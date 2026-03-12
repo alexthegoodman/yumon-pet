@@ -54,7 +54,7 @@ pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 
 // Max sequence length during training (characters)
 // const MAX_SEQ_LEN:  usize = 120;
-const MAX_SEQ_LEN:  usize = 60; // easier to train on iGPU
+const MAX_SEQ_LEN:  usize = 60; // lighter to train on iGPU
 // Max vocab size
 const MAX_VOCAB:    usize = 256;
 // Emote head loss weight (much lighter than language loss)
@@ -242,12 +242,6 @@ pub fn run(
     // ── Prepare samples with label-indexed context ────────────────────────────
     let training_samples = prepare_samples(&sentences, &tokenizer, &keyword_index);
 
-    // for (i, sample) in training_samples.iter().enumerate() {
-    //     if i < 10 {
-    //         println!("sample example: {:?} {:?} {:?} {:?}", sample.emote_label, sample.input_ids, sample.matched_classes, sample.target_ids);
-    //     }
-    // }
-
     let labelled   = training_samples.iter().filter(|s| !s.matched_classes.is_empty()).count();
     let unlabelled = training_samples.len() - labelled;
     println!(
@@ -256,8 +250,37 @@ pub fn run(
     );
 
     // ── Init model + optimizer ────────────────────────────────────────────────
-    let mut model: YumonBrain<TrainBackend> = YumonBrainConfig::new(tokenizer.vocab_size)
-        .init(&device);
+    // ── Resume from checkpoint if one exists ─────────────────────────────────
+    let checkpoint_meta = std::path::Path::new(out_dir).join("metadata.json");
+    let checkpoint_model = std::path::Path::new(out_dir).join("model.bin"); // BinFileRecorder ext
+
+    let (mut model, epochs_already_done) = if checkpoint_model.exists() && checkpoint_meta.exists() {
+        match YumonBrain::<TrainBackend>::load(out_dir, &device) {
+            Ok((m, _tok)) => {
+                let meta_json = std::fs::read_to_string(&checkpoint_meta)?;
+                let meta: BrainMetadata = serde_json::from_str(&meta_json)?;
+                println!("▶️  Resuming from checkpoint ({} epochs done, loss={:.4})",
+                         meta.epochs_trained, meta.final_loss);
+                (m, meta.epochs_trained)
+            }
+            Err(e) => {
+                eprintln!("⚠️  Checkpoint found but failed to load ({e}) — starting fresh.");
+                (YumonBrainConfig::new(tokenizer.vocab_size).init(&device), 0)
+            }
+        }
+    } else {
+        println!("🆕 No checkpoint found — starting fresh.");
+        (YumonBrainConfig::new(tokenizer.vocab_size).init(&device), 0)
+    };
+
+    if epochs_already_done >= epochs {
+        println!("✅ Already trained for {epochs_already_done} epochs (requested {epochs}). Nothing to do.");
+        return Ok(());
+    }
+
+    let remaining_epochs = epochs - epochs_already_done;
+    println!("📅 Training for {remaining_epochs} more epoch(s) (to reach {epochs} total).");
+
     let mut optimizer = AdamConfig::new()
         .with_epsilon(1e-7)
         .with_weight_decay(Some(burn::optim::decay::WeightDecayConfig::new(1e-5)))
@@ -268,13 +291,14 @@ pub fn run(
     let mut final_loss = 0.0f32;
 
     // ── Training loop ─────────────────────────────────────────────────────────
-    for epoch in 0..epochs {
+    for epoch in 0..remaining_epochs {
+        let absolute_epoch = epochs_already_done + epoch + 1;
         let mut idx: Vec<usize> = (0..training_samples.len()).collect();
         use rand::seq::SliceRandom;
         idx.shuffle(&mut rng);
 
         let num_batches = idx.len().max(1) / batch_size;
-        let pb = make_progress(num_batches, epoch + 1, epochs);
+        let pb = make_progress(num_batches, absolute_epoch, epochs);
         let mut epoch_loss = 0.0f32;
 
         for batch_num in 0..num_batches {
@@ -349,11 +373,11 @@ pub fn run(
         }
 
         final_loss = epoch_loss / num_batches.max(1) as f32;
-        pb.finish_with_message(format!("epoch {}/{epochs}  loss={final_loss:.4}", epoch + 1));
+        pb.finish_with_message(format!("epoch {absolute_epoch}/{epochs}  loss={final_loss:.4}"));
 
         let meta = BrainMetadata {
             vocab_size:     tokenizer.vocab_size,
-            epochs_trained: epoch + 1,
+            epochs_trained: absolute_epoch,
             final_loss,
         };
         model.valid().save(out_dir, &tokenizer, &meta)?;
