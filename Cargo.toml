@@ -19,7 +19,7 @@ nalgebra = { version = "0.32.5", features = ["mint"] }
 nalgebra-glm = "0.18.0"
 noise = "0.8"
 mint = "0.5.9"
-burn = { version = "0.20", features = ["ndarray", "autodiff"] }
+burn = { version = "0.20", features = ["ndarray", "autodiff", "wgpu"] }
 fastrand = "2"
 bincode     = "1"
 image       = "0.25"

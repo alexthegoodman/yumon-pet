@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 /// Yumon ePet — Entry point
 ///
 /// Subcommands:

@@ -28,7 +28,7 @@ use super::{
     IMG_SIZE, CIFAR_CLASSES, EMOTE_CLASSES,
 };
 
-pub type TrainBackend = burn::backend::Autodiff<burn::backend::NdArray<f32>>;
+pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 
 pub fn run(
     cifar_dir:  &str,
@@ -37,7 +37,7 @@ pub fn run(
     epochs:     usize,
     batch_size: usize,
 ) -> Result<()> {
-    let device: <TrainBackend as Backend>::Device = Default::default();
+    let device = burn::backend::wgpu::WgpuDevice::default();
 
     // ── Load datasets ─────────────────────────────────────────────────────────
     let cifar_train = CifarDataset::load(&format!("{cifar_dir}/train.bin"))?;

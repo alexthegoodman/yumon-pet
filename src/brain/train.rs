@@ -33,7 +33,7 @@ use crate::brain::{
     wiki::load_wiki_sentences,
 };
 
-pub type TrainBackend = burn::backend::Autodiff<burn::backend::NdArray<f32>>;
+pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 
 // Max sequence length during training (characters)
 const MAX_SEQ_LEN: usize = 120;
@@ -50,7 +50,7 @@ pub fn run(
     batch_size:        usize,
     max_articles:      usize,
 ) -> Result<()> {
-    let device: <TrainBackend as Backend>::Device = Default::default();
+    let device = burn::backend::wgpu::WgpuDevice::default();
 
     // ── Load + tokenize wiki corpus ───────────────────────────────────────────
     let sentences = load_wiki_sentences(wiki_xml, max_articles)?;
