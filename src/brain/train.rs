@@ -328,6 +328,11 @@ pub fn run(
                     &device,
                 );
 
+                // let [batch1, seq_len1] = ids_t.dims();
+                // let [batch2, seq_len2] = context_t.dims();
+
+                // println!("sequence length {:?} {:?}", seq_len1, seq_len2);
+
                 let (token_logits, emote_logits) = model.forward(ids_t, context_t);
 
                 // Language loss
@@ -364,7 +369,7 @@ pub fn run(
                 .div_scalar(n);
 
             let grads = GradientsParams::from_grads(combined.backward(), &model);
-            model     = optimizer.step(3e-4, model, grads);
+            model     = optimizer.step(3e-5, model, grads);
 
             let avg = batch_loss_sum / n;
             epoch_loss += avg;
