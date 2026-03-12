@@ -20,6 +20,7 @@ use burn::{
     optim::{AdamConfig, GradientsParams, Optimizer},
     prelude::*,
     tensor::{backend::AutodiffBackend, Int, TensorData},
+    module::AutodiffModule,
 };
 use rand::Rng;
 use indicatif::{ProgressBar, ProgressStyle};

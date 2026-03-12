@@ -15,6 +15,7 @@ use burn::{
     optim::{AdamConfig, GradientsParams, Optimizer},
     prelude::*,
     tensor::{backend::AutodiffBackend, Int, TensorData},
+    module::AutodiffModule,
 };
 use rand::seq::SliceRandom;
 use rand::thread_rng;

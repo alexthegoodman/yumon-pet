@@ -34,15 +34,15 @@ use crate::vision::{CIFAR_CLASSES, EMOTE_CLASSES, IMG_SIZE};
 pub struct VisionModel<B: Backend> {
     // Block 1
     conv1:  Conv2d<B>,
-    bn1:    BatchNorm<B, 2>,
+    bn1:    BatchNorm<B>,
 
     // Block 2
     conv2:  Conv2d<B>,
-    bn2:    BatchNorm<B, 2>,
+    bn2:    BatchNorm<B>,
 
     // Block 3
     conv3:  Conv2d<B>,
-    bn3:    BatchNorm<B, 2>,
+    bn3:    BatchNorm<B>,
 
     pool:       MaxPool2d,
     avg_pool:   AdaptiveAvgPool2d,
