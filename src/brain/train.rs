@@ -241,6 +241,12 @@ pub fn run(
     // ── Prepare samples with label-indexed context ────────────────────────────
     let training_samples = prepare_samples(&sentences, &tokenizer, &keyword_index);
 
+    // for (i, sample) in training_samples.iter().enumerate() {
+    //     if i < 10 {
+    //         println!("sample example: {:?} {:?} {:?} {:?}", sample.emote_label, sample.input_ids, sample.matched_classes, sample.target_ids);
+    //     }
+    // }
+
     let labelled   = training_samples.iter().filter(|s| !s.matched_classes.is_empty()).count();
     let unlabelled = training_samples.len() - labelled;
     println!(
@@ -373,6 +379,7 @@ fn prepare_samples(
     keyword_index: &HashMap<String, Vec<usize>>,
 ) -> Vec<Sample> {
     let mut samples = Vec::new();
+    let mut label_counts = HashMap::new();
 
     for s in sentences {
         let encoded = tokenizer.encode(s);
@@ -389,7 +396,19 @@ fn prepare_samples(
         let emote_label     = keyword_emote_label(s);
         let matched_classes = matched_classes(s, keyword_index);
 
-        samples.push(Sample { input_ids, target_ids, emote_label, matched_classes });
+        if matched_classes.len() > 0 {
+            if label_counts.get(&matched_classes[0]).is_none() {
+                label_counts.insert(matched_classes[0], 0);
+            }
+
+            // we can train on non-matches for broader knowledge later on possibly
+            if let Some(current) = label_counts.get(&matched_classes[0]) {
+                if *current < 200 {
+                    label_counts.insert(matched_classes[0], *current + 1);
+                    samples.push(Sample { input_ids, target_ids, emote_label, matched_classes });
+                }
+            }
+        }
     }
 
     samples
