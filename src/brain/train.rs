@@ -53,7 +53,8 @@ use crate::brain::{
 pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 
 // Max sequence length during training (characters)
-const MAX_SEQ_LEN:  usize = 120;
+// const MAX_SEQ_LEN:  usize = 120;
+const MAX_SEQ_LEN:  usize = 60; // easier to train on iGPU
 // Max vocab size
 const MAX_VOCAB:    usize = 256;
 // Emote head loss weight (much lighter than language loss)
