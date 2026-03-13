@@ -369,7 +369,12 @@ pub fn run(
                 .div_scalar(n);
 
             let grads = GradientsParams::from_grads(combined.backward(), &model);
-            model     = optimizer.step(3e-5, model, grads);
+            model     = optimizer.step(
+                3e-5, 
+                // 1e-5,
+                model, 
+                grads
+            );
 
             let avg = batch_loss_sum / n;
             epoch_loss += avg;

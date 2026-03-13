@@ -39,11 +39,13 @@ use super::{
 
 // pub const EMBED_DIM:   usize = 64;
 pub const EMBED_DIM:   usize = 256; //  we have ~173 Ints total per input
-pub const LSTM_UNITS:  usize = 512;
-pub const HIDDEN_UNITS: usize = 256;
-// pub const EMBED_DIM:   usize = 16;
-// pub const LSTM_UNITS:  usize = 128;
-// pub const HIDDEN_UNITS: usize = 32;
+pub const LSTM_UNITS:  usize = 512; // medium (fish)
+pub const HIDDEN_UNITS: usize = 256; // medium
+// pub const LSTM_UNITS:  usize = 1024; // large
+// pub const HIDDEN_UNITS: usize = 512; // large
+// pub const EMBED_DIM:   usize = 16; // too small
+// pub const LSTM_UNITS:  usize = 128; // too small
+// pub const HIDDEN_UNITS: usize = 32; // too small
 pub const TEMPERATURE: f32   = 0.7;
 pub const TOP_K:       usize = 10;
 
