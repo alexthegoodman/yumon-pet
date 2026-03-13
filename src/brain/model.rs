@@ -29,7 +29,7 @@ use burn::{
 use anyhow::Result;
 use serde::{Serialize, Deserialize};
 
-use crate::vision::EMOTE_CLASSES;
+use crate::{brain::bpe::{BpeTokenizer, TokenizerKind}, vision::EMOTE_CLASSES};
 use super::{
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN},
     CONTEXT_DIMS,
@@ -140,7 +140,7 @@ impl<B: Backend> YumonBrain<B> {
     /// Returns a GenerationResult with the reply text and Yumon's emote index.
     pub fn generate(
         &self,
-        tokenizer:       &Tokenizer,
+        tokenizer:       &TokenizerKind,
         class_probs:     &[f32],
         emote_probs:     &[f32],
         user_emote_idx:  usize,
@@ -185,7 +185,7 @@ impl<B: Backend> YumonBrain<B> {
             let (token_logits, emote_logits) = self.forward(ids_t, context_t.clone());
 
             // Last timestep token logits → [vocab_size]
-            let vocab = tokenizer.vocab_size;
+            let vocab = tokenizer.vocab_size();
             let last_logits = token_logits
                 .slice([0..1, seq_len - 1..seq_len, 0..vocab])
                 .reshape([vocab]);
@@ -232,13 +232,21 @@ impl<B: Backend> YumonBrain<B> {
         Ok(())
     }
 
-    pub fn load(directory: &str, device: &B::Device) -> Result<(Self, Tokenizer)> {
+    pub fn load(directory: &str, device: &B::Device) -> Result<(Self, TokenizerKind)> {
         let dir = std::path::Path::new(directory);
 
         let meta_json = std::fs::read_to_string(dir.join("metadata.json"))?;
         let metadata: BrainMetadata = serde_json::from_str(&meta_json)?;
 
-        let tokenizer = Tokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?;
+        // let tokenizer = Tokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?;
+
+        let use_bpe = true;
+
+        let tokenizer = if use_bpe {
+            TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?)
+        } else {
+            TokenizerKind::Char(Tokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?)
+        };
 
         let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
         let record   = recorder.load(dir.join("model").into(), device)

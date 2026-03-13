@@ -20,17 +20,11 @@
 
 use anyhow::{Result, Context};
 use tokenizers::{
-    Tokenizer,
-    models::bpe::{BPE, BpeTrainerBuilder},
-    pre_tokenizers::whitespace::Whitespace,
-    processors::template::TemplateProcessing,
-    decoders::bpe::BPEDecoder,
-    normalizers::{Lowercase, NFC, Sequence as NormSequence},
-    AddedToken,
+    AddedToken, Tokenizer, decoders::bpe::BPEDecoder, models::{TrainerWrapper, bpe::{BPE, BpeTrainerBuilder}}, normalizers::{Lowercase, NFC, Sequence as NormSequence}, pre_tokenizers::whitespace::Whitespace, processors::template::TemplateProcessing
 };
 use std::io::Write;
 use std::path::Path;
-use quick_error::ResultExt;
+// use quick_error::ResultExt;
 
 // Special token strings — match your existing conventions
 pub const PAD_STR: &str = "<PAD>";
@@ -101,21 +95,6 @@ impl BpeTokenizer {
         // BPE decoder — reconstructs spaces correctly
         tokenizer.with_decoder(BPEDecoder::default());
 
-        // Wrap every encoded sequence with <BOS> … <EOS>
-        // tokenizer.with_post_processor(
-        //     TemplateProcessing::builder()
-        //         .try_single(format!("{BOS_STR} $A {EOS_STR}"))
-        //         .context("template single")?
-        //         .try_pair(format!("{BOS_STR} $A {EOS_STR} $B:1 {EOS_STR}:1"))
-        //         .context("template pair")?
-        //         .special_tokens(vec![
-        //             (BOS_STR, BOS_ID),
-        //             (EOS_STR, EOS_ID),
-        //         ])
-        //         .build()
-        //         .context("building TemplateProcessing")?,
-        // );
-
         tokenizer.with_post_processor(
             anyhow::Context::context(
                 TemplateProcessing::builder()
@@ -133,9 +112,10 @@ impl BpeTokenizer {
         );
 
         // ── Train ──────────────────────────────────────────────────────────────
+        let mut trainer_wrapper: TrainerWrapper = trainer.clone().into();
         tokenizer
-            .train_from_files(&mut trainer.clone(), vec![tmp_path.to_string()])  // NOTE: see compatibility note below
-            .context("BPE training failed")?;
+            .train_from_files(&mut trainer_wrapper, vec![tmp_path.to_string()])
+            .map_err(|e| anyhow::anyhow!("BPE training failed: {}", e))?;
 
         // Verify special token IDs landed where we expect
         Self::assert_special_token_ids(&tokenizer)?;
@@ -149,8 +129,7 @@ impl BpeTokenizer {
     /// Encode a string → token ID sequence (includes BOS/EOS).
     pub fn encode(&self, text: &str) -> Result<Vec<u32>> {
         let enc = self.inner.encode(text, false)
-            .context("encoding failed");
-        let enc = enc.as_ref().expect("Couldn't encode");
+             .map_err(|e| anyhow::anyhow!("encode tokenizer failed: {}", e))?;
         Ok(enc.get_ids().to_vec())
     }
 
@@ -163,16 +142,6 @@ impl BpeTokenizer {
         Ok(ids)
     }
 
-    /// Decode token IDs → string (strips special tokens).
-    // pub fn decode(&self, ids: &[u32]) -> Result<String> {
-    //     let filtered: Vec<u32> = ids.iter()
-    //         .copied()
-    //         .filter(|&id| id != PAD_ID && id != BOS_ID && id != EOS_ID)
-    //         .collect();
-    //     self.inner.decode(&filtered, true)
-    //         .context("decoding failed")
-    // }
-
     pub fn decode(&self, ids: &[u32]) -> Result<String> {
         let filtered: Vec<u32> = ids.iter()
             .copied()
@@ -183,12 +152,11 @@ impl BpeTokenizer {
     }
 
     /// Save tokenizer to `dir/` — creates two files:
-    ///   `{dir}/tokenizer.json`  — full HuggingFace tokenizer spec
     pub fn save(&self, dir: &str) -> Result<()> {
         std::fs::create_dir_all(dir)?;
         let path = format!("{dir}/tokenizer.json");
         self.inner.save(&path, false)
-            .context("saving tokenizer")?;
+            .map_err(|e| anyhow::anyhow!("saving tokenizer: {}", e))?;
         println!("💾 BPE tokenizer saved to {path}");
         Ok(())
     }
@@ -197,7 +165,7 @@ impl BpeTokenizer {
     pub fn load(dir: &str) -> Result<Self> {
         let path = format!("{dir}/tokenizer.json");
         let inner = Tokenizer::from_file(&path)
-            .context(format!("loading tokenizer from {path}"))?;
+            .map_err(|e| anyhow::anyhow!("loading tokenizer from {path}: {}", e))?;
         let vocab_size = inner.get_vocab_size(true);
         println!("📂 BPE tokenizer loaded — vocab size: {vocab_size}");
         Ok(Self { inner, vocab_size })

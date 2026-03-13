@@ -3,6 +3,10 @@ name = "yumon-pet"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "train_bpe"
+path = "src/bin/train_bpe.rs"
+
 [dependencies]
 pollster = "0.3"
 bytemuck = { version = "1.19.0", features = ["derive"] }
