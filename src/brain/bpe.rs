@@ -53,7 +53,7 @@ impl BpeTokenizer {
         println!("   Target vocab size: {vocab_size}");
 
         // ── Write corpus to a temp file (tokenizers trainer needs file paths) ──
-        let tmp_path = "/tmp/yumon_bpe_corpus.txt";
+        let tmp_path = "tmp/yumon_bpe_corpus.txt";
         {
             let mut f = std::fs::File::create(tmp_path)
                 .context("creating temp corpus file")?;
