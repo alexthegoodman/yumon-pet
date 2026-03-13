@@ -20,7 +20,7 @@
 
 use anyhow::{Result, Context};
 use tokenizers::{
-    AddedToken, Tokenizer, decoders::bpe::BPEDecoder, models::{TrainerWrapper, bpe::{BPE, BpeTrainerBuilder}}, normalizers::{Lowercase, NFC, Sequence as NormSequence}, pre_tokenizers::whitespace::Whitespace, processors::template::TemplateProcessing
+    AddedToken, Tokenizer, decoders::{bpe::BPEDecoder, byte_level::ByteLevel}, models::{TrainerWrapper, bpe::{BPE, BpeTrainerBuilder}}, normalizers::{Lowercase, NFC, Sequence as NormSequence}, pre_tokenizers::whitespace::Whitespace, processors::template::TemplateProcessing
 };
 use std::io::Write;
 use std::path::Path;
@@ -75,7 +75,7 @@ impl BpeTokenizer {
             .vocab_size(vocab_size)
             .min_frequency(2)           // ignore hapax legomena
             .special_tokens(special_tokens.clone())
-            .continuing_subword_prefix("##".to_string()) // WordPiece-style visible joins
+            // .continuing_subword_prefix("##".to_string()) // WordPiece-style visible joins (not needed with ByteLevel)
             .show_progress(true)
             .build();
 
@@ -90,10 +90,12 @@ impl BpeTokenizer {
         ]));
 
         // Split on whitespace before BPE merges
-        tokenizer.with_pre_tokenizer(Whitespace::default());
+        // tokenizer.with_pre_tokenizer(Whitespace::default());
+        tokenizer.with_pre_tokenizer(ByteLevel::default());
 
         // BPE decoder — reconstructs spaces correctly
-        tokenizer.with_decoder(BPEDecoder::default());
+        // tokenizer.with_decoder(BPEDecoder::default());
+        tokenizer.with_decoder(ByteLevel::default());
 
         tokenizer.with_post_processor(
             anyhow::Context::context(
@@ -244,6 +246,15 @@ impl TokenizerKind {
             Self::Bpe(t)  => {
                 let u32_ids: Vec<u32> = ids.iter().map(|&x| x as u32).collect();
                 t.decode(&u32_ids).unwrap_or_default()
+            }
+        }
+    }
+
+    pub fn save(&self, path: &str) -> Result<()> {
+        match self {
+            Self::Char(t) => t.save(path),
+            Self::Bpe(t)  => {
+                t.save(path)
             }
         }
     }

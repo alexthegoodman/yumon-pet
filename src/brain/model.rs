@@ -215,7 +215,7 @@ impl<B: Backend> YumonBrain<B> {
 
     // ── Checkpoint I/O ────────────────────────────────────────────────────────
 
-    pub fn save(&self, directory: &str, tokenizer: &Tokenizer, metadata: &BrainMetadata) -> Result<()> {
+    pub fn save(&self, directory: &str, tokenizer: &TokenizerKind, metadata: &BrainMetadata) -> Result<()> {
         let dir = std::path::Path::new(directory);
         std::fs::create_dir_all(dir)?;
 

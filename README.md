@@ -16,7 +16,7 @@ cargo build --release
 
 ### 1. Train Vision CNN
 ```bash
-cargo run --release -- train-vision \
+cargo run --bin yumon-pet --release -- train-vision \
   --cifar-dir data/cifar-100-binary \
   --fer-dir   data/fer2013-archive \
   --out-dir   checkpoints/vision \
@@ -29,7 +29,7 @@ Watch for **emote val acc** — aim for >50% before proceeding (FER2013 is chall
 
 ### 2. Train LSTM Brain
 ```bash
-cargo run --release -- train-brain \
+cargo run --bin yumon-pet --release -- train-brain \
   --wiki-xml  data/simplewiki-latest-pages-articles.xml \
   --vision-checkpoint checkpoints/vision \
   --out-dir   checkpoints/brain \
@@ -44,13 +44,13 @@ Watch for **loss** descending below ~1.5 for coherent character-level generation
 ### 3. Chat (Inference)
 ```bash
 # With an image
-cargo run --release -- chat \
+cargo run --bin yumon-pet --release -- chat \
   --vision-checkpoint checkpoints/vision \
   --brain-checkpoint  checkpoints/brain \
   --image path/to/photo.jpg
 
 # Text-only (neutral vision context)
-cargo run --release -- chat \
+cargo run --bin yumon-pet --release -- chat \
   --vision-checkpoint checkpoints/vision \
   --brain-checkpoint  checkpoints/brain \
   --user-emote happy
@@ -58,6 +58,6 @@ cargo run --release -- chat \
 
 ### 4. Check Status
 ```bash
-cargo run --release -- status
+cargo run --bin yumon-pet --release -- status
 ```
 

@@ -42,7 +42,7 @@ use rand::Rng;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 
-use crate::vision::{CIFAR_CLASSES, EMOTE_CLASSES};
+use crate::{brain::bpe::{BpeTokenizer, TokenizerKind}, vision::{CIFAR_CLASSES, EMOTE_CLASSES}};
 use crate::brain::{
     CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
@@ -236,8 +236,18 @@ pub fn run(
 
     let full_text: String = sentences.join(" ");
     println!("Building vocabulary from {} chars...", full_text.len());
-    let tokenizer = Tokenizer::build_from_text(&full_text, MAX_VOCAB);
-    println!("Vocabulary size: {}", tokenizer.vocab_size);
+    // let tokenizer = Tokenizer::build_from_text(&full_text, MAX_VOCAB);
+
+    let use_bpe = true;
+
+    let tokenizer = if use_bpe {
+        TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?)
+    } else {
+        let dir = std::path::Path::new(out_dir);
+        TokenizerKind::Char(Tokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?)
+    };
+
+    println!("Vocabulary size: {}", tokenizer.vocab_size());
 
     // ── Prepare samples with label-indexed context ────────────────────────────
     let training_samples = prepare_samples(&sentences, &tokenizer, &keyword_index);
@@ -265,12 +275,12 @@ pub fn run(
             }
             Err(e) => {
                 eprintln!("⚠️  Checkpoint found but failed to load ({e}) — starting fresh.");
-                (YumonBrainConfig::new(tokenizer.vocab_size).init(&device), 0)
+                (YumonBrainConfig::new(tokenizer.vocab_size()).init(&device), 0)
             }
         }
     } else {
         println!("🆕 No checkpoint found — starting fresh.");
-        (YumonBrainConfig::new(tokenizer.vocab_size).init(&device), 0)
+        (YumonBrainConfig::new(tokenizer.vocab_size()).init(&device), 0)
     };
 
     if epochs_already_done >= epochs {
@@ -336,7 +346,7 @@ pub fn run(
                 let (token_logits, emote_logits) = model.forward(ids_t, context_t);
 
                 // Language loss
-                let vocab     = tokenizer.vocab_size;
+                let vocab     = tokenizer.vocab_size();
                 let logits_2d = token_logits.reshape([seq_len, vocab]);
                 let targets: Vec<i32> = sample.target_ids.iter().map(|&t| t as i32).collect();
                 let target_t  = Tensor::<TrainBackend, 1, Int>::from_ints(
@@ -386,7 +396,7 @@ pub fn run(
         pb.finish_with_message(format!("epoch {absolute_epoch}/{epochs}  loss={final_loss:.4}"));
 
         let meta = BrainMetadata {
-            vocab_size:     tokenizer.vocab_size,
+            vocab_size:     tokenizer.vocab_size(),
             epochs_trained: absolute_epoch,
             final_loss,
         };
@@ -410,7 +420,7 @@ struct Sample {
 
 fn prepare_samples(
     sentences:     &[String],
-    tokenizer:     &Tokenizer,
+    tokenizer:     &TokenizerKind,
     keyword_index: &HashMap<String, Vec<usize>>,
 ) -> Vec<Sample> {
     let mut samples = Vec::new();
