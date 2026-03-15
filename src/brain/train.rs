@@ -32,17 +32,13 @@
 
 use anyhow::Result;
 use burn::{
-    nn::loss::CrossEntropyLossConfig,
-    optim::{AdamConfig, GradientsParams, Optimizer},
-    prelude::*,
-    tensor::{backend::AutodiffBackend, Int, TensorData},
-    module::AutodiffModule,
+    grad_clipping::GradientClippingConfig, module::AutodiffModule, nn::loss::CrossEntropyLossConfig, optim::{AdamConfig, AdamWConfig, GradientsParams, Optimizer}, prelude::*, tensor::{Int, TensorData, backend::AutodiffBackend}
 };
 use rand::Rng;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 
-use crate::{brain::bpe::{BpeTokenizer, TokenizerKind}, vision::{CIFAR_CLASSES, EMOTE_CLASSES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES}};
 use crate::brain::{
     CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
@@ -51,10 +47,11 @@ use crate::brain::{
 };
 
 pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
+// pub type TrainBackend = burn::backend::Autodiff<burn::backend::NdArray<f32>>;
 
 // Max sequence length during training (characters)
 // const MAX_SEQ_LEN:  usize = 120;
-const MAX_SEQ_LEN:  usize = 60; // lighter to train on iGPU
+pub const MAX_SEQ_LEN:  usize = 60; // lighter to train on iGPU
 // Max vocab size
 const MAX_VOCAB:    usize = 256;
 // Emote head loss weight (much lighter than language loss)
@@ -238,13 +235,13 @@ pub fn run(
     println!("Building vocabulary from {} chars...", full_text.len());
     // let tokenizer = Tokenizer::build_from_text(&full_text, MAX_VOCAB);
 
-    let use_bpe = true;
+    let use_bpe = false;
 
     let tokenizer = if use_bpe {
         TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?)
     } else {
         let dir = std::path::Path::new(out_dir);
-        TokenizerKind::Char(Tokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?)
+        TokenizerKind::Char(Tokenizer::build_from_text(&full_text, MAX_VOCAB))
     };
 
     println!("Vocabulary size: {}", tokenizer.vocab_size());
@@ -291,18 +288,44 @@ pub fn run(
     let remaining_epochs = epochs - epochs_already_done;
     println!("📅 Training for {remaining_epochs} more epoch(s) (to reach {epochs} total).");
 
-    let mut optimizer = AdamConfig::new()
+    // let mut optimizer = AdamConfig::new()
+    //     .with_epsilon(1e-7)
+    //     .with_weight_decay(Some(burn::optim::decay::WeightDecayConfig::new(1e-5)))
+    //     .init();
+
+    let mut optimizer = AdamWConfig::new()
         .with_epsilon(1e-7)
-        .with_weight_decay(Some(burn::optim::decay::WeightDecayConfig::new(1e-5)))
+        .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
+        // .with_weight_decay(Some(burn::optim::decay::WeightDecayConfig::new(1e-5)))
         .init();
 
-    let ce_loss = CrossEntropyLossConfig::new().init(&device);
+    // let ce_loss = CrossEntropyLossConfig::new().init(&device);
+    let ce_loss = CrossEntropyLossConfig::new()
+        .with_pad_tokens(Some(vec![PAD_TOKEN as usize]))
+        .init(&device);
     let mut rng = rand::thread_rng();
     let mut final_loss = 0.0f32;
+    
+    // lr over time
+    let first_lr = 0.0001;
+    let last_lr = 1e-7;
+
+    // Compute LR from absolute epoch number — stateless, resume-safe
+    let lr_for_epoch = |abs_epoch: usize| -> f64 {
+        let t = abs_epoch as f64 / epochs as f64;         // 0.0 → 1.0
+        let t = t.clamp(0.0, 1.0);
+        first_lr + (last_lr - first_lr) * t               // linear interp
+    };
 
     // ── Training loop ─────────────────────────────────────────────────────────
     for epoch in 0..remaining_epochs {
         let absolute_epoch = epochs_already_done + epoch + 1;
+
+        let current_lr = lr_for_epoch(absolute_epoch);
+        // let current_lr = 1e-6;
+
+        println!("current_lr {:?}", current_lr);
+
         let mut idx: Vec<usize> = (0..training_samples.len()).collect();
         use rand::seq::SliceRandom;
         idx.shuffle(&mut rng);
@@ -319,8 +342,16 @@ pub fn run(
 
             for &i in batch_idx {
                 let sample  = &training_samples[i];
-                let seq_len = sample.input_ids.len();
+                // let seq_len = sample.input_ids.len();
+                let seq_len = MAX_SEQ_LEN;
                 if seq_len < 2 { continue; }
+
+                // let pad_count = sample.target_ids.iter().filter(|&&t| t == PAD_TOKEN).count();
+                // let total = sample.target_ids.len();
+                // println!("pad ratio: {}/{} ({:.1}%)", pad_count, total, pad_count as f32 / total as f32 * 100.0);
+
+                // println!("input_ids  first 10: {:?}", &sample.input_ids[..10.min(sample.input_ids.len())]);
+                // println!("target_ids first 10: {:?}", &sample.target_ids[..10.min(sample.target_ids.len())]);   
 
                 // Build peaked class probs from this sentence's matched labels,
                 // with fresh noise every forward pass (data augmentation for free).
@@ -329,6 +360,32 @@ pub fn run(
 
                 let context_t = Tensor::<TrainBackend, 2>::from_floats(
                     TensorData::new(ctx_flat, [1, CONTEXT_DIMS]),
+                    &device,
+                );
+
+                // let seed_text = sample.matched_classes.first()
+                //     .map(|&i| CIFAR_FINE_LABELS[i])
+                //     .unwrap_or("");
+
+                // // input: just BOS + label, short
+                // let input_ids: Vec<i32> = std::iter::once(BOS_TOKEN as i32)
+                //     .chain(tokenizer.encode(seed_text).into_iter().map(|t| t as i32))
+                //     .collect();
+
+                // let seq_len = input_ids.len();
+
+                // // target: just the first seq_len tokens of the sentence
+                // let target_ids: Vec<i32> = sample.target_ids[..seq_len]
+                //     .iter().map(|&t| t as i32).collect();
+
+                // let ids_t = Tensor::<TrainBackend, 2, Int>::from_ints(
+                //     TensorData::new(input_ids, [1, seq_len]),
+                //     &device,
+                // );
+
+                let targets_flat: Vec<i32> = sample.target_ids.iter().map(|&t| t as i32).collect();
+                let targets_t = Tensor::<TrainBackend, 2, Int>::from_ints(
+                    TensorData::new(targets_flat, [1, seq_len]),
                     &device,
                 );
 
@@ -343,12 +400,19 @@ pub fn run(
 
                 // println!("sequence length {:?} {:?}", seq_len1, seq_len2);
 
-                let (token_logits, emote_logits) = model.forward(ids_t, context_t);
+                let (token_logits, emote_logits) = model.forward(ids_t, targets_t, context_t);
 
                 // Language loss
                 let vocab     = tokenizer.vocab_size();
                 let logits_2d = token_logits.reshape([seq_len, vocab]);
-                let targets: Vec<i32> = sample.target_ids.iter().map(|&t| t as i32).collect();
+
+                // let predicted = logits_2d.clone().argmax(1);
+                // let pred_vec: Vec<i32> = predicted.to_data().to_vec().unwrap();
+                // println!("predicted tokens first 10: {:?}", &pred_vec[..10.min(pred_vec.len())]);
+
+                // let targets: Vec<i32> = sample.target_ids.iter().map(|&t| t as i32).collect();
+                let targets: Vec<i32> = sample.target_labels.iter().map(|&t| t as i32).collect();
+
                 let target_t  = Tensor::<TrainBackend, 1, Int>::from_ints(
                     TensorData::new(targets, [seq_len]),
                     &device,
@@ -380,8 +444,11 @@ pub fn run(
 
             let grads = GradientsParams::from_grads(combined.backward(), &model);
             model     = optimizer.step(
-                3e-5, 
+                current_lr,
+                // 1e-4,
+                // 3e-5, 
                 // 1e-5,
+                // 0.001, // standard?
                 model, 
                 grads
             );
@@ -393,7 +460,7 @@ pub fn run(
         }
 
         final_loss = epoch_loss / num_batches.max(1) as f32;
-        pb.finish_with_message(format!("epoch {absolute_epoch}/{epochs}  loss={final_loss:.4}"));
+        pb.finish_with_message(format!("epoch {absolute_epoch}/{epochs}  loss={final_loss:.4} current_lr={current_lr:.4}"));
 
         let meta = BrainMetadata {
             vocab_size:     tokenizer.vocab_size(),
@@ -416,7 +483,50 @@ struct Sample {
     /// CIFAR-100 class indices whose keywords appear in this sentence.
     /// Empty = no label matched → near-uniform context at train time.
     matched_classes: Vec<usize>,
+    target_labels: Vec<usize>,
 }
+
+// fn prepare_samples(
+//     sentences:     &[String],
+//     tokenizer:     &TokenizerKind,
+//     keyword_index: &HashMap<String, Vec<usize>>,
+// ) -> Vec<Sample> {
+//     let mut samples = Vec::new();
+//     let mut label_counts = HashMap::new();
+
+//     for s in sentences {
+//         let encoded = tokenizer.encode(s);
+//         if encoded.len() < 3 { continue; }
+
+//         let truncated: Vec<usize> = std::iter::once(BOS_TOKEN)
+//             .chain(encoded.iter().cloned().take(MAX_SEQ_LEN - 2))
+//             .chain(std::iter::once(EOS_TOKEN))
+//             .collect();
+
+//         let input_ids  = truncated[..truncated.len() - 1].to_vec();
+//         let target_ids = truncated[1..].to_vec();
+
+//         let emote_label     = keyword_emote_label(s);
+//         let matched_classes = matched_classes(s, keyword_index);
+
+//         if matched_classes.len() > 0 {
+//             if label_counts.get(&matched_classes[0]).is_none() {
+//                 label_counts.insert(matched_classes[0], 0);
+//             }
+
+//             // we can train on non-matches for broader knowledge later on possibly
+//             if let Some(current) = label_counts.get(&matched_classes[0]) {
+//                 if *current < 200 {
+//                     label_counts.insert(matched_classes[0], *current + 1);
+//                     samples.push(Sample { input_ids, target_ids, emote_label, matched_classes });
+//                 }
+//             }
+//         }
+//     }
+
+//     samples
+// }
+
 
 fn prepare_samples(
     sentences:     &[String],
@@ -424,40 +534,49 @@ fn prepare_samples(
     keyword_index: &HashMap<String, Vec<usize>>,
 ) -> Vec<Sample> {
     let mut samples = Vec::new();
-    let mut label_counts = HashMap::new();
 
-    for s in sentences {
-        let encoded = tokenizer.encode(s);
-        if encoded.len() < 3 { continue; }
+    for pair in sentences.chunks(2) {
+        if pair.len() < 2 { continue; }
 
-        let truncated: Vec<usize> = std::iter::once(BOS_TOKEN)
-            .chain(encoded.iter().cloned().take(MAX_SEQ_LEN - 2))
+        let input_encoded  = tokenizer.encode(&pair[0]);
+        let target_encoded = tokenizer.encode(&pair[1]);
+
+        if input_encoded.len() < 2 || target_encoded.len() < 2 { continue; }
+
+        let input_ids: Vec<usize> = std::iter::once(BOS_TOKEN)
+            .chain(input_encoded.iter().cloned().take(MAX_SEQ_LEN - 2))
             .chain(std::iter::once(EOS_TOKEN))
             .collect();
 
-        let input_ids  = truncated[..truncated.len() - 1].to_vec();
-        let target_ids = truncated[1..].to_vec();
+        let target_ids: Vec<usize> = std::iter::once(BOS_TOKEN)
+            .chain(target_encoded.iter().cloned().take(MAX_SEQ_LEN - 2))
+            .chain(std::iter::once(EOS_TOKEN))
+            .collect();
 
-        let emote_label     = keyword_emote_label(s);
-        let matched_classes = matched_classes(s, keyword_index);
+        let emote_label     = keyword_emote_label(&pair[0]);
+        let matched_classes = matched_classes(&pair[0], keyword_index);
 
-        if matched_classes.len() > 0 {
-            if label_counts.get(&matched_classes[0]).is_none() {
-                label_counts.insert(matched_classes[0], 0);
-            }
+        if matched_classes.is_empty() { continue; }
 
-            // we can train on non-matches for broader knowledge later on possibly
-            if let Some(current) = label_counts.get(&matched_classes[0]) {
-                if *current < 200 {
-                    label_counts.insert(matched_classes[0], *current + 1);
-                    samples.push(Sample { input_ids, target_ids, emote_label, matched_classes });
-                }
-            }
-        }
+        let pad = |mut v: Vec<usize>| -> Vec<usize> {
+            v.resize(MAX_SEQ_LEN, PAD_TOKEN);
+            v
+        };
+
+        let input_ids  = pad(input_ids);
+        let target_ids = pad(target_ids);
+
+        let target_labels: Vec<usize> = target_encoded.iter().cloned().take(MAX_SEQ_LEN - 1)
+            .chain(std::iter::once(EOS_TOKEN))
+            .collect();
+        let target_labels = pad(target_labels);
+
+        samples.push(Sample { input_ids, target_ids, emote_label, matched_classes, target_labels });
     }
 
     samples
 }
+
 
 // ─── Emote keyword heuristic ──────────────────────────────────────────────────
 
