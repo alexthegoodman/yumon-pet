@@ -7759,6 +7759,7 @@ dependencies = [
  "serde_with",
  "tokenizers",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]

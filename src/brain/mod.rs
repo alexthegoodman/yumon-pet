@@ -5,6 +5,7 @@ pub mod wiki;
 pub mod train;
 pub mod tokenizer;
 pub mod bpe;
+pub mod mdx;
 
 // Re-export tokenizer for convenience
 pub use tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, UNK_TOKEN};

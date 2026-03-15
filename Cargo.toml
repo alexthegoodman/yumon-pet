@@ -32,3 +32,4 @@ clap        = { version = "4",   features = ["derive"] }
 indicatif   = "0.17"     # progress bars during training
 tokenizers = { version = "0.19", features = ["unstable_wasm"] }
 quick-error = "2.0.1"
+walkdir = "2"

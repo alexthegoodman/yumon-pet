@@ -38,9 +38,12 @@ pub fn load_wiki_sentences(xml_path: &str, max_articles: usize) -> Result<Vec<St
             Ok(Event::Text(ref e)) if in_text => {
                 let raw = e.unescape().unwrap_or_default();
                 let cleaned = strip_wiki_markup(&raw);
+                let mut n = 0;
                 for s in split_sentences(&cleaned) {
+                    if n > 5 { break; }
                     if is_good_sentence(&s) {
                         sentences.push(s);
+                        n = n + 1;
                     }
                 }
                 in_text = false;
@@ -169,7 +172,7 @@ fn split_sentences(text: &str) -> Vec<String> {
     sentences
 }
 
-fn is_good_sentence(s: &str) -> bool {
+pub fn is_good_sentence(s: &str) -> bool {
     let len = s.len();
     if len < 20 || len > 200 { return false; }
 

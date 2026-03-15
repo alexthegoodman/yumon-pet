@@ -38,7 +38,7 @@ use rand::Rng;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, mdx::load_mdx_sentences}, vision::{CIFAR_CLASSES, EMOTE_CLASSES}};
 use crate::brain::{
     CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
@@ -229,7 +229,16 @@ pub fn run(
              keyword_index.len(), CIFAR_CLASSES);
 
     // ── Load + tokenize wiki corpus ───────────────────────────────────────────
-    let sentences = load_wiki_sentences(wiki_xml, max_articles)?;
+    let mut sentences = load_wiki_sentences(wiki_xml, max_articles)?;
+    let mdx_sentences = load_mdx_sentences("data/(poems)/")?;
+
+    for (i, sent) in mdx_sentences.iter().enumerate() {
+        if (i < 12) {
+            println!("MDX: {:?}", sent);
+        }
+    }
+    
+    sentences.extend(mdx_sentences);
 
     let full_text: String = sentences.join(" ");
     println!("Building vocabulary from {} chars...", full_text.len());
@@ -249,11 +258,17 @@ pub fn run(
     // ── Prepare samples with label-indexed context ────────────────────────────
     let training_samples = prepare_samples(&sentences, &tokenizer, &keyword_index);
 
-    let labelled   = training_samples.iter().filter(|s| !s.matched_classes.is_empty()).count();
-    let unlabelled = training_samples.len() - labelled;
+    // for (i, sample) in training_samples.iter().enumerate() {
+    //     if (i < 20) {
+    //         println!("Sample: {:?}", sample.pair);
+    //     }
+    // }
+
+    // let labelled   = training_samples.iter().filter(|s| !s.matched_classes.is_empty()).count();
+    // let unlabelled = training_samples.len() - labelled;
     println!(
-        "Training samples: {}  ({} with CIFAR label match, {} near-uniform)",
-        training_samples.len(), labelled, unlabelled
+        "Training samples: {}",
+        training_samples.len()
     );
 
     // ── Init model + optimizer ────────────────────────────────────────────────
@@ -444,10 +459,11 @@ pub fn run(
 
             let grads = GradientsParams::from_grads(combined.backward(), &model);
             model     = optimizer.step(
-                current_lr,
+                // current_lr,
                 // 1e-4,
                 // 3e-5, 
                 // 1e-5,
+                3e-6,
                 // 0.001, // standard?
                 model, 
                 grads
@@ -455,7 +471,11 @@ pub fn run(
 
             let avg = batch_loss_sum / n;
             epoch_loss += avg;
-            pb.set_prefix(format!("{:.4}", avg));
+
+            let batches_done = (batch_num + 1) as f32;
+            let avg_loss = epoch_loss / batches_done;
+
+            pb.set_prefix(format!("{:.4} avg_loss={:.4}", avg, avg_loss));
             pb.inc(1);
         }
 
@@ -484,6 +504,7 @@ struct Sample {
     /// Empty = no label matched → near-uniform context at train time.
     matched_classes: Vec<usize>,
     target_labels: Vec<usize>,
+    pair: Vec<String>
 }
 
 // fn prepare_samples(
@@ -541,7 +562,8 @@ fn prepare_samples(
         let input_encoded  = tokenizer.encode(&pair[0]);
         let target_encoded = tokenizer.encode(&pair[1]);
 
-        if input_encoded.len() < 2 || target_encoded.len() < 2 { continue; }
+        if input_encoded.len() < 20 || target_encoded.len() < 20 { continue; }
+        if input_encoded.len() > 200 || target_encoded.len() > 200 { continue; }
 
         let input_ids: Vec<usize> = std::iter::once(BOS_TOKEN)
             .chain(input_encoded.iter().cloned().take(MAX_SEQ_LEN - 2))
@@ -556,7 +578,7 @@ fn prepare_samples(
         let emote_label     = keyword_emote_label(&pair[0]);
         let matched_classes = matched_classes(&pair[0], keyword_index);
 
-        if matched_classes.is_empty() { continue; }
+        // if matched_classes.is_empty() { continue; }
 
         let pad = |mut v: Vec<usize>| -> Vec<usize> {
             v.resize(MAX_SEQ_LEN, PAD_TOKEN);
@@ -571,7 +593,7 @@ fn prepare_samples(
             .collect();
         let target_labels = pad(target_labels);
 
-        samples.push(Sample { input_ids, target_ids, emote_label, matched_classes, target_labels });
+        samples.push(Sample { pair: pair.to_vec(), input_ids, target_ids, emote_label, matched_classes, target_labels });
     }
 
     samples

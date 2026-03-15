@@ -17,10 +17,7 @@
 
 use burn::{
     nn::{
-        Dropout, DropoutConfig,
-        Embedding, EmbeddingConfig,
-        Linear, LinearConfig,
-        Lstm, LstmConfig, attention::{CrossAttention, CrossAttentionConfig, MhaInput, MultiHeadAttention, MultiHeadAttentionConfig},
+        Dropout, DropoutConfig, Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, Lstm, LstmConfig, attention::{CrossAttention, CrossAttentionConfig, MhaInput, MultiHeadAttention, MultiHeadAttentionConfig}
     },
     prelude::*,
     record::{BinFileRecorder, FullPrecisionSettings, Recorder},
@@ -46,9 +43,17 @@ pub const EMBED_DIM:   usize = 128; //  we have ~173 Ints total per input
 // pub const LSTM_UNITS:  usize = 256; // medium-small with 2 layers
 // pub const HIDDEN_UNITS: usize = 128; // medium
 
-pub const LSTM_UNITS:  usize = 512;
-pub const HIDDEN_UNITS: usize = 512;
-pub const ATTN_HEADS: usize = 4;
+// pub const LSTM_UNITS:  usize = 512;
+// pub const HIDDEN_UNITS: usize = 512;
+// pub const LSTM_UNITS:  usize = 256;
+// pub const HIDDEN_UNITS: usize = 256;
+// pub const ATTN_HEADS: usize = 4;
+
+pub const LSTM_UNITS:  usize = 256;
+pub const HIDDEN_UNITS: usize = 256;
+pub const ATTN_HEADS:  usize = 8;       // was 4
+// pub const ATTN_HEAD_DIM: usize = 64;    // was LSTM_UNITS/ATTN_HEADS = 64 — same, but now explicit
+pub const ATTN_HEAD_DIM: usize = 128;  // 8 heads × 128 = 1024 total attn capacity
 
 // pub const EMBED_DIM:   usize = 16; // too small
 // pub const LSTM_UNITS:  usize = 128; // too small
@@ -63,8 +68,16 @@ pub struct YumonBrain<B: Backend> {
     embedding:       Embedding<B>,
     // We project (embed + context) → lstm_input_dim before the LSTM
     // because Burn's LSTM input size must be fixed at init.
-    input_proj:      Linear<B>,
-    lstm:            Lstm<B>,
+    // input_proj:      Linear<B>,
+    // lstm:            Lstm<B>,
+
+    enc_input_proj:     Linear<B>,   // was: input_proj
+    dec_input_proj:     Linear<B>,   // new
+    enc_lstm:           Lstm<B>,     // was: lstm
+    dec_lstm:           Lstm<B>,     // new
+    enc_norm:           LayerNorm<B>,  // new
+    dec_norm:           LayerNorm<B>,  // new
+
     // lstm2:            Lstm<B>,
     dropout:         Dropout,
     // dense:           Linear<B>,
@@ -88,12 +101,30 @@ impl YumonBrainConfig {
         println!("lstm_in usize {:?}", lstm_in);
         YumonBrain {
             embedding:        EmbeddingConfig::new(self.vocab_size, EMBED_DIM).init(device),
-            input_proj:       LinearConfig::new(lstm_in, lstm_in).init(device),
-            lstm:             LstmConfig::new(lstm_in, LSTM_UNITS, false).init(device),
+            // input_proj:       LinearConfig::new(lstm_in, lstm_in).init(device),
+            // lstm:             LstmConfig::new(lstm_in, LSTM_UNITS, false).init(device),
+
+            enc_input_proj: LinearConfig::new(lstm_in, lstm_in).init(device),
+            dec_input_proj: LinearConfig::new(lstm_in, lstm_in).init(device),
+            enc_lstm:       LstmConfig::new(lstm_in, LSTM_UNITS, false).init(device),
+            dec_lstm:       LstmConfig::new(lstm_in, LSTM_UNITS, false).init(device),
+
+            enc_norm: LayerNormConfig::new(LSTM_UNITS).init(device),
+            dec_norm: LayerNormConfig::new(LSTM_UNITS).init(device),
+
             // lstm2:             LstmConfig::new(LSTM_UNITS, LSTM_UNITS, false).init(device),
             dropout:          DropoutConfig::new(self.dropout_rate).init(),
             // encoder_attention: MultiHeadAttentionConfig::new(LSTM_UNITS, ATTN_HEADS).init(device),
-            encoder_attention: CrossAttentionConfig::new(LSTM_UNITS, LSTM_UNITS, ATTN_HEADS, 1, LSTM_UNITS / ATTN_HEADS).with_quiet_softmax(true).init(device),
+            // encoder_attention: CrossAttentionConfig::new(LSTM_UNITS, LSTM_UNITS, ATTN_HEADS, 1, LSTM_UNITS / ATTN_HEADS).with_quiet_softmax(true).init(device),
+            encoder_attention: CrossAttentionConfig::new(
+                LSTM_UNITS,       // query dim  (from LSTM)
+                LSTM_UNITS,       // key/value dim (context)
+                ATTN_HEADS,       // 8 heads
+                1,
+                ATTN_HEAD_DIM,    // now independently tunable
+            )
+            .with_quiet_softmax(false)
+            .init(device),
             // dense:            LinearConfig::new(LSTM_UNITS, HIDDEN_UNITS).init(device),
             // token_head:       LinearConfig::new(HIDDEN_UNITS, self.vocab_size).init(device),
             // yumon_emote_head: LinearConfig::new(HIDDEN_UNITS, EMOTE_CLASSES).init(device),
@@ -174,30 +205,19 @@ impl<B: Backend> YumonBrain<B> {
         let [batch, src_len] = source_tokens.dims();
         let [_, trg_len] = target_tokens.dims();
 
-        // println!("far a");
-
-        // // --- 1. ENCODER PHASE ---
-        // // Turn the source message into a "thought vector" (State)
-        // let src_embeds = self.embedding.forward(source_tokens);
-        // // We pass None as initial state, let it process the whole input
-        // let (src_seq, src_state) = self.lstm.forward(src_embeds, None);
-
         // --- 1. ENCODER PHASE ---
         let src_embeds = self.embedding.forward(source_tokens); // [batch, src_len, 128]
         let ctx_expanded = context.clone()
             .unsqueeze_dim::<3>(1)
             .expand([batch, src_len, CONTEXT_DIMS]);             // [batch, src_len, 114]
         let src_input = Tensor::cat(vec![src_embeds, ctx_expanded], 2); // [batch, src_len, 242]
-        let src_input = self.input_proj.forward(src_input);
-        let (src_seq, src_state) = self.lstm.forward(src_input, None);
-
-        // println!("far b");
-
-        // // --- 2. DECODER PHASE ---
-        // // Start the response using the final state of the encoder as the "initial memory"
-        // let trg_embeds = self.embedding.forward(target_tokens);
-        // // Crucial: Use src_state here to bridge the "similarity" gap
-        // let (trg_seq, _trg_state) = self.lstm.forward(trg_embeds, Some(src_state));
+        // let src_input = self.input_proj.forward(src_input);
+        // let (src_seq, src_state) = self.lstm.forward(src_input, None);
+        let src_input = self.enc_input_proj.forward(src_input);
+        let (src_seq, src_state) = self.enc_lstm.forward(src_input, None);
+        let src_seq = self.enc_norm.forward(src_seq);
+        
+        // println!("src_seq mean={:.5}", src_seq.clone().mean().into_scalar());
 
         // --- 2. DECODER PHASE ---
         let trg_embeds = self.embedding.forward(target_tokens); // [batch, trg_len, 128]
@@ -205,10 +225,23 @@ impl<B: Backend> YumonBrain<B> {
             .unsqueeze_dim::<3>(1)
             .expand([batch, trg_len, CONTEXT_DIMS]);             // [batch, trg_len, 114]
         let trg_input = Tensor::cat(vec![trg_embeds, ctx_expanded_trg], 2); // [batch, trg_len, 242]
-        let trg_input = self.input_proj.forward(trg_input);
-        let (trg_seq, _trg_state) = self.lstm.forward(trg_input, Some(src_state));
+        // let trg_input = self.input_proj.forward(trg_input);
+        // let (trg_seq, _trg_state) = self.lstm.forward(trg_input, Some(src_state));
+        let trg_input = self.dec_input_proj.forward(trg_input);
+        let (trg_seq, _) = self.dec_lstm.forward(trg_input, Some(src_state));
+        let trg_seq = self.dec_norm.forward(trg_seq);
 
-        // println!("far 1");
+        // println!("trg_seq mean={:.5}", trg_seq.clone().mean().into_scalar());
+
+        // println!("trg_seq min={:.5} max={:.5}", 
+        //     trg_seq.clone().min().into_scalar(),
+        //     trg_seq.clone().max().into_scalar());
+        // println!("src_seq min={:.5} max={:.5}", 
+        //     src_seq.clone().min().into_scalar(),
+        //     src_seq.clone().max().into_scalar());
+
+        // println!("trg_seq std={:.5}", trg_seq.clone().var(2).mean().into_scalar());
+        // println!("src_seq std={:.5}", src_seq.clone().var(2).mean().into_scalar());
 
         // --- 3. CROSS-ATTENTION ---
         // Replace the MhaInput logic with this direct call:
@@ -218,12 +251,31 @@ impl<B: Backend> YumonBrain<B> {
             None             // Mask (we'll start with None to get it running)
         );
 
-        // The rest remains the same
-        // let combined = attended + trg_seq;
+        // --- DIAGNOSTICS ---
+        // let src_data = src_seq.clone().mean().into_scalar();
+        // let trg_data = trg_seq.clone().mean().into_scalar();
+        // let att_data = attended.clone().mean().into_scalar();
+        // let att_std  = attended.clone().var(0).mean().into_scalar();
+        
+        // println!("src_seq   mean: {:.5}", src_data);
+        // println!("trg_seq   mean: {:.5}", trg_data);
+        // println!("attended  mean: {:.5}", att_data);
+        // println!("attended  std:  {:.5}", att_std);
 
-        // println!("far 2");
+        // Check if attended is just copying trg_seq
+        // let diff = (attended.clone() - trg_seq.clone()).abs().mean().into_scalar();
+        // println!("attended vs trg_seq diff: {:.5}", diff);
+
+        // // Check if attended is just copying src_seq (wrong)
+        // let diff2 = (attended.clone() - src_seq.clone().slice([0..batch, 0..trg_len])).abs().mean().into_scalar();
+        // println!("attended vs src_seq diff: {:.5}", diff2);
+        // -------------------
 
         let attended_proj = self.attn_proj.forward(attended); // [batch, seq, LSTM_UNITS]
+
+        // println!("attended_proj mean={:.5}", attended_proj.clone().mean().into_scalar());
+
+        // let combined = attended_proj + trg_seq;               // both [batch, seq, 512]
         let combined = attended_proj + trg_seq;               // both [batch, seq, 512]
 
         // --- 4. HEADS ---
