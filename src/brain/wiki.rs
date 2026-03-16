@@ -40,7 +40,7 @@ pub fn load_wiki_sentences(xml_path: &str, max_articles: usize) -> Result<Vec<St
                 let cleaned = strip_wiki_markup(&raw);
                 let mut n = 0;
                 for s in split_sentences(&cleaned) {
-                    if n > 5 { break; }
+                    if n > 50 { break; }
                     if is_good_sentence(&s) {
                         sentences.push(s);
                         n = n + 1;

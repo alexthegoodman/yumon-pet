@@ -60,7 +60,7 @@ enum Command {
         batch_size: usize,
 
         /// Maximum wiki articles to load (0 = all)
-        #[arg(long, default_value_t = 2_500)]
+        #[arg(long, default_value_t = 500)]
         max_articles: usize,
     },
 
