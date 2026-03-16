@@ -48,7 +48,11 @@ impl BpeTokenizer {
     /// `vocab_size` — total vocabulary including special tokens.
     ///   Recommended: 2048–8192 for a small LSTM.
     ///   Start with 4096 and see how sequence lengths feel.
-    pub fn train(sentences: &[String], vocab_size: usize) -> Result<Self> {
+    pub fn train(
+        // sentences: &[String], 
+        sentences: Vec<&String>,
+        vocab_size: usize
+    ) -> Result<Self> {
         println!("🔧 Training BPE tokenizer on {} sentences …", sentences.len());
         println!("   Target vocab size: {vocab_size}");
 

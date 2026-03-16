@@ -43,17 +43,23 @@ pub const EMBED_DIM:   usize = 128; //  we have ~173 Ints total per input
 // pub const LSTM_UNITS:  usize = 256; // medium-small with 2 layers
 // pub const HIDDEN_UNITS: usize = 128; // medium
 
+// pub const LSTM_UNITS:  usize = 2048;
+// pub const HIDDEN_UNITS: usize = 2048;
+pub const LSTM_UNITS:  usize = 1024;
+pub const HIDDEN_UNITS: usize = 1024;
 // pub const LSTM_UNITS:  usize = 512;
 // pub const HIDDEN_UNITS: usize = 512;
 // pub const LSTM_UNITS:  usize = 256;
 // pub const HIDDEN_UNITS: usize = 256;
 // pub const ATTN_HEADS: usize = 4;
 
-pub const LSTM_UNITS:  usize = 256;
-pub const HIDDEN_UNITS: usize = 256;
-pub const ATTN_HEADS:  usize = 8;       // was 4
+// pub const LSTM_UNITS:  usize = 256;
+// pub const HIDDEN_UNITS: usize = 256;
+pub const ATTN_HEADS:  usize = 16;       // was 4
 // pub const ATTN_HEAD_DIM: usize = 64;    // was LSTM_UNITS/ATTN_HEADS = 64 — same, but now explicit
-pub const ATTN_HEAD_DIM: usize = 128;  // 8 heads × 128 = 1024 total attn capacity
+// pub const ATTN_HEAD_DIM: usize = 128;  // 8 heads × 128 = 1024 total attn capacity
+pub const ATTN_HEAD_DIM: usize = 256;  // 8 heads × 256 = 2048 total attn capacity
+// pub const ATTN_HEAD_DIM: usize = 512;
 
 // pub const EMBED_DIM:   usize = 16; // too small
 // pub const LSTM_UNITS:  usize = 128; // too small
@@ -136,66 +142,6 @@ impl YumonBrainConfig {
 }
 
 impl<B: Backend> YumonBrain<B> {
-    /// Forward pass for training — processes a full sequence.
-    ///
-    /// token_ids:    [batch, seq_len]       — input token indices
-    /// context:      [batch, CONTEXT_DIMS]  — vision + emote context (same for all timesteps)
-    ///
-    /// Returns:
-    ///   token_logits:  [batch, seq_len, vocab_size]
-    ///   emote_logits:  [batch, EMOTE_CLASSES]  — from last timestep only
-    // pub fn forward(
-    //     &self,
-    //     token_ids: Tensor<B, 2, burn::tensor::Int>,
-    //     context:   Tensor<B, 2>,
-    // ) -> (Tensor<B, 3>, Tensor<B, 2>) {
-    //     use burn::tensor::activation::relu;
-
-    //     let [batch, seq_len] = token_ids.dims();
-
-    //     // Embed tokens → [batch, seq_len, EMBED_DIM]
-    //     let embeds = self.embedding.forward(token_ids);
-
-    //     // Expand context to [batch, seq_len, CONTEXT_DIMS] and concat
-    //     let ctx_expanded = context
-    //         .unsqueeze_dim::<3>(1)                          // [batch, 1, ctx]
-    //         .expand([batch, seq_len, CONTEXT_DIMS]);         // [batch, seq, ctx]
-
-    //     let lstm_in = Tensor::cat(vec![embeds, ctx_expanded], 2); // [batch, seq, embed+ctx]
-
-    //     // Project (no-op if already right size, but helps with gradient flow)
-    //     let lstm_in = self.input_proj.forward(lstm_in);
-
-    //     // LSTM
-    //     let (out_seq, out_state) = self.lstm.forward(lstm_in, None);
-    //     // let (out_seq, _) = self.lstm2.forward(out_seq, None); // slows things down, but seems to contribute little (with or without out_state)
-    //     // out_seq: [batch, seq_len, LSTM_UNITS]
-
-    //     let dropped = self.dropout.forward(out_seq);
-
-    //     let attn_input = MhaInput::self_attn(dropped.clone());
-    //     let attended = self.encoder_attention.forward(attn_input);
-
-    //     let combined = attended.context + dropped;
-
-    //     // let shared  = relu(self.dense.forward(dropped)); // [batch, seq, HIDDEN]
-
-    //     // Token logits — every timestep
-    //     // let token_logits = self.token_head.forward(shared.clone()); // [batch, seq, vocab]
-    //     let token_logits = self.token_head.forward(combined.clone()); // [batch, seq, vocab]
-
-    //     // Emote logits — last timestep only
-    //     let last = 
-    //         //shared
-    //         combined
-    //         .slice([0..batch, seq_len - 1..seq_len, 0..HIDDEN_UNITS])
-    //         // .slice([0..batch, MAX_SEQ_LEN - 1..MAX_SEQ_LEN, 0..HIDDEN_UNITS])
-    //         .reshape([batch, HIDDEN_UNITS]);
-    //     let emote_logits = self.yumon_emote_head.forward(last); // [batch, EMOTE]
-
-    //     (token_logits, emote_logits)
-    // }
-
     pub fn forward(
         &self,
         source_tokens: Tensor<B, 2, Int>, // The message received (Input)
@@ -290,87 +236,6 @@ impl<B: Backend> YumonBrain<B> {
 
         (token_logits, emote_logits)
     }
-
-    /// Autoregressive generation.
-    /// Returns a GenerationResult with the reply text and Yumon's emote index.
-    // pub fn generate(
-    //     &self,
-    //     tokenizer:       &TokenizerKind,
-    //     class_probs:     &[f32], // for which object detected from cifar-100
-    //     emote_probs:     &[f32], // which emotion detected fer2013
-    //     user_emote_idx:  usize,
-    //     seed_text:       &str,
-    //     max_tokens:      usize,
-    //     device:          &B::Device,
-    // ) -> GenerationResult {
-    //     use burn::tensor::activation::log_softmax;
-
-    //     // Build context vector [1, CONTEXT_DIMS]
-    //     let mut ctx_flat = Vec::with_capacity(CONTEXT_DIMS);
-    //     ctx_flat.extend_from_slice(class_probs);
-    //     ctx_flat.extend_from_slice(emote_probs);
-    //     // user_emote_onehot
-    //     let mut onehot = vec![0.0f32; EMOTE_CLASSES];
-    //     onehot[user_emote_idx.min(EMOTE_CLASSES - 1)] = 1.0;
-    //     ctx_flat.extend_from_slice(&onehot);
-
-    //     let context_t = Tensor::<B, 2>::from_floats(
-    //         TensorData::new(ctx_flat, [1, CONTEXT_DIMS]),
-    //         device,
-    //     );
-
-    //     // Seed tokens
-    //     let mut token_ids: Vec<usize> = vec![BOS_TOKEN];
-    //     if !seed_text.is_empty() {
-    //         token_ids.extend(tokenizer.encode(seed_text));
-    //     }
-
-    //     let mut rng = rand::thread_rng();
-    //     let mut last_emote_logits: Option<Vec<f32>> = None;
-
-    //     for _ in 0..max_tokens {
-    //         let seq_len = token_ids.len();
-    //         let ids_flat: Vec<i32> = token_ids.iter().map(|&t| t as i32).collect();
-
-    //         let ids_t = Tensor::<B, 2, burn::tensor::Int>::from_ints(
-    //             TensorData::new(ids_flat, [1, seq_len]),
-    //             device,
-    //         );
-
-    //         let (token_logits, emote_logits) = self.forward(ids_t, context_t.clone());
-
-    //         // Last timestep token logits → [vocab_size]
-    //         let vocab = tokenizer.vocab_size();
-    //         let last_logits = token_logits
-    //             .slice([0..1, seq_len - 1..seq_len, 0..vocab])
-    //             .reshape([vocab]);
-
-    //         let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
-
-    //         // Save emote logits
-    //         last_emote_logits = Some(emote_logits.to_data().to_vec::<f32>().unwrap());
-
-    //         // Temperature + top-k sampling
-    //         let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
-    //         if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
-    //         token_ids.push(next_token);
-
-    //         // println!("token_ids after each step: {:?}", token_ids);
-    //         // println!("next_token: {}", next_token);
-    //         // println!("EOS: {} PAD: {}", EOS_TOKEN, PAD_TOKEN);
-    //     }
-
-    //     // Decode reply (skip BOS)
-    //     let reply = tokenizer.decode(&token_ids[1..]);
-
-    //     // Yumon emote = argmax of last emote_logits
-    //     let yumon_emote_idx = last_emote_logits
-    //         .as_deref()
-    //         .map(argmax)
-    //         .unwrap_or(4); // default neutral
-
-    //     GenerationResult { reply, yumon_emote_idx }
-    // }
 
     pub fn generate(
         &self,
@@ -497,7 +362,7 @@ impl<B: Backend> YumonBrain<B> {
 
         // let tokenizer = Tokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?;
 
-        let use_bpe = false;
+        let use_bpe = true;
 
         let tokenizer = if use_bpe {
             TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?)

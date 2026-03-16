@@ -38,7 +38,7 @@ use rand::Rng;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, mdx::load_mdx_sentences}, vision::{CIFAR_CLASSES, EMOTE_CLASSES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, mdx::{load_csv_quotes, load_mdx_sentences}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES}};
 use crate::brain::{
     CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
@@ -229,7 +229,16 @@ pub fn run(
              keyword_index.len(), CIFAR_CLASSES);
 
     // ── Load + tokenize wiki corpus ───────────────────────────────────────────
-    let mut sentences = load_wiki_sentences(wiki_xml, max_articles)?;
+    let mut sentences = Vec::new();
+
+    let wiki_sentences = load_wiki_sentences(wiki_xml, max_articles)?;
+
+    for (i, sent) in wiki_sentences.iter().enumerate() {
+        if (i < 12) {
+            println!("WIKI: {:?}", sent);
+        }
+    }
+
     let mdx_sentences = load_mdx_sentences("data/(poems)/")?;
 
     for (i, sent) in mdx_sentences.iter().enumerate() {
@@ -237,14 +246,25 @@ pub fn run(
             println!("MDX: {:?}", sent);
         }
     }
+
+    let quote_sentences = load_csv_quotes("data/quotes.csv")?;
+
+    for (i, sent) in quote_sentences.iter().enumerate() {
+        if (i < 12) {
+            println!("QUOTE: {:?}", sent);
+        }
+    }
     
+    sentences.extend(wiki_sentences);
     sentences.extend(mdx_sentences);
+    sentences.extend(quote_sentences);
+    // let sentences = mdx_sentences;
 
     let full_text: String = sentences.join(" ");
     println!("Building vocabulary from {} chars...", full_text.len());
     // let tokenizer = Tokenizer::build_from_text(&full_text, MAX_VOCAB);
 
-    let use_bpe = false;
+    let use_bpe = true;
 
     let tokenizer = if use_bpe {
         TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?)
@@ -459,11 +479,13 @@ pub fn run(
 
             let grads = GradientsParams::from_grads(combined.backward(), &model);
             model     = optimizer.step(
-                // current_lr,
+                current_lr,
                 // 1e-4,
                 // 3e-5, 
                 // 1e-5,
-                3e-6,
+                // 3e-6,
+                // 3e-7,
+                // 3e-8,
                 // 0.001, // standard?
                 model, 
                 grads
@@ -562,8 +584,8 @@ fn prepare_samples(
         let input_encoded  = tokenizer.encode(&pair[0]);
         let target_encoded = tokenizer.encode(&pair[1]);
 
-        if input_encoded.len() < 20 || target_encoded.len() < 20 { continue; }
-        if input_encoded.len() > 200 || target_encoded.len() > 200 { continue; }
+        if input_encoded.len() < 10 || target_encoded.len() < 10 { continue; }
+        if input_encoded.len() > 400 || target_encoded.len() > 400 { continue; }
 
         let input_ids: Vec<usize> = std::iter::once(BOS_TOKEN)
             .chain(input_encoded.iter().cloned().take(MAX_SEQ_LEN - 2))

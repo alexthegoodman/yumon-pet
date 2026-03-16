@@ -7741,6 +7741,7 @@ dependencies = [
  "bytemuck",
  "chrono",
  "clap",
+ "csv",
  "directories",
  "fastrand",
  "futures",

@@ -13,6 +13,7 @@ mod brain;
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
+use burn::{backend::Wgpu, prelude::Module};
 
 #[derive(Parser)]
 #[command(name = "yumon", about = "Yumon ePet — tabletop AI companion")]
@@ -52,14 +53,14 @@ enum Command {
         #[arg(long, default_value = "checkpoints/brain")]
         out_dir: String,
 
-        #[arg(long, default_value_t = 50)]
+        #[arg(long, default_value_t = 10)]
         epochs: usize,
 
         #[arg(long, default_value_t = 1)]
         batch_size: usize,
 
         /// Maximum wiki articles to load (0 = all)
-        #[arg(long, default_value_t = 4_000)]
+        #[arg(long, default_value_t = 2_500)]
         max_articles: usize,
     },
 
@@ -133,8 +134,9 @@ fn run_chat(
     prompt:     &str,
     user_emote: &str,
 ) -> Result<()> {
-    use burn::backend::NdArray;
-    type B = NdArray<f32>;
+    // use burn::backend::NdArray;
+    // type B = NdArray<f32, i64, i8>;
+    type B = Wgpu;
     let device = Default::default();
 
     // 1. Load vision model
@@ -144,6 +146,22 @@ fn run_chat(
     // 2. Load brain model + tokenizer
     let (brain_model, tokenizer) = brain::model::YumonBrain::<B>::load(brain_cp, &device)?;
     println!("✅ Brain model loaded from {brain_cp}");
+
+    // Quantize weights for faster CPU inference
+    // lots of errors, not stable to do quantization yet
+    // use burn::tensor::quantization::{QuantScheme, QuantLevel, QuantMode};
+    // let scheme = QuantScheme {
+    //     // level: QuantLevel::Tensor,
+    //     // mode: QuantMode::Symmetric,
+    //     value: burn::tensor::quantization::QuantValue::Q4S,
+    //     param: burn::tensor::quantization::QuantParam::BF16,
+    //     store: burn::tensor::quantization::QuantStore::Native,
+    //     level: QuantLevel::Tensor,
+    //     mode: QuantMode::Symmetric,
+    //     // ..Default::default()
+    // };
+    // let mut quantizer = burn::module::Quantizer { scheme, calibration: burn::tensor::quantization::Calibration::MinMax };
+    // let brain_model = brain_model.quantize_weights(&mut quantizer);
 
     // 3. Run vision inference (or use zeros if no image)
     let (class_probs, emote_probs) = if let Some(path) = image_path {
@@ -183,6 +201,7 @@ fn run_chat(
         user_emote_idx,
         prompt,
         80,   // max tokens
+        // 30,
         &device,
     );
 

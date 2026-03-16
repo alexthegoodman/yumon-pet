@@ -31,3 +31,46 @@ pub fn load_mdx_sentences(mdx_dir: &str) -> Result<Vec<String>> {
     println!("✅ Loaded {} sentences from {} MDX files", sentences.len(), files_loaded);
     Ok(sentences)
 }
+
+// #[derive(Debug)]
+// pub struct Quote {
+//     pub text: String,
+//     pub author: String,
+//     pub tags: Vec<String>,
+// }
+
+pub fn load_csv_quotes(csv_path: &str) -> Result<Vec<String>> {
+    println!("📖 Loading quotes CSV: {csv_path}");
+
+    let mut rdr = csv::Reader::from_path(csv_path)?;
+    let mut quotes = Vec::new();
+
+    let mut count = 0;
+
+    for result in rdr.records() {
+        let record = result?;
+
+        let text   = record.get(0).unwrap_or("").trim().to_string();
+        let author = record.get(1).unwrap_or("").trim().to_string();
+        let tags   = record
+            .get(2)
+            .unwrap_or("")
+            .split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>();
+
+        if text.is_empty() {
+            continue;
+        }
+
+        quotes.push(text);
+
+        count = count + 1;
+
+        if count > 1000 { break; }
+    }
+
+    println!("✅ Loaded {} quotes from {csv_path}", quotes.len());
+    Ok(quotes)
+}
