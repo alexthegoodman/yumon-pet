@@ -68,7 +68,7 @@ pub fn load_csv_quotes(csv_path: &str) -> Result<Vec<String>> {
 
         count = count + 1;
 
-        if count > 10_000 { break; }
+        if count > 100_000 { break; }
     }
 
     println!("✅ Loaded {} quotes from {csv_path}", quotes.len());

@@ -51,8 +51,8 @@ pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 
 // Max sequence length during training (characters)
 // const MAX_SEQ_LEN:  usize = 120;
-// pub const MAX_SEQ_LEN:  usize = 60; // lighter to train on iGPU
-pub const MAX_SEQ_LEN:  usize = 30; // even lower with bpe
+pub const MAX_SEQ_LEN:  usize = 60; // lighter to train on iGPU
+// pub const MAX_SEQ_LEN:  usize = 30; // even lower with bpe
 // Max vocab size
 const MAX_VOCAB:    usize = 256;
 // Emote head loss weight (much lighter than language loss)
@@ -271,13 +271,12 @@ pub fn run(
             println!("Q&A: {:?}", sent);
         }
     }
-    
-    sentences.extend(wiki_sentences);
-    sentences.extend(mdx_sentences);
-    sentences.extend(quote_sentences);
-    sentences.extend(dict_sentences);
-    sentences.extend(qna_sentences);
-    // let sentences = mdx_sentences;
+
+    sentences.extend(mdx_sentences.clone());
+    sentences.extend(quote_sentences.clone());
+    sentences.extend(qna_sentences.clone());
+    sentences.extend(wiki_sentences.clone());
+    sentences.extend(dict_sentences.clone());
 
     let full_text: String = sentences.join(" ");
     println!("Building vocabulary from {} chars...", full_text.len());
@@ -295,20 +294,39 @@ pub fn run(
     println!("Vocabulary size: {}", tokenizer.vocab_size());
 
     // ── Prepare samples with label-indexed context ────────────────────────────
-    let training_samples = prepare_samples(&sentences, &tokenizer, &keyword_index);
+    let mut training_samples = Vec::new();
+
+    let mdx_samples = prepare_samples(&mdx_sentences, &tokenizer, &keyword_index);
+    let quote_samples = prepare_samples(&quote_sentences, &tokenizer, &keyword_index);
+    let qna_samples = prepare_samples(&qna_sentences, &tokenizer, &keyword_index);
+    let wiki_samples = prepare_samples(&wiki_sentences, &tokenizer, &keyword_index);
+    let dict_samples = prepare_samples(&dict_sentences, &tokenizer, &keyword_index);
+
+    println!(
+        "Samples lengths: {} {} {} {} {}",
+        mdx_samples.len(),
+        quote_samples.len(),
+        qna_samples.len(),
+        wiki_samples.len(),
+        dict_samples.len()
+    );
+
+    training_samples.extend(wiki_samples);
+    training_samples.extend(mdx_samples);
+    training_samples.extend(quote_samples);
+    training_samples.extend(dict_samples);
+    training_samples.extend(qna_samples);
+
+    println!(
+        "Training samples: {}",
+        training_samples.len()
+    );
 
     for (i, sample) in training_samples.iter().enumerate() {
         if (i < 12) {
             println!("Sample: {:?}", sample.pair);
         }
     }
-
-    // let labelled   = training_samples.iter().filter(|s| !s.matched_classes.is_empty()).count();
-    // let unlabelled = training_samples.len() - labelled;
-    println!(
-        "Training samples: {}",
-        training_samples.len()
-    );
 
     // ── Init model + optimizer ────────────────────────────────────────────────
     // ── Resume from checkpoint if one exists ─────────────────────────────────
@@ -575,43 +593,48 @@ pub fn run(
         model.valid().save(out_dir, &tokenizer, &meta)?;
 
         // --- Periodic Inference ---
-        {
-            let inference_model = model.valid();
-            println!("\n🔍 Running inference for epoch {absolute_epoch}...");
+        // {
+        //     let inference_model = model.valid();
+        //     println!("\n🔍 Running inference for epoch {absolute_epoch}...");
 
-            // Pick a few target classes to see if the model is learning the context
-            // 0: apple, 3: bear, 8: bicycle, 23: cloud, 4: neutral
-            let test_prompts = [
-                (0, "Apple", "The apple"),
-                (3, "Bear", "The bear"),
-                (8, "Bicycle", "A bicycle"),
-                (23, "Cloud", "The cloud"),
-                (4, "Neutral", "Hello"),
-            ];
+        //     // Pick a few target classes to see if the model is learning the context
+        //     // 0: apple, 3: bear, 8: bicycle, 23: cloud, 4: neutral
+        //     let test_prompts = [
+        //         (0, "Apple", "The apple"),
+        //         (3, "Bear", "The bear"),
+        //         (8, "Bicycle", "A bicycle"),
+        //         (23, "Cloud", "The cloud"),
+        //         (4, "Neutral", "Hello"),
+        //     ];
 
-            for (class_idx, label, seed) in test_prompts {
-                let mut inf_rng = rand::thread_rng();
-                // We use fixed context for comparison across epochs
-                let class_probs = peaked_class_probs(&[class_idx], &mut inf_rng);
-                let emote_probs = peaked_class_probs(&[4], &mut inf_rng); // neutral user emote
+        //     let label_keywords   = build_label_keywords();
+        //     let keyword_index    = build_keyword_index(&label_keywords);
 
-                let res = inference_model.generate(
-                    &tokenizer,
-                    &class_probs,
-                    &emote_probs,
-                    4, // neutral user emote onehot
-                    seed,
-                    30,
-                    &device,
-                );
+        //     for (class_idx, label, seed) in test_prompts {
+        //         let mut inf_rng = rand::thread_rng();
+        //         let emote_label     = keyword_emote_label(seed);
+        //         let matched_classes = matched_classes(seed, &keyword_index);
+        //         // We use fixed context for comparison across epochs
+        //         let class_probs = peaked_class_probs(&matched_classes, &mut inf_rng);
+        //         let emote_probs = peaked_class_probs(&[0, 0, 0, 1, 0, 0, 0], &mut inf_rng); // neutral user emote
 
-                println!("  [{label}] {seed} -> {} (emote: {})",
-                    res.reply.replace("\n", " "),
-                    EMOTE_NAMES[res.yumon_emote_idx]
-                );
-            }
-            println!();
-        }
+        //         let res = inference_model.generate(
+        //             &tokenizer,
+        //             &class_probs,
+        //             &emote_probs,
+        //             4, // neutral user emote onehot
+        //             seed,
+        //             30,
+        //             &device,
+        //         );
+
+        //         println!("  [{label}] {seed} -> {} (emote: {})",
+        //             res.reply.replace("\n", " "),
+        //             EMOTE_NAMES[res.yumon_emote_idx]
+        //         );
+        //     }
+        //     println!();
+        // }
     }
 
     println!("✅ Brain training complete. Final loss: {final_loss:.4}");
@@ -733,7 +756,7 @@ fn prepare_samples(
 
     for sentence in sentences {
         let encoded = tokenizer.encode(sentence);
-        if encoded.len() < 25 || encoded.len() > 30 { continue; }
+        if encoded.len() < (MAX_SEQ_LEN - 20) || encoded.len() > (MAX_SEQ_LEN + 20) { continue; }
 
         // input:  [BOS, t0, t1, ..., t_{n-1}]
         // labels: [t0,  t1, ..., t_{n-1}, EOS]  (one-ahead shift)

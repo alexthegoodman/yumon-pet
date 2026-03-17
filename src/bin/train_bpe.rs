@@ -8,7 +8,7 @@ pub fn main() {
     // ── Load + tokenize wiki corpus ───────────────────────────────────────────
     let mut sentences = Vec::new();
 
-    let wiki_sentences: Result<Vec<String>, anyhow::Error> = load_wiki_sentences(wiki_xml, 2_000);
+    let wiki_sentences: Result<Vec<String>, anyhow::Error> = load_wiki_sentences(wiki_xml, 5_000);
     let wiki_sentences = wiki_sentences.as_ref().expect("Couldn't get wiki_sentences");
 
     for (i, sent) in sentences.iter().enumerate() {
@@ -49,7 +49,12 @@ pub fn main() {
     sentences.extend(quote_sentences);
     sentences.extend(dict_sentences);
         
-    let bpe = BpeTokenizer::train(sentences, 4096);
+    let bpe = BpeTokenizer::train(
+        sentences, 
+        4096 // max size on my igpu
+        // 8192
+        // 16384
+    );
     let bpe = bpe.as_ref().expect("Couldn't train bpe");
 
     bpe.save("yumon_bpe").as_ref().expect("Couldn't save bpe");

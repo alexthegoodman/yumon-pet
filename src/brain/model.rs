@@ -134,7 +134,8 @@ use super::{
 //     }
 // }
 
-pub const EMBED_DIM:     usize = 128;
+// pub const EMBED_DIM:     usize = 128;
+pub const EMBED_DIM:     usize = 512; // larger like 512 for bpe with its large vocab? 128 for char?
 pub const LSTM_UNITS:    usize = 512;
 pub const HIDDEN_UNITS:  usize = 512;
 // pub const LSTM_UNITS:    usize = 256;
@@ -151,6 +152,7 @@ pub struct YumonBrain<B: Backend> {
     embedding:  Embedding<B>,
     input_proj: Linear<B>,
     lstm:       Lstm<B>,
+    lstm2:      Lstm<B>,
     norm:       LayerNorm<B>,
     dropout:    Dropout,
     attention:  MultiHeadAttention<B>,  // used as self-attention (q=k=v)
@@ -173,6 +175,7 @@ impl YumonBrainConfig {
             embedding:  EmbeddingConfig::new(self.vocab_size, EMBED_DIM).init(device),
             input_proj: LinearConfig::new(lstm_in, lstm_in).init(device),
             lstm:       LstmConfig::new(lstm_in, LSTM_UNITS, false).init(device),
+            lstm2:       LstmConfig::new(LSTM_UNITS, LSTM_UNITS, false).init(device),
             norm:       LayerNormConfig::new(LSTM_UNITS).init(device),
             dropout:    DropoutConfig::new(self.dropout_rate).init(),
             // attention:  CrossAttentionConfig::new(
@@ -420,6 +423,8 @@ impl<B: Backend> YumonBrain<B> {
     ) -> (Tensor<B, 3>, Tensor<B, 2>, LstmState<B, 2>) {
         let [batch, seq_len] = tokens.dims();
 
+        let is_valid = tokens.clone().equal_elem(PAD_TOKEN as u32);  // [batch, seq_len], Bool tensor where true = real token
+
         // 1. Embed + concat context
         let embeds = self.embedding.forward(tokens);             // [batch, seq, 128]
         let ctx = context
@@ -430,12 +435,15 @@ impl<B: Backend> YumonBrain<B> {
         // 2. Input projection + LSTM
         let x = self.input_proj.forward(x);
         let (x, x_state) = self.lstm.forward(x, prev_state);                // [batch, seq, 512]
-        let x = self.norm.forward(x);
-        let x = self.dropout.forward(x);
+        let (x, x_state) = self.lstm2.forward(x, None);
+
+        // let x = self.norm.forward(x);
+        // let x = self.dropout.forward(x);
 
         // 3. Self-attention (query = key = value = same sequence)
         let mask_attn = Tensor::<B, 3, Bool>::tril_mask([batch, seq_len, seq_len], 0, &x.device());
         let mha_input = MhaInput::new(x.clone(), x.clone(), x.clone())
+                                                    .mask_pad(is_valid)
                                                     .mask_attn(mask_attn);
 
         let attended = self.attention.forward(mha_input);
