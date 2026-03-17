@@ -38,11 +38,11 @@ use rand::Rng;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, mdx::{load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_mdx_sentences}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, mdx::{load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_mdx_sentences}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 use crate::brain::{
     CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
-    model::{YumonBrain, YumonBrainConfig, BrainMetadata},
+    model::{YumonBrain, YumonBrainConfig, BrainMetadata, GenerationResult},
     wiki::load_wiki_sentences,
 };
 
@@ -573,6 +573,45 @@ pub fn run(
             final_loss,
         };
         model.valid().save(out_dir, &tokenizer, &meta)?;
+
+        // --- Periodic Inference ---
+        {
+            let inference_model = model.valid();
+            println!("\n🔍 Running inference for epoch {absolute_epoch}...");
+
+            // Pick a few target classes to see if the model is learning the context
+            // 0: apple, 3: bear, 8: bicycle, 23: cloud, 4: neutral
+            let test_prompts = [
+                (0, "Apple", "The apple"),
+                (3, "Bear", "The bear"),
+                (8, "Bicycle", "A bicycle"),
+                (23, "Cloud", "The cloud"),
+                (4, "Neutral", "Hello"),
+            ];
+
+            for (class_idx, label, seed) in test_prompts {
+                let mut inf_rng = rand::thread_rng();
+                // We use fixed context for comparison across epochs
+                let class_probs = peaked_class_probs(&[class_idx], &mut inf_rng);
+                let emote_probs = peaked_class_probs(&[4], &mut inf_rng); // neutral user emote
+
+                let res = inference_model.generate(
+                    &tokenizer,
+                    &class_probs,
+                    &emote_probs,
+                    4, // neutral user emote onehot
+                    seed,
+                    30,
+                    &device,
+                );
+
+                println!("  [{label}] {seed} -> {} (emote: {})",
+                    res.reply.replace("\n", " "),
+                    EMOTE_NAMES[res.yumon_emote_idx]
+                );
+            }
+            println!();
+        }
     }
 
     println!("✅ Brain training complete. Final loss: {final_loss:.4}");
