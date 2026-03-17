@@ -53,14 +53,14 @@ enum Command {
         #[arg(long, default_value = "checkpoints/brain")]
         out_dir: String,
 
-        #[arg(long, default_value_t = 10)]
+        #[arg(long, default_value_t = 100)]
         epochs: usize,
 
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = 32)]
         batch_size: usize,
 
         /// Maximum wiki articles to load (0 = all)
-        #[arg(long, default_value_t = 500)]
+        #[arg(long, default_value_t = 5_000)]
         max_articles: usize,
     },
 

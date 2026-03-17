@@ -1,4 +1,4 @@
-use yumon_pet::brain::{bpe::{self, BpeTokenizer}, mdx::{load_csv_quotes, load_mdx_sentences}, wiki::load_wiki_sentences};
+use yumon_pet::brain::{bpe::{self, BpeTokenizer}, mdx::{load_csv_quotes, load_dictionary_sentences, load_mdx_sentences}, wiki::load_wiki_sentences};
 
 pub fn main() {
     let wiki_xml = "data/simplewiki-latest-pages-articles.xml";
@@ -34,10 +34,20 @@ pub fn main() {
             println!("QUOTE: {:?}", sent);
         }
     }
+
+    let dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt");
+    let dict_sentences = dict_sentences.as_ref().expect("Couldn't get dict_sentences");
+
+    for (i, sent) in dict_sentences.iter().enumerate() {
+        if (i < 12) {
+            println!("DICT: {:?}", sent);
+        }
+    }
     
     sentences.extend(wiki_sentences);
     sentences.extend(mdx_sentences);
     sentences.extend(quote_sentences);
+    sentences.extend(dict_sentences);
         
     let bpe = BpeTokenizer::train(sentences, 4096);
     let bpe = bpe.as_ref().expect("Couldn't train bpe");

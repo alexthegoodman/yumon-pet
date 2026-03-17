@@ -38,7 +38,7 @@ use rand::Rng;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, mdx::{load_csv_quotes, load_mdx_sentences}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, mdx::{load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_mdx_sentences}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES}};
 use crate::brain::{
     CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
@@ -255,10 +255,28 @@ pub fn run(
             println!("QUOTE: {:?}", sent);
         }
     }
+
+    let dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt")?;
+
+    for (i, sent) in dict_sentences.iter().enumerate() {
+        if (i < 12) {
+            println!("DICT: {:?}", sent);
+        }
+    }
+
+    let qna_sentences = load_csv_qna("data/AI.csv")?;
+
+    for (i, sent) in qna_sentences.iter().enumerate() {
+        if (i < 12) {
+            println!("Q&A: {:?}", sent);
+        }
+    }
     
     sentences.extend(wiki_sentences);
     sentences.extend(mdx_sentences);
     sentences.extend(quote_sentences);
+    sentences.extend(dict_sentences);
+    sentences.extend(qna_sentences);
     // let sentences = mdx_sentences;
 
     let full_text: String = sentences.join(" ");
@@ -279,11 +297,11 @@ pub fn run(
     // ── Prepare samples with label-indexed context ────────────────────────────
     let training_samples = prepare_samples(&sentences, &tokenizer, &keyword_index);
 
-    // for (i, sample) in training_samples.iter().enumerate() {
-    //     if (i < 20) {
-    //         println!("Sample: {:?}", sample.pair);
-    //     }
-    // }
+    for (i, sample) in training_samples.iter().enumerate() {
+        if (i < 12) {
+            println!("Sample: {:?}", sample.pair);
+        }
+    }
 
     // let labelled   = training_samples.iter().filter(|s| !s.matched_classes.is_empty()).count();
     // let unlabelled = training_samples.len() - labelled;
@@ -370,144 +388,179 @@ pub fn run(
         let pb = make_progress(num_batches, absolute_epoch, epochs);
         let mut epoch_loss = 0.0f32;
 
-        for batch_num in 0..num_batches {
-            let batch_idx = &idx[batch_num * batch_size..(batch_num + 1) * batch_size];
+        // for batch_num in 0..num_batches {
+        //     let batch_idx = &idx[batch_num * batch_size..(batch_num + 1) * batch_size];
 
-            let mut batch_loss_tensors: Vec<Tensor<TrainBackend, 1>> = Vec::new();
-            let mut batch_loss_sum = 0.0f32;
+        //     let mut batch_loss_tensors: Vec<Tensor<TrainBackend, 1>> = Vec::new();
+        //     let mut batch_loss_sum = 0.0f32;
+
+            // for &i in batch_idx {
+            //     let sample  = &training_samples[i];
+            //     // let seq_len = sample.input_ids.len();
+            //     let seq_len = MAX_SEQ_LEN;
+            //     if seq_len < 2 { continue; }
+
+            //     let class_probs = peaked_class_probs(&sample.matched_classes, &mut rng);
+            //     let ctx_flat    = build_context(&class_probs, sample.emote_label, &mut rng);
+
+            //     let context_t = Tensor::<TrainBackend, 2>::from_floats(
+            //         TensorData::new(ctx_flat, [1, CONTEXT_DIMS]),
+            //         &device,
+            //     );
+
+            //     let ids_flat: Vec<i32> = sample.input_ids.iter().map(|&t| t as i32).collect();
+            //     // println!("ids_flat len={}, seq_len={}", ids_flat.len(), seq_len);
+            //     let ids_t = Tensor::<TrainBackend, 2, Int>::from_ints(
+            //         TensorData::new(ids_flat, [1, seq_len]),
+            //         &device,
+            //     );
+
+            //     let (token_logits, emote_logits, lstm_state) = model.forward(ids_t, context_t, None);
+
+            //     // Language loss
+            //     let vocab     = tokenizer.vocab_size();
+            //     let logits_2d = token_logits.reshape([seq_len, vocab]);
+
+            //     // let targets: Vec<i32> = sample.target_ids.iter().map(|&t| t as i32).collect();
+            //     let targets: Vec<i32> = sample.target_labels.iter().map(|&t| t as i32).collect();
+
+            //     let target_t  = Tensor::<TrainBackend, 1, Int>::from_ints(
+            //         TensorData::new(targets, [seq_len]),
+            //         &device,
+            //     );
+            //     let lang_loss = ce_loss.forward(logits_2d, target_t);
+
+            //     // Emote loss — last timestep only
+            //     let emote_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(
+            //         TensorData::new(vec![sample.emote_label as i32], [1]),
+            //         &device,
+            //     );
+            //     let emote_loss = ce_loss.forward(emote_logits, emote_target_t);
+
+            //     let total     = lang_loss + emote_loss.mul_scalar(EMOTE_WEIGHT);
+            //     let loss_val: f32 = total.clone().inner().to_data()
+            //         .to_vec::<f32>().unwrap()[0];
+
+            //     batch_loss_sum += loss_val;
+            //     batch_loss_tensors.push(total);
+            // }
+
+            // if batch_loss_tensors.is_empty() { continue; }
+
+            // let n        = batch_loss_tensors.len() as f32;
+            // let combined = batch_loss_tensors.into_iter()
+            //     .reduce(|a, b| a + b)
+            //     .unwrap()
+            //     .div_scalar(n);
+
+            // let grads = GradientsParams::from_grads(combined.backward(), &model);
+            // model     = optimizer.step(
+            //     current_lr,
+            //     // 0.001,
+            //     // 1e-4,
+            //     // 3e-5, 
+            //     // 1e-5,
+            //     // 3e-6,
+            //     // 3e-7,
+            //     // 3e-8,
+            //     // 0.001, // standard?
+            //     model, 
+            //     grads
+            // );
+
+            // let avg = batch_loss_sum / n;
+            // epoch_loss += avg;
+
+            // let batches_done = (batch_num + 1) as f32;
+            // let avg_loss = epoch_loss / batches_done;
+
+            // pb.set_prefix(format!("{:.4} avg_loss={:.4}", avg, avg_loss));
+            // pb.inc(1);
+        // }
+
+        for batch_num in 0..num_batches {
+            let batch_start = batch_num * batch_size;
+            let batch_end = (batch_start + batch_size).min(training_samples.len());
+            let batch_idx = &idx[batch_start..batch_end];
+            let current_batch_size = batch_idx.len();  // in case last batch is smaller
+
+            if current_batch_size == 0 { continue; }
+
+            // ── Collect everything into flat vectors (fast) ─────────────────────
+            let mut all_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
+            let mut all_contexts: Vec<f32> = Vec::with_capacity(current_batch_size * CONTEXT_DIMS);
+            let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
+            let mut all_emote_targets: Vec<i32> = Vec::with_capacity(current_batch_size);
 
             for &i in batch_idx {
-                let sample  = &training_samples[i];
-                // let seq_len = sample.input_ids.len();
-                let seq_len = MAX_SEQ_LEN;
-                if seq_len < 2 { continue; }
+                let sample = &training_samples[i];
 
-                // let pad_count = sample.target_ids.iter().filter(|&&t| t == PAD_TOKEN).count();
-                // let total = sample.target_ids.len();
-                // println!("pad ratio: {}/{} ({:.1}%)", pad_count, total, pad_count as f32 / total as f32 * 100.0);
+                // input ids
+                all_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
 
-                // println!("input_ids  first 10: {:?}", &sample.input_ids[..10.min(sample.input_ids.len())]);
-                // println!("target_ids first 10: {:?}", &sample.target_ids[..10.min(sample.target_ids.len())]);   
-
-                // Build peaked class probs from this sentence's matched labels,
-                // with fresh noise every forward pass (data augmentation for free).
-
-                // println!("context");
-
+                // context (still per-sample because of rng noise — cheap)
                 let class_probs = peaked_class_probs(&sample.matched_classes, &mut rng);
-                let ctx_flat    = build_context(&class_probs, sample.emote_label, &mut rng);
+                let ctx_flat = build_context(&class_probs, sample.emote_label, &mut rng);
+                all_contexts.extend(ctx_flat);
 
-                let context_t = Tensor::<TrainBackend, 2>::from_floats(
-                    TensorData::new(ctx_flat, [1, CONTEXT_DIMS]),
-                    &device,
-                );
+                // language targets
+                all_lang_targets.extend(sample.target_labels.iter().map(|&t| t as i32));
 
-                // println!("context done");
-
-                // let seed_text = sample.matched_classes.first()
-                //     .map(|&i| CIFAR_FINE_LABELS[i])
-                //     .unwrap_or("");
-
-                // // input: just BOS + label, short
-                // let input_ids: Vec<i32> = std::iter::once(BOS_TOKEN as i32)
-                //     .chain(tokenizer.encode(seed_text).into_iter().map(|t| t as i32))
-                //     .collect();
-
-                // let seq_len = input_ids.len();
-
-                // // target: just the first seq_len tokens of the sentence
-                // let target_ids: Vec<i32> = sample.target_ids[..seq_len]
-                //     .iter().map(|&t| t as i32).collect();
-
-                // let ids_t = Tensor::<TrainBackend, 2, Int>::from_ints(
-                //     TensorData::new(input_ids, [1, seq_len]),
-                //     &device,
-                // );
-
-                // let targets_flat: Vec<i32> = sample.target_ids.iter().map(|&t| t as i32).collect();
-                // let targets_t = Tensor::<TrainBackend, 2, Int>::from_ints(
-                //     TensorData::new(targets_flat, [1, seq_len]),
-                //     &device,
-                // );
-
-                let ids_flat: Vec<i32> = sample.input_ids.iter().map(|&t| t as i32).collect();
-                // println!("ids_flat len={}, seq_len={}", ids_flat.len(), seq_len);
-                let ids_t = Tensor::<TrainBackend, 2, Int>::from_ints(
-                    TensorData::new(ids_flat, [1, seq_len]),
-                    &device,
-                );
-
-                // let [batch1, seq_len1] = ids_t.dims();
-                // let [batch2, seq_len2] = context_t.dims();
-
-                // println!("sequence length {:?} {:?}", seq_len1, seq_len2);
-
-                // let (token_logits, emote_logits) = model.forward(ids_t, targets_t, context_t);
-
-                let (token_logits, emote_logits, lstm_state) = model.forward(ids_t, context_t, None);
-
-                // Language loss
-                let vocab     = tokenizer.vocab_size();
-                let logits_2d = token_logits.reshape([seq_len, vocab]);
-
-                // let predicted = logits_2d.clone().argmax(1);
-                // let pred_vec: Vec<i32> = predicted.to_data().to_vec().unwrap();
-                // println!("predicted tokens first 10: {:?}", &pred_vec[..10.min(pred_vec.len())]);
-
-                // let targets: Vec<i32> = sample.target_ids.iter().map(|&t| t as i32).collect();
-                let targets: Vec<i32> = sample.target_labels.iter().map(|&t| t as i32).collect();
-
-                let target_t  = Tensor::<TrainBackend, 1, Int>::from_ints(
-                    TensorData::new(targets, [seq_len]),
-                    &device,
-                );
-                let lang_loss = ce_loss.forward(logits_2d, target_t);
-
-                // Emote loss — last timestep only
-                let emote_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(
-                    TensorData::new(vec![sample.emote_label as i32], [1]),
-                    &device,
-                );
-                let emote_loss = ce_loss.forward(emote_logits, emote_target_t);
-
-                let total     = lang_loss + emote_loss.mul_scalar(EMOTE_WEIGHT);
-                let loss_val: f32 = total.clone().inner().to_data()
-                    .to_vec::<f32>().unwrap()[0];
-
-                batch_loss_sum += loss_val;
-                batch_loss_tensors.push(total);
+                // emote target
+                all_emote_targets.push(sample.emote_label as i32);
             }
 
-            if batch_loss_tensors.is_empty() { continue; }
+            // ── Stack into real batched tensors (ONE allocation) ───────────────
+            let ids_t = Tensor::<TrainBackend, 2, Int>::from_ints(
+                TensorData::new(all_ids, [current_batch_size, MAX_SEQ_LEN]),
+                &device,
+            );
 
-            let n        = batch_loss_tensors.len() as f32;
-            let combined = batch_loss_tensors.into_iter()
-                .reduce(|a, b| a + b)
-                .unwrap()
-                .div_scalar(n);
+            let context_t = Tensor::<TrainBackend, 2>::from_floats(
+                TensorData::new(all_contexts, [current_batch_size, CONTEXT_DIMS]),
+                &device,
+            );
 
-            let grads = GradientsParams::from_grads(combined.backward(), &model);
-            model     = optimizer.step(
-                current_lr,
-                // 0.001,
+            let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(
+                TensorData::new(all_lang_targets, [current_batch_size * MAX_SEQ_LEN]),
+                &device,
+            );
+
+            let emote_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(
+                TensorData::new(all_emote_targets, [current_batch_size]),
+                &device,
+            );
+
+            // ── SINGLE forward pass (this is where the 20× speedup happens) ─────
+            let (token_logits, emote_logits, _lstm_state) = model.forward(ids_t, context_t, None);
+
+            // ── Loss (now automatically batched) ───────────────────────────────
+            let vocab = tokenizer.vocab_size();
+            let logits_2d = token_logits.reshape([current_batch_size * MAX_SEQ_LEN, vocab]);  // [B*S, vocab]
+
+            let lang_loss = ce_loss.forward(logits_2d, lang_target_t);
+
+            let emote_loss = ce_loss.forward(emote_logits, emote_target_t);  // [B, C] and [B]
+
+            let total_loss = lang_loss + emote_loss.mul_scalar(EMOTE_WEIGHT);
+
+            // Backward + step (exactly one per real batch)
+            let grads = GradientsParams::from_grads(total_loss.backward(), &model);
+            model = optimizer.step(
+                current_lr, 
                 // 1e-4,
-                // 3e-5, 
-                // 1e-5,
-                // 3e-6,
-                // 3e-7,
-                // 3e-8,
-                // 0.001, // standard?
                 model, 
                 grads
             );
 
-            let avg = batch_loss_sum / n;
-            epoch_loss += avg;
+            // Logging (same feel as before)
+            let loss_val: f32 = total_loss.clone().inner().to_data().to_vec::<f32>().unwrap()[0];
+            epoch_loss += loss_val;
 
             let batches_done = (batch_num + 1) as f32;
             let avg_loss = epoch_loss / batches_done;
 
-            pb.set_prefix(format!("{:.4} avg_loss={:.4}", avg, avg_loss));
+            pb.set_prefix(format!("{:.4} avg_loss={:.4}", loss_val, avg_loss));
             pb.inc(1);
         }
 
@@ -641,7 +694,7 @@ fn prepare_samples(
 
     for sentence in sentences {
         let encoded = tokenizer.encode(sentence);
-        if encoded.len() < 20 || encoded.len() > 60 { continue; }
+        if encoded.len() < 25 || encoded.len() > 30 { continue; }
 
         // input:  [BOS, t0, t1, ..., t_{n-1}]
         // labels: [t0,  t1, ..., t_{n-1}, EOS]  (one-ahead shift)

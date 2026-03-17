@@ -137,7 +137,10 @@ use super::{
 pub const EMBED_DIM:     usize = 128;
 pub const LSTM_UNITS:    usize = 512;
 pub const HIDDEN_UNITS:  usize = 512;
+// pub const LSTM_UNITS:    usize = 256;
+// pub const HIDDEN_UNITS:  usize = 256;
 pub const ATTN_HEADS:    usize = 8;
+// pub const ATTN_HEADS:    usize = 4;
 pub const ATTN_HEAD_DIM: usize = 64;   // LSTM_UNITS / ATTN_HEADS
 
 pub const TEMPERATURE: f32  = 0.7;
@@ -425,31 +428,17 @@ impl<B: Backend> YumonBrain<B> {
         let x = Tensor::cat(vec![embeds, ctx], 2);              // [batch, seq, 242]
 
         // 2. Input projection + LSTM
-        // println!("see 1");
         let x = self.input_proj.forward(x);
         let (x, x_state) = self.lstm.forward(x, prev_state);                // [batch, seq, 512]
         let x = self.norm.forward(x);
         let x = self.dropout.forward(x);
 
         // 3. Self-attention (query = key = value = same sequence)
-        // println!("see 2");
-        // let base_mask = causal_mask::<B>(seq_len, &x.device());
-        let mask_attn = Tensor::<B, 3, Bool>::tril_mask([1, seq_len, seq_len], 0, &x.device());
-
-        // let mask_attn = base_mask
-        //                                         .unsqueeze_dim::<3>(0)
-        //                                         .expand([batch, seq_len, seq_len]); // [batch, seq, seq]
-
-        // println!("see 3");
-        // let mha_input = MhaInput::new(query, key, value) // each a Tensor<B, 3>
-        //                                         .mask_attn(mask_attn) // Tensor<B, 3, Bool>
-        //                                         .mask_pad(mask_pad); // Tensor<B, 2, Bool>
-
+        let mask_attn = Tensor::<B, 3, Bool>::tril_mask([batch, seq_len, seq_len], 0, &x.device());
         let mha_input = MhaInput::new(x.clone(), x.clone(), x.clone())
                                                     .mask_attn(mask_attn);
 
         let attended = self.attention.forward(mha_input);
-        // println!("see 4");
         let x = self.attn_proj.forward(attended.context) + x;           // residual
 
         // 4. Heads
@@ -531,7 +520,7 @@ impl<B: Backend> YumonBrain<B> {
             last_emote_logits = Some(emote_logits.to_data().to_vec::<f32>().unwrap());
 
             let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
-            println!("Check token {:?}", next_token);
+            // println!("Check token {:?}", next_token);
             if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
             token_ids.push(next_token);
         }

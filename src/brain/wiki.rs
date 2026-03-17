@@ -174,7 +174,7 @@ fn split_sentences(text: &str) -> Vec<String> {
 
 pub fn is_good_sentence(s: &str) -> bool {
     let len = s.len();
-    if len < 10 || len > 400 { return false; }
+    if len < 4 || len > 400 { return false; }
 
     // Reject lines starting with wiki junk
     let first = s.chars().next().unwrap_or(' ');
