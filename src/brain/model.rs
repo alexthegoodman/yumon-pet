@@ -205,7 +205,7 @@ impl<B: Backend> YumonBrain<B> {
 
         let mut rng = rand::thread_rng();
         let mut last_emote_logits: Option<Vec<f32>> = None;
-        let mut last_state = None;
+        // let mut last_state = None;
 
         for _ in 0..max_tokens {
             // Clamp + pad to MAX_SEQ_LEN
@@ -222,9 +222,9 @@ impl<B: Backend> YumonBrain<B> {
             );
 
             let (token_logits, emote_logits, lstm_state) =
-                self.forward(tokens_t, context_t.clone(), last_state);
+                self.forward(tokens_t, context_t.clone(), None);
 
-            last_state = Some(lstm_state);
+            // last_state = Some(lstm_state);
 
             // Sample from the last real position
             let last_idx  = clamped_len - 1;
