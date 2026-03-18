@@ -176,6 +176,14 @@ pub fn is_good_sentence(s: &str) -> bool {
     let len = s.len();
     if len < 4 || len > 400 { return false; }
 
+    if s.contains("'''") { return false; }
+    if s.contains("[[") { return false; }
+    if s.contains("|") { return false; }
+    if s.contains("*") { return false; }
+    if s.contains("#") { return false; }
+    if s.contains("''") { return false; }
+    if s.contains("ISBN") { return false; }
+
     // Reject lines starting with wiki junk
     let first = s.chars().next().unwrap_or(' ');
     if matches!(first, '=' | '{' | '|' | '!' | '*' | '#' | ':') { return false; }

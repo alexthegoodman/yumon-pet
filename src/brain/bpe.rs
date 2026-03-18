@@ -163,7 +163,7 @@ impl BpeTokenizer {
         let path = format!("{dir}/tokenizer.json");
         self.inner.save(&path, false)
             .map_err(|e| anyhow::anyhow!("saving tokenizer: {}", e))?;
-        println!("💾 BPE tokenizer saved to {path}");
+        // println!("💾 BPE tokenizer saved to {path}");
         Ok(())
     }
 

@@ -35,19 +35,19 @@ pub fn main() {
         }
     }
 
-    let dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt");
-    let dict_sentences = dict_sentences.as_ref().expect("Couldn't get dict_sentences");
+    // let dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt");
+    // let dict_sentences = dict_sentences.as_ref().expect("Couldn't get dict_sentences");
 
-    for (i, sent) in dict_sentences.iter().enumerate() {
-        if (i < 12) {
-            println!("DICT: {:?}", sent);
-        }
-    }
+    // for (i, sent) in dict_sentences.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("DICT: {:?}", sent);
+    //     }
+    // }
     
     sentences.extend(wiki_sentences);
     sentences.extend(mdx_sentences);
     sentences.extend(quote_sentences);
-    sentences.extend(dict_sentences);
+    // sentences.extend(dict_sentences);
         
     let bpe = BpeTokenizer::train(
         sentences, 

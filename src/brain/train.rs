@@ -36,9 +36,10 @@ use burn::{
 };
 use rand::Rng;
 use indicatif::{ProgressBar, ProgressStyle};
+use ratatui::{Terminal, TerminalOptions, Viewport, prelude::CrosstermBackend};
 use std::collections::HashMap;
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, mdx::{load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_mdx_sentences}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_mdx_sentences}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 use crate::brain::{
     CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
@@ -50,9 +51,10 @@ pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 // pub type TrainBackend = burn::backend::Autodiff<burn::backend::NdArray<f32>>;
 
 // Max sequence length during training (characters)
-// const MAX_SEQ_LEN:  usize = 120;
-pub const MAX_SEQ_LEN:  usize = 60; // lighter to train on iGPU
-// pub const MAX_SEQ_LEN:  usize = 30; // even lower with bpe
+// pub const MAX_SEQ_LEN:  usize = 120;
+// pub const MAX_SEQ_LEN:  usize = 25;
+// pub const MAX_SEQ_LEN:  usize = 60; // lighter to train on iGPU
+pub const MAX_SEQ_LEN:  usize = 35; // even lower with bpe
 // Max vocab size
 const MAX_VOCAB:    usize = 256;
 // Emote head loss weight (much lighter than language loss)
@@ -275,8 +277,8 @@ pub fn run(
     sentences.extend(mdx_sentences.clone());
     sentences.extend(quote_sentences.clone());
     sentences.extend(qna_sentences.clone());
-    sentences.extend(wiki_sentences.clone());
-    sentences.extend(dict_sentences.clone());
+    // sentences.extend(wiki_sentences.clone());
+    // sentences.extend(dict_sentences.clone()); // wasteful cloning
 
     let full_text: String = sentences.join(" ");
     println!("Building vocabulary from {} chars...", full_text.len());
@@ -314,8 +316,10 @@ pub fn run(
     training_samples.extend(wiki_samples);
     training_samples.extend(mdx_samples);
     training_samples.extend(quote_samples);
-    training_samples.extend(dict_samples);
+    // training_samples.extend(dict_samples);
     training_samples.extend(qna_samples);
+
+    // training_samples.truncate(4096); // limit total for now
 
     println!(
         "Training samples: {}",
@@ -379,124 +383,69 @@ pub fn run(
     let mut final_loss = 0.0f32;
     
     // lr over time
-    let first_lr = 0.0001;
-    let last_lr = 1e-8;
+    let first_lr = 1e-6;
+    let last_lr = 1e-7;
 
-    // Compute LR from absolute epoch number — stateless, resume-safe
-    let lr_for_epoch = |abs_epoch: usize| -> f64 {
-        let t = abs_epoch as f64 / epochs as f64;         // 0.0 → 1.0
-        let t = t.clamp(0.0, 1.0);
-        first_lr + (last_lr - first_lr) * t               // linear interp
+    use std::io::stdout;
+    let backend = CrosstermBackend::new(stdout());
+    let mut terminal = Terminal::with_options(
+        backend,
+        TerminalOptions { viewport: Viewport::Inline(16) },
+    )?;
+
+    let total_batches = training_samples.len() / batch_size;
+
+    let mut state = TrainingState {
+        loss_history: vec![],
+        avg_loss_history: vec![],
+        current_loss: 0.0,
+        avg_loss: 0.0,
+        epoch: epochs_already_done + 1,
+        total_epochs: epochs,
+        batch: 0,
+        total_batches,          // ← same value your loop uses for num_batches
+        current_lr: first_lr as f64,
+        global_step: 0,
     };
 
     // ── Training loop ─────────────────────────────────────────────────────────
     for epoch in 0..remaining_epochs {
         let absolute_epoch = epochs_already_done + epoch + 1;
 
-        let current_lr = lr_for_epoch(absolute_epoch);
-        // let current_lr = 1e-6;
-
-        println!("current_lr {:?}", current_lr);
-
         let mut idx: Vec<usize> = (0..training_samples.len()).collect();
         use rand::seq::SliceRandom;
         idx.shuffle(&mut rng);
 
         let num_batches = idx.len().max(1) / batch_size;
-        let pb = make_progress(num_batches, absolute_epoch, epochs);
+        // let pb = make_progress(num_batches, absolute_epoch, epochs);
         let mut epoch_loss = 0.0f32;
 
-        // for batch_num in 0..num_batches {
-        //     let batch_idx = &idx[batch_num * batch_size..(batch_num + 1) * batch_size];
-
-        //     let mut batch_loss_tensors: Vec<Tensor<TrainBackend, 1>> = Vec::new();
-        //     let mut batch_loss_sum = 0.0f32;
-
-            // for &i in batch_idx {
-            //     let sample  = &training_samples[i];
-            //     // let seq_len = sample.input_ids.len();
-            //     let seq_len = MAX_SEQ_LEN;
-            //     if seq_len < 2 { continue; }
-
-            //     let class_probs = peaked_class_probs(&sample.matched_classes, &mut rng);
-            //     let ctx_flat    = build_context(&class_probs, sample.emote_label, &mut rng);
-
-            //     let context_t = Tensor::<TrainBackend, 2>::from_floats(
-            //         TensorData::new(ctx_flat, [1, CONTEXT_DIMS]),
-            //         &device,
-            //     );
-
-            //     let ids_flat: Vec<i32> = sample.input_ids.iter().map(|&t| t as i32).collect();
-            //     // println!("ids_flat len={}, seq_len={}", ids_flat.len(), seq_len);
-            //     let ids_t = Tensor::<TrainBackend, 2, Int>::from_ints(
-            //         TensorData::new(ids_flat, [1, seq_len]),
-            //         &device,
-            //     );
-
-            //     let (token_logits, emote_logits, lstm_state) = model.forward(ids_t, context_t, None);
-
-            //     // Language loss
-            //     let vocab     = tokenizer.vocab_size();
-            //     let logits_2d = token_logits.reshape([seq_len, vocab]);
-
-            //     // let targets: Vec<i32> = sample.target_ids.iter().map(|&t| t as i32).collect();
-            //     let targets: Vec<i32> = sample.target_labels.iter().map(|&t| t as i32).collect();
-
-            //     let target_t  = Tensor::<TrainBackend, 1, Int>::from_ints(
-            //         TensorData::new(targets, [seq_len]),
-            //         &device,
-            //     );
-            //     let lang_loss = ce_loss.forward(logits_2d, target_t);
-
-            //     // Emote loss — last timestep only
-            //     let emote_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(
-            //         TensorData::new(vec![sample.emote_label as i32], [1]),
-            //         &device,
-            //     );
-            //     let emote_loss = ce_loss.forward(emote_logits, emote_target_t);
-
-            //     let total     = lang_loss + emote_loss.mul_scalar(EMOTE_WEIGHT);
-            //     let loss_val: f32 = total.clone().inner().to_data()
-            //         .to_vec::<f32>().unwrap()[0];
-
-            //     batch_loss_sum += loss_val;
-            //     batch_loss_tensors.push(total);
-            // }
-
-            // if batch_loss_tensors.is_empty() { continue; }
-
-            // let n        = batch_loss_tensors.len() as f32;
-            // let combined = batch_loss_tensors.into_iter()
-            //     .reduce(|a, b| a + b)
-            //     .unwrap()
-            //     .div_scalar(n);
-
-            // let grads = GradientsParams::from_grads(combined.backward(), &model);
-            // model     = optimizer.step(
-            //     current_lr,
-            //     // 0.001,
-            //     // 1e-4,
-            //     // 3e-5, 
-            //     // 1e-5,
-            //     // 3e-6,
-            //     // 3e-7,
-            //     // 3e-8,
-            //     // 0.001, // standard?
-            //     model, 
-            //     grads
-            // );
-
-            // let avg = batch_loss_sum / n;
-            // epoch_loss += avg;
-
-            // let batches_done = (batch_num + 1) as f32;
-            // let avg_loss = epoch_loss / batches_done;
-
-            // pb.set_prefix(format!("{:.4} avg_loss={:.4}", avg, avg_loss));
-            // pb.inc(1);
-        // }
-
         for batch_num in 0..num_batches {
+            // cosine annealing
+            // let current_lr = {
+            //     let total_steps = remaining_epochs * (training_samples.len() / batch_size);
+            //     let step = epoch * (training_samples.len() / batch_size) + batch_num;
+            //     let progress = step as f64 / total_steps as f64;
+            //     let cosine = (std::f64::consts::PI * progress).cos();
+            //     (last_lr + 0.5 * (first_lr - last_lr) * (1.0 + cosine)) as f64
+            // };
+
+            // // linear
+            let current_lr = {
+                let total_steps = remaining_epochs * (training_samples.len() / batch_size);
+                let step = epoch * (training_samples.len() / batch_size) + batch_num;
+                let t = step as f64 / total_steps as f64;
+                (first_lr as f64 * (1.0 - t) + last_lr as f64 * t)
+            };
+
+            // // exp decay
+            // let current_lr = {
+            //     let total_steps = remaining_epochs * (training_samples.len() / batch_size);
+            //     let step = epoch * (training_samples.len() / batch_size) + batch_num;
+            //     let t = step as f64 / total_steps as f64;
+            //     (first_lr as f64 * (last_lr as f64 / first_lr as f64).powf(t))
+            // };
+
             let batch_start = batch_num * batch_size;
             let batch_end = (batch_start + batch_size).min(training_samples.len());
             let batch_idx = &idx[batch_start..batch_end];
@@ -566,7 +515,7 @@ pub fn run(
             let grads = GradientsParams::from_grads(total_loss.backward(), &model);
             model = optimizer.step(
                 current_lr, 
-                // 1e-4,
+                // 1e-6,
                 model, 
                 grads
             );
@@ -578,12 +527,29 @@ pub fn run(
             let batches_done = (batch_num + 1) as f32;
             let avg_loss = epoch_loss / batches_done;
 
-            pb.set_prefix(format!("{:.4} avg_loss={:.4}", loss_val, avg_loss));
-            pb.inc(1);
+            // pb.set_prefix(format!("{:.4} avg_loss={:.4} current_lr={:.7}", loss_val, avg_loss, current_lr));
+            // pb.inc(1);
+
+            // instead of pb.set_prefix(...) and pb.inc(1)
+            state.current_loss = loss_val;
+            state.avg_loss = epoch_loss / (batch_num + 1) as f32;
+            state.batch = batch_num + 1;
+            state.current_lr = current_lr;
+            state.global_step += 1;
+            state.loss_history.push((state.global_step as f64, loss_val as f64));
+            state.avg_loss_history.push((state.global_step as f64, state.avg_loss as f64));
+
+            // optional: sliding window so chart doesn't compress
+            // if state.loss_history.len() > 500 {
+            //     state.loss_history.remove(0);
+            //     state.avg_loss_history.remove(0);
+            // }
+
+            terminal.draw(|frame| render(frame, &state))?;
         }
 
         final_loss = epoch_loss / num_batches.max(1) as f32;
-        pb.finish_with_message(format!("epoch {absolute_epoch}/{epochs}  loss={final_loss:.4} current_lr={current_lr:.4}"));
+        // pb.finish_with_message(format!("epoch {absolute_epoch}/{epochs}  loss={final_loss:.4}"));
 
         let meta = BrainMetadata {
             vocab_size:     tokenizer.vocab_size(),
@@ -637,6 +603,9 @@ pub fn run(
         // }
     }
 
+    // after the epoch loop
+    terminal.clear()?;
+
     println!("✅ Brain training complete. Final loss: {final_loss:.4}");
     Ok(())
 }
@@ -654,99 +623,6 @@ struct Sample {
     pair: Vec<String>
 }
 
-// fn prepare_samples(
-//     sentences:     &[String],
-//     tokenizer:     &TokenizerKind,
-//     keyword_index: &HashMap<String, Vec<usize>>,
-// ) -> Vec<Sample> {
-//     let mut samples = Vec::new();
-//     let mut label_counts = HashMap::new();
-
-//     for s in sentences {
-//         let encoded = tokenizer.encode(s);
-//         if encoded.len() < 3 { continue; }
-
-//         let truncated: Vec<usize> = std::iter::once(BOS_TOKEN)
-//             .chain(encoded.iter().cloned().take(MAX_SEQ_LEN - 2))
-//             .chain(std::iter::once(EOS_TOKEN))
-//             .collect();
-
-//         let input_ids  = truncated[..truncated.len() - 1].to_vec();
-//         let target_ids = truncated[1..].to_vec();
-
-//         let emote_label     = keyword_emote_label(s);
-//         let matched_classes = matched_classes(s, keyword_index);
-
-//         if matched_classes.len() > 0 {
-//             if label_counts.get(&matched_classes[0]).is_none() {
-//                 label_counts.insert(matched_classes[0], 0);
-//             }
-
-//             // we can train on non-matches for broader knowledge later on possibly
-//             if let Some(current) = label_counts.get(&matched_classes[0]) {
-//                 if *current < 200 {
-//                     label_counts.insert(matched_classes[0], *current + 1);
-//                     samples.push(Sample { input_ids, target_ids, emote_label, matched_classes });
-//                 }
-//             }
-//         }
-//     }
-
-//     samples
-// }
-
-
-// fn prepare_samples(
-//     sentences:     &[String],
-//     tokenizer:     &TokenizerKind,
-//     keyword_index: &HashMap<String, Vec<usize>>,
-// ) -> Vec<Sample> {
-//     let mut samples = Vec::new();
-
-//     for pair in sentences.chunks(2) {
-//         if pair.len() < 2 { continue; }
-
-//         let input_encoded  = tokenizer.encode(&pair[0]);
-//         let target_encoded = tokenizer.encode(&pair[1]);
-
-//         if input_encoded.len() < 10 || target_encoded.len() < 10 { continue; }
-//         if input_encoded.len() > 400 || target_encoded.len() > 400 { continue; }
-
-//         let input_ids: Vec<usize> = std::iter::once(BOS_TOKEN)
-//             .chain(input_encoded.iter().cloned().take(MAX_SEQ_LEN - 2))
-//             .chain(std::iter::once(EOS_TOKEN))
-//             .collect();
-
-//         let target_ids: Vec<usize> = std::iter::once(BOS_TOKEN)
-//             .chain(target_encoded.iter().cloned().take(MAX_SEQ_LEN - 2))
-//             .chain(std::iter::once(EOS_TOKEN))
-//             .collect();
-
-//         let emote_label     = keyword_emote_label(&pair[0]);
-//         let matched_classes = matched_classes(&pair[0], keyword_index);
-
-//         // if matched_classes.is_empty() { continue; }
-
-//         let pad = |mut v: Vec<usize>| -> Vec<usize> {
-//             v.resize(MAX_SEQ_LEN, PAD_TOKEN);
-//             v
-//         };
-
-//         let input_ids  = pad(input_ids);
-//         let target_ids = pad(target_ids);
-
-//         let target_labels: Vec<usize> = target_encoded.iter().cloned().take(MAX_SEQ_LEN - 1)
-//             .chain(std::iter::once(EOS_TOKEN))
-//             .collect();
-//         let target_labels = pad(target_labels);
-
-//         samples.push(Sample { pair: pair.to_vec(), input_ids, target_ids, emote_label, matched_classes, target_labels });
-//     }
-
-//     samples
-// }
-
-
 fn prepare_samples(
     sentences:     &[String],
     tokenizer:     &TokenizerKind,
@@ -755,8 +631,17 @@ fn prepare_samples(
     let mut samples = Vec::new();
 
     for sentence in sentences {
+        let bad_words = vec!["sex", "drug", "kill", "rape"];
+
+        // Check if the main_string contains any of the strings in the vector
+        let found = bad_words
+            .iter()
+            .any(|&substring| sentence.contains(substring));
+
+        if found { continue; }
+
         let encoded = tokenizer.encode(sentence);
-        if encoded.len() < (MAX_SEQ_LEN - 20) || encoded.len() > (MAX_SEQ_LEN + 20) { continue; }
+        if encoded.len() < (MAX_SEQ_LEN - 5) || encoded.len() > MAX_SEQ_LEN { continue; }
 
         // input:  [BOS, t0, t1, ..., t_{n-1}]
         // labels: [t0,  t1, ..., t_{n-1}, EOS]  (one-ahead shift)

@@ -53,7 +53,7 @@ enum Command {
         #[arg(long, default_value = "checkpoints/brain")]
         out_dir: String,
 
-        #[arg(long, default_value_t = 100)]
+        #[arg(long, default_value_t = 30)]
         epochs: usize,
 
         #[arg(long, default_value_t = 32)]
