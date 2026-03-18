@@ -236,11 +236,11 @@ pub fn run(
 
     let wiki_sentences = load_wiki_sentences(wiki_xml, max_articles)?;
 
-    for (i, sent) in wiki_sentences.iter().enumerate() {
-        if (i < 12) {
-            println!("WIKI: {:?}", sent);
-        }
-    }
+    // for (i, sent) in wiki_sentences.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("WIKI: {:?}", sent);
+    //     }
+    // }
 
     let mdx_sentences = load_mdx_sentences("data/(poems)/")?;
 
@@ -326,11 +326,11 @@ pub fn run(
         training_samples.len()
     );
 
-    for (i, sample) in training_samples.iter().enumerate() {
-        if (i < 12) {
-            println!("Sample: {:?}", sample.pair);
-        }
-    }
+    // for (i, sample) in training_samples.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("Sample: {:?}", sample.pair);
+    //     }
+    // }
 
     // ── Init model + optimizer ────────────────────────────────────────────────
     // ── Resume from checkpoint if one exists ─────────────────────────────────
@@ -384,7 +384,7 @@ pub fn run(
     
     // lr over time
     let first_lr = 1e-5;
-    let last_lr = 1e-6;
+    let last_lr = 1e-8;
 
     // let first_lr = 1e-6;
     // let last_lr = 1e-7;
