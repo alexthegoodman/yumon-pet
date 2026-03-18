@@ -383,8 +383,14 @@ pub fn run(
     let mut final_loss = 0.0f32;
     
     // lr over time
-    let first_lr = 3e-4;
-    let last_lr = 1e-6;
+    // let first_lr = 3e-5;
+    // let last_lr = 1e-7;
+
+    // let first_lr = 1e-6;
+    // let last_lr = 1e-7;
+
+    let first_lr = 0.0001;
+    let last_lr = 1e-8;
 
     use std::io::stdout;
     let backend = CrosstermBackend::new(stdout());
