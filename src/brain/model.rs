@@ -254,11 +254,22 @@ use super::{
 
 use burn::nn::transformer::{TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput};
 
-pub const EMBED_DIM:    usize = 512;
-pub const HIDDEN_UNITS: usize = 512;
-pub const ATTN_HEADS:   usize = 4;
-pub const N_LAYERS:     usize = 4;
-pub const FF_DIM:       usize = 1024; // 2x hidden, lighter than usual 4x
+// pub const EMBED_DIM:    usize = 768;
+// pub const HIDDEN_UNITS: usize = 768;
+// pub const EMBED_DIM:    usize = 512;
+// pub const HIDDEN_UNITS: usize = 512;
+// pub const EMBED_DIM:    usize = 256;
+// pub const HIDDEN_UNITS: usize = 256;
+pub const EMBED_DIM:    usize = 128;
+pub const HIDDEN_UNITS: usize = 128;
+pub const ATTN_HEADS:   usize = 2;
+// pub const N_LAYERS:     usize = 4;
+// pub const N_LAYERS:     usize = 3;
+pub const N_LAYERS:     usize = 2;
+// pub const FF_DIM:       usize = 512;
+// pub const FF_DIM:       usize = 256;
+pub const FF_DIM:       usize = 256;
+// pub const FF_DIM:       usize = 2048;
 
 pub const TEMPERATURE: f32  = 0.7;
 pub const TOP_K:       usize = 10;
@@ -277,7 +288,7 @@ pub struct YumonBrain<B: Backend> {
 #[derive(Config, Debug)]
 pub struct YumonBrainConfig {
     pub vocab_size:   usize,
-    #[config(default = 0.3)]
+    #[config(default = 0.05)]
     pub dropout_rate: f64,
 }
 

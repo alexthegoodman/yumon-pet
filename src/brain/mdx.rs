@@ -100,6 +100,34 @@ pub fn load_csv_qna(csv_path: &str) -> Result<Vec<String>> {
     Ok(quotes)
 }
 
+pub fn load_csv_bible(bible_path: &str) -> Result<Vec<String>> {
+    println!("📖 Loading bible CSV: {bible_path}");
+
+    let mut rdr = csv::Reader::from_path(bible_path)?;
+    let mut quotes = Vec::new();
+
+    let mut count = 0;
+
+    for result in rdr.records() {
+        let record = result?;
+
+        let id   = record.get(0).unwrap_or("").trim().to_string();
+        let b = record.get(1).unwrap_or("").trim().to_string();
+        let c = record.get(2).unwrap_or("").trim().to_string();
+        let v = record.get(3).unwrap_or("").trim().to_string();
+        let verse = record.get(4).unwrap_or("").trim().to_string();
+
+        quotes.push(verse);
+
+        count = count + 1;
+
+        if count > 10_000 { break; }
+    }
+
+    println!("✅ Loaded {} verses from {bible_path}", quotes.len());
+    Ok(quotes)
+}
+
 pub fn load_dictionary_sentences(dict_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading dictionary: {dict_path}");
 
@@ -130,6 +158,24 @@ pub fn load_dictionary_sentences(dict_path: &str) -> Result<Vec<String>> {
     }
 
     println!("✅ Loaded {} dictionary sentences", sentences.len());
+    Ok(sentences)
+}
+
+pub fn load_handcrafted_sentences(dict_path: &str) -> Result<Vec<String>> {
+    println!("📖 Loading handcrafted: {dict_path}");
+
+    let content = std::fs::read_to_string(dict_path)?;
+    let mut sentences = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+         if is_good_sentence(&trimmed) {
+            sentences.push(trimmed.to_string());
+        }
+    }
+
+    println!("✅ Loaded {} handcrafted sentences", sentences.len());
     Ok(sentences)
 }
 

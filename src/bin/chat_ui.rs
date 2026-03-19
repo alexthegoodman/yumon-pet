@@ -64,7 +64,7 @@ fn main() -> Result<()> {
 
     // App state
     let vision_cp = "checkpoints/vision".to_string();
-    let brain_cp = "checkpoints/brain-transformer-1".to_string();
+    let brain_cp = "checkpoints/brain".to_string();
     let mut app = AppState::new(vision_cp.clone(), brain_cp.clone());
 
     // Channels for communication with the model thread

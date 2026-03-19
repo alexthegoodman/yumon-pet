@@ -56,7 +56,13 @@ enum Command {
         #[arg(long, default_value_t = 50)]
         epochs: usize,
 
-        #[arg(long, default_value_t = 32)]
+        // #[arg(long, default_value_t = 1)] // requires lr adjustments, little gain?
+        #[arg(long, default_value_t = 8)] // best for loss
+        // #[arg(long, default_value_t = 32)] // necessary for 512 hidden size on iGPU
+        // #[arg(long, default_value_t = 16)]
+        // #[arg(long, default_value_t = 256)] // too large even with 128 hidden state on iGPU
+        // #[arg(long, default_value_t = 128)]
+        // #[arg(long, default_value_t = 64)]
         batch_size: usize,
 
         /// Maximum wiki articles to load (0 = all)

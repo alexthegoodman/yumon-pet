@@ -34,12 +34,12 @@ use anyhow::Result;
 use burn::{
     grad_clipping::GradientClippingConfig, module::AutodiffModule, nn::loss::CrossEntropyLossConfig, optim::{AdamConfig, AdamWConfig, GradientsParams, Optimizer}, prelude::*, tensor::{Int, TensorData, backend::AutodiffBackend}
 };
-use rand::Rng;
+use rand::{Rng, seq::SliceRandom, thread_rng};
 use indicatif::{ProgressBar, ProgressStyle};
 use ratatui::{Terminal, TerminalOptions, Viewport, prelude::CrosstermBackend};
 use std::collections::HashMap;
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_mdx_sentences}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 use crate::brain::{
     CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
@@ -54,7 +54,7 @@ pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 // pub const MAX_SEQ_LEN:  usize = 120;
 // pub const MAX_SEQ_LEN:  usize = 25;
 // pub const MAX_SEQ_LEN:  usize = 60; // lighter to train on iGPU
-pub const MAX_SEQ_LEN:  usize = 35; // even lower with bpe
+pub const MAX_SEQ_LEN:  usize = 40; // even lower with bpe
 // Max vocab size
 const MAX_VOCAB:    usize = 256;
 // Emote head loss weight (much lighter than language loss)
@@ -234,7 +234,7 @@ pub fn run(
     // ── Load + tokenize wiki corpus ───────────────────────────────────────────
     let mut sentences = Vec::new();
 
-    let wiki_sentences = load_wiki_sentences(wiki_xml, max_articles)?;
+    // let wiki_sentences = load_wiki_sentences(wiki_xml, max_articles)?;
 
     // for (i, sent) in wiki_sentences.iter().enumerate() {
     //     if (i < 12) {
@@ -258,13 +258,13 @@ pub fn run(
         }
     }
 
-    let dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt")?;
+    // let dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt")?;
 
-    for (i, sent) in dict_sentences.iter().enumerate() {
-        if (i < 12) {
-            println!("DICT: {:?}", sent);
-        }
-    }
+    // for (i, sent) in dict_sentences.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("DICT: {:?}", sent);
+    //     }
+    // }
 
     let qna_sentences = load_csv_qna("data/AI.csv")?;
 
@@ -274,9 +274,26 @@ pub fn run(
         }
     }
 
+    let bible_verses = load_csv_bible("data/bible_asv.csv")?;
+
+    for (i, sent) in bible_verses.iter().enumerate() {
+        if (i < 12) {
+            println!("Verse: {:?}", sent);
+        }
+    }
+
+    let handcrafted = load_handcrafted_sentences("data/handcrafted.txt")?;
+
+    for (i, sent) in handcrafted.iter().enumerate() {
+        if (i < 12) {
+            println!("handcrafted: {:?}", sent);
+        }
+    }
+
     sentences.extend(mdx_sentences.clone());
     sentences.extend(quote_sentences.clone());
     sentences.extend(qna_sentences.clone());
+    sentences.extend(handcrafted.clone());
     // sentences.extend(wiki_sentences.clone());
     // sentences.extend(dict_sentences.clone()); // wasteful cloning
 
@@ -301,25 +318,35 @@ pub fn run(
     let mdx_samples = prepare_samples(&mdx_sentences, &tokenizer, &keyword_index);
     let quote_samples = prepare_samples(&quote_sentences, &tokenizer, &keyword_index);
     let qna_samples = prepare_samples(&qna_sentences, &tokenizer, &keyword_index);
-    let wiki_samples = prepare_samples(&wiki_sentences, &tokenizer, &keyword_index);
-    let dict_samples = prepare_samples(&dict_sentences, &tokenizer, &keyword_index);
+    // let wiki_samples = prepare_samples(&wiki_sentences, &tokenizer, &keyword_index);
+    // let dict_samples = prepare_samples(&dict_sentences, &tokenizer, &keyword_index);
+    let bible_samples = prepare_samples(&bible_verses, &tokenizer, &keyword_index);
+    let handcrafted_samples = prepare_samples(&handcrafted, &tokenizer, &keyword_index);
 
     println!(
         "Samples lengths: {} {} {} {} {}",
         mdx_samples.len(),
         quote_samples.len(),
         qna_samples.len(),
-        wiki_samples.len(),
-        dict_samples.len()
+        // wiki_samples.len(),
+        bible_samples.len(),
+        handcrafted_samples.len()
     );
 
-    training_samples.extend(wiki_samples);
+    // training_samples.extend(wiki_samples);
     training_samples.extend(mdx_samples);
-    training_samples.extend(quote_samples);
+    // training_samples.extend(quote_samples);
     // training_samples.extend(dict_samples);
     training_samples.extend(qna_samples);
+    training_samples.extend(bible_samples);
+    
+    let mut rng = thread_rng();
+    training_samples.shuffle(&mut rng);
+    training_samples.truncate(8192); // limit total for now
+    // training_samples.truncate(1024); 
+    // training_samples.truncate(2048); 
 
-    // training_samples.truncate(4096); // limit total for now
+    training_samples.extend(handcrafted_samples); // always add after to include all of these
 
     println!(
         "Training samples: {}",
@@ -383,7 +410,8 @@ pub fn run(
     let mut final_loss = 0.0f32;
     
     // lr over time
-    let first_lr = 1e-5;
+    // let first_lr = 1e-4;
+    let first_lr = 0.001;
     let last_lr = 1e-8;
 
     // let first_lr = 1e-6;
@@ -650,7 +678,7 @@ fn prepare_samples(
         if found { continue; }
 
         let encoded = tokenizer.encode(sentence);
-        if encoded.len() < (MAX_SEQ_LEN - 5) || encoded.len() > MAX_SEQ_LEN { continue; }
+        if encoded.len() < (MAX_SEQ_LEN - 30) || encoded.len() > MAX_SEQ_LEN { continue; }
 
         // input:  [BOS, t0, t1, ..., t_{n-1}]
         // labels: [t0,  t1, ..., t_{n-1}, EOS]  (one-ahead shift)
@@ -670,10 +698,10 @@ fn prepare_samples(
         let input_ids = pad(input_ids);
         let target_labels = pad(target_labels);
 
-        if samples.len() < 12 {
-            println!("input_ids {:?}", input_ids);
-            println!("target_labels {:?}", target_labels);
-        }
+        // if samples.len() < 12 {
+        //     println!("input_ids {:?}", input_ids);
+        //     println!("target_labels {:?}", target_labels);
+        // }
 
         // assert!(input_ids.len() == MAX_SEQ_LEN, 
         //     "input_ids wrong len: {} (encoded len was {})", input_ids.len(), encoded.len());
