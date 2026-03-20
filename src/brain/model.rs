@@ -378,7 +378,7 @@ impl<B: Backend> YumonBrain<B> {
         max_tokens:     usize,
         device:         &B::Device,
     ) -> GenerationResult {
-        println!("Generate");
+        // println!("Generate {:?}", seed_text);
 
         // Build static context tensor
         let mut ctx_flat = Vec::with_capacity(CONTEXT_DIMS);
@@ -481,6 +481,31 @@ impl<B: Backend> YumonBrain<B> {
 
         let tokenizer = if use_bpe {
             TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?)
+        } else {
+            TokenizerKind::Char(Tokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?)
+        };
+
+        let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+        let record   = recorder.load(dir.join("model").into(), device)
+            .map_err(|e| anyhow::anyhow!("load: {e:?}"))?;
+        let model    = YumonBrainConfig::new(metadata.vocab_size).init::<B>(device)
+                          .load_record(record);
+
+        Ok((model, tokenizer))
+    }
+
+    pub fn load_app(directory: &str, device: &B::Device) -> Result<(Self, TokenizerKind)> {
+        let dir = std::path::Path::new(directory);
+
+        let meta_json = std::fs::read_to_string(dir.join("metadata.json"))?;
+        let metadata: BrainMetadata = serde_json::from_str(&meta_json)?;
+
+        // let tokenizer = Tokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?;
+
+        let use_bpe = true;
+
+        let tokenizer = if use_bpe {
+            TokenizerKind::Bpe(BpeTokenizer::load("../../yumon-pet/yumon_bpe")?)
         } else {
             TokenizerKind::Char(Tokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?)
         };

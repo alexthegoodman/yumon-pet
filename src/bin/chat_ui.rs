@@ -166,7 +166,6 @@ fn main() -> Result<()> {
             let mut rng = rand::thread_rng();
             app.next_speak_interval = Duration::from_secs(rng.gen_range(30..120));
             
-            app.messages.push(Message::User(String::new()));
             tx_user.send(("".to_string(), 4)).unwrap(); // empty prompt, neutral emote
         }
 
@@ -230,10 +229,10 @@ fn ui(f: &mut ratatui::Frame, app: &AppState) {
 
     // Input field
     let input = Paragraph::new(app.input.as_str())
-        .style(match app.loading {
-            true => Style::default().fg(Color::DarkGray),
-            false => Style::default(),
-        })
+        // .style(match app.loading {
+        //     true => Style::default().fg(Color::DarkGray),
+        //     false => Style::default(),
+        // })
         .block(Block::default().borders(Borders::ALL).title("Input"));
     f.render_widget(input, chunks[1]);
 }

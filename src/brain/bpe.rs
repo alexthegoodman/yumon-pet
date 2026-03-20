@@ -173,7 +173,7 @@ impl BpeTokenizer {
         let inner = Tokenizer::from_file(&path)
             .map_err(|e| anyhow::anyhow!("loading tokenizer from {path}: {}", e))?;
         let vocab_size = inner.get_vocab_size(true);
-        println!("📂 BPE tokenizer loaded — vocab size: {vocab_size}");
+        // println!("📂 BPE tokenizer loaded — vocab size: {vocab_size}");
         Ok(Self { inner, vocab_size })
     }
 
