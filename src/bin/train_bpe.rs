@@ -1,4 +1,4 @@
-use yumon_pet::brain::{bpe::{self, BpeTokenizer}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences}, wiki::load_wiki_sentences};
+use yumon_pet::brain::{bpe::{self, BpeTokenizer}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}, wiki::load_wiki_sentences};
 
 pub fn main() {
     let wiki_xml = "data/simplewiki-latest-pages-articles.xml";
@@ -44,16 +44,16 @@ pub fn main() {
     //     }
     // }
 
-    let qna_sentences = load_csv_qna("data/AI.csv");
-    let qna_sentences = qna_sentences.as_ref().expect("Couldn't get qna_sentences");
+    // let qna_sentences = load_csv_qna("data/AI.csv");
+    // let qna_sentences = qna_sentences.as_ref().expect("Couldn't get qna_sentences");
 
-    for (i, sent) in qna_sentences.iter().enumerate() {
-        if (i < 12) {
-            println!("Q&A: {:?}", sent);
-        }
-    }
+    // for (i, sent) in qna_sentences.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("Q&A: {:?}", sent);
+    //     }
+    // }
 
-    let bible_verses = load_csv_bible("data/bible_asv.csv");
+    let bible_verses = load_csv_bible("data/bible_bbe.csv");
     let bible_verses = bible_verses.as_ref().expect("Couldn't get bible_verses");
 
     for (i, sent) in bible_verses.iter().enumerate() {
@@ -70,14 +70,24 @@ pub fn main() {
             println!("handcrafted: {:?}", sent);
         }
     }
+
+    let notions = load_notion_sentences("data/notion/");
+    let notions = notions.as_ref().expect("Couldn't get handcrafted");
+
+    for (i, sent) in notions.iter().enumerate() {
+        if (i < 12) {
+            println!("notion: {:?}", sent);
+        }
+    }
     
     // sentences.extend(wiki_sentences);
     sentences.extend(mdx_sentences);
-    sentences.extend(qna_sentences);
+    // sentences.extend(qna_sentences);
     sentences.extend(bible_verses);
     sentences.extend(handcrafted);
     // sentences.extend(quote_sentences);
     // sentences.extend(dict_sentences);
+    sentences.extend(notions);
         
     let bpe = BpeTokenizer::train(
         sentences, 

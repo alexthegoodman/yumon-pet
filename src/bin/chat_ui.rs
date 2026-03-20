@@ -14,6 +14,7 @@ use ratatui::{
     Terminal,
 };
 use std::{io, sync::mpsc, thread, time::{Duration, Instant}};
+use rand::Rng;
 
 // Import from our crate
 // We need to be careful with imports since this is a bin file in the same crate.
@@ -39,10 +40,14 @@ struct AppState {
     device: Device<Wgpu>,
     // We'll store the models in an Option and move them to the background thread or keep them if small enough
     // For now, let's keep it simple and load them once.
+    last_yumon_speak: Instant,
+    next_speak_interval: Duration,
 }
 
 impl AppState {
     fn new(vision_cp: String, brain_cp: String) -> Self {
+        let mut rng = rand::thread_rng();
+
         Self {
             input: String::new(),
             messages: vec![Message::System("Loading models...".into())],
@@ -50,6 +55,8 @@ impl AppState {
             vision_cp,
             brain_cp,
             device: Default::default(),
+            last_yumon_speak: Instant::now(),
+            next_speak_interval: Duration::from_secs(rng.gen_range(30..120)),
         }
     }
 }
@@ -148,6 +155,19 @@ fn main() -> Result<()> {
                 _ => {}
             }
             app.messages.push(msg);
+        }
+
+        // Yumon random thought timer
+        if !app.loading && app.last_yumon_speak.elapsed() >= app.next_speak_interval {
+            app.loading = true;
+            app.last_yumon_speak = Instant::now();
+            
+            // Pick a new random interval for next time
+            let mut rng = rand::thread_rng();
+            app.next_speak_interval = Duration::from_secs(rng.gen_range(30..120));
+            
+            app.messages.push(Message::User(String::new()));
+            tx_user.send(("".to_string(), 4)).unwrap(); // empty prompt, neutral emote
         }
 
         if last_tick.elapsed() >= tick_rate {
