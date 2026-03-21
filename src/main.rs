@@ -202,9 +202,9 @@ fn run_chat(
     // 6. Generate reply from LSTM
     let result = brain_model.generate(
         &tokenizer,
-        &class_probs,
-        &emote_probs,
-        user_emote_idx,
+        // &class_probs,
+        // &emote_probs,
+        // user_emote_idx,
         prompt,
         80,   // max tokens
         // 30,

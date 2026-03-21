@@ -37,6 +37,31 @@ pub const BOS_ID: u32 = 1;
 pub const EOS_ID: u32 = 2;
 pub const UNK_ID: u32 = 3;
 
+// ── Context token ingredients ─────────────────────────────────────────────────
+pub const DIRS: &[&str]    = &["N","NE","E","SE","S","SW","W","NW"];
+pub const DISTS: &[&str]   = &["near","far"];
+pub const ENTITY_OBS: &str = "OBS";
+pub const ENTITY_RES: &str = "RES";
+pub const ENTITY_BLD: &str = "BLD";
+
+pub const CONTEXT_TOKEN_START_ID: u32 = 4;  // immediately after UNK
+pub const CONTEXT_TOKEN_COUNT:    u32 = 51; // 3*(8*2+1)
+pub const BPE_VOCAB_OFFSET:       u32 = CONTEXT_TOKEN_START_ID + CONTEXT_TOKEN_COUNT; // = 55
+
+pub fn context_token_strings() -> Vec<String> {
+    let mut tokens = Vec::with_capacity(51);
+    for entity in [ENTITY_OBS, ENTITY_RES, ENTITY_BLD] {
+        // none token first for each entity
+        tokens.push(format!("<{entity}:none>"));
+        for dir in DIRS {
+            for dist in DISTS {
+                tokens.push(format!("<{entity}:{dir}:{dist}>"));
+            }
+        }
+    }
+    tokens
+}
+
 pub struct BpeTokenizer {
     inner:      Tokenizer,
     pub vocab_size: usize,
@@ -68,12 +93,16 @@ impl BpeTokenizer {
         println!("   Corpus written to {tmp_path}");
 
         // ── Build trainer ──────────────────────────────────────────────────────
-        let special_tokens = vec![
+        let mut special_tokens = vec![
             AddedToken::from(PAD_STR, true),
             AddedToken::from(BOS_STR, true),
             AddedToken::from(EOS_STR, true),
             AddedToken::from(UNK_STR, true),
         ];
+        // append the 51 context tokens in stable order
+        for s in context_token_strings() {
+            special_tokens.push(AddedToken::from(s, true));
+        }
 
         let trainer = BpeTrainerBuilder::new()
             .vocab_size(vocab_size)
@@ -206,6 +235,21 @@ impl BpeTokenizer {
             }
         }
         Ok(())
+    }
+
+    pub fn encode_context(
+        &self,
+        entity: &str,           // "OBS", "RES", "BLD"
+        dir: Option<&str>,      // Some("N") .. Some("NW"), or None
+        dist: Option<&str>,     // Some("near") | Some("far"), or None
+    ) -> Result<u32> {
+        let s = match (dir, dist) {
+            (Some(d), Some(r)) => format!("<{entity}:{d}:{r}>"),
+            _                  => format!("<{entity}:none>"),
+        };
+        self.inner
+            .token_to_id(&s)
+            .ok_or_else(|| anyhow::anyhow!("unknown context token: {s}"))
     }
 }
 
