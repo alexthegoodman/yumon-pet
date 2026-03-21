@@ -517,9 +517,9 @@ impl<B: Backend> YumonBrain<B> {
             token_ids.push(next_token);
 
              // exit if FSM already reached a final state
-            // if index.final_states().contains(&fsm_state) { break; }
-            // // Hard stops   
-            // if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
+            if index.final_states().contains(&fsm_state) { break; }
+            // Hard stops   
+            if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
         }
 
         // ── Decode and parse ───────────────────────────────────────────────────

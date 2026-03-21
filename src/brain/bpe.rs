@@ -168,7 +168,8 @@ impl BpeTokenizer {
             .copied()
             .filter(|&id| id != PAD_ID && id != BOS_ID && id != EOS_ID)
             .collect();
-        self.inner.decode(&filtered, true)
+        let skip_special_tokens = false;
+        self.inner.decode(&filtered, skip_special_tokens)
             .map_err(|e| anyhow::anyhow!(e))  // ← convert tokenizers error to anyhow
     }
 
