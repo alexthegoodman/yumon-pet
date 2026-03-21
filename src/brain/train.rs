@@ -39,7 +39,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use ratatui::{Terminal, TerminalOptions, Viewport, prelude::CrosstermBackend};
 use std::collections::HashMap;
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}, model::CONTEXT_DIMS, pdf::load_pdf_ebook_sentences, samples::{WorldContext, prepare_samples}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}, model::CONTEXT_DIMS, pdf::load_pdf_ebook_sentences, samples::{WorldContext, prepare_paired_samples, prepare_samples}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 use crate::brain::{
     // CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
@@ -53,8 +53,8 @@ pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 // Max sequence length during training (characters)
 // pub const MAX_SEQ_LEN:  usize = 120;
 // pub const MAX_SEQ_LEN:  usize = 25;
-pub const MAX_SEQ_LEN:  usize = 80; // better for outlines structured output?
-// pub const MAX_SEQ_LEN:  usize = 60; // lighter to train on iGPU
+// pub const MAX_SEQ_LEN:  usize = 80; // better for outlines structured output?
+pub const MAX_SEQ_LEN:  usize = 60; // lighter to train on iGPU
 // pub const MAX_SEQ_LEN:  usize = 40; // even lower with bpe
 // Max vocab size
 const MAX_VOCAB:    usize = 256;
@@ -271,7 +271,7 @@ pub fn run(
     //     }
     // }
 
-    let mdx_sentences = load_mdx_sentences("data/(poems)/")?;
+    let mut mdx_sentences = load_mdx_sentences("data/(poems)/")?;
 
     for (i, sent) in mdx_sentences.iter().enumerate() {
         if (i < 12) {
@@ -309,7 +309,7 @@ pub fn run(
     //     }
     // }
 
-    let bible_verses = load_csv_bible("data/bible_bbe.csv")?;
+    let mut bible_verses = load_csv_bible("data/bible_bbe.csv")?;
 
     for (i, sent) in bible_verses.iter().enumerate() {
         if (i < 12) {
@@ -319,7 +319,7 @@ pub fn run(
         }
     }
 
-    let handcrafted = load_handcrafted_sentences("data/handcrafted.txt")?;
+    let mut handcrafted = load_handcrafted_sentences("data/handcrafted.txt")?;
 
     for (i, sent) in handcrafted.iter().enumerate() {
         if (i < 12) {
@@ -329,7 +329,7 @@ pub fn run(
         }
     }
 
-    let notions = load_notion_sentences("data/notion/")?;
+    let mut notions = load_notion_sentences("data/notion/")?;
 
     for (i, sent) in notions.iter().enumerate() {
         if (i < 12) {
@@ -345,7 +345,7 @@ pub fn run(
     //     }
     // }
 
-    let ebooks = load_pdf_ebook_sentences("data/algorithms_ebook.pdf")?;
+    let mut ebooks = load_pdf_ebook_sentences("data/algorithms_ebook.pdf")?;
 
     for (i, sent) in ebooks.iter().enumerate() {
         if (i < 12) {
@@ -353,7 +353,7 @@ pub fn run(
         }
     }
 
-    let ebooks2 = load_pdf_ebook_sentences("data/Perspectives.pdf")?;
+    let mut ebooks2 = load_pdf_ebook_sentences("data/Perspectives.pdf")?;
 
     for (i, sent) in ebooks2.iter().enumerate() {
         if (i < 12) {
@@ -386,17 +386,38 @@ pub fn run(
     // ── Prepare samples with label-indexed context ────────────────────────────
     let mut training_samples = Vec::new();
 
-    let mdx_samples = prepare_samples(&mdx_sentences, &tokenizer, &keyword_index);
+    let mut rng = thread_rng();
+
+     // optional: makes keyword matching faster
+    mdx_sentences.shuffle(&mut rng);
+    mdx_sentences.truncate(8192);
+
+    bible_verses.shuffle(&mut rng);
+    bible_verses.truncate(8192);
+
+    handcrafted.shuffle(&mut rng);
+    handcrafted.truncate(8192);
+
+    notions.shuffle(&mut rng);
+    notions.truncate(8192);
+
+    ebooks.shuffle(&mut rng);
+    ebooks.truncate(8192);
+
+    ebooks2.shuffle(&mut rng);
+    ebooks2.truncate(8192);
+
+    let mdx_samples = prepare_paired_samples(&mdx_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2);
     // let quote_samples = prepare_samples(&quote_sentences, &tokenizer, &keyword_index);
     // let qna_samples = prepare_samples(&qna_sentences, &tokenizer, &keyword_index);
     // let mut wiki_samples = prepare_samples(&wiki_sentences, &tokenizer, &keyword_index);
     // let dict_samples = prepare_samples(&dict_sentences, &tokenizer, &keyword_index);
-    let mut bible_samples = prepare_samples(&bible_verses, &tokenizer, &keyword_index);
-    let handcrafted_samples = prepare_samples(&handcrafted, &tokenizer, &keyword_index);
-    let mut notion_samples = prepare_samples(&notions, &tokenizer, &keyword_index);
+    let mut bible_samples = prepare_paired_samples(&bible_verses, &tokenizer, &keyword_index, &mut rng, 1, 2);
+    let handcrafted_samples = prepare_paired_samples(&handcrafted, &tokenizer, &keyword_index, &mut rng, 1, 2);
+    let mut notion_samples = prepare_paired_samples(&notions, &tokenizer, &keyword_index, &mut rng, 1, 2);
     // let personal_samples = prepare_samples(&personals, &tokenizer, &keyword_index);
-    let mut ebook_samples = prepare_samples(&ebooks, &tokenizer, &keyword_index);
-    let mut ebooks2_samples = prepare_samples(&ebooks2, &tokenizer, &keyword_index);
+    let mut ebook_samples = prepare_paired_samples(&ebooks, &tokenizer, &keyword_index, &mut rng, 1, 2);
+    let mut ebooks2_samples = prepare_paired_samples(&ebooks2, &tokenizer, &keyword_index, &mut rng, 1, 2);
 
     println!(
         "Samples lengths: {} {} {} {} {} {}",
@@ -412,26 +433,24 @@ pub fn run(
         ebooks2_samples.len()
     );
 
-    let mut rng = thread_rng();
-
     bible_samples.shuffle(&mut rng);
-    // bible_samples.truncate(2048);
-    bible_samples.truncate(4096);
+    bible_samples.truncate(2048);
+    // bible_samples.truncate(4096);
 
     // wiki_samples.shuffle(&mut rng);
     // wiki_samples.truncate(2048);
 
     ebook_samples.shuffle(&mut rng);
-    // ebook_samples.truncate(2048);
-    ebook_samples.truncate(4096);
+    ebook_samples.truncate(2048);
+    // ebook_samples.truncate(4096);
 
     ebooks2_samples.shuffle(&mut rng);
-    // ebooks2_samples.truncate(2048);
-    ebooks2_samples.truncate(4096);
+    ebooks2_samples.truncate(2048);
+    // ebooks2_samples.truncate(4096);
 
     notion_samples.shuffle(&mut rng);
-    // notion_samples.truncate(2048);
-    notion_samples.truncate(4096);
+    notion_samples.truncate(2048);
+    // notion_samples.truncate(4096);
     
     // training_samples.extend(wiki_samples); // Yumon expresses that he is confused by wiki material
     training_samples.extend(mdx_samples);
@@ -444,8 +463,8 @@ pub fn run(
     training_samples.extend(ebooks2_samples);
     
     training_samples.shuffle(&mut rng);
-    training_samples.truncate(16384); // maybe at 128 hidden size? maybe need 256?
-    // training_samples.truncate(8192); // limit total for now
+    // training_samples.truncate(16384); // maybe at 128 hidden size? maybe need 256?
+    training_samples.truncate(8192); // limit total for now
     // training_samples.truncate(1024); 
     // training_samples.truncate(2048); 
 

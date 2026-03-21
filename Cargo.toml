@@ -41,3 +41,6 @@ crossterm = "0.28"
 # crossbeam-channel = "0.5.15"
 pdf-extract = "0.10.0"
 outlines-core = "0.2.14"
+keyword_extraction = {version = "1.5", features = ["yake"]}
+rayon = "1.11.0"
+stop-words = "0.8.0"

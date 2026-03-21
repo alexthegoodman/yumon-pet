@@ -3795,6 +3795,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyword_extraction"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bab83c382982b79063036f88b9e722b899c23e750f1318ceead83ccd7413f874"
+dependencies = [
+ "regex",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6099,6 +6109,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "stop-words"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c6a86be9f7fa4559b7339669e72026eb437f5e9c5a85c207fe1033079033a17"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "stringprep"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8143,6 +8162,7 @@ dependencies = [
  "futures",
  "image",
  "indicatif",
+ "keyword_extraction",
  "mint",
  "nalgebra",
  "nalgebra-glm",
@@ -8154,10 +8174,12 @@ dependencies = [
  "quick-xml",
  "rand 0.8.5",
  "ratatui",
+ "rayon",
  "regex",
  "serde",
  "serde_json",
  "serde_with",
+ "stop-words",
  "tokenizers 0.19.1",
  "uuid",
  "walkdir",
