@@ -215,6 +215,22 @@ pub fn load_handcrafted_sentences(dict_path: &str) -> Result<Vec<String>> {
     Ok(sentences)
 }
 
+pub fn load_keywords(path: &str) -> Result<Vec<String>> {
+    println!("📖 Loading keywords: {path}");
+
+    let content = std::fs::read_to_string(path)?;
+    let mut keywords = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        keywords.push(trimmed.to_string());
+    }
+
+    println!("✅ Loaded {} keywords", keywords.len());
+    Ok(keywords)
+}
+
 fn extract_definition(line: &str) -> Option<String> {
     // Strip etymology brackets at the end e.g. [latin from greek]
     let line = regex::Regex::new(r"\[.*?\]")

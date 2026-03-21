@@ -71,7 +71,7 @@ fn main() -> Result<()> {
 
     // App state
     let vision_cp = "checkpoints/vision".to_string();
-    let brain_cp = "checkpoints/brain-128-8b-8k-mix-5".to_string();
+    let brain_cp = "checkpoints/brain".to_string();
     let mut app = AppState::new(vision_cp.clone(), brain_cp.clone());
 
     // Channels for communication with the model thread
@@ -129,6 +129,7 @@ fn main() -> Result<()> {
                         KeyCode::Enter => {
                             if !app.input.is_empty() && !app.loading {
                                 let input = std::mem::take(&mut app.input);
+                                let input = "Prompt: ".to_owned() + &input.clone() + " / ";
                                 app.messages.push(Message::User(input.clone()));
                                 app.loading = true;
                                 tx_user.send((input, 4)).unwrap(); // 4 is neutral
@@ -158,16 +159,16 @@ fn main() -> Result<()> {
         }
 
         // Yumon random thought timer
-        if !app.loading && app.last_yumon_speak.elapsed() >= app.next_speak_interval {
-            app.loading = true;
-            app.last_yumon_speak = Instant::now();
+        // if !app.loading && app.last_yumon_speak.elapsed() >= app.next_speak_interval {
+        //     app.loading = true;
+        //     app.last_yumon_speak = Instant::now();
             
-            // Pick a new random interval for next time
-            let mut rng = rand::thread_rng();
-            app.next_speak_interval = Duration::from_secs(rng.gen_range(30..120));
+        //     // Pick a new random interval for next time
+        //     let mut rng = rand::thread_rng();
+        //     app.next_speak_interval = Duration::from_secs(rng.gen_range(30..120));
             
-            tx_user.send(("".to_string(), 4)).unwrap(); // empty prompt, neutral emote
-        }
+        //     tx_user.send(("".to_string(), 4)).unwrap(); // empty prompt, neutral emote
+        // }
 
         if last_tick.elapsed() >= tick_rate {
             last_tick = Instant::now();

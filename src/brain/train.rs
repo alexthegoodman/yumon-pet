@@ -37,9 +37,9 @@ use burn::{
 use rand::{Rng, seq::SliceRandom, thread_rng};
 use indicatif::{ProgressBar, ProgressStyle};
 use ratatui::{Terminal, TerminalOptions, Viewport, prelude::CrosstermBackend};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}, pdf::load_pdf_ebook_sentences}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, chart::{TrainingState, render}, keywords::extract_keywords, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_keywords, load_mdx_sentences, load_notion_sentences}, pdf::load_pdf_ebook_sentences}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 use crate::brain::{
     CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
@@ -54,7 +54,9 @@ pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 // pub const MAX_SEQ_LEN:  usize = 120;
 // pub const MAX_SEQ_LEN:  usize = 25;
 // pub const MAX_SEQ_LEN:  usize = 60; // lighter to train on iGPU
-pub const MAX_SEQ_LEN:  usize = 40; // even lower with bpe
+// pub const MAX_SEQ_LEN:  usize = 80;
+pub const MAX_SEQ_LEN:  usize = 60;
+// pub const MAX_SEQ_LEN:  usize = 40; // even lower with bpe
 // Max vocab size
 const MAX_VOCAB:    usize = 256;
 // Emote head loss weight (much lighter than language loss)
@@ -71,35 +73,35 @@ const NOISE_STD:    f32   = 0.3;
 // that wiki sentences mentioning "lawn" or "mower" both match.
 // Single-word labels are also lowercased and stripped of underscores.
 
-const CIFAR_FINE_LABELS: [&str; CIFAR_CLASSES] = [
-    "apple", "aquarium_fish", "baby", "bear", "beaver",
-    "bed", "bee", "beetle", "bicycle", "bottle",
-    "bowl", "boy", "bridge", "bus", "butterfly",
-    "camel", "can", "castle", "caterpillar", "cattle",
-    "chair", "chimpanzee", "clock", "cloud", "cockroach",
-    "couch", "crab", "crocodile", "cup", "dinosaur",
-    "dolphin", "elephant", "flatfish", "forest", "fox",
-    "girl", "hamster", "house", "kangaroo", "keyboard",
-    "lamp", "lawn_mower", "leopard", "lion", "lizard",
-    "lobster", "man", "maple_tree", "motorcycle", "mountain",
-    "mouse", "mushroom", "oak_tree", "orange", "orchid",
-    "otter", "palm_tree", "pear", "pickup_truck", "pine_tree",
-    "plain", "plate", "poppy", "porcupine", "possum",
-    "rabbit", "raccoon", "ray", "road", "rocket",
-    "rose", "sea", "seal", "shark", "shrew",
-    "skunk", "skyscraper", "snail", "snake", "spider",
-    "squirrel", "streetcar", "sunflower", "sweet_pepper", "table",
-    "tank", "telephone", "television", "tiger", "tractor",
-    "train", "trout", "tulip", "turtle", "wardrobe",
-    "whale", "willow_tree", "wolf", "woman", "worm",
-];
+// const CIFAR_FINE_LABELS: [&str; CIFAR_CLASSES] = [
+//     "apple", "aquarium_fish", "baby", "bear", "beaver",
+//     "bed", "bee", "beetle", "bicycle", "bottle",
+//     "bowl", "boy", "bridge", "bus", "butterfly",
+//     "camel", "can", "castle", "caterpillar", "cattle",
+//     "chair", "chimpanzee", "clock", "cloud", "cockroach",
+//     "couch", "crab", "crocodile", "cup", "dinosaur",
+//     "dolphin", "elephant", "flatfish", "forest", "fox",
+//     "girl", "hamster", "house", "kangaroo", "keyboard",
+//     "lamp", "lawn_mower", "leopard", "lion", "lizard",
+//     "lobster", "man", "maple_tree", "motorcycle", "mountain",
+//     "mouse", "mushroom", "oak_tree", "orange", "orchid",
+//     "otter", "palm_tree", "pear", "pickup_truck", "pine_tree",
+//     "plain", "plate", "poppy", "porcupine", "possum",
+//     "rabbit", "raccoon", "ray", "road", "rocket",
+//     "rose", "sea", "seal", "shark", "shrew",
+//     "skunk", "skyscraper", "snail", "snake", "spider",
+//     "squirrel", "streetcar", "sunflower", "sweet_pepper", "table",
+//     "tank", "telephone", "television", "tiger", "tractor",
+//     "train", "trout", "tulip", "turtle", "wardrobe",
+//     "whale", "willow_tree", "wolf", "woman", "worm",
+// ];
 
 // ─── Inverted index ───────────────────────────────────────────────────────────
 
-/// For each CIFAR class index, the set of keywords that map to it.
-/// Multi-word labels contribute all their parts.
 fn build_label_keywords() -> Vec<Vec<String>> {
-    CIFAR_FINE_LABELS.iter().map(|label| {
+    let keywords = load_keywords("data/keywords.txt");
+    let keywords = keywords.as_ref().expect("Couldn't get keywords");
+    keywords.iter().map(|label| {
         label.split('_')
              .map(|w| w.to_lowercase())
              .filter(|w| w.len() >= 3) // skip tiny words like "a", "of"
@@ -107,7 +109,6 @@ fn build_label_keywords() -> Vec<Vec<String>> {
     }).collect()
 }
 
-/// Maps keyword → list of CIFAR class indices that contain it.
 fn build_keyword_index(label_keywords: &[Vec<String>]) -> HashMap<String, Vec<usize>> {
     let mut idx: HashMap<String, Vec<usize>> = HashMap::new();
     for (class_i, keywords) in label_keywords.iter().enumerate() {
@@ -118,8 +119,6 @@ fn build_keyword_index(label_keywords: &[Vec<String>]) -> HashMap<String, Vec<us
     idx
 }
 
-/// Given a sentence, return all CIFAR class indices whose keywords appear in it.
-/// Uses whole-word matching: "plain" should not match "explanation".
 fn matched_classes(sentence: &str, keyword_index: &HashMap<String, Vec<usize>>) -> Vec<usize> {
     let lower = sentence.to_lowercase();
     let mut matched = std::collections::HashSet::new();
@@ -168,13 +167,14 @@ fn whole_word_match(text: &str, kw: &str) -> bool {
 /// If no classes matched, all logits are 0 + noise → near-uniform distribution.
 fn peaked_class_probs(matched: &[usize], rng: &mut impl Rng) -> Vec<f32> {
     let mut logits = vec![0.0f32; CIFAR_CLASSES];
-    for &ci in matched {
-        logits[ci] = PEAK_LOGIT;
-    }
-    // Add jitter to simulate CNN uncertainty
-    for l in logits.iter_mut() {
-        *l += rng.sample::<f32, _>(rand::distributions::Standard) * NOISE_STD * 2.0 - NOISE_STD;
-    }
+    // nb longer needed
+    // for &ci in matched {
+    //     logits[ci] = PEAK_LOGIT;
+    // }
+    // // Add jitter to simulate CNN uncertainty
+    // for l in logits.iter_mut() {
+    //     *l += rng.sample::<f32, _>(rand::distributions::Standard) * NOISE_STD * 2.0 - NOISE_STD;
+    // }
     softmax(&logits)
 }
 
@@ -244,7 +244,7 @@ pub fn run(
     //     }
     // }
 
-    let mdx_sentences = load_mdx_sentences("data/(poems)/")?;
+    let mut mdx_sentences = load_mdx_sentences("data/(poems)/")?;
 
     for (i, sent) in mdx_sentences.iter().enumerate() {
         if (i < 12) {
@@ -282,7 +282,7 @@ pub fn run(
     //     }
     // }
 
-    let bible_verses = load_csv_bible("data/bible_bbe.csv")?;
+    let mut bible_verses = load_csv_bible("data/bible_bbe.csv")?;
 
     for (i, sent) in bible_verses.iter().enumerate() {
         if (i < 12) {
@@ -292,7 +292,7 @@ pub fn run(
         }
     }
 
-    let handcrafted = load_handcrafted_sentences("data/handcrafted.txt")?;
+    let mut handcrafted = load_handcrafted_sentences("data/handcrafted.txt")?;
 
     for (i, sent) in handcrafted.iter().enumerate() {
         if (i < 12) {
@@ -302,7 +302,7 @@ pub fn run(
         }
     }
 
-    let notions = load_notion_sentences("data/notion/")?;
+    let mut notions = load_notion_sentences("data/notion/")?;
 
     for (i, sent) in notions.iter().enumerate() {
         if (i < 12) {
@@ -318,7 +318,7 @@ pub fn run(
     //     }
     // }
 
-    let ebooks = load_pdf_ebook_sentences("data/algorithms_ebook.pdf")?;
+    let mut ebooks = load_pdf_ebook_sentences("data/algorithms_ebook.pdf")?;
 
     for (i, sent) in ebooks.iter().enumerate() {
         if (i < 12) {
@@ -326,7 +326,7 @@ pub fn run(
         }
     }
 
-    let ebooks2 = load_pdf_ebook_sentences("data/Perspectives.pdf")?;
+    let mut ebooks2 = load_pdf_ebook_sentences("data/Perspectives.pdf")?;
 
     for (i, sent) in ebooks2.iter().enumerate() {
         if (i < 12) {
@@ -359,17 +359,38 @@ pub fn run(
     // ── Prepare samples with label-indexed context ────────────────────────────
     let mut training_samples = Vec::new();
 
-    let mdx_samples = prepare_samples(&mdx_sentences, &tokenizer, &keyword_index);
+    let mut rng = thread_rng();
+
+    // optional: makes keyword matching faster
+    mdx_sentences.shuffle(&mut rng);
+    mdx_sentences.truncate(8192);
+
+    bible_verses.shuffle(&mut rng);
+    bible_verses.truncate(8192);
+
+    handcrafted.shuffle(&mut rng);
+    handcrafted.truncate(8192);
+
+    notions.shuffle(&mut rng);
+    notions.truncate(8192);
+
+    ebooks.shuffle(&mut rng);
+    ebooks.truncate(8192);
+
+    ebooks2.shuffle(&mut rng);
+    ebooks2.truncate(8192);
+
+    let mdx_samples = prepare_paired_samples(&mdx_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2);
     // let quote_samples = prepare_samples(&quote_sentences, &tokenizer, &keyword_index);
     // let qna_samples = prepare_samples(&qna_sentences, &tokenizer, &keyword_index);
     // let mut wiki_samples = prepare_samples(&wiki_sentences, &tokenizer, &keyword_index);
     // let dict_samples = prepare_samples(&dict_sentences, &tokenizer, &keyword_index);
-    let mut bible_samples = prepare_samples(&bible_verses, &tokenizer, &keyword_index);
-    let handcrafted_samples = prepare_samples(&handcrafted, &tokenizer, &keyword_index);
-    let mut notion_samples = prepare_samples(&notions, &tokenizer, &keyword_index);
+    let mut bible_samples = prepare_paired_samples(&bible_verses, &tokenizer, &keyword_index, &mut rng, 1, 2);
+    let handcrafted_samples = prepare_paired_samples(&handcrafted, &tokenizer, &keyword_index, &mut rng, 1, 2);
+    let mut notion_samples = prepare_paired_samples(&notions, &tokenizer, &keyword_index, &mut rng, 1, 2);
     // let personal_samples = prepare_samples(&personals, &tokenizer, &keyword_index);
-    let mut ebook_samples = prepare_samples(&ebooks, &tokenizer, &keyword_index);
-    let mut ebooks2_samples = prepare_samples(&ebooks2, &tokenizer, &keyword_index);
+    let mut ebook_samples = prepare_paired_samples(&ebooks, &tokenizer, &keyword_index, &mut rng, 1, 2);
+    let mut ebooks2_samples = prepare_paired_samples(&ebooks2, &tokenizer, &keyword_index, &mut rng, 1, 2);
 
     println!(
         "Samples lengths: {} {} {} {} {} {}",
@@ -385,29 +406,26 @@ pub fn run(
         ebooks2_samples.len()
     );
 
-    let mut rng = thread_rng();
-
     bible_samples.shuffle(&mut rng);
-    // bible_samples.truncate(2048);
-    bible_samples.truncate(4096);
+    bible_samples.truncate(2048);
+    // bible_samples.truncate(4096);
 
     // wiki_samples.shuffle(&mut rng);
     // wiki_samples.truncate(2048);
 
     ebook_samples.shuffle(&mut rng);
-    // ebook_samples.truncate(2048);
-    ebook_samples.truncate(4096);
+    ebook_samples.truncate(2048);
+    // ebook_samples.truncate(4096);
 
     ebooks2_samples.shuffle(&mut rng);
-    // ebooks2_samples.truncate(2048);
-    ebooks2_samples.truncate(4096);
+    ebooks2_samples.truncate(2048);
+    // ebooks2_samples.truncate(4096);
 
     notion_samples.shuffle(&mut rng);
-    // notion_samples.truncate(2048);
-    notion_samples.truncate(4096);
+    notion_samples.truncate(2048);
+    // notion_samples.truncate(4096);
     
     // training_samples.extend(wiki_samples); // Yumon expresses that he is confused by wiki material
-    training_samples.extend(mdx_samples);
     // training_samples.extend(quote_samples);
     // training_samples.extend(dict_samples);
     // training_samples.extend(qna_samples);
@@ -417,24 +435,27 @@ pub fn run(
     training_samples.extend(ebooks2_samples);
     
     training_samples.shuffle(&mut rng);
-    training_samples.truncate(16384); // maybe at 128 hidden size? maybe need 256?
-    // training_samples.truncate(8192); // limit total for now
+    // training_samples.truncate(16384); // maybe at 128 hidden size? maybe need 256?
+    training_samples.truncate(8192); // limit total for now
     // training_samples.truncate(1024); 
     // training_samples.truncate(2048); 
 
     training_samples.extend(handcrafted_samples); // always add after to include all of these
     // training_samples.extend(personal_samples);
+    training_samples.extend(mdx_samples);
 
     println!(
         "Training samples: {}",
         training_samples.len()
     );
 
-    // for (i, sample) in training_samples.iter().enumerate() {
-    //     if (i < 12) {
-    //         println!("Sample: {:?}", sample.pair);
-    //     }
-    // }
+    for (i, sample) in training_samples.iter().enumerate() {
+        if (i < 12) {
+            println!("Sample: {:?}", sample.pair);
+        } else {
+            break;
+        }
+    }
 
     // ── Init model + optimizer ────────────────────────────────────────────────
     // ── Resume from checkpoint if one exists ─────────────────────────────────
@@ -784,7 +805,7 @@ fn prepare_samples(
         //     "input_ids wrong len: {} (encoded len was {})", input_ids.len(), encoded.len());
 
         let emote_label     = keyword_emote_label(sentence);
-        let matched_classes = matched_classes(sentence, keyword_index);
+        let matched_classes = matched_classes(sentence, keyword_index);        
 
         samples.push(Sample {
             pair:            vec![sentence.clone()],
@@ -794,6 +815,103 @@ fn prepare_samples(
             emote_label,
             matched_classes,
         });
+    }
+
+    samples
+}
+
+use rayon::prelude::*;
+
+fn prepare_paired_samples(
+    sentences:     &[String],
+    tokenizer:     &TokenizerKind,
+    keyword_index: &HashMap<String, Vec<usize>>,
+    rng:           &mut impl Rng,
+    min_shared_keywords: usize,
+    max_pairs_per_sent:  usize,
+) -> Vec<Sample> {
+    // let sent_keywords: Vec<Vec<String>> = sentences
+    //     .iter()
+    //     .map(|s| extract_keywords(s).into_iter().map(|(kw, _)| kw).collect())
+    //     .collect();
+    println!("prepare paired samples");
+    let sent_keywords: Vec<Vec<String>> = sentences
+        .par_iter()
+        // .iter()
+        .map(|s| extract_keywords(s).into_iter().map(|(kw, _)| kw).collect())
+        .collect();
+
+    let mut kw_to_sentences: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, kws) in sent_keywords.iter().enumerate() {
+        for kw in kws {
+            kw_to_sentences.entry(kw.clone()).or_default().push(i);
+        }
+    }
+
+    let bad_words = vec!["sex", "drug", "kill", "rape"];
+    let mut samples = Vec::new();
+
+    for i in 0..sentences.len() {
+        let sent_a = &sentences[i];
+
+        if bad_words.iter().any(|&w| sent_a.contains(w)) { continue; }
+
+        let kws_a: HashSet<&String> = sent_keywords[i].iter().collect();
+        if kws_a.is_empty() { continue; }
+
+        let mut candidates: HashSet<usize> = HashSet::new();
+        for kw in &sent_keywords[i] {
+            if let Some(list) = kw_to_sentences.get(kw) {
+                for &j in list {
+                    if j != i { candidates.insert(j); }
+                }
+            }
+        }
+
+        let mut cands: Vec<usize> = candidates.into_iter().collect();
+        cands.shuffle(rng);
+
+        let mut added = 0;
+        for j in cands {
+            if added >= max_pairs_per_sent { break; }
+
+            let sent_b = &sentences[j];
+            if bad_words.iter().any(|&w| sent_b.contains(w)) { continue; }
+
+            let kws_b: HashSet<&String> = sent_keywords[j].iter().collect();
+            if kws_a.intersection(&kws_b).count() < min_shared_keywords { continue; }
+
+            let text = format!("Prompt: {} / Reply: {}", sent_a, sent_b);
+            let encoded = tokenizer.encode(&text);
+            if encoded.len() < (MAX_SEQ_LEN - 30) || encoded.len() > MAX_SEQ_LEN { continue; }
+
+            let input_ids: Vec<usize> = std::iter::once(BOS_TOKEN)
+                .chain(encoded.iter().cloned().take(MAX_SEQ_LEN - 1))
+                .collect();
+
+            let target_labels: Vec<usize> = encoded.iter().cloned().take(MAX_SEQ_LEN - 1)
+                .chain(std::iter::once(EOS_TOKEN))
+                .collect();
+
+            let pad = |mut v: Vec<usize>| -> Vec<usize> {
+                v.resize(MAX_SEQ_LEN, PAD_TOKEN);
+                v
+            };
+
+            let input_ids    = pad(input_ids);
+            let target_labels = pad(target_labels);
+
+            samples.push(Sample {
+                pair:            vec![sent_a.clone(), sent_b.clone()],
+                input_ids,
+                target_ids:      vec![],
+                target_labels,
+                emote_label:     keyword_emote_label(&text),
+                matched_classes: matched_classes(&text, keyword_index),
+            });
+
+            added += 1;
+        }
     }
 
     samples

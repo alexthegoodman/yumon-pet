@@ -40,3 +40,6 @@ crossterm = "0.28"
 # floem = "0.2.0"
 # crossbeam-channel = "0.5.15"
 pdf-extract = "0.10.0"
+keyword_extraction = {version = "1.5", features = ["yake"]}
+stop-words = "0.8.0"
+rayon = "1.11.0"
