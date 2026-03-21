@@ -48,8 +48,11 @@ pub fn load_notion_sentences(notion_dir: &str) -> Result<Vec<String>> {
 
         for line in content.lines() {
             let trimmed = line.trim();
-            if is_good_sentence(trimmed) {
-                sentences.push(trimmed.to_string());
+
+            for sent in trimmed.split(".") {
+                if is_good_sentence(sent) {
+                    sentences.push(sent.to_string());
+                }
             }
         }
 
@@ -148,11 +151,13 @@ pub fn load_csv_bible(bible_path: &str) -> Result<Vec<String>> {
         let v = record.get(3).unwrap_or("").trim().to_string();
         let verse = record.get(4).unwrap_or("").trim().to_string();
 
-        quotes.push(verse);
+        // if (b == "40" || b == "41" || b == "42" || b == "43") { // gospel only
+            quotes.push(verse);
 
-        count = count + 1;
+            count = count + 1;
 
-        if count > 10_000 { break; }
+            if count > 20_000 { break; }
+        // }
     }
 
     println!("✅ Loaded {} verses from {bible_path}", quotes.len());

@@ -39,7 +39,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use ratatui::{Terminal, TerminalOptions, Viewport, prelude::CrosstermBackend};
 use std::collections::HashMap;
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}, pdf::load_pdf_ebook_sentences}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 use crate::brain::{
     CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
@@ -234,15 +234,15 @@ pub fn run(
     // ── Load + tokenize wiki corpus ───────────────────────────────────────────
     let mut sentences = Vec::new();
 
-    let wiki_sentences = load_wiki_sentences(wiki_xml, max_articles)?;
+    // let wiki_sentences = load_wiki_sentences(wiki_xml, max_articles)?;
 
-    for (i, sent) in wiki_sentences.iter().enumerate() {
-        if (i < 12) {
-            println!("WIKI: {:?}", sent);
-        } else {
-            break;
-        }
-    }
+    // for (i, sent) in wiki_sentences.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("WIKI: {:?}", sent);
+    //     } else {
+    //         break;
+    //     }
+    // }
 
     let mdx_sentences = load_mdx_sentences("data/(poems)/")?;
 
@@ -310,6 +310,30 @@ pub fn run(
         }
     }
 
+    // let personals = load_notion_sentences("data/personal/")?;
+
+    // for (i, sent) in personals.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("personal: {:?}", sent);
+    //     }
+    // }
+
+    let ebooks = load_pdf_ebook_sentences("data/algorithms_ebook.pdf")?;
+
+    for (i, sent) in ebooks.iter().enumerate() {
+        if (i < 12) {
+            println!("ebook: {:?}", sent);
+        }
+    }
+
+    let ebooks2 = load_pdf_ebook_sentences("data/Perspectives.pdf")?;
+
+    for (i, sent) in ebooks2.iter().enumerate() {
+        if (i < 12) {
+            println!("ebook: {:?}", sent);
+        }
+    }
+
     sentences.extend(mdx_sentences.clone());
     // sentences.extend(quote_sentences.clone());
     // sentences.extend(qna_sentences.clone());
@@ -338,46 +362,68 @@ pub fn run(
     let mdx_samples = prepare_samples(&mdx_sentences, &tokenizer, &keyword_index);
     // let quote_samples = prepare_samples(&quote_sentences, &tokenizer, &keyword_index);
     // let qna_samples = prepare_samples(&qna_sentences, &tokenizer, &keyword_index);
-    let mut wiki_samples = prepare_samples(&wiki_sentences, &tokenizer, &keyword_index);
+    // let mut wiki_samples = prepare_samples(&wiki_sentences, &tokenizer, &keyword_index);
     // let dict_samples = prepare_samples(&dict_sentences, &tokenizer, &keyword_index);
     let mut bible_samples = prepare_samples(&bible_verses, &tokenizer, &keyword_index);
     let handcrafted_samples = prepare_samples(&handcrafted, &tokenizer, &keyword_index);
-    let notion_samples = prepare_samples(&notions, &tokenizer, &keyword_index);
+    let mut notion_samples = prepare_samples(&notions, &tokenizer, &keyword_index);
+    // let personal_samples = prepare_samples(&personals, &tokenizer, &keyword_index);
+    let mut ebook_samples = prepare_samples(&ebooks, &tokenizer, &keyword_index);
+    let mut ebooks2_samples = prepare_samples(&ebooks2, &tokenizer, &keyword_index);
 
     println!(
-        "Samples lengths: {} {} {} {}",
+        "Samples lengths: {} {} {} {} {} {}",
         mdx_samples.len(),
         // quote_samples.len(),
         // qna_samples.len(),
         // wiki_samples.len(),
         bible_samples.len(),
         handcrafted_samples.len(),
-        notion_samples.len()
+        notion_samples.len(),
+        // personal_samples.len(),
+        ebook_samples.len(),
+        ebooks2_samples.len()
     );
 
     let mut rng = thread_rng();
 
     bible_samples.shuffle(&mut rng);
-    bible_samples.truncate(2048);
+    // bible_samples.truncate(2048);
+    bible_samples.truncate(4096);
 
-    wiki_samples.shuffle(&mut rng);
-    wiki_samples.truncate(2048);
+    // wiki_samples.shuffle(&mut rng);
+    // wiki_samples.truncate(2048);
+
+    ebook_samples.shuffle(&mut rng);
+    // ebook_samples.truncate(2048);
+    ebook_samples.truncate(4096);
+
+    ebooks2_samples.shuffle(&mut rng);
+    // ebooks2_samples.truncate(2048);
+    ebooks2_samples.truncate(4096);
+
+    notion_samples.shuffle(&mut rng);
+    // notion_samples.truncate(2048);
+    notion_samples.truncate(4096);
     
-    training_samples.extend(wiki_samples);
+    // training_samples.extend(wiki_samples); // Yumon expresses that he is confused by wiki material
     training_samples.extend(mdx_samples);
     // training_samples.extend(quote_samples);
     // training_samples.extend(dict_samples);
     // training_samples.extend(qna_samples);
     training_samples.extend(bible_samples);
     training_samples.extend(notion_samples);
-    
+    training_samples.extend(ebook_samples);
+    training_samples.extend(ebooks2_samples);
     
     training_samples.shuffle(&mut rng);
-    training_samples.truncate(8192); // limit total for now
+    training_samples.truncate(16384); // maybe at 128 hidden size? maybe need 256?
+    // training_samples.truncate(8192); // limit total for now
     // training_samples.truncate(1024); 
     // training_samples.truncate(2048); 
 
     training_samples.extend(handcrafted_samples); // always add after to include all of these
+    // training_samples.extend(personal_samples);
 
     println!(
         "Training samples: {}",

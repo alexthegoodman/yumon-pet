@@ -1,4 +1,4 @@
-use yumon_pet::brain::{bpe::{self, BpeTokenizer}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}, wiki::load_wiki_sentences};
+use yumon_pet::brain::{bpe::{self, BpeTokenizer}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}, pdf::load_pdf_ebook_sentences, wiki::load_wiki_sentences};
 
 pub fn main() {
     let wiki_xml = "data/simplewiki-latest-pages-articles.xml";
@@ -79,6 +79,15 @@ pub fn main() {
             println!("notion: {:?}", sent);
         }
     }
+
+    let ebooks = load_pdf_ebook_sentences("data/algorithms_ebook.pdf");
+    let ebooks = ebooks.as_ref().expect("Couldn't get handcrafted");
+
+    for (i, sent) in ebooks.iter().enumerate() {
+        if (i < 12) {
+            println!("ebook: {:?}", sent);
+        }
+    }
     
     // sentences.extend(wiki_sentences);
     sentences.extend(mdx_sentences);
@@ -88,6 +97,7 @@ pub fn main() {
     // sentences.extend(quote_sentences);
     // sentences.extend(dict_sentences);
     sentences.extend(notions);
+    sentences.extend(ebooks);
         
     let bpe = BpeTokenizer::train(
         sentences, 
