@@ -36,6 +36,8 @@ pub const PAD_ID: u32 = 0;
 pub const BOS_ID: u32 = 1;
 pub const EOS_ID: u32 = 2;
 pub const UNK_ID: u32 = 3;
+pub const CL_ID: u32 = 4;
+pub const CR_ID: u32 = 5;
 
 pub struct BpeTokenizer {
     pub inner:      Tokenizer,

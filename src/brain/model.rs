@@ -17,7 +17,7 @@
 
 use burn::{
     nn::{
-        Dropout, DropoutConfig, Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, Lstm, LstmConfig, LstmState, attention::{CrossAttention, CrossAttentionConfig, MhaInput, MultiHeadAttention, MultiHeadAttentionConfig}
+        Dropout, DropoutConfig, Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, Lstm, LstmConfig, LstmState, attention::{CrossAttention, CrossAttentionConfig, MhaInput, MultiHeadAttention, MultiHeadAttentionConfig}, transformer::{TransformerDecoder, TransformerDecoderConfig, TransformerDecoderInput}
     },
     prelude::*,
     record::{BinFileRecorder, FullPrecisionSettings, Recorder},
@@ -55,45 +55,45 @@ pub const FF_DIM:       usize = 256;
 pub const TEMPERATURE: f32  = 0.7;
 pub const TOP_K:       usize = 10;
 
-#[derive(Module, Debug)]
-pub struct YumonBrain<B: Backend> {
-    embedding:        Embedding<B>,
-    pos_embedding:    Embedding<B>,   // learned positional
-    transformer:      TransformerEncoder<B>,
-    norm:             LayerNorm<B>,
-    dropout:          Dropout,
-    token_head:       Linear<B>,
-    yumon_emote_head: Linear<B>,
-}
+// #[derive(Module, Debug)]
+// pub struct YumonBrain<B: Backend> {
+//     embedding:        Embedding<B>,
+//     pos_embedding:    Embedding<B>,   // learned positional
+//     transformer:      TransformerEncoder<B>,
+//     norm:             LayerNorm<B>,
+//     dropout:          Dropout,
+//     token_head:       Linear<B>,
+//     yumon_emote_head: Linear<B>,
+// }
 
-#[derive(Config, Debug)]
-pub struct YumonBrainConfig {
-    pub vocab_size:   usize,
-    #[config(default = 0.05)]
-    pub dropout_rate: f64,
-}
+// #[derive(Config, Debug)]
+// pub struct YumonBrainConfig {
+//     pub vocab_size:   usize,
+//     #[config(default = 0.05)]
+//     pub dropout_rate: f64,
+// }
 
-impl YumonBrainConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> YumonBrain<B> {
-        let transformer_config = TransformerEncoderConfig::new(
-            EMBED_DIM,
-            FF_DIM,
-            ATTN_HEADS,
-            N_LAYERS,
-        )
-        .with_dropout(self.dropout_rate);
+// impl YumonBrainConfig {
+//     pub fn init<B: Backend>(&self, device: &B::Device) -> YumonBrain<B> {
+//         let transformer_config = TransformerEncoderConfig::new(
+//             EMBED_DIM,
+//             FF_DIM,
+//             ATTN_HEADS,
+//             N_LAYERS,
+//         )
+//         .with_dropout(self.dropout_rate);
 
-        YumonBrain {
-            embedding:        EmbeddingConfig::new(self.vocab_size, EMBED_DIM).init(device),
-            pos_embedding:    EmbeddingConfig::new(MAX_SEQ_LEN, EMBED_DIM).init(device),
-            transformer:      transformer_config.init(device),
-            norm:             LayerNormConfig::new(EMBED_DIM).init(device),
-            dropout:          DropoutConfig::new(self.dropout_rate).init(),
-            token_head:       LinearConfig::new(EMBED_DIM, self.vocab_size).init(device),
-            yumon_emote_head: LinearConfig::new(EMBED_DIM, EMOTE_CLASSES).init(device),
-        }
-    }
-}
+//         YumonBrain {
+//             embedding:        EmbeddingConfig::new(self.vocab_size, EMBED_DIM).init(device),
+//             pos_embedding:    EmbeddingConfig::new(MAX_SEQ_LEN, EMBED_DIM).init(device),
+//             transformer:      transformer_config.init(device),
+//             norm:             LayerNormConfig::new(EMBED_DIM).init(device),
+//             dropout:          DropoutConfig::new(self.dropout_rate).init(),
+//             token_head:       LinearConfig::new(EMBED_DIM, self.vocab_size).init(device),
+//             yumon_emote_head: LinearConfig::new(EMBED_DIM, EMOTE_CLASSES).init(device),
+//         }
+//     }
+// }
 
 // impl<B: Backend> YumonBrain<B> {
 //     pub fn forward(
@@ -319,11 +319,52 @@ pub const YUMON_SCHEMA: &str = r#"{
 // Only change: accepts pre-built context_vec instead of raw components.
 // The tensor construction that was scattered across call sites moves here cleanly.
 
+// ── Model struct — swap Encoder for Decoder ───────────────────────────────────
+#[derive(Module, Debug)]
+pub struct YumonBrain<B: Backend> {
+    embedding:        Embedding<B>,
+    pos_embedding:    Embedding<B>,
+    transformer:      TransformerDecoder<B>,   // ← changed
+    norm:             LayerNorm<B>,
+    dropout:          Dropout,
+    token_head:       Linear<B>,
+    yumon_emote_head: Linear<B>,
+}
+
+#[derive(Config, Debug)]
+pub struct YumonBrainConfig {
+    pub vocab_size:   usize,
+    #[config(default = 0.05)]
+    pub dropout_rate: f64,
+}
+
+impl YumonBrainConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> YumonBrain<B> {
+        let transformer_config = TransformerDecoderConfig::new(  // ← changed
+            EMBED_DIM,
+            FF_DIM,
+            ATTN_HEADS,
+            N_LAYERS,
+        )
+        .with_dropout(self.dropout_rate);
+
+        YumonBrain {
+            embedding:        EmbeddingConfig::new(self.vocab_size, EMBED_DIM).init(device),
+            pos_embedding:    EmbeddingConfig::new(MAX_SEQ_LEN, EMBED_DIM).init(device),
+            transformer:      transformer_config.init(device),
+            norm:             LayerNormConfig::new(EMBED_DIM).init(device),
+            dropout:          DropoutConfig::new(self.dropout_rate).init(),
+            token_head:       LinearConfig::new(EMBED_DIM, self.vocab_size).init(device),
+            yumon_emote_head: LinearConfig::new(EMBED_DIM, EMOTE_CLASSES).init(device),
+        }
+    }
+}
+
 impl<B: Backend> YumonBrain<B> {
     pub fn forward(
         &self,
         tokens:      Tensor<B, 2, Int>,
-        context_vec: Tensor<B, 2>,          // [batch, CONTEXT_DIMS] — caller builds this
+        context_vec: Tensor<B, 2>,
     ) -> (Tensor<B, 3>, Tensor<B, 2>) {
         let [batch, seq_len] = tokens.dims();
 
@@ -342,14 +383,20 @@ impl<B: Backend> YumonBrain<B> {
         let pos_emb = self.pos_embedding.forward(positions);
         let x = self.dropout.forward(tok_emb + pos_emb);
 
+        // ── Causal mask — decoder handles this internally but we pass pad mask ─
+        let mask_pad = tokens.equal_elem(PAD_TOKEN as u32);
+
         let mask_attn = Tensor::<B, 3, Bool>::tril_mask(
             [batch, seq_len, seq_len], 0, &x.device()
         );
-        let mask_pad = tokens.equal_elem(PAD_TOKEN as u32);
 
-        let input = TransformerEncoderInput::new(x)
-            .mask_attn(mask_attn)
-            .mask_pad(mask_pad);
+        // TransformerDecoder in decoder-only mode: pass x as both target and memory
+        // The causal mask is applied automatically inside TransformerDecoder
+        let input = TransformerDecoderInput::new(x.clone(), x)
+            // .memory_mask_attn(mask_attn) // need?
+            // .memory_mask_pad(mask_pad) // need?
+            .target_mask_attn(mask_attn) // need
+            .target_mask_pad(mask_pad);
 
         let x = self.transformer.forward(input);
         let x = self.norm.forward(x);
@@ -361,9 +408,6 @@ impl<B: Backend> YumonBrain<B> {
             .reshape([batch, EMBED_DIM]);
         let emote_logits = self.yumon_emote_head.forward(last);
 
-        // context_vec is available here for future cross-attention extension;
-        // currently the caller injects it at the token embedding level via
-        // the training loop — no architectural change needed yet.
         let _ = context_vec;
 
         (token_logits, emote_logits)

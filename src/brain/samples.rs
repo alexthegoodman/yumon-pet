@@ -202,10 +202,31 @@ pub fn prepare_samples(
             .chain(input_encoded.iter().cloned().take(MAX_SEQ_LEN - 1))
             .collect();
 
-        let target_labels: Vec<usize> = target_encoded
-            .iter()
-            .cloned()
-            .take(MAX_SEQ_LEN - 1)
+        // let target_labels: Vec<usize> = target_encoded
+        //     .iter()
+        //     .cloned()
+        //     .take(MAX_SEQ_LEN - 1)
+        //     .chain(std::iter::once(EOS_TOKEN))
+        //     .collect();
+
+        // let pad = |mut v: Vec<usize>| -> Vec<usize> {
+        //     v.resize(MAX_SEQ_LEN, PAD_TOKEN);
+        //     v
+        // };
+
+        // ── Concatenate prompt + JSON target into one sequence ────────────────
+        let combined: Vec<usize> = std::iter::once(BOS_TOKEN)
+            .chain(input_encoded.iter().cloned())
+            .chain(target_encoded.iter().cloned())
+            .chain(std::iter::once(EOS_TOKEN))
+            .collect();
+
+        if combined.len() > MAX_SEQ_LEN { continue; }
+
+        // ── Target labels: PAD over prompt, loss only on JSON portion ─────────
+        let target_labels: Vec<usize> = std::iter::repeat(PAD_TOKEN)
+            .take(1 + input_encoded.len())          // BOS + prompt = no loss
+            .chain(target_encoded.iter().cloned())  // JSON = compute loss here
             .chain(std::iter::once(EOS_TOKEN))
             .collect();
 
@@ -213,6 +234,9 @@ pub fn prepare_samples(
             v.resize(MAX_SEQ_LEN, PAD_TOKEN);
             v
         };
+
+        let input_ids     = pad(combined);
+        let target_labels = pad(target_labels);
 
         // Build the 132-float context vector:
         //   [class_probs:100][user_emote_probs:7][user_emote_onehot:7][world:18]
@@ -238,8 +262,8 @@ pub fn prepare_samples(
         debug_assert_eq!(ctx.len(), 132);
 
         samples.push(Sample {
-            input_ids:       pad(input_ids),
-            target_labels:   pad(target_labels),
+            input_ids:       input_ids,
+            target_labels:   target_labels,
             context_vec:     ctx,
             emote_label:     emote_lbl,
             matched_classes: matched,
@@ -333,24 +357,58 @@ pub fn prepare_paired_samples(
             if target_encoded.is_empty()
                 || target_encoded.len() > MAX_SEQ_LEN - 2 { continue; }
 
+            // let pad = |mut v: Vec<usize>| -> Vec<usize> {
+            //     v.resize(MAX_SEQ_LEN, PAD_TOKEN);
+            //     v
+            // };
+
+            // let input_ids: Vec<usize> = std::iter::once(BOS_TOKEN)
+            //     .chain(input_encoded.iter().cloned().take(MAX_SEQ_LEN - 1))
+            //     .collect();
+
+            // let target_labels: Vec<usize> = target_encoded
+            //     .iter()
+            //     .cloned()
+            //     .take(MAX_SEQ_LEN - 1)
+            //     .chain(std::iter::once(EOS_TOKEN))
+            //     .collect();
+
+            let target_labels: Vec<usize> = std::iter::repeat(PAD_TOKEN)
+                .take(input_encoded.len())       // mask prompt — no loss here
+                .chain(target_encoded.iter().cloned())
+                .chain(std::iter::once(EOS_TOKEN))
+                .collect();
+
+            // // ── Concatenate prompt + JSON target into one sequence ────────────────
+            let combined: Vec<usize> = std::iter::once(BOS_TOKEN)
+                .chain(input_encoded.iter().cloned())
+                .chain(target_encoded.iter().cloned())
+                .collect();
+
+            // let combinedshift: Vec<usize> = input_encoded.iter().cloned()
+            //     .chain(target_encoded.iter().cloned())
+            //     .chain(std::iter::once(EOS_TOKEN))
+            //     .collect();
+
+            if combined.len() > MAX_SEQ_LEN { continue; }
+
+            // ── Target labels: PAD over prompt, loss only on JSON portion ─────────
+            // let target_labels: Vec<usize> = std::iter::repeat(PAD_TOKEN)
+            //     .take(1 + input_encoded.len())          // BOS + prompt = no loss
+            //     .chain(target_encoded.iter().cloned())  // JSON = compute loss here
+            //     .chain(std::iter::once(EOS_TOKEN))
+            //     .collect();
+            // let target_labels: Vec<usize> = target_encoded.iter().cloned()
+            //     .chain(std::iter::once(EOS_TOKEN))
+            //     .collect();
+
             let pad = |mut v: Vec<usize>| -> Vec<usize> {
                 v.resize(MAX_SEQ_LEN, PAD_TOKEN);
                 v
             };
 
-            // input:  [BOS, prompt_tokens...]
-            let input_ids: Vec<usize> = pad(
-                std::iter::once(BOS_TOKEN)
-                    .chain(input_encoded.iter().cloned().take(MAX_SEQ_LEN - 1))
-                    .collect()
-            );
-
-            // target: [json_tokens..., EOS]
-            let target_labels: Vec<usize> = pad(
-                target_encoded.iter().cloned().take(MAX_SEQ_LEN - 1)
-                    .chain(std::iter::once(EOS_TOKEN))
-                    .collect()
-            );
+            let input_ids     = pad(combined);
+            let target_labels = pad(target_labels);
 
             let emote_lbl   = keyword_emote_label(sent_b);  // reply drives emote
             let matched     = matched_classes(sent_b, keyword_index);

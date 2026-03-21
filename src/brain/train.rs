@@ -39,7 +39,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use ratatui::{Terminal, TerminalOptions, Viewport, prelude::CrosstermBackend};
 use std::collections::HashMap;
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}, model::CONTEXT_DIMS, pdf::load_pdf_ebook_sentences, samples::{WorldContext, prepare_paired_samples, prepare_samples}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, CL_ID, CR_ID, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}, model::CONTEXT_DIMS, pdf::load_pdf_ebook_sentences, samples::{WorldContext, prepare_paired_samples, prepare_samples}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 use crate::brain::{
     // CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
@@ -480,6 +480,14 @@ pub fn run(
     for (i, sample) in training_samples.iter().enumerate() {
         if (i < 12) {
             println!("Sample: {:?}", sample.target_json);
+            println!("input:  {:?}", tokenizer.decode(&sample.input_ids));
+            println!("target: {:?}", tokenizer.decode(&sample.target_labels
+                .iter()
+                .map(|&t| if t == PAD_TOKEN { PAD_TOKEN } else { t })
+                .collect::<Vec<_>>()));
+            println!("input_len: {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
+            println!("target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
+
         } else {
             break;
         }
