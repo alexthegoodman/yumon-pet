@@ -8,6 +8,7 @@ pub mod bpe;
 pub mod mdx;
 pub mod chart;
 pub mod pdf;
+pub mod samples;
 
 // Re-export tokenizer for convenience
 pub use tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, UNK_TOKEN};
@@ -22,5 +23,5 @@ pub use tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, UNK_TOKEN};
 
 use crate::vision::{CIFAR_CLASSES, EMOTE_CLASSES};
 
-pub const CONTEXT_DIMS: usize = CIFAR_CLASSES + EMOTE_CLASSES + EMOTE_CLASSES;
+// pub const CONTEXT_DIMS: usize = CIFAR_CLASSES + EMOTE_CLASSES + EMOTE_CLASSES;
 // = 100 + 7 + 7 = 114

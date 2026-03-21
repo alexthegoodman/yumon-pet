@@ -38,7 +38,7 @@ pub const EOS_ID: u32 = 2;
 pub const UNK_ID: u32 = 3;
 
 pub struct BpeTokenizer {
-    inner:      Tokenizer,
+    pub inner:      Tokenizer,
     pub vocab_size: usize,
 }
 
@@ -68,11 +68,26 @@ impl BpeTokenizer {
         println!("   Corpus written to {tmp_path}");
 
         // ── Build trainer ──────────────────────────────────────────────────────
+        // let special_tokens = vec![
+        //     AddedToken::from(PAD_STR, true),
+        //     AddedToken::from(BOS_STR, true),
+        //     AddedToken::from(EOS_STR, true),
+        //     AddedToken::from(UNK_STR, true),
+        // ];
         let special_tokens = vec![
             AddedToken::from(PAD_STR, true),
             AddedToken::from(BOS_STR, true),
             AddedToken::from(EOS_STR, true),
             AddedToken::from(UNK_STR, true),
+            // JSON structural tokens — must bypass ByteLevel encoding
+            AddedToken::from("{", true),
+            AddedToken::from("}", true),
+            AddedToken::from("[", true),
+            AddedToken::from("]", true),
+            AddedToken::from(":", true),
+            AddedToken::from(",", true),
+            AddedToken::from("\"", true),
+            AddedToken::from("\n", true),
         ];
 
         let trainer = BpeTrainerBuilder::new()

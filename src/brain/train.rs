@@ -39,9 +39,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use ratatui::{Terminal, TerminalOptions, Viewport, prelude::CrosstermBackend};
 use std::collections::HashMap;
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}, pdf::load_pdf_ebook_sentences}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}, model::CONTEXT_DIMS, pdf::load_pdf_ebook_sentences, samples::{WorldContext, prepare_samples}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 use crate::brain::{
-    CONTEXT_DIMS,
+    // CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
     model::{YumonBrain, YumonBrainConfig, BrainMetadata, GenerationResult},
     wiki::load_wiki_sentences,
@@ -53,8 +53,9 @@ pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 // Max sequence length during training (characters)
 // pub const MAX_SEQ_LEN:  usize = 120;
 // pub const MAX_SEQ_LEN:  usize = 25;
+pub const MAX_SEQ_LEN:  usize = 80; // better for outlines structured output?
 // pub const MAX_SEQ_LEN:  usize = 60; // lighter to train on iGPU
-pub const MAX_SEQ_LEN:  usize = 40; // even lower with bpe
+// pub const MAX_SEQ_LEN:  usize = 40; // even lower with bpe
 // Max vocab size
 const MAX_VOCAB:    usize = 256;
 // Emote head loss weight (much lighter than language loss)
@@ -98,7 +99,7 @@ const CIFAR_FINE_LABELS: [&str; CIFAR_CLASSES] = [
 
 /// For each CIFAR class index, the set of keywords that map to it.
 /// Multi-word labels contribute all their parts.
-fn build_label_keywords() -> Vec<Vec<String>> {
+pub fn build_label_keywords() -> Vec<Vec<String>> {
     CIFAR_FINE_LABELS.iter().map(|label| {
         label.split('_')
              .map(|w| w.to_lowercase())
@@ -108,7 +109,7 @@ fn build_label_keywords() -> Vec<Vec<String>> {
 }
 
 /// Maps keyword → list of CIFAR class indices that contain it.
-fn build_keyword_index(label_keywords: &[Vec<String>]) -> HashMap<String, Vec<usize>> {
+pub fn build_keyword_index(label_keywords: &[Vec<String>]) -> HashMap<String, Vec<usize>> {
     let mut idx: HashMap<String, Vec<usize>> = HashMap::new();
     for (class_i, keywords) in label_keywords.iter().enumerate() {
         for kw in keywords {
@@ -120,7 +121,7 @@ fn build_keyword_index(label_keywords: &[Vec<String>]) -> HashMap<String, Vec<us
 
 /// Given a sentence, return all CIFAR class indices whose keywords appear in it.
 /// Uses whole-word matching: "plain" should not match "explanation".
-fn matched_classes(sentence: &str, keyword_index: &HashMap<String, Vec<usize>>) -> Vec<usize> {
+pub fn matched_classes(sentence: &str, keyword_index: &HashMap<String, Vec<usize>>) -> Vec<usize> {
     let lower = sentence.to_lowercase();
     let mut matched = std::collections::HashSet::new();
 
@@ -139,7 +140,7 @@ fn matched_classes(sentence: &str, keyword_index: &HashMap<String, Vec<usize>>) 
 }
 
 /// True if `kw` appears in `text` as a whole word (not a substring of another word).
-fn whole_word_match(text: &str, kw: &str) -> bool {
+pub fn whole_word_match(text: &str, kw: &str) -> bool {
     let kw_bytes = kw.as_bytes();
     let text_bytes = text.as_bytes();
     let klen = kw_bytes.len();
@@ -166,7 +167,7 @@ fn whole_word_match(text: &str, kw: &str) -> bool {
 /// Then add Gaussian noise (std = NOISE_STD) to every logit and apply softmax.
 ///
 /// If no classes matched, all logits are 0 + noise → near-uniform distribution.
-fn peaked_class_probs(matched: &[usize], rng: &mut impl Rng) -> Vec<f32> {
+pub fn peaked_class_probs(matched: &[usize], rng: &mut impl Rng) -> Vec<f32> {
     let mut logits = vec![0.0f32; CIFAR_CLASSES];
     for &ci in matched {
         logits[ci] = PEAK_LOGIT;
@@ -180,33 +181,59 @@ fn peaked_class_probs(matched: &[usize], rng: &mut impl Rng) -> Vec<f32> {
 
 /// Build the full 114-dim context vector for a training sample.
 /// emote_idx: the sentence's keyword-derived emote label (0..6).
-fn build_context(
+// pub fn build_context(
+//     class_probs: &[f32],
+//     emote_idx:   usize,
+//     rng:         &mut impl Rng,
+// ) -> Vec<f32> {
+//     let mut ctx = Vec::with_capacity(CONTEXT_DIMS);
+
+//     // class_probs [100]
+//     ctx.extend_from_slice(class_probs);
+
+//     // emote_probs [7]: peaked on emote_idx + noise, to match inference distribution
+//     let mut emote_logits = vec![0.0f32; EMOTE_CLASSES];
+//     emote_logits[emote_idx] = PEAK_LOGIT;
+//     for l in emote_logits.iter_mut() {
+//         *l += rng.sample::<f32, _>(rand::distributions::Standard) * NOISE_STD * 2.0 - NOISE_STD;
+//     }
+//     ctx.extend(softmax(&emote_logits));
+
+//     // user_emote_onehot [7]
+//     let mut onehot = vec![0.0f32; EMOTE_CLASSES];
+//     onehot[emote_idx] = 1.0;
+//     ctx.extend(onehot);
+
+//     ctx
+// }
+
+pub fn build_context(
     class_probs: &[f32],
-    emote_idx:   usize,
-    rng:         &mut impl Rng,
+    emote_label: usize,
+    world:       &WorldContext,   // ← new
+    rng:         &mut impl rand::Rng,
 ) -> Vec<f32> {
     let mut ctx = Vec::with_capacity(CONTEXT_DIMS);
 
-    // class_probs [100]
+    // class_probs (100)
     ctx.extend_from_slice(class_probs);
 
-    // emote_probs [7]: peaked on emote_idx + noise, to match inference distribution
-    let mut emote_logits = vec![0.0f32; EMOTE_CLASSES];
-    emote_logits[emote_idx] = PEAK_LOGIT;
-    for l in emote_logits.iter_mut() {
-        *l += rng.sample::<f32, _>(rand::distributions::Standard) * NOISE_STD * 2.0 - NOISE_STD;
-    }
-    ctx.extend(softmax(&emote_logits));
+    // user_emote_probs (7) — one-hot with small noise
+    let mut emote_probs = vec![0.0f32; 7];
+    emote_probs[emote_label.min(6)] = 1.0;
+    ctx.extend_from_slice(&emote_probs);
 
-    // user_emote_onehot [7]
-    let mut onehot = vec![0.0f32; EMOTE_CLASSES];
-    onehot[emote_idx] = 1.0;
-    ctx.extend(onehot);
+    // user_emote_onehot (7) — same for training
+    ctx.extend_from_slice(&emote_probs);
 
+    // world spatial context (18)
+    ctx.extend_from_slice(&world.to_context_slice());
+
+    debug_assert_eq!(ctx.len(), CONTEXT_DIMS);
     ctx
 }
 
-fn softmax(logits: &[f32]) -> Vec<f32> {
+pub fn softmax(logits: &[f32]) -> Vec<f32> {
     let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     let exps: Vec<f32> = logits.iter().map(|l| (l - max).exp()).collect();
     let sum = exps.iter().sum::<f32>();
@@ -430,11 +457,13 @@ pub fn run(
         training_samples.len()
     );
 
-    // for (i, sample) in training_samples.iter().enumerate() {
-    //     if (i < 12) {
-    //         println!("Sample: {:?}", sample.pair);
-    //     }
-    // }
+    for (i, sample) in training_samples.iter().enumerate() {
+        if (i < 12) {
+            println!("Sample: {:?}", sample.target_json);
+        } else {
+            break;
+        }
+    }
 
     // ── Init model + optimizer ────────────────────────────────────────────────
     // ── Resume from checkpoint if one exists ─────────────────────────────────
@@ -573,21 +602,35 @@ pub fn run(
             let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
             let mut all_emote_targets: Vec<i32> = Vec::with_capacity(current_batch_size);
 
+            // for &i in batch_idx {
+            //     let sample = &training_samples[i];
+
+            //     // input ids
+            //     all_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
+
+            //     // context (still per-sample because of rng noise — cheap)
+            //     let class_probs = peaked_class_probs(&sample.matched_classes, &mut rng);
+            //     let ctx_flat = build_context(&class_probs, sample.emote_label, &mut rng);
+            //     all_contexts.extend(ctx_flat);
+
+            //     // language targets
+            //     all_lang_targets.extend(sample.target_labels.iter().map(|&t| t as i32));
+
+            //     // emote target
+            //     all_emote_targets.push(sample.emote_label as i32);
+            // }
+
             for &i in batch_idx {
                 let sample = &training_samples[i];
 
-                // input ids
                 all_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
 
-                // context (still per-sample because of rng noise — cheap)
+                // ← pass sample.world instead of rebuilding from scratch
                 let class_probs = peaked_class_probs(&sample.matched_classes, &mut rng);
-                let ctx_flat = build_context(&class_probs, sample.emote_label, &mut rng);
+                let ctx_flat = build_context(&class_probs, sample.emote_label, &sample.world, &mut rng);
                 all_contexts.extend(ctx_flat);
 
-                // language targets
                 all_lang_targets.extend(sample.target_labels.iter().map(|&t| t as i32));
-
-                // emote target
                 all_emote_targets.push(sample.emote_label as i32);
             }
 
@@ -613,7 +656,9 @@ pub fn run(
             );
 
             // ── SINGLE forward pass (this is where the 20× speedup happens) ─────
-            let (token_logits, emote_logits, _lstm_state) = model.forward(ids_t, context_t, None);
+            // let (token_logits, emote_logits, _lstm_state) = model.forward(ids_t, context_t, None);
+
+            let (token_logits, emote_logits) = model.forward(ids_t, context_t);
 
             // ── Loss (now automatically batched) ───────────────────────────────
             let vocab = tokenizer.vocab_size();
@@ -726,84 +771,84 @@ pub fn run(
 
 // ─── Sample preparation ───────────────────────────────────────────────────────
 
-struct Sample {
-    input_ids:       Vec<usize>,
-    target_ids:      Vec<usize>,
-    emote_label:     usize,
-    /// CIFAR-100 class indices whose keywords appear in this sentence.
-    /// Empty = no label matched → near-uniform context at train time.
-    matched_classes: Vec<usize>,
-    target_labels: Vec<usize>,
-    pair: Vec<String>
-}
+// struct Sample {
+//     input_ids:       Vec<usize>,
+//     target_ids:      Vec<usize>,
+//     emote_label:     usize,
+//     /// CIFAR-100 class indices whose keywords appear in this sentence.
+//     /// Empty = no label matched → near-uniform context at train time.
+//     matched_classes: Vec<usize>,
+//     target_labels: Vec<usize>,
+//     pair: Vec<String>
+// }
 
-fn prepare_samples(
-    sentences:     &[String],
-    tokenizer:     &TokenizerKind,
-    keyword_index: &HashMap<String, Vec<usize>>,
-) -> Vec<Sample> {
-    let mut samples = Vec::new();
+// fn prepare_samples(
+//     sentences:     &[String],
+//     tokenizer:     &TokenizerKind,
+//     keyword_index: &HashMap<String, Vec<usize>>,
+// ) -> Vec<Sample> {
+//     let mut samples = Vec::new();
 
-    for sentence in sentences {
-        let bad_words = vec!["sex", "drug", "kill", "rape"];
+//     for sentence in sentences {
+//         let bad_words = vec!["sex", "drug", "kill", "rape"];
 
-        // Check if the main_string contains any of the strings in the vector
-        let found = bad_words
-            .iter()
-            .any(|&substring| sentence.contains(substring));
+//         // Check if the main_string contains any of the strings in the vector
+//         let found = bad_words
+//             .iter()
+//             .any(|&substring| sentence.contains(substring));
 
-        if found { continue; }
+//         if found { continue; }
 
-        let encoded = tokenizer.encode(sentence);
-        if encoded.len() < (MAX_SEQ_LEN - 30) || encoded.len() > MAX_SEQ_LEN { continue; }
+//         let encoded = tokenizer.encode(sentence);
+//         if encoded.len() < (MAX_SEQ_LEN - 30) || encoded.len() > MAX_SEQ_LEN { continue; }
 
-        // input:  [BOS, t0, t1, ..., t_{n-1}]
-        // labels: [t0,  t1, ..., t_{n-1}, EOS]  (one-ahead shift)
-        let input_ids: Vec<usize> = std::iter::once(BOS_TOKEN)
-            .chain(encoded.iter().cloned().take(MAX_SEQ_LEN - 1))
-            .collect();
+//         // input:  [BOS, t0, t1, ..., t_{n-1}]
+//         // labels: [t0,  t1, ..., t_{n-1}, EOS]  (one-ahead shift)
+//         let input_ids: Vec<usize> = std::iter::once(BOS_TOKEN)
+//             .chain(encoded.iter().cloned().take(MAX_SEQ_LEN - 1))
+//             .collect();
 
-        let target_labels: Vec<usize> = encoded.iter().cloned().take(MAX_SEQ_LEN - 1)
-            .chain(std::iter::once(EOS_TOKEN))
-            .collect();
+//         let target_labels: Vec<usize> = encoded.iter().cloned().take(MAX_SEQ_LEN - 1)
+//             .chain(std::iter::once(EOS_TOKEN))
+//             .collect();
 
-        let pad = |mut v: Vec<usize>| -> Vec<usize> {
-            v.resize(MAX_SEQ_LEN, PAD_TOKEN);
-            v
-        };
+//         let pad = |mut v: Vec<usize>| -> Vec<usize> {
+//             v.resize(MAX_SEQ_LEN, PAD_TOKEN);
+//             v
+//         };
 
-        let input_ids = pad(input_ids);
-        let target_labels = pad(target_labels);
+//         let input_ids = pad(input_ids);
+//         let target_labels = pad(target_labels);
 
-        // if samples.len() < 12 {
-        //     println!("input_ids {:?}", input_ids);
-        //     println!("target_labels {:?}", target_labels);
-        // }
+//         // if samples.len() < 12 {
+//         //     println!("input_ids {:?}", input_ids);
+//         //     println!("target_labels {:?}", target_labels);
+//         // }
 
-        // assert!(input_ids.len() == MAX_SEQ_LEN, 
-        //     "input_ids wrong len: {} (encoded len was {})", input_ids.len(), encoded.len());
+//         // assert!(input_ids.len() == MAX_SEQ_LEN, 
+//         //     "input_ids wrong len: {} (encoded len was {})", input_ids.len(), encoded.len());
 
-        let emote_label     = keyword_emote_label(sentence);
-        let matched_classes = matched_classes(sentence, keyword_index);
+//         let emote_label     = keyword_emote_label(sentence);
+//         let matched_classes = matched_classes(sentence, keyword_index);
 
-        samples.push(Sample {
-            pair:            vec![sentence.clone()],
-            input_ids,
-            target_ids:      vec![],          // unused in completion mode
-            target_labels,
-            emote_label,
-            matched_classes,
-        });
-    }
+//         samples.push(Sample {
+//             pair:            vec![sentence.clone()],
+//             input_ids,
+//             target_ids:      vec![],          // unused in completion mode
+//             target_labels,
+//             emote_label,
+//             matched_classes,
+//         });
+//     }
 
-    samples
-}
+//     samples
+// }
 
 // ─── Emote keyword heuristic ──────────────────────────────────────────────────
 
 /// Simple keyword-based pseudo-label for emote head pre-training.
 /// 0=angry, 1=disgust, 2=fear, 3=happy, 4=neutral, 5=sad, 6=surprise
-fn keyword_emote_label(text: &str) -> usize {
+pub fn keyword_emote_label(text: &str) -> usize {
     let lower = text.to_lowercase();
     if lower.contains("war") || lower.contains("attack") || lower.contains("conflict") {
         0
@@ -824,7 +869,7 @@ fn keyword_emote_label(text: &str) -> usize {
 
 // ─── Progress bar ─────────────────────────────────────────────────────────────
 
-fn make_progress(total: usize, epoch: usize, epochs: usize) -> ProgressBar {
+pub fn make_progress(total: usize, epoch: usize, epochs: usize) -> ProgressBar {
     let pb = ProgressBar::new(total as u64);
     pb.set_style(
         ProgressStyle::default_bar()

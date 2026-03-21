@@ -200,21 +200,21 @@ fn run_chat(
         .unwrap_or(top_emote);
 
     // 6. Generate reply from LSTM
-    let result = brain_model.generate(
-        &tokenizer,
-        &class_probs,
-        &emote_probs,
-        user_emote_idx,
-        prompt,
-        80,   // max tokens
-        // 30,
-        &device,
-    );
+    // let result = brain_model.generate(
+    //     &tokenizer,
+    //     &class_probs,
+    //     &emote_probs,
+    //     user_emote_idx,
+    //     prompt,
+    //     80,   // max tokens
+    //     // 30,
+    //     &device,
+    // );
 
-    println!("\n┌─ Yumon says ──────────────────────────────────────────┐");
-    println!("│ {}", result.reply);
-    println!("└───────────────────────────────────────────────────────┘");
-    println!("  Yumon emote: {} ({})", vision::EMOTE_NAMES[result.yumon_emote_idx], result.yumon_emote_idx);
+    // println!("\n┌─ Yumon says ──────────────────────────────────────────┐");
+    // println!("│ {}", result.reply);
+    // println!("└───────────────────────────────────────────────────────┘");
+    // println!("  Yumon emote: {} ({})", vision::EMOTE_NAMES[result.yumon_emote_idx], result.yumon_emote_idx);
 
     Ok(())
 }

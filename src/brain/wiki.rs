@@ -177,8 +177,8 @@ pub fn is_good_sentence(s: &str) -> bool {
     if len < 4 || len > 400 { return false; }
 
     if s.contains("'''") { return false; }
-    if s.contains("[") { return false; }
-    if s.contains("]") { return false; }
+    if s.contains("[[") { return false; }
+    if s.contains("]]") { return false; }
     if s.contains("|") { return false; }
     if s.contains("*") { return false; }
     if s.contains("#") { return false; }
@@ -187,10 +187,11 @@ pub fn is_good_sentence(s: &str) -> bool {
     if s.contains(".com") { return false; }
     if s.contains(".net") { return false; }
     if s.contains(".org") { return false; }
-    if s.contains("{") { return false; }
-    if s.contains("}") { return false; }
+    // if s.contains("{") { return false; } // keep for json
+    // if s.contains("}") { return false; }
     if s.contains(".md") { return false; }
     if s.contains("~") { return false; }
+    if s.contains("http") { return false; }
 
     // Reject lines starting with wiki junk
     let first = s.chars().next().unwrap_or(' ');
