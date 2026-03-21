@@ -53,8 +53,9 @@ pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 // Max sequence length during training (characters)
 // pub const MAX_SEQ_LEN:  usize = 120;
 // pub const MAX_SEQ_LEN:  usize = 25;
+pub const MAX_SEQ_LEN:  usize = 100;
 // pub const MAX_SEQ_LEN:  usize = 80; // better for outlines structured output?
-pub const MAX_SEQ_LEN:  usize = 60; // lighter to train on iGPU
+// pub const MAX_SEQ_LEN:  usize = 60; // lighter to train on iGPU
 // pub const MAX_SEQ_LEN:  usize = 40; // even lower with bpe
 // Max vocab size
 const MAX_VOCAB:    usize = 256;

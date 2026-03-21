@@ -501,7 +501,7 @@ fn ui(f: &mut ratatui::Frame, app: &AppState) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Min(1),
-            Constraint::Length(132),
+            Constraint::Length(82),
         ])
         .split(outer[0]);
 
