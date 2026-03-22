@@ -357,22 +357,6 @@ pub fn prepare_paired_samples(
             if target_encoded.is_empty()
                 || target_encoded.len() > MAX_SEQ_LEN - 2 { continue; }
 
-            // let pad = |mut v: Vec<usize>| -> Vec<usize> {
-            //     v.resize(MAX_SEQ_LEN, PAD_TOKEN);
-            //     v
-            // };
-
-            // let input_ids: Vec<usize> = std::iter::once(BOS_TOKEN)
-            //     .chain(input_encoded.iter().cloned().take(MAX_SEQ_LEN - 1))
-            //     .collect();
-
-            // let target_labels: Vec<usize> = target_encoded
-            //     .iter()
-            //     .cloned()
-            //     .take(MAX_SEQ_LEN - 1)
-            //     .chain(std::iter::once(EOS_TOKEN))
-            //     .collect();
-
             let target_labels: Vec<usize> = std::iter::repeat(PAD_TOKEN)
                 .take(input_encoded.len())       // mask prompt — no loss here
                 .chain(target_encoded.iter().cloned())
@@ -385,22 +369,7 @@ pub fn prepare_paired_samples(
                 .chain(target_encoded.iter().cloned())
                 .collect();
 
-            // let combinedshift: Vec<usize> = input_encoded.iter().cloned()
-            //     .chain(target_encoded.iter().cloned())
-            //     .chain(std::iter::once(EOS_TOKEN))
-            //     .collect();
-
             if combined.len() > MAX_SEQ_LEN { continue; }
-
-            // ── Target labels: PAD over prompt, loss only on JSON portion ─────────
-            // let target_labels: Vec<usize> = std::iter::repeat(PAD_TOKEN)
-            //     .take(1 + input_encoded.len())          // BOS + prompt = no loss
-            //     .chain(target_encoded.iter().cloned())  // JSON = compute loss here
-            //     .chain(std::iter::once(EOS_TOKEN))
-            //     .collect();
-            // let target_labels: Vec<usize> = target_encoded.iter().cloned()
-            //     .chain(std::iter::once(EOS_TOKEN))
-            //     .collect();
 
             let pad = |mut v: Vec<usize>| -> Vec<usize> {
                 v.resize(MAX_SEQ_LEN, PAD_TOKEN);

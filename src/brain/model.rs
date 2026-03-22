@@ -39,20 +39,21 @@ use burn::nn::transformer::{TransformerEncoder, TransformerEncoderConfig, Transf
 // pub const HIDDEN_UNITS: usize = 768;
 // pub const EMBED_DIM:    usize = 512;
 // pub const HIDDEN_UNITS: usize = 512;
-// pub const EMBED_DIM:    usize = 256;
-// pub const HIDDEN_UNITS: usize = 256;
-pub const EMBED_DIM:    usize = 128;
-pub const HIDDEN_UNITS: usize = 128;
+pub const EMBED_DIM:    usize = 256;
+pub const HIDDEN_UNITS: usize = 256;
+// pub const EMBED_DIM:    usize = 128;
+// pub const HIDDEN_UNITS: usize = 128;
 pub const ATTN_HEADS:   usize = 2;
 // pub const N_LAYERS:     usize = 4;
 // pub const N_LAYERS:     usize = 3;
 pub const N_LAYERS:     usize = 2;
-// pub const FF_DIM:       usize = 512;
+pub const FF_DIM:       usize = 512;
 // pub const FF_DIM:       usize = 256;
-pub const FF_DIM:       usize = 256;
+// pub const FF_DIM:       usize = 256;
 // pub const FF_DIM:       usize = 2048;
 
-pub const TEMPERATURE: f32  = 0.7;
+// pub const TEMPERATURE: f32  = 0.7;
+pub const TEMPERATURE: f32  = 0.95;
 pub const TOP_K:       usize = 10;
 
 // #[derive(Module, Debug)]
@@ -517,20 +518,6 @@ impl<B: Backend> YumonBrain<B> {
             let mut logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
 
             // ── Apply outlines mask ────────────────────────────────────────────
-            // if let Some(allowed) = index.allowed_tokens(&fsm_state) {
-            //     // Build a -inf mask, then restore allowed token scores
-            //     let neg_inf = f32::NEG_INFINITY;
-            //     let mut masked = vec![neg_inf; logits_vec.len()];
-            //     for &token_id in &allowed {
-            //         let idx = token_id as usize;
-            //         if idx < masked.len() {
-            //             masked[idx] = logits_vec[idx];
-            //         }
-            //     }
-            //     logits_vec = masked;
-            // }
-
-           
 
             // inside the loop, replace the masking block:
             let allowed = index.allowed_tokens(&fsm_state);
@@ -554,16 +541,21 @@ impl<B: Backend> YumonBrain<B> {
             let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
 
             // ── Advance FSM ────────────────────────────────────────────────────
-            fsm_state = index
-                .next_state(&fsm_state, &(next_token as u32))
-                .unwrap_or(fsm_state);  // stay put if transition undefined
+            // fsm_state = index
+            //     .next_state(&fsm_state, &(next_token as u32))
+            //     .unwrap_or(fsm_state);  // stay put if transition undefined
 
-            token_ids.push(next_token);
+            if let Some(state) = index
+                .next_state(&fsm_state, &(next_token as u32)) {
+                token_ids.push(next_token);
 
-             // exit if FSM already reached a final state
-            if index.final_states().contains(&fsm_state) { break; }
-            // Hard stops   
-            if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
+                fsm_state = state;
+
+                // exit if FSM already reached a final state
+                if index.final_states().contains(&fsm_state) { break; }
+                // Hard stops   
+                if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
+            }
         }
 
         // ── Decode and parse ───────────────────────────────────────────────────

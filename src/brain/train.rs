@@ -354,13 +354,13 @@ pub fn run(
         }
     }
 
-    let mut ebooks2 = load_pdf_ebook_sentences("data/Perspectives.pdf")?;
+    // let mut ebooks2 = load_pdf_ebook_sentences("data/Perspectives.pdf")?;
 
-    for (i, sent) in ebooks2.iter().enumerate() {
-        if (i < 12) {
-            println!("ebook: {:?}", sent);
-        }
-    }
+    // for (i, sent) in ebooks2.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("ebook: {:?}", sent);
+    //     }
+    // }
 
     sentences.extend(mdx_sentences.clone());
     // sentences.extend(quote_sentences.clone());
@@ -405,8 +405,8 @@ pub fn run(
     ebooks.shuffle(&mut rng);
     ebooks.truncate(8192);
 
-    ebooks2.shuffle(&mut rng);
-    ebooks2.truncate(8192);
+    // ebooks2.shuffle(&mut rng);
+    // ebooks2.truncate(8192);
 
     let mdx_samples = prepare_paired_samples(&mdx_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2);
     // let quote_samples = prepare_samples(&quote_sentences, &tokenizer, &keyword_index);
@@ -418,10 +418,10 @@ pub fn run(
     let mut notion_samples = prepare_paired_samples(&notions, &tokenizer, &keyword_index, &mut rng, 1, 2);
     // let personal_samples = prepare_samples(&personals, &tokenizer, &keyword_index);
     let mut ebook_samples = prepare_paired_samples(&ebooks, &tokenizer, &keyword_index, &mut rng, 1, 2);
-    let mut ebooks2_samples = prepare_paired_samples(&ebooks2, &tokenizer, &keyword_index, &mut rng, 1, 2);
+    // let mut ebooks2_samples = prepare_paired_samples(&ebooks2, &tokenizer, &keyword_index, &mut rng, 1, 2);
 
     println!(
-        "Samples lengths: {} {} {} {} {} {}",
+        "Samples lengths: {} {} {} {} {}",
         mdx_samples.len(),
         // quote_samples.len(),
         // qna_samples.len(),
@@ -431,7 +431,7 @@ pub fn run(
         notion_samples.len(),
         // personal_samples.len(),
         ebook_samples.len(),
-        ebooks2_samples.len()
+        // ebooks2_samples.len()
     );
 
     bible_samples.shuffle(&mut rng);
@@ -445,9 +445,9 @@ pub fn run(
     ebook_samples.truncate(2048);
     // ebook_samples.truncate(4096);
 
-    ebooks2_samples.shuffle(&mut rng);
-    ebooks2_samples.truncate(2048);
-    // ebooks2_samples.truncate(4096);
+    // ebooks2_samples.shuffle(&mut rng);
+    // ebooks2_samples.truncate(2048);
+    // // ebooks2_samples.truncate(4096);
 
     notion_samples.shuffle(&mut rng);
     notion_samples.truncate(2048);
@@ -461,7 +461,7 @@ pub fn run(
     training_samples.extend(bible_samples);
     training_samples.extend(notion_samples);
     training_samples.extend(ebook_samples);
-    training_samples.extend(ebooks2_samples);
+    // training_samples.extend(ebooks2_samples);
     
     training_samples.shuffle(&mut rng);
     // training_samples.truncate(16384); // maybe at 128 hidden size? maybe need 256?
@@ -694,6 +694,25 @@ pub fn run(
 
             let lang_loss = ce_loss.forward(logits_2d, lang_target_t);
 
+            // let vocab = tokenizer.vocab_size();
+
+            // // 1. Logits: Drop the last position (nothing follows it to predict)
+            // // [B, S, V] -> [B, S-1, V]
+            // let logits_shift = token_logits.slice([0..current_batch_size, 0..MAX_SEQ_LEN - 1]);
+
+            // // 2. Targets: Drop the first position (the BOS/Prompt start which isn't predicted)
+            // // [B, S] -> [B, S-1]
+            // // We reshape the flat lang_target_t back to 2D first to slice it easily
+            // let targets_2d = lang_target_t.reshape([current_batch_size, MAX_SEQ_LEN]);
+            // let targets_shift = targets_2d.slice([0..current_batch_size, 1..MAX_SEQ_LEN]);
+
+            // // 3. Flatten for CrossEntropy
+            // let logits_flattened = logits_shift.reshape([current_batch_size * (MAX_SEQ_LEN - 1), vocab]);
+            // let targets_flattened = targets_shift.reshape([current_batch_size * (MAX_SEQ_LEN - 1)]);
+
+            // // 4. Forward Loss
+            // let lang_loss = ce_loss.forward(logits_flattened, targets_flattened);
+
             let emote_loss = ce_loss.forward(emote_logits, emote_target_t);  // [B, C] and [B]
 
             let total_loss = lang_loss + emote_loss.mul_scalar(EMOTE_WEIGHT);
@@ -718,12 +737,14 @@ pub fn run(
             // pb.inc(1);
 
             // instead of pb.set_prefix(...) and pb.inc(1)
-            state.current_loss = loss_val;
-            state.avg_loss = epoch_loss / (batch_num + 1) as f32;
+            // state.current_loss = loss_val;
+            let loss_scale = 100.0; // 1 for normal, 100.0 for structured? helps see minor improvements in TUI
+            state.current_loss = loss_val * loss_scale; // Don't scale the actual loss used for backprop, just the display value.
+            state.avg_loss = (epoch_loss * loss_scale) / (batch_num + 1) as f32; // Don't scale the actual loss used for backprop, just the display value.
             state.batch = batch_num + 1;
             state.current_lr = current_lr;
             state.global_step += 1;
-            state.loss_history.push((state.global_step as f64, loss_val as f64));
+            state.loss_history.push((state.global_step as f64, loss_val as f64 * loss_scale as f64)); // Don't scale the actual loss used for backprop, just the display value.
             state.avg_loss_history.push((state.global_step as f64, state.avg_loss as f64));
 
             // optional: sliding window so chart doesn't compress
