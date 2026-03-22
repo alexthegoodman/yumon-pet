@@ -346,7 +346,15 @@ pub fn run(
     //     }
     // }
 
-    let mut ebooks = load_pdf_ebook_sentences("data/algorithms_ebook.pdf")?;
+    // let mut ebooks = load_pdf_ebook_sentences("data/algorithms_ebook.pdf")?;
+
+    // for (i, sent) in ebooks.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("ebook: {:?}", sent);
+    //     }
+    // }
+
+    let mut ebooks = load_pdf_ebook_sentences("data/stephen_hawking_a_brief_history_of_time.pdf")?;
 
     for (i, sent) in ebooks.iter().enumerate() {
         if (i < 12) {
@@ -445,8 +453,8 @@ pub fn run(
     // wiki_samples.truncate(2048);
 
     ebook_samples.shuffle(&mut rng);
-    ebook_samples.truncate(2048);
-    // ebook_samples.truncate(4096);
+    // ebook_samples.truncate(2048);
+    ebook_samples.truncate(4096);
 
     // ebooks2_samples.shuffle(&mut rng);
     // ebooks2_samples.truncate(2048);

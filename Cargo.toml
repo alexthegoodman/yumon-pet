@@ -44,3 +44,5 @@ outlines-core = "0.2.14"
 keyword_extraction = {version = "1.5", features = ["yake"]}
 rayon = "1.11.0"
 stop-words = "0.8.0"
+three-d = { version = "0.17", features = ["egui-gui"] }
+three-d-asset = { version = "0.7", features = ["gltf", "png"] }

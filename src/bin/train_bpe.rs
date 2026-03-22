@@ -80,7 +80,16 @@ pub fn main() {
         }
     }
 
-    let ebooks = load_pdf_ebook_sentences("data/algorithms_ebook.pdf");
+    // let ebooks = load_pdf_ebook_sentences("data/algorithms_ebook.pdf");
+    // let ebooks = ebooks.as_ref().expect("Couldn't get handcrafted");
+
+    // for (i, sent) in ebooks.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("ebook: {:?}", sent);
+    //     }
+    // }
+
+    let ebooks = load_pdf_ebook_sentences("data/stephen_hawking_a_brief_history_of_time.pdf");
     let ebooks = ebooks.as_ref().expect("Couldn't get handcrafted");
 
     for (i, sent) in ebooks.iter().enumerate() {
