@@ -39,7 +39,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use ratatui::{Terminal, TerminalOptions, Viewport, prelude::CrosstermBackend};
 use std::collections::HashMap;
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, CL_ID, CR_ID, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}, model::CONTEXT_DIMS, pdf::load_pdf_ebook_sentences, samples::{WorldContext, prepare_paired_samples, prepare_samples}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, CL_ID, CR_ID, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}, model::CONTEXT_DIMS, pdf::load_pdf_ebook_sentences, samples::{TrainingStage, WorldContext, prepare_paired_samples}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 use crate::brain::{
     // CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
@@ -408,16 +408,19 @@ pub fn run(
     // ebooks2.shuffle(&mut rng);
     // ebooks2.truncate(8192);
 
-    let mdx_samples = prepare_paired_samples(&mdx_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2);
+    // let training_stage = TrainingStage::Language; // first
+    let training_stage = TrainingStage::Structured; // fine-tune
+
+    let mdx_samples = prepare_paired_samples(&mdx_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     // let quote_samples = prepare_samples(&quote_sentences, &tokenizer, &keyword_index);
     // let qna_samples = prepare_samples(&qna_sentences, &tokenizer, &keyword_index);
     // let mut wiki_samples = prepare_samples(&wiki_sentences, &tokenizer, &keyword_index);
     // let dict_samples = prepare_samples(&dict_sentences, &tokenizer, &keyword_index);
-    let mut bible_samples = prepare_paired_samples(&bible_verses, &tokenizer, &keyword_index, &mut rng, 1, 2);
-    let handcrafted_samples = prepare_paired_samples(&handcrafted, &tokenizer, &keyword_index, &mut rng, 1, 2);
-    let mut notion_samples = prepare_paired_samples(&notions, &tokenizer, &keyword_index, &mut rng, 1, 2);
+    let mut bible_samples = prepare_paired_samples(&bible_verses, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
+    let handcrafted_samples = prepare_paired_samples(&handcrafted, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
+    let mut notion_samples = prepare_paired_samples(&notions, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     // let personal_samples = prepare_samples(&personals, &tokenizer, &keyword_index);
-    let mut ebook_samples = prepare_paired_samples(&ebooks, &tokenizer, &keyword_index, &mut rng, 1, 2);
+    let mut ebook_samples = prepare_paired_samples(&ebooks, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     // let mut ebooks2_samples = prepare_paired_samples(&ebooks2, &tokenizer, &keyword_index, &mut rng, 1, 2);
 
     println!(
@@ -625,48 +628,64 @@ pub fn run(
             if current_batch_size == 0 { continue; }
 
             // ── Collect everything into flat vectors (fast) ─────────────────────
-            let mut all_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
+            // let mut all_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
             let mut all_contexts: Vec<f32> = Vec::with_capacity(current_batch_size * CONTEXT_DIMS);
             let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
             let mut all_emote_targets: Vec<i32> = Vec::with_capacity(current_batch_size);
-
-            // for &i in batch_idx {
-            //     let sample = &training_samples[i];
-
-            //     // input ids
-            //     all_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
-
-            //     // context (still per-sample because of rng noise — cheap)
-            //     let class_probs = peaked_class_probs(&sample.matched_classes, &mut rng);
-            //     let ctx_flat = build_context(&class_probs, sample.emote_label, &mut rng);
-            //     all_contexts.extend(ctx_flat);
-
-            //     // language targets
-            //     all_lang_targets.extend(sample.target_labels.iter().map(|&t| t as i32));
-
-            //     // emote target
-            //     all_emote_targets.push(sample.emote_label as i32);
-            // }
+            let mut all_enc_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
+            // let mut all_dec_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
+            let mut all_dec_input_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
 
             for &i in batch_idx {
                 let sample = &training_samples[i];
 
-                all_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
+                // all_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
 
-                // ← pass sample.world instead of rebuilding from scratch
+                // // ← pass sample.world instead of rebuilding from scratch
                 let class_probs = peaked_class_probs(&sample.matched_classes, &mut rng);
                 let ctx_flat = build_context(&class_probs, sample.emote_label, &sample.world, &mut rng);
                 all_contexts.extend(ctx_flat);
 
-                all_lang_targets.extend(sample.target_labels.iter().map(|&t| t as i32));
+                // all_lang_targets.extend(sample.target_labels.iter().map(|&t| t as i32));
                 all_emote_targets.push(sample.emote_label as i32);
+
+                all_enc_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
+                // all_dec_ids.extend(sample.target_labels.iter().map(|&t| t as i32));
+
+                // Inside the for &i in batch_idx loop, after let sample = &training_samples[i];
+
+                let target_labels = &sample.target_labels;  // [tok0, tok1, ..., EOS, PAD, PAD, ...]
+
+                // Find real length (includes EOS, stops before first PAD)
+                let real_len = target_labels.iter()
+                    .position(|&t| t == PAD_TOKEN)
+                    .unwrap_or(MAX_SEQ_LEN);
+
+                // ── Decoder INPUT (exactly like generate_* loops) ─────────────
+                let mut dec_input: Vec<i32> = vec![BOS_TOKEN as i32];
+                dec_input.extend(
+                    target_labels[0..real_len.saturating_sub(1)]
+                        .iter()
+                        .map(|&t| t as i32)
+                );
+                dec_input.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
+
+                // ── Loss TARGETS (shifted correctly, includes first token + EOS) ──
+                let mut lang_targets: Vec<i32> = target_labels[0..real_len]  // ← CHANGED: start at 0
+                    .iter()
+                    .map(|&t| t as i32)
+                    .collect();
+                lang_targets.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
+
+                all_dec_input_ids.extend(dec_input);
+                all_lang_targets.extend(lang_targets);
             }
 
             // ── Stack into real batched tensors (ONE allocation) ───────────────
-            let ids_t = Tensor::<TrainBackend, 2, Int>::from_ints(
-                TensorData::new(all_ids, [current_batch_size, MAX_SEQ_LEN]),
-                &device,
-            );
+            // let ids_t = Tensor::<TrainBackend, 2, Int>::from_ints(
+            //     TensorData::new(all_ids, [current_batch_size, MAX_SEQ_LEN]),
+            //     &device,
+            // );
 
             let context_t = Tensor::<TrainBackend, 2>::from_floats(
                 TensorData::new(all_contexts, [current_batch_size, CONTEXT_DIMS]),
@@ -683,35 +702,31 @@ pub fn run(
                 &device,
             );
 
-            // ── SINGLE forward pass (this is where the 20× speedup happens) ─────
-            // let (token_logits, emote_logits, _lstm_state) = model.forward(ids_t, context_t, None);
+            let enc_t = Tensor::<TrainBackend, 2, Int>::from_ints(
+                TensorData::new(all_enc_ids, [current_batch_size, MAX_SEQ_LEN]),
+                &device,
+            );
 
-            let (token_logits, emote_logits) = model.forward(ids_t, context_t);
+            // let dec_t = Tensor::<TrainBackend, 2, Int>::from_ints(
+            //     TensorData::new(all_dec_ids, [current_batch_size, MAX_SEQ_LEN]),
+            //     &device,
+            // );
+
+            let dec_t = Tensor::<TrainBackend, 2, Int>::from_ints(  // now shifted input
+                TensorData::new(all_dec_input_ids, [current_batch_size, MAX_SEQ_LEN]),
+                &device,
+            );
+
+            // ── SINGLE forward pass (this is where the 20× speedup happens) ─────
+            // let (token_logits, emote_logits) = model.forward(ids_t, context_t);
+
+            let (token_logits, emote_logits) = model.forward(enc_t, dec_t, context_t);
 
             // ── Loss (now automatically batched) ───────────────────────────────
             let vocab = tokenizer.vocab_size();
             let logits_2d = token_logits.reshape([current_batch_size * MAX_SEQ_LEN, vocab]);  // [B*S, vocab]
 
             let lang_loss = ce_loss.forward(logits_2d, lang_target_t);
-
-            // let vocab = tokenizer.vocab_size();
-
-            // // 1. Logits: Drop the last position (nothing follows it to predict)
-            // // [B, S, V] -> [B, S-1, V]
-            // let logits_shift = token_logits.slice([0..current_batch_size, 0..MAX_SEQ_LEN - 1]);
-
-            // // 2. Targets: Drop the first position (the BOS/Prompt start which isn't predicted)
-            // // [B, S] -> [B, S-1]
-            // // We reshape the flat lang_target_t back to 2D first to slice it easily
-            // let targets_2d = lang_target_t.reshape([current_batch_size, MAX_SEQ_LEN]);
-            // let targets_shift = targets_2d.slice([0..current_batch_size, 1..MAX_SEQ_LEN]);
-
-            // // 3. Flatten for CrossEntropy
-            // let logits_flattened = logits_shift.reshape([current_batch_size * (MAX_SEQ_LEN - 1), vocab]);
-            // let targets_flattened = targets_shift.reshape([current_batch_size * (MAX_SEQ_LEN - 1)]);
-
-            // // 4. Forward Loss
-            // let lang_loss = ce_loss.forward(logits_flattened, targets_flattened);
 
             let emote_loss = ce_loss.forward(emote_logits, emote_target_t);  // [B, C] and [B]
 
@@ -738,7 +753,8 @@ pub fn run(
 
             // instead of pb.set_prefix(...) and pb.inc(1)
             // state.current_loss = loss_val;
-            let loss_scale = 100.0; // 1 for normal, 100.0 for structured? helps see minor improvements in TUI
+            // let loss_scale = 100.0; // 1 for normal, 100.0 for structured? helps see minor improvements in TUI
+            let loss_scale = 1.0; 
             state.current_loss = loss_val * loss_scale; // Don't scale the actual loss used for backprop, just the display value.
             state.avg_loss = (epoch_loss * loss_scale) / (batch_num + 1) as f32; // Don't scale the actual loss used for backprop, just the display value.
             state.batch = batch_num + 1;

@@ -7,6 +7,12 @@ use crate::brain::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, bpe::TokenizerKind, keywords
 use rand::SeedableRng;
 use rand::prelude::SliceRandom;
 
+#[derive(Clone, Copy, Debug)]
+pub enum TrainingStage {
+    Language,   // phase 1: plain sentence → sentence
+    Structured, // phase 2: sentence → JSON
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CardinalDir {
@@ -159,123 +165,123 @@ pub struct Sample {
 
 // ── prepare_samples ────────────────────────────────────────────────────────────
 
-pub fn prepare_samples(
-    sentences:     &[String],
-    tokenizer:     &TokenizerKind,
-    keyword_index: &HashMap<String, Vec<usize>>,
-) -> Vec<Sample> {
-    use rand::SeedableRng;
-    let mut rng = rand::rngs::StdRng::from_entropy();
-    let mut samples = Vec::new();
+// pub fn prepare_samples(
+//     sentences:     &[String],
+//     tokenizer:     &TokenizerKind,
+//     keyword_index: &HashMap<String, Vec<usize>>
+// ) -> Vec<Sample> {
+//     use rand::SeedableRng;
+//     let mut rng = rand::rngs::StdRng::from_entropy();
+//     let mut samples = Vec::new();
 
-    for sentence in sentences {
-        // The reply portion is just the sentence itself —
-        // the model learns to echo/continue it as natural speech
-        let (action, motion_dir) = derive_action(&WorldContext::random(&mut rng));
-        let world = WorldContext::random(&mut rng);
+//     for sentence in sentences {
+//         // The reply portion is just the sentence itself —
+//         // the model learns to echo/continue it as natural speech
+//         let (action, motion_dir) = derive_action(&WorldContext::random(&mut rng));
+//         let world = WorldContext::random(&mut rng);
 
-        // Build the JSON target string
-        // let target_json = serde_json::json!({
-        //     "action":     action.as_str(),
-        //     "motion_dir": format!("{:?}", motion_dir).to_lowercase(),
-        //     "reply":      sentence,
-        // })
-        // .to_string();
-        let target_json = serde_json::to_string_pretty(&serde_json::json!({
-            "action":     action.as_str(),
-            "motion_dir": format!("{:?}", motion_dir).to_lowercase(),
-            "reply":      sentence,
-        })).unwrap();
+//         // Build the JSON target string
+//         // let target_json = serde_json::json!({
+//         //     "action":     action.as_str(),
+//         //     "motion_dir": format!("{:?}", motion_dir).to_lowercase(),
+//         //     "reply":      sentence,
+//         // })
+//         // .to_string();
+//         let target_json = serde_json::to_string_pretty(&serde_json::json!({
+//             "action":     action.as_str(),
+//             "motion_dir": format!("{:?}", motion_dir).to_lowercase(),
+//             "reply":      sentence,
+//         })).unwrap();
 
-        // Tokenize both input (the sentence) and the JSON target
-        let input_encoded  = tokenizer.encode(sentence);
-        let target_encoded = tokenizer.encode(&target_json.clone());
+//         // Tokenize both input (the sentence) and the JSON target
+//         let input_encoded  = tokenizer.encode(sentence);
+//         let target_encoded = tokenizer.encode(&target_json.clone());
 
-        // Length guard on the target (that's what the model must generate)
-        if target_encoded.len() < (MAX_SEQ_LEN - 30)
-            || target_encoded.len() > MAX_SEQ_LEN
-        {
-            continue;
-        }
+//         // Length guard on the target (that's what the model must generate)
+//         if target_encoded.len() < (MAX_SEQ_LEN - 30)
+//             || target_encoded.len() > MAX_SEQ_LEN
+//         {
+//             continue;
+//         }
 
-        let input_ids: Vec<usize> = std::iter::once(BOS_TOKEN)
-            .chain(input_encoded.iter().cloned().take(MAX_SEQ_LEN - 1))
-            .collect();
+//         let input_ids: Vec<usize> = std::iter::once(BOS_TOKEN)
+//             .chain(input_encoded.iter().cloned().take(MAX_SEQ_LEN - 1))
+//             .collect();
 
-        // let target_labels: Vec<usize> = target_encoded
-        //     .iter()
-        //     .cloned()
-        //     .take(MAX_SEQ_LEN - 1)
-        //     .chain(std::iter::once(EOS_TOKEN))
-        //     .collect();
+//         // let target_labels: Vec<usize> = target_encoded
+//         //     .iter()
+//         //     .cloned()
+//         //     .take(MAX_SEQ_LEN - 1)
+//         //     .chain(std::iter::once(EOS_TOKEN))
+//         //     .collect();
 
-        // let pad = |mut v: Vec<usize>| -> Vec<usize> {
-        //     v.resize(MAX_SEQ_LEN, PAD_TOKEN);
-        //     v
-        // };
+//         // let pad = |mut v: Vec<usize>| -> Vec<usize> {
+//         //     v.resize(MAX_SEQ_LEN, PAD_TOKEN);
+//         //     v
+//         // };
 
-        // ── Concatenate prompt + JSON target into one sequence ────────────────
-        let combined: Vec<usize> = std::iter::once(BOS_TOKEN)
-            .chain(input_encoded.iter().cloned())
-            .chain(target_encoded.iter().cloned())
-            .chain(std::iter::once(EOS_TOKEN))
-            .collect();
+//         // ── Concatenate prompt + JSON target into one sequence ────────────────
+//         let combined: Vec<usize> = std::iter::once(BOS_TOKEN)
+//             .chain(input_encoded.iter().cloned())
+//             .chain(target_encoded.iter().cloned())
+//             .chain(std::iter::once(EOS_TOKEN))
+//             .collect();
 
-        if combined.len() > MAX_SEQ_LEN { continue; }
+//         if combined.len() > MAX_SEQ_LEN { continue; }
 
-        // ── Target labels: PAD over prompt, loss only on JSON portion ─────────
-        let target_labels: Vec<usize> = std::iter::repeat(PAD_TOKEN)
-            .take(1 + input_encoded.len())          // BOS + prompt = no loss
-            .chain(target_encoded.iter().cloned())  // JSON = compute loss here
-            .chain(std::iter::once(EOS_TOKEN))
-            .collect();
+//         // ── Target labels: PAD over prompt, loss only on JSON portion ─────────
+//         let target_labels: Vec<usize> = std::iter::repeat(PAD_TOKEN)
+//             .take(1 + input_encoded.len())          // BOS + prompt = no loss
+//             .chain(target_encoded.iter().cloned())  // JSON = compute loss here
+//             .chain(std::iter::once(EOS_TOKEN))
+//             .collect();
 
-        let pad = |mut v: Vec<usize>| -> Vec<usize> {
-            v.resize(MAX_SEQ_LEN, PAD_TOKEN);
-            v
-        };
+//         let pad = |mut v: Vec<usize>| -> Vec<usize> {
+//             v.resize(MAX_SEQ_LEN, PAD_TOKEN);
+//             v
+//         };
 
-        let input_ids     = pad(combined);
-        let target_labels = pad(target_labels);
+//         let input_ids     = pad(combined);
+//         let target_labels = pad(target_labels);
 
-        // Build the 132-float context vector:
-        //   [class_probs:100][user_emote_probs:7][user_emote_onehot:7][world:18]
-        let matched   = matched_classes(sentence, keyword_index);
-        let emote_lbl = keyword_emote_label(sentence);
+//         // Build the 132-float context vector:
+//         //   [class_probs:100][user_emote_probs:7][user_emote_onehot:7][world:18]
+//         let matched   = matched_classes(sentence, keyword_index);
+//         let emote_lbl = keyword_emote_label(sentence);
 
-        let mut ctx = Vec::with_capacity(132);
-        // class_probs: uniform over matched classes, else near-uniform
-        let mut class_probs = vec![1.0f32 / 100.0; 100];
-        for &c in &matched {
-            class_probs[c] = 0.5;
-        }
-        ctx.extend_from_slice(&class_probs);
-        // user_emote_probs: one-hot at emote_lbl
-        let mut emote_probs = vec![0.0f32; 7];
-        emote_probs[emote_lbl.min(6)] = 1.0;
-        ctx.extend_from_slice(&emote_probs);
-        // user_emote_onehot (same for training)
-        ctx.extend_from_slice(&emote_probs);
-        // world spatial context
-        ctx.extend_from_slice(&world.to_context_slice());
+//         let mut ctx = Vec::with_capacity(132);
+//         // class_probs: uniform over matched classes, else near-uniform
+//         let mut class_probs = vec![1.0f32 / 100.0; 100];
+//         for &c in &matched {
+//             class_probs[c] = 0.5;
+//         }
+//         ctx.extend_from_slice(&class_probs);
+//         // user_emote_probs: one-hot at emote_lbl
+//         let mut emote_probs = vec![0.0f32; 7];
+//         emote_probs[emote_lbl.min(6)] = 1.0;
+//         ctx.extend_from_slice(&emote_probs);
+//         // user_emote_onehot (same for training)
+//         ctx.extend_from_slice(&emote_probs);
+//         // world spatial context
+//         ctx.extend_from_slice(&world.to_context_slice());
 
-        debug_assert_eq!(ctx.len(), 132);
+//         debug_assert_eq!(ctx.len(), 132);
 
-        samples.push(Sample {
-            input_ids:       input_ids,
-            target_labels:   target_labels,
-            context_vec:     ctx,
-            emote_label:     emote_lbl,
-            matched_classes: matched,
-            action,
-            motion_dir,
-            world,
-            target_json
-        });
-    }
+//         samples.push(Sample {
+//             input_ids:       input_ids,
+//             target_labels:   target_labels,
+//             context_vec:     ctx,
+//             emote_label:     emote_lbl,
+//             matched_classes: matched,
+//             action,
+//             motion_dir,
+//             world,
+//             target_json
+//         });
+//     }
 
-    samples
-}
+//     samples
+// }
 
 pub fn prepare_paired_samples(
     sentences:           &[String],
@@ -284,6 +290,7 @@ pub fn prepare_paired_samples(
     rng:                 &mut impl Rng,
     min_shared_keywords: usize,
     max_pairs_per_sent:  usize,
+    stage: TrainingStage,
 ) -> Vec<Sample> {
     println!("prepare paired samples");
 
@@ -340,43 +347,51 @@ pub fn prepare_paired_samples(
             let world  = WorldContext::random(&mut rng_local);
             let (action, motion_dir) = derive_action(&world);
 
-            let target_json = serde_json::to_string_pretty(&serde_json::json!({
-                "action":     action.as_str(),
-                "motion_dir": format!("{:?}", motion_dir).to_lowercase(),
-                "reply":      sent_b,
-            })).unwrap();
-
-            let target_encoded: Vec<usize> = match tokenizer {
-                TokenizerKind::Bpe(b) => b.encode_raw(&target_json)
-                    .unwrap_or_default()
-                    .into_iter().map(|x| x as usize).collect(),
-                TokenizerKind::Char(c) => c.encode(&target_json),
+            // ── Target depends on training stage ──────────────────────────────
+            let (target_encoded, target_json) = match stage {
+                TrainingStage::Language => {
+                    let encoded = tokenizer.encode(sent_b);
+                    let json = sent_b.clone();
+                    (encoded, json)
+                }
+                TrainingStage::Structured => {
+                    let world = WorldContext::random(&mut rng_local);
+                    let (action, motion_dir) = derive_action(&world);
+                    let json = serde_json::to_string_pretty(&serde_json::json!({
+                        "action":     action.as_str(),
+                        "motion_dir": format!("{:?}", motion_dir).to_lowercase(),
+                        "reply":      sent_b,
+                    })).unwrap();
+                    let encoded = match tokenizer {
+                        TokenizerKind::Bpe(b) => b.encode_raw(&json)
+                            .unwrap_or_default()
+                            .into_iter().map(|x| x as usize).collect(),
+                        TokenizerKind::Char(c) => c.encode(&json),
+                    };
+                    (encoded, json)
+                }
             };
 
             // Length guard on target — that's what the model must generate
             if target_encoded.is_empty()
                 || target_encoded.len() > MAX_SEQ_LEN - 2 { continue; }
 
-            let target_labels: Vec<usize> = std::iter::repeat(PAD_TOKEN)
-                .take(input_encoded.len())       // mask prompt — no loss here
-                .chain(target_encoded.iter().cloned())
+            let target_labels: Vec<usize> = target_encoded.iter().cloned()
                 .chain(std::iter::once(EOS_TOKEN))
                 .collect();
 
-            // // ── Concatenate prompt + JSON target into one sequence ────────────────
-            let combined: Vec<usize> = std::iter::once(BOS_TOKEN)
+            let enc_input: Vec<usize> = std::iter::once(BOS_TOKEN)
                 .chain(input_encoded.iter().cloned())
-                .chain(target_encoded.iter().cloned())
                 .collect();
 
-            if combined.len() > MAX_SEQ_LEN { continue; }
+            if enc_input.len() > MAX_SEQ_LEN { continue; }
 
             let pad = |mut v: Vec<usize>| -> Vec<usize> {
                 v.resize(MAX_SEQ_LEN, PAD_TOKEN);
                 v
             };
 
-            let input_ids     = pad(combined);
+            let input_ids     = pad(enc_input);
             let target_labels = pad(target_labels);
 
             let emote_lbl   = keyword_emote_label(sent_b);  // reply drives emote
