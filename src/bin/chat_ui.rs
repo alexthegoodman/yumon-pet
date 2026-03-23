@@ -111,7 +111,7 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let brain_cp = "checkpoints/brain-stephen-time".to_string();
+    let brain_cp = "checkpoints/brain".to_string();
     let mut app = AppState::new(brain_cp.clone());
 
     let (tx_user, rx_user) = mpsc::channel::<(String, usize, WorldContext)>();
@@ -152,9 +152,10 @@ fn main() -> Result<()> {
 
         while let Ok((prompt, user_emote_idx, world)) = rx_user.recv() {
             // let result = brain_model.generate_unmasked( // good for debug or for TrainingStage::Language?
-            let result = brain_model.generate_structured( // good for TrainingStage::Structured JSON?
+            let result = brain_model.generate_unmasked_parsed(
+            // let result = brain_model.generate_structured( // good for TrainingStage::Structured JSON?
                 &tokenizer,
-                &index,
+                // &index,
                 &world,
                 &class_probs,
                 &emote_probs,

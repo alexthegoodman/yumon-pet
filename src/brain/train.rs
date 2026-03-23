@@ -39,7 +39,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use ratatui::{Terminal, TerminalOptions, Viewport, prelude::CrosstermBackend};
 use std::collections::HashMap;
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, CL_ID, CR_ID, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences}, model::CONTEXT_DIMS, pdf::load_pdf_ebook_sentences, samples::{TrainingStage, WorldContext, prepare_paired_samples}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, CL_ID, CR_ID, TokenizerKind}, chart::{TrainingState, render}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences, load_txt_sentences}, model::CONTEXT_DIMS, pdf::load_pdf_ebook_sentences, samples::{TrainingStage, WorldContext, prepare_paired_samples}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 use crate::brain::{
     // CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
@@ -354,11 +354,19 @@ pub fn run(
     //     }
     // }
 
-    let mut ebooks = load_pdf_ebook_sentences("data/stephen_hawking_a_brief_history_of_time.pdf")?;
+    // let mut ebooks = load_pdf_ebook_sentences("data/stephen_hawking_a_brief_history_of_time.pdf")?;
 
-    for (i, sent) in ebooks.iter().enumerate() {
+    // for (i, sent) in ebooks.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("ebook: {:?}", sent);
+    //     }
+    // }
+
+    let mut txt = load_txt_sentences("data/creative_stories.txt")?;
+
+    for (i, sent) in txt.iter().enumerate() {
         if (i < 12) {
-            println!("ebook: {:?}", sent);
+            println!("txt: {:?}", sent);
         }
     }
 
@@ -410,8 +418,11 @@ pub fn run(
     notions.shuffle(&mut rng);
     notions.truncate(8192);
 
-    ebooks.shuffle(&mut rng);
-    ebooks.truncate(8192);
+    txt.shuffle(&mut rng);
+    txt.truncate(8192);
+
+    // ebooks.shuffle(&mut rng);
+    // ebooks.truncate(8192);
 
     // ebooks2.shuffle(&mut rng);
     // ebooks2.truncate(8192);
@@ -428,7 +439,8 @@ pub fn run(
     let handcrafted_samples = prepare_paired_samples(&handcrafted, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     let mut notion_samples = prepare_paired_samples(&notions, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     // let personal_samples = prepare_samples(&personals, &tokenizer, &keyword_index);
-    let mut ebook_samples = prepare_paired_samples(&ebooks, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
+    // let mut ebook_samples = prepare_paired_samples(&ebooks, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
+    let mut txt_samples = prepare_paired_samples(&txt, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     // let mut ebooks2_samples = prepare_paired_samples(&ebooks2, &tokenizer, &keyword_index, &mut rng, 1, 2);
 
     println!(
@@ -441,7 +453,7 @@ pub fn run(
         handcrafted_samples.len(),
         notion_samples.len(),
         // personal_samples.len(),
-        ebook_samples.len(),
+        txt_samples.len(),
         // ebooks2_samples.len()
     );
 
@@ -452,9 +464,9 @@ pub fn run(
     // wiki_samples.shuffle(&mut rng);
     // wiki_samples.truncate(2048);
 
-    ebook_samples.shuffle(&mut rng);
+    txt_samples.shuffle(&mut rng);
     // ebook_samples.truncate(2048);
-    ebook_samples.truncate(4096);
+    txt_samples.truncate(4096);
 
     // ebooks2_samples.shuffle(&mut rng);
     // ebooks2_samples.truncate(2048);
@@ -465,13 +477,12 @@ pub fn run(
     // notion_samples.truncate(4096);
     
     // training_samples.extend(wiki_samples); // Yumon expresses that he is confused by wiki material
-    training_samples.extend(mdx_samples);
     // training_samples.extend(quote_samples);
     // training_samples.extend(dict_samples);
     // training_samples.extend(qna_samples);
     training_samples.extend(bible_samples);
     training_samples.extend(notion_samples);
-    training_samples.extend(ebook_samples);
+    training_samples.extend(txt_samples);
     // training_samples.extend(ebooks2_samples);
     
     training_samples.shuffle(&mut rng);
@@ -480,6 +491,7 @@ pub fn run(
     // training_samples.truncate(1024); 
     // training_samples.truncate(2048); 
 
+    training_samples.extend(mdx_samples);
     training_samples.extend(handcrafted_samples); // always add after to include all of these
     // training_samples.extend(personal_samples);
 

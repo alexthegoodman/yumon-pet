@@ -152,12 +152,13 @@ pub fn load_csv_bible(bible_path: &str) -> Result<Vec<String>> {
         let verse = record.get(4).unwrap_or("").trim().to_string();
 
         // if (b == "40" || b == "41" || b == "42" || b == "43") { // gospel only
+        if (b == "20") { // proverbs
             quotes.push(verse);
 
             count = count + 1;
 
             if count > 20_000 { break; }
-        // }
+        }
     }
 
     println!("✅ Loaded {} verses from {bible_path}", quotes.len());
@@ -212,6 +213,26 @@ pub fn load_handcrafted_sentences(dict_path: &str) -> Result<Vec<String>> {
     }
 
     println!("✅ Loaded {} handcrafted sentences", sentences.len());
+    Ok(sentences)
+}
+
+pub fn load_txt_sentences(path: &str) -> Result<Vec<String>> {
+    println!("📖 Loading txt: {path}");
+
+    let content = std::fs::read_to_string(path)?;
+    let mut sentences = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        for sent in trimmed.split(".") {
+            if is_good_sentence(&sent) {
+                sentences.push(sent.to_string());
+            }
+        }
+    }
+
+    println!("✅ Loaded {} txt sentences", sentences.len());
     Ok(sentences)
 }
 

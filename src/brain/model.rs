@@ -27,7 +27,7 @@ use anyhow::Result;
 use outlines_core::{index::Index, prelude::Vocabulary};
 use serde::{Serialize, Deserialize};
 
-use crate::{brain::{bpe::{BpeTokenizer, EOS_ID, TokenizerKind}, samples::{Action, CardinalDir, WorldContext}, train::MAX_SEQ_LEN}, vision::EMOTE_CLASSES};
+use crate::{brain::{bpe::{BpeTokenizer, EOS_ID, TokenizerKind}, fixer::fix_json_syntax, samples::{Action, CardinalDir, WorldContext}, train::MAX_SEQ_LEN}, vision::EMOTE_CLASSES};
 use super::{
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN},
     // CONTEXT_DIMS,
@@ -56,252 +56,6 @@ pub const FF_DIM:       usize = 256;
 pub const TEMPERATURE: f32  = 0.95;
 pub const TOP_K:       usize = 10;
 
-// #[derive(Module, Debug)]
-// pub struct YumonBrain<B: Backend> {
-//     embedding:        Embedding<B>,
-//     pos_embedding:    Embedding<B>,   // learned positional
-//     transformer:      TransformerEncoder<B>,
-//     norm:             LayerNorm<B>,
-//     dropout:          Dropout,
-//     token_head:       Linear<B>,
-//     yumon_emote_head: Linear<B>,
-// }
-
-// #[derive(Config, Debug)]
-// pub struct YumonBrainConfig {
-//     pub vocab_size:   usize,
-//     #[config(default = 0.05)]
-//     pub dropout_rate: f64,
-// }
-
-// impl YumonBrainConfig {
-//     pub fn init<B: Backend>(&self, device: &B::Device) -> YumonBrain<B> {
-//         let transformer_config = TransformerEncoderConfig::new(
-//             EMBED_DIM,
-//             FF_DIM,
-//             ATTN_HEADS,
-//             N_LAYERS,
-//         )
-//         .with_dropout(self.dropout_rate);
-
-//         YumonBrain {
-//             embedding:        EmbeddingConfig::new(self.vocab_size, EMBED_DIM).init(device),
-//             pos_embedding:    EmbeddingConfig::new(MAX_SEQ_LEN, EMBED_DIM).init(device),
-//             transformer:      transformer_config.init(device),
-//             norm:             LayerNormConfig::new(EMBED_DIM).init(device),
-//             dropout:          DropoutConfig::new(self.dropout_rate).init(),
-//             token_head:       LinearConfig::new(EMBED_DIM, self.vocab_size).init(device),
-//             yumon_emote_head: LinearConfig::new(EMBED_DIM, EMOTE_CLASSES).init(device),
-//         }
-//     }
-// }
-
-// impl<B: Backend> YumonBrain<B> {
-//     pub fn forward(
-//         &self,
-//         tokens:  Tensor<B, 2, Int>,
-//         context: Tensor<B, 2>,
-//         _prev_state: Option<()>,   // no recurrent state needed, kept for API compat
-//     ) -> (Tensor<B, 3>, Tensor<B, 2>, ()) {
-//         let [batch, seq_len] = tokens.dims();
-
-//         // 1. Token + positional embeddings
-//         let tok_emb = self.embedding.forward(tokens.clone());   // [batch, seq, embed]
-
-//         let positions = Tensor::<B, 2, Int>::from_ints(
-//             TensorData::new(
-//                 (0..seq_len as i32).collect::<Vec<_>>()
-//                     .into_iter()
-//                     .cycle()
-//                     .take(batch * seq_len)
-//                     .collect::<Vec<_>>(),
-//                 [batch, seq_len],
-//             ),
-//             &tok_emb.device(),
-//         );
-//         let pos_emb = self.pos_embedding.forward(positions);    // [batch, seq, embed]
-
-//         let x = self.dropout.forward(tok_emb + pos_emb);       // [batch, seq, embed]
-
-//         // 2. Causal mask — prevents attending to future tokens
-//         let mask_attn = Tensor::<B, 3, Bool>::tril_mask(
-//             [batch, seq_len, seq_len], 0, &x.device()
-//         );
-
-//         // 3. Padding mask from PAD tokens
-//         let mask_pad = tokens.equal_elem(PAD_TOKEN as u32);     // [batch, seq], true = pad
-
-//         // 4. Transformer encoder (GPT-style causal)
-//         let input = TransformerEncoderInput::new(x)
-//             .mask_attn(mask_attn)
-//             .mask_pad(mask_pad);
-
-//         let x = self.transformer.forward(input);                // [batch, seq, embed]
-//         let x = self.norm.forward(x);
-
-//         // 5. Heads
-//         let token_logits = self.token_head.forward(x.clone());  // [batch, seq, vocab]
-
-//         let last = x
-//             .slice([0..batch, seq_len - 1..seq_len])
-//             .reshape([batch, EMBED_DIM]);
-//         let emote_logits = self.yumon_emote_head.forward(last);
-
-//         (token_logits, emote_logits, ())
-//     }
-
-//     pub fn generate(
-//         &self,
-//         tokenizer:      &TokenizerKind,
-//         class_probs:    &[f32],
-//         emote_probs:    &[f32],
-//         user_emote_idx: usize,
-//         seed_text:      &str,   // completion prefix — Yumon continues from here
-//         max_tokens:     usize,
-//         device:         &B::Device,
-//     ) -> GenerationResult {
-//         // println!("Generate {:?}", seed_text);
-
-//         // Build static context tensor
-//         let mut ctx_flat = Vec::with_capacity(CONTEXT_DIMS);
-//         ctx_flat.extend_from_slice(class_probs);
-//         ctx_flat.extend_from_slice(emote_probs);
-//         let mut onehot = vec![0.0f32; EMOTE_CLASSES];
-//         onehot[user_emote_idx.min(EMOTE_CLASSES - 1)] = 1.0;
-//         ctx_flat.extend_from_slice(&onehot);
-
-//         let context_t = Tensor::<B, 2>::from_floats(
-//             TensorData::new(ctx_flat, [1, CONTEXT_DIMS]),
-//             device,
-//         );
-
-//         // Seed token sequence — the prefix Yumon completes
-//         let mut token_ids: Vec<usize> = if seed_text.is_empty() {
-//             vec![BOS_TOKEN]
-//         } else {
-//             std::iter::once(BOS_TOKEN)
-//                 .chain(tokenizer.encode(seed_text).into_iter())
-//                 .collect()
-//         };
-
-//         let mut rng = rand::thread_rng();
-//         let mut last_emote_logits: Option<Vec<f32>> = None;
-//         // let mut last_state = None;
-
-//         for _ in 0..max_tokens {
-//             // Clamp + pad to MAX_SEQ_LEN
-//             let clamped_len = token_ids.len().min(MAX_SEQ_LEN);
-//             let mut padded = token_ids[token_ids.len() - clamped_len..].to_vec();
-//             padded.resize(MAX_SEQ_LEN, PAD_TOKEN);
-
-//             let tokens_t = Tensor::<B, 2, Int>::from_ints(
-//                 TensorData::new(
-//                     padded.iter().map(|&t| t as i32).collect::<Vec<_>>(),
-//                     [1, MAX_SEQ_LEN],
-//                 ),
-//                 device,
-//             );
-
-//             let (token_logits, emote_logits, lstm_state) =
-//                 self.forward(tokens_t, context_t.clone(), None);
-
-//             // last_state = Some(lstm_state);
-
-//             // Sample from the last real position
-//             let last_idx  = clamped_len - 1;
-//             let vocab     = tokenizer.vocab_size();
-//             let last_logits = token_logits
-//                 .slice([0..1, last_idx..last_idx + 1, 0..vocab])
-//                 .reshape([vocab]);
-
-//             let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
-//             last_emote_logits = Some(emote_logits.to_data().to_vec::<f32>().unwrap());
-
-//             let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
-//             // println!("Check token {:?}", next_token);
-//             if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
-//             token_ids.push(next_token);
-//         }
-
-//         // Decode only the generated portion (after seed)
-//         let seed_len = if seed_text.is_empty() { 1 } 
-//                        else { 1 + tokenizer.encode(seed_text).len() };
-//         let reply = tokenizer.decode(&token_ids[seed_len..]);
-//         let yumon_emote_idx = last_emote_logits.as_deref().map(argmax).unwrap_or(4);
-
-//         GenerationResult { reply, yumon_emote_idx }
-//     }
-
-//     // ── Checkpoint I/O ────────────────────────────────────────────────────────
-
-//     pub fn save(&self, directory: &str, tokenizer: &TokenizerKind, metadata: &BrainMetadata) -> Result<()> {
-//         let dir = std::path::Path::new(directory);
-//         std::fs::create_dir_all(dir)?;
-
-//         let meta_json = serde_json::to_string_pretty(metadata)?;
-//         std::fs::write(dir.join("metadata.json"), meta_json)?;
-
-//         tokenizer.save(dir.join("tokenizer.json").to_str().unwrap())?;
-
-//         let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
-//         self.clone().save_file(dir.join("model"), &recorder)
-//             .map_err(|e| anyhow::anyhow!("save_file: {e:?}"))?;
-
-//         // println!("✅ Brain checkpoint saved → {directory}");
-//         Ok(())
-//     }
-
-//     pub fn load(directory: &str, device: &B::Device) -> Result<(Self, TokenizerKind)> {
-//         let dir = std::path::Path::new(directory);
-
-//         let meta_json = std::fs::read_to_string(dir.join("metadata.json"))?;
-//         let metadata: BrainMetadata = serde_json::from_str(&meta_json)?;
-
-//         // let tokenizer = Tokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?;
-
-//         let use_bpe = true;
-
-//         let tokenizer = if use_bpe {
-//             TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?)
-//         } else {
-//             TokenizerKind::Char(Tokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?)
-//         };
-
-//         let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
-//         let record   = recorder.load(dir.join("model").into(), device)
-//             .map_err(|e| anyhow::anyhow!("load: {e:?}"))?;
-//         let model    = YumonBrainConfig::new(metadata.vocab_size).init::<B>(device)
-//                           .load_record(record);
-
-//         Ok((model, tokenizer))
-//     }
-
-//     pub fn load_app(directory: &str, device: &B::Device) -> Result<(Self, TokenizerKind)> {
-//         let dir = std::path::Path::new(directory);
-
-//         let meta_json = std::fs::read_to_string(dir.join("metadata.json"))?;
-//         let metadata: BrainMetadata = serde_json::from_str(&meta_json)?;
-
-//         // let tokenizer = Tokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?;
-
-//         let use_bpe = true;
-
-//         let tokenizer = if use_bpe {
-//             TokenizerKind::Bpe(BpeTokenizer::load("../../yumon-pet/yumon_bpe")?)
-//         } else {
-//             TokenizerKind::Char(Tokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?)
-//         };
-
-//         let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
-//         let record   = recorder.load(dir.join("model").into(), device)
-//             .map_err(|e| anyhow::anyhow!("load: {e:?}"))?;
-//         let model    = YumonBrainConfig::new(metadata.vocab_size).init::<B>(device)
-//                           .load_record(record);
-
-//         Ok((model, tokenizer))
-//     }
-// }
-
 // ── CONTEXT_DIMS update ────────────────────────────────────────────────────────
 // Change this constant wherever it's defined:
 pub const CONTEXT_DIMS: usize = 132;  // was 114, +18 for world spatial context
@@ -315,22 +69,6 @@ pub const YUMON_SCHEMA: &str = r#"{
     },
     "required": ["action", "motion_dir", "reply"]
 }"#;
-
-// ── Updated forward() ─────────────────────────────────────────────────────────
-// Only change: accepts pre-built context_vec instead of raw components.
-// The tensor construction that was scattered across call sites moves here cleanly.
-
-// // ── Model struct — swap Encoder for Decoder ───────────────────────────────────
-// #[derive(Module, Debug)]
-// pub struct YumonBrain<B: Backend> {
-//     embedding:        Embedding<B>,
-//     pos_embedding:    Embedding<B>,
-//     transformer:      TransformerDecoder<B>,   // ← changed
-//     norm:             LayerNorm<B>,
-//     dropout:          Dropout,
-//     token_head:       Linear<B>,
-//     yumon_emote_head: Linear<B>,
-// }
 
 #[derive(Module, Debug)]
 pub struct YumonBrain<B: Backend> {
@@ -380,10 +118,6 @@ impl YumonBrainConfig {
         .with_dropout(self.dropout_rate);
 
         YumonBrain {
-            // embedding:        EmbeddingConfig::new(self.vocab_size, EMBED_DIM).init(device),
-            // pos_embedding:    EmbeddingConfig::new(MAX_SEQ_LEN, EMBED_DIM).init(device),
-            // transformer:      transformer_config.init(device),
-            // norm:             LayerNormConfig::new(EMBED_DIM).init(device),
             enc_embedding:        EmbeddingConfig::new(self.vocab_size, EMBED_DIM).init(device),
             enc_pos_embedding:    EmbeddingConfig::new(MAX_SEQ_LEN, EMBED_DIM).init(device),
             encoder:                encoder_config.init(device),
@@ -404,58 +138,6 @@ impl YumonBrainConfig {
 }
 
 impl<B: Backend> YumonBrain<B> {
-    // pub fn forward(
-    //     &self,
-    //     tokens:      Tensor<B, 2, Int>,
-    //     context_vec: Tensor<B, 2>,
-    // ) -> (Tensor<B, 3>, Tensor<B, 2>) {
-    //     let [batch, seq_len] = tokens.dims();
-
-    //     let tok_emb = self.embedding.forward(tokens.clone());
-
-    //     let positions = Tensor::<B, 2, Int>::from_ints(
-    //         TensorData::new(
-    //             (0..seq_len as i32)
-    //                 .cycle()
-    //                 .take(batch * seq_len)
-    //                 .collect::<Vec<_>>(),
-    //             [batch, seq_len],
-    //         ),
-    //         &tok_emb.device(),
-    //     );
-    //     let pos_emb = self.pos_embedding.forward(positions);
-    //     let x = self.dropout.forward(tok_emb + pos_emb);
-
-    //     // ── Causal mask — decoder handles this internally but we pass pad mask ─
-    //     let mask_pad = tokens.equal_elem(PAD_TOKEN as u32);
-
-    //     let mask_attn = Tensor::<B, 3, Bool>::tril_mask(
-    //         [batch, seq_len, seq_len], 0, &x.device()
-    //     );
-
-    //     // TransformerDecoder in decoder-only mode: pass x as both target and memory
-    //     // The causal mask is applied automatically inside TransformerDecoder
-    //     let input = TransformerDecoderInput::new(x.clone(), x)
-    //         // .memory_mask_attn(mask_attn) // need?
-    //         // .memory_mask_pad(mask_pad) // need?
-    //         .target_mask_attn(mask_attn) // need
-    //         .target_mask_pad(mask_pad);
-
-    //     let x = self.transformer.forward(input);
-    //     let x = self.norm.forward(x);
-
-    //     let token_logits = self.token_head.forward(x.clone());
-
-    //     let last = x
-    //         .slice([0..batch, seq_len - 1..seq_len])
-    //         .reshape([batch, EMBED_DIM]);
-    //     let emote_logits = self.yumon_emote_head.forward(last);
-
-    //     let _ = context_vec;
-
-    //     (token_logits, emote_logits)
-    // }
-
     pub fn encode(
         &self,
         enc_tokens:  Tensor<B, 2, Int>,
@@ -553,182 +235,6 @@ impl<B: Backend> YumonBrain<B> {
 
         Ok(index)
     }
-
-    // ── generate_structured() ─────────────────────────────────────────────────
-
-    // pub fn generate_structured(
-    //     &self,
-    //     tokenizer:      &TokenizerKind,
-    //     index:          &Index,   // pre-built at startup
-    //     world:          &WorldContext,
-    //     class_probs:    &[f32],
-    //     emote_probs:    &[f32],
-    //     user_emote_idx: usize,
-    //     seed_text:      &str,
-    //     max_tokens:     usize,
-    //     device:         &B::Device,
-    // ) -> GenerationResult {
-    //     // ── Build context tensor (132 floats) ──────────────────────────────────
-    //     let mut ctx_flat = Vec::with_capacity(CONTEXT_DIMS);
-    //     ctx_flat.extend_from_slice(class_probs);
-    //     ctx_flat.extend_from_slice(emote_probs);
-    //     let mut onehot = vec![0.0f32; EMOTE_CLASSES];
-    //     onehot[user_emote_idx.min(EMOTE_CLASSES - 1)] = 1.0;
-    //     ctx_flat.extend_from_slice(&onehot);
-    //     ctx_flat.extend_from_slice(&world.to_context_slice());
-    //     debug_assert_eq!(ctx_flat.len(), CONTEXT_DIMS);
-
-    //     let context_t = Tensor::<B, 2>::from_floats(
-    //         TensorData::new(ctx_flat, [1, CONTEXT_DIMS]),
-    //         device,
-    //     );
-
-    //     // ── Seed tokens ────────────────────────────────────────────────────────
-    //     let mut token_ids: Vec<usize> = if seed_text.is_empty() {
-    //         vec![BOS_TOKEN]
-    //     } else {
-    //         std::iter::once(BOS_TOKEN)
-    //             .chain(tokenizer.encode(seed_text))
-    //             .collect()
-    //     };
-
-    //     // ── FSM state ──────────────────────────────────────────────────────────
-    //     let mut fsm_state = index.initial_state();
-    //     let final_states  = index.final_states();
-
-    //     let mut rng = rand::thread_rng();
-    //     let mut last_emote_logits: Option<Vec<f32>> = None;
-
-    //      let mut debug_allowed_count: Option<usize> = None;
-    //     let mut debug_fsm_state = fsm_state;
-
-    //     // Encode once
-    //     // let memory = self.encode(enc_tokens_t, context_t);
-
-    //     // // Decode step by step
-    //     // let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
-
-    //     // for _ in 0..max_tokens {
-    //     //     let dec_tokens_t = /* tensor from dec_ids */;
-    //     //     let (token_logits, emote_logits) = self.decode(dec_tokens_t, memory.clone());
-            
-    //     //     // sample, FSM advance, push token, check stops as before
-    //     // }
-
-    //     for _ in 0..max_tokens {
-    //         // ── Forward pass ───────────────────────────────────────────────────
-    //         let clamped_len = token_ids.len().min(MAX_SEQ_LEN);
-    //         let mut padded  = token_ids[token_ids.len() - clamped_len..].to_vec();
-    //         padded.resize(MAX_SEQ_LEN, PAD_TOKEN);
-
-    //         let tokens_t = Tensor::<B, 2, Int>::from_ints(
-    //             TensorData::new(
-    //                 padded.iter().map(|&t| t as i32).collect::<Vec<_>>(),
-    //                 [1, MAX_SEQ_LEN],
-    //             ),
-    //             device,
-    //         );
-
-    //         let (token_logits, emote_logits) =
-    //             self.forward(tokens_t, context_t.clone());
-
-    //         last_emote_logits = Some(emote_logits.to_data().to_vec::<f32>().unwrap());
-
-    //         let last_idx    = clamped_len - 1;
-    //         let vocab_size  = tokenizer.vocab_size();
-    //         let last_logits = token_logits
-    //             .slice([0..1, last_idx..last_idx + 1, 0..vocab_size])
-    //             .reshape([vocab_size]);
-
-    //         let mut logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
-
-    //         // ── Apply outlines mask ────────────────────────────────────────────
-
-    //         // inside the loop, replace the masking block:
-    //         let allowed = index.allowed_tokens(&fsm_state);
-    //         if debug_allowed_count.is_none() {
-    //             debug_allowed_count = Some(allowed.as_ref().map(|a| a.len()).unwrap_or(0));
-    //         }
-    //         debug_fsm_state = fsm_state;
-
-    //         if let Some(allowed) = allowed {
-    //             let mut masked = vec![f32::NEG_INFINITY; logits_vec.len()];
-    //             for &token_id in &allowed {
-    //                 let idx = token_id as usize;
-    //                 if idx < masked.len() {
-    //                     masked[idx] = logits_vec[idx];
-    //                 }
-    //             }
-    //             logits_vec = masked;
-    //         }
-
-    //         // ── Sample ─────────────────────────────────────────────────────────
-    //         let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
-
-    //         // ── Advance FSM ────────────────────────────────────────────────────
-    //         // fsm_state = index
-    //         //     .next_state(&fsm_state, &(next_token as u32))
-    //         //     .unwrap_or(fsm_state);  // stay put if transition undefined
-
-    //         if let Some(state) = index
-    //             .next_state(&fsm_state, &(next_token as u32)) {
-    //             token_ids.push(next_token);
-
-    //             fsm_state = state;
-
-    //             // exit if FSM already reached a final state
-    //             if index.final_states().contains(&fsm_state) { break; }
-    //             // Hard stops   
-    //             if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
-    //         }
-    //     }
-
-    //     // ── Decode and parse ───────────────────────────────────────────────────
-    //     let seed_len = if seed_text.is_empty() {
-    //         1
-    //     } else {
-    //         1 + tokenizer.encode(seed_text).len()
-    //     };
-
-    //     let raw_output = tokenizer.decode(&token_ids[seed_len..]);
-
-    //     // eprintln!("raw_output: {:?}", raw_output);  // temporary
-
-    //     let parsed: serde_json::Value =
-    //         serde_json::from_str(&raw_output).unwrap_or(serde_json::json!({
-    //             "action":     "idle",
-    //             "motion_dir": "none",
-    //             "reply":      ""
-    //         }));
-
-    //     let action = match parsed["action"].as_str().unwrap_or("idle") {
-    //         "speak"  => Action::Speak,
-    //         "build"  => Action::Build,
-    //         "travel" => Action::Travel,
-    //         "use"    => Action::Use,
-    //         _        => Action::Idle,
-    //     };
-
-    //     let motion_dir = match parsed["motion_dir"].as_str().unwrap_or("none") {
-    //         "north" => CardinalDir::North,
-    //         "south" => CardinalDir::South,
-    //         "east"  => CardinalDir::East,
-    //         "west"  => CardinalDir::West,
-    //         _       => CardinalDir::None,
-    //     };
-
-    //     let reply = parsed["reply"]
-    //         .as_str()
-    //         .unwrap_or("")
-    //         .to_string();
-
-    //     let yumon_emote_idx = last_emote_logits
-    //         .as_deref()
-    //         .map(argmax)
-    //         .unwrap_or(4);
-
-    //     GenerationResult { reply, action, motion_dir, yumon_emote_idx, raw_output, fsm_state: debug_fsm_state, allowed_count: debug_allowed_count }
-    // }
 
     pub fn generate_structured(
         &self,
@@ -843,12 +349,31 @@ impl<B: Backend> YumonBrain<B> {
         // ── Decode tokens → string (skip BOS) ─────────────────────────────────
         let raw_output = tokenizer.decode(&dec_ids[1..]);
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&raw_output).unwrap_or(serde_json::json!({
-                "action":     "idle",
-                "motion_dir": "none",
-                "reply":      ""
-            }));
+        // let parsed: serde_json::Value =
+        //     serde_json::from_str(&raw_output).unwrap_or(serde_json::json!({
+        //         "action":     "idle",
+        //         "motion_dir": "none",
+        //         "reply":      ""
+        //     }));
+
+        let parsed: serde_json::Value = serde_json::from_str(&raw_output)
+            .or_else(|_| serde_json::from_str(&fix_json_syntax(&raw_output).fixed))
+            .unwrap_or_else(|_| {
+                let extract = |key: &str| -> String {
+                    regex::Regex::new(&format!(r#""{key}"\s*:\s*"([^"]*)"#))
+                        .ok()
+                        .and_then(|re| re.captures(&raw_output))
+                        .and_then(|caps| caps.get(1))
+                        .map(|m| m.as_str().to_string())
+                        .unwrap_or_default()
+                };
+
+                serde_json::json!({
+                    "action":     extract("action"),
+                    "motion_dir": extract("motion_dir"),
+                    "reply":      extract("reply"),
+                })
+            });
 
         let action = match parsed["action"].as_str().unwrap_or("idle") {
             "speak"  => Action::Speak,
@@ -887,94 +412,157 @@ impl<B: Backend> YumonBrain<B> {
         }
     }
 
-    // // good for debugging raw json output as well as TrainingStage::Language
-    // pub fn generate_unmasked(
-    //     &self,
-    //     tokenizer:      &TokenizerKind,
-    //     world:          &WorldContext,
-    //     class_probs:    &[f32],
-    //     emote_probs:    &[f32],
-    //     user_emote_idx: usize,
-    //     seed_text:      &str,
-    //     max_tokens:     usize,
-    //     device:         &B::Device,
-    // ) -> GenerationResult {
-    //     // same context setup as generate_structured
-    //     let mut ctx_flat = Vec::with_capacity(CONTEXT_DIMS);
-    //     ctx_flat.extend_from_slice(class_probs);
-    //     ctx_flat.extend_from_slice(emote_probs);
-    //     let mut onehot = vec![0.0f32; EMOTE_CLASSES];
-    //     onehot[user_emote_idx.min(EMOTE_CLASSES - 1)] = 1.0;
-    //     ctx_flat.extend_from_slice(&onehot);
-    //     ctx_flat.extend_from_slice(&world.to_context_slice());
+    pub fn generate_unmasked_parsed(
+        &self,
+        tokenizer:      &TokenizerKind,
+        world:          &WorldContext,
+        class_probs:    &[f32],
+        emote_probs:    &[f32],
+        user_emote_idx: usize,
+        seed_text:      &str,
+        max_tokens:     usize,
+        device:         &B::Device,
+    ) -> GenerationResult {
+        // ── Build context tensor ───────────────────────────────────────────────
+        let mut ctx_flat = Vec::with_capacity(CONTEXT_DIMS);
+        ctx_flat.extend_from_slice(class_probs);
+        ctx_flat.extend_from_slice(emote_probs);
+        let mut onehot = vec![0.0f32; EMOTE_CLASSES];
+        onehot[user_emote_idx.min(EMOTE_CLASSES - 1)] = 1.0;
+        ctx_flat.extend_from_slice(&onehot);
+        ctx_flat.extend_from_slice(&world.to_context_slice());
 
-    //     let context_t = Tensor::<B, 2>::from_floats(
-    //         TensorData::new(ctx_flat, [1, CONTEXT_DIMS]),
-    //         device,
-    //     );
+        let context_t = Tensor::<B, 2>::from_floats(
+            TensorData::new(ctx_flat, [1, CONTEXT_DIMS]),
+            device,
+        );
 
-    //     let mut token_ids: Vec<usize> = if seed_text.is_empty() {
-    //         vec![BOS_TOKEN]
-    //     } else {
-    //         std::iter::once(BOS_TOKEN)
-    //             .chain(tokenizer.encode(seed_text))
-    //             .collect()
-    //     };
+        // ── Encode input once ──────────────────────────────────────────────────
+        let enc_ids: Vec<i32> = {
+            let mut ids = vec![BOS_TOKEN as i32];
+            if !seed_text.is_empty() {
+                ids.extend(tokenizer.encode(seed_text).iter().map(|&t| t as i32));
+            }
+            ids.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
+            ids
+        };
 
-    //     let mut rng = rand::thread_rng();
-    //     let mut last_emote_logits: Option<Vec<f32>> = None;
+        let enc_tokens_t = Tensor::<B, 2, Int>::from_ints(
+            TensorData::new(enc_ids, [1, MAX_SEQ_LEN]),
+            device,
+        );
 
-    //     for _ in 0..max_tokens {
-    //         let clamped_len = token_ids.len().min(MAX_SEQ_LEN);
-    //         let mut padded = token_ids[token_ids.len() - clamped_len..].to_vec();
-    //         padded.resize(MAX_SEQ_LEN, PAD_TOKEN);
+        let memory = self.encode(enc_tokens_t, context_t);  // run once
 
-    //         let tokens_t = Tensor::<B, 2, Int>::from_ints(
-    //             TensorData::new(
-    //                 padded.iter().map(|&t| t as i32).collect::<Vec<_>>(),
-    //                 [1, MAX_SEQ_LEN],
-    //             ),
-    //             device,
-    //         );
+        // ── Decode autoregressively — no FSM masking ───────────────────────────
+        let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
+        let mut rng = rand::thread_rng();
+        let mut last_emote_logits: Option<Vec<f32>> = None;
 
-    //         let (token_logits, emote_logits) = self.forward(tokens_t, context_t.clone());
-    //         last_emote_logits = Some(emote_logits.to_data().to_vec::<f32>().unwrap());
+        for _ in 0..max_tokens {
+            let clamped_len = dec_ids.len().min(MAX_SEQ_LEN);
+            let mut padded = dec_ids[dec_ids.len() - clamped_len..].to_vec();
+            padded.resize(MAX_SEQ_LEN, PAD_TOKEN);
 
-    //         let last_idx   = clamped_len - 1;
-    //         let vocab_size = tokenizer.vocab_size();
-    //         let last_logits = token_logits
-    //             .slice([0..1, last_idx..last_idx + 1, 0..vocab_size])
-    //             .reshape([vocab_size]);
+            let dec_tokens_t = Tensor::<B, 2, Int>::from_ints(
+                TensorData::new(
+                    padded.iter().map(|&t| t as i32).collect::<Vec<_>>(),
+                    [1, MAX_SEQ_LEN],
+                ),
+                device,
+            );
 
-    //         // no masking at all — pure model output
-    //         let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
-    //         let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
+            let (token_logits, emote_logits) = self.decode(dec_tokens_t, memory.clone());
+            last_emote_logits = Some(emote_logits.to_data().to_vec::<f32>().unwrap());
 
-    //         if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
-    //         token_ids.push(next_token);
-    //     }
+            let vocab_size  = tokenizer.vocab_size();
+            let last_logits = token_logits
+                .slice([0..1, clamped_len - 1..clamped_len, 0..vocab_size])
+                .reshape([vocab_size]);
 
-    //     let seed_len = if seed_text.is_empty() { 1 }
-    //                 else { 1 + tokenizer.encode(seed_text).len() };
+            // no masking — pure model output
+            let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
+            let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
 
-    //     let raw_output = tokenizer.decode(&token_ids[seed_len..]);
+            if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
+            dec_ids.push(next_token);
+        }
 
-    //     // try to parse, but don't worry if it fails — raw_json will show us everything
-    //     let parsed: serde_json::Value = serde_json::from_str(&raw_output)
-    //         .unwrap_or(serde_json::json!({
-    //             "action": "idle", "motion_dir": "none", "reply": ""
-    //         }));
+        // ── Decode tokens → string (skip BOS) ─────────────────────────────────
+        let raw_output = tokenizer.decode(&dec_ids[1..]);
 
-    //     GenerationResult {
-    //         reply:         parsed["reply"].as_str().unwrap_or("").to_string(),
-    //         action:        Action::Speak,
-    //         motion_dir:    CardinalDir::None,
-    //         yumon_emote_idx: last_emote_logits.as_deref().map(argmax).unwrap_or(4),
-    //         raw_output:      raw_output,  // ← this is what we care about
-    //         fsm_state:     0,
-    //         allowed_count: None,
-    //     }
-    // }
+        let fixed = fix_json_syntax(&raw_output).fixed;
+
+        let extract = |key: &str| -> String {
+            regex::Regex::new(&format!(r#"\s*{key}"?\s*:?\s*"([^"]*)"#))
+                .ok()
+                .and_then(|re| re.captures(&fixed))
+                .and_then(|caps| caps.get(1))
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default()
+        };
+
+        let parsed_action     = extract("action");
+        let parsed_motion_dir = extract("motion_dir");
+        let mut parsed_reply  = extract("reply");
+
+        if parsed_reply.is_empty() || parsed_reply.len() < 4 {
+            let parsed: serde_json::Value = serde_json::from_str(&fixed)
+                .unwrap_or_else(|_| {
+                    let extract = |key: &str| -> String {
+                        regex::Regex::new(&format!(r#""{key}"\s*:\s*"([^"]*)"#))
+                            .ok()
+                            .and_then(|re| re.captures(&fixed))
+                            .and_then(|caps| caps.get(1))
+                            .map(|m| m.as_str().to_string())
+                            .unwrap_or_default()
+                    };
+
+                    serde_json::json!({
+                        "action":     extract("action"),
+                        "motion_dir": extract("motion_dir"),
+                        "reply":      extract("reply"),
+                    })
+                });
+
+            parsed_reply = parsed["reply"].to_string();
+        }
+
+        let action = match parsed_action.as_str() {
+            "speak"  => Action::Speak,
+            "build"  => Action::Build,
+            "travel" => Action::Travel,
+            "use"    => Action::Use,
+            _        => Action::Idle,
+        };
+
+        let motion_dir = match parsed_motion_dir.as_str() {
+            "north" => CardinalDir::North,
+            "south" => CardinalDir::South,
+            "east"  => CardinalDir::East,
+            "west"  => CardinalDir::West,
+            _       => CardinalDir::None,
+        };
+
+        let reply = parsed_reply
+            .as_str()
+            .to_string();
+
+        let yumon_emote_idx = last_emote_logits
+            .as_deref()
+            .map(argmax)
+            .unwrap_or(4);
+
+        GenerationResult {
+            reply,
+            action,
+            motion_dir,
+            yumon_emote_idx,
+            raw_output,
+            fsm_state: 0,
+            allowed_count: None,
+        }
+    }
 
     // good for debugging raw json output as well as TrainingStage::Language
     pub fn generate_unmasked(
