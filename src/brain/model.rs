@@ -1,20 +1,3 @@
-/// Yumon Brain — LSTM language model with vision context injection.
-///
-/// Architecture:
-///   Input per timestep: token_embedding (EMBED_DIM) ++ context_vector (CONTEXT_DIMS)
-///   → LSTM(512) → Dropout(0.3) → Dense(256, ReLU)
-///   ├─ token_head:       Dense(vocab_size)   — next character prediction
-///   └─ yumon_emote_head: Dense(EMOTE_CLASSES) — Yumon's emotional response
-///
-/// Context vector (114 dims):
-///   [class_probs: 100] ++ [user_emote_probs: 7] ++ [user_emote_onehot: 7]
-///
-/// The emote head only fires on the EOS timestep during training (conditioned on
-/// the full context of the generated reply). At inference we read it from the
-/// last generated step.
-///
-/// Token generation: temperature-sampled autoregressive decoding with top-k filtering.
-
 use burn::{
     nn::{
         Dropout, DropoutConfig, Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig, Lstm, LstmConfig, LstmState, attention::{CrossAttention, CrossAttentionConfig, MhaInput, MultiHeadAttention, MultiHeadAttentionConfig}, transformer::{TransformerDecoder, TransformerDecoderConfig, TransformerDecoderInput}
@@ -727,12 +710,6 @@ fn make_positions<B: Backend>(
 }
 
 // ─── Generation Result ────────────────────────────────────────────────────────
-
-// #[derive(Debug, Clone)]
-// pub struct GenerationResult {
-//     pub reply:           String,
-//     pub yumon_emote_idx: usize,
-// }
 
 #[derive(Debug, Clone)]
 pub struct GenerationResult {
