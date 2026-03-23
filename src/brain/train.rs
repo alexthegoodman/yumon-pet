@@ -427,8 +427,8 @@ pub fn run(
     // ebooks2.shuffle(&mut rng);
     // ebooks2.truncate(8192);
 
-    // let training_stage = TrainingStage::Language; // first
-    let training_stage = TrainingStage::Structured; // fine-tune
+    let training_stage = TrainingStage::Language; // first
+    // let training_stage = TrainingStage::Structured; // fine-tune
 
     let mdx_samples = prepare_paired_samples(&mdx_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     // let quote_samples = prepare_samples(&quote_sentences, &tokenizer, &keyword_index);
@@ -457,24 +457,24 @@ pub fn run(
         // ebooks2_samples.len()
     );
 
-    bible_samples.shuffle(&mut rng);
-    bible_samples.truncate(2048);
-    // bible_samples.truncate(4096);
+    // bible_samples.shuffle(&mut rng);
+    // bible_samples.truncate(2048);
+    // // bible_samples.truncate(4096);
 
-    // wiki_samples.shuffle(&mut rng);
-    // wiki_samples.truncate(2048);
+    // // wiki_samples.shuffle(&mut rng);
+    // // wiki_samples.truncate(2048);
 
-    txt_samples.shuffle(&mut rng);
-    // ebook_samples.truncate(2048);
-    txt_samples.truncate(4096);
+    // txt_samples.shuffle(&mut rng);
+    // // ebook_samples.truncate(2048);
+    // txt_samples.truncate(4096);
 
-    // ebooks2_samples.shuffle(&mut rng);
-    // ebooks2_samples.truncate(2048);
-    // // ebooks2_samples.truncate(4096);
+    // // ebooks2_samples.shuffle(&mut rng);
+    // // ebooks2_samples.truncate(2048);
+    // // // ebooks2_samples.truncate(4096);
 
-    notion_samples.shuffle(&mut rng);
-    notion_samples.truncate(2048);
-    // notion_samples.truncate(4096);
+    // notion_samples.shuffle(&mut rng);
+    // notion_samples.truncate(2048);
+    // // notion_samples.truncate(4096);
     
     // training_samples.extend(wiki_samples); // Yumon expresses that he is confused by wiki material
     // training_samples.extend(quote_samples);
@@ -486,8 +486,9 @@ pub fn run(
     // training_samples.extend(ebooks2_samples);
     
     training_samples.shuffle(&mut rng);
+    training_samples.truncate(65536);
     // training_samples.truncate(16384); // maybe at 128 hidden size? maybe need 256?
-    training_samples.truncate(8192); // limit total for now
+    // training_samples.truncate(8192); // limit total for now
     // training_samples.truncate(1024); 
     // training_samples.truncate(2048); 
 
@@ -562,6 +563,7 @@ pub fn run(
     // let ce_loss = CrossEntropyLossConfig::new().init(&device);
     let ce_loss = CrossEntropyLossConfig::new()
         .with_pad_tokens(Some(vec![PAD_TOKEN as usize]))
+        .with_smoothing(Some(0.1))
         .init(&device);
     let mut rng = rand::thread_rng();
     let mut final_loss = 0.0f32;

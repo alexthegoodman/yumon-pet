@@ -43,13 +43,16 @@ use burn::nn::transformer::{TransformerEncoder, TransformerEncoderConfig, Transf
 // pub const HIDDEN_UNITS: usize = 256;
 pub const EMBED_DIM:    usize = 128;
 pub const HIDDEN_UNITS: usize = 128;
+// pub const ATTN_HEADS:   usize = 4;
 pub const ATTN_HEADS:   usize = 2;
+// pub const N_LAYERS:     usize = 1;
 // pub const N_LAYERS:     usize = 4;
 // pub const N_LAYERS:     usize = 3;
 pub const N_LAYERS:     usize = 2;
 // pub const FF_DIM:       usize = 512;
-pub const FF_DIM:       usize = 256;
 // pub const FF_DIM:       usize = 256;
+pub const FF_DIM:       usize = 256;
+// pub const FF_DIM:       usize = 1024;
 // pub const FF_DIM:       usize = 2048;
 
 // pub const TEMPERATURE: f32  = 0.7;
@@ -107,6 +110,8 @@ impl YumonBrainConfig {
             ATTN_HEADS,
             N_LAYERS,
         )
+        .with_norm_first(true)
+        .with_quiet_softmax(true)
         .with_dropout(self.dropout_rate);
 
         let decoder_config = TransformerDecoderConfig::new(  // ← changed
@@ -115,6 +120,8 @@ impl YumonBrainConfig {
             ATTN_HEADS,
             N_LAYERS,
         )
+        .with_norm_first(true)
+        .with_quiet_softmax(true)
         .with_dropout(self.dropout_rate);
 
         YumonBrain {
