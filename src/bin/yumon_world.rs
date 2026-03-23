@@ -300,8 +300,8 @@ fn main() {
             let emote_probs = vec![1.0 / EMOTE_CLASSES as f32; EMOTE_CLASSES];
 
             while let Ok(p) = rx_prompt.recv() {
-                let result = brain.generate_structured(
-                    &tokenizer, &index, &p.world_ctx,
+                let result = brain.generate_unmasked_parsed(
+                    &tokenizer, &p.world_ctx,
                     &class_probs, &emote_probs,
                     p.emote_idx, &p.prompt, 110, &device,
                 );

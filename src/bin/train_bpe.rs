@@ -8,14 +8,14 @@ pub fn main() {
     // ── Load + tokenize wiki corpus ───────────────────────────────────────────
     let mut sentences = Vec::new();
 
-    // let wiki_sentences: Result<Vec<String>, anyhow::Error> = load_wiki_sentences(wiki_xml, 5_000);
-    // let wiki_sentences = wiki_sentences.as_ref().expect("Couldn't get wiki_sentences");
+    let wiki_sentences: Result<Vec<String>, anyhow::Error> = load_wiki_sentences(wiki_xml, 50_000);
+    let wiki_sentences = wiki_sentences.as_ref().expect("Couldn't get wiki_sentences");
 
-    // for (i, sent) in sentences.iter().enumerate() {
-    //     if (i < 12) {
-    //         println!("WIKI: {:?}", sent);
-    //     }
-    // }
+    for (i, sent) in sentences.iter().enumerate() {
+        if (i < 12) {
+            println!("WIKI: {:?}", sent);
+        }
+    }
 
     let mdx_sentences = load_mdx_sentences("data/(poems)/");
     let mdx_sentences = mdx_sentences.as_ref().expect("Couldn't get mdx_sentences");
@@ -26,32 +26,32 @@ pub fn main() {
         }
     }
 
-    // let quote_sentences = load_csv_quotes("data/quotes.csv");
-    // let quote_sentences = quote_sentences.as_ref().expect("Couldn't get quote_sentences");
+    let quote_sentences = load_csv_quotes("data/quotes.csv");
+    let quote_sentences = quote_sentences.as_ref().expect("Couldn't get quote_sentences");
 
-    // for (i, sent) in quote_sentences.iter().enumerate() {
-    //     if (i < 12) {
-    //         println!("QUOTE: {:?}", sent);
-    //     }
-    // }
+    for (i, sent) in quote_sentences.iter().enumerate() {
+        if (i < 12) {
+            println!("QUOTE: {:?}", sent);
+        }
+    }
 
-    // let dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt");
-    // let dict_sentences = dict_sentences.as_ref().expect("Couldn't get dict_sentences");
+    let dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt");
+    let dict_sentences = dict_sentences.as_ref().expect("Couldn't get dict_sentences");
 
-    // for (i, sent) in dict_sentences.iter().enumerate() {
-    //     if (i < 12) {
-    //         println!("DICT: {:?}", sent);
-    //     }
-    // }
+    for (i, sent) in dict_sentences.iter().enumerate() {
+        if (i < 12) {
+            println!("DICT: {:?}", sent);
+        }
+    }
 
-    // let qna_sentences = load_csv_qna("data/AI.csv");
-    // let qna_sentences = qna_sentences.as_ref().expect("Couldn't get qna_sentences");
+    let qna_sentences = load_csv_qna("data/AI.csv");
+    let qna_sentences = qna_sentences.as_ref().expect("Couldn't get qna_sentences");
 
-    // for (i, sent) in qna_sentences.iter().enumerate() {
-    //     if (i < 12) {
-    //         println!("Q&A: {:?}", sent);
-    //     }
-    // }
+    for (i, sent) in qna_sentences.iter().enumerate() {
+        if (i < 12) {
+            println!("Q&A: {:?}", sent);
+        }
+    }
 
     let bible_verses = load_csv_bible("data/bible_bbe.csv");
     let bible_verses = bible_verses.as_ref().expect("Couldn't get bible_verses");
@@ -107,13 +107,13 @@ pub fn main() {
     //     }
     // }
     
-    // sentences.extend(wiki_sentences);
+    sentences.extend(wiki_sentences);
     sentences.extend(mdx_sentences);
-    // sentences.extend(qna_sentences);
+    sentences.extend(qna_sentences);
     sentences.extend(bible_verses);
     sentences.extend(handcrafted);
-    // sentences.extend(quote_sentences);
-    // sentences.extend(dict_sentences);
+    sentences.extend(quote_sentences);
+    sentences.extend(dict_sentences);
     sentences.extend(notions);
     // sentences.extend(ebooks);
     sentences.extend(txt);

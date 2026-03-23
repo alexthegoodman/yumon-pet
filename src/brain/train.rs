@@ -262,15 +262,15 @@ pub fn run(
     // ── Load + tokenize wiki corpus ───────────────────────────────────────────
     let mut sentences = Vec::new();
 
-    // let wiki_sentences = load_wiki_sentences(wiki_xml, max_articles)?;
+    let mut wiki_sentences = load_wiki_sentences(wiki_xml, max_articles)?;
 
-    // for (i, sent) in wiki_sentences.iter().enumerate() {
-    //     if (i < 12) {
-    //         println!("WIKI: {:?}", sent);
-    //     } else {
-    //         break;
-    //     }
-    // }
+    for (i, sent) in wiki_sentences.iter().enumerate() {
+        if (i < 12) {
+            println!("WIKI: {:?}", sent);
+        } else {
+            break;
+        }
+    }
 
     let mut mdx_sentences = load_mdx_sentences("data/(poems)/")?;
 
@@ -282,33 +282,33 @@ pub fn run(
         }
     }
 
-    // let quote_sentences = load_csv_quotes("data/quotes.csv")?;
+    let mut quote_sentences = load_csv_quotes("data/quotes.csv")?;
 
-    // for (i, sent) in quote_sentences.iter().enumerate() {
-    //     if (i < 12) {
-    //         println!("QUOTE: {:?}", sent);
-    //     } else {
-    //         break;
-    //     }
-    // }
+    for (i, sent) in quote_sentences.iter().enumerate() {
+        if (i < 12) {
+            println!("QUOTE: {:?}", sent);
+        } else {
+            break;
+        }
+    }
 
-    // // let dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt")?;
+    let mut dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt")?;
 
-    // // for (i, sent) in dict_sentences.iter().enumerate() {
-    // //     if (i < 12) {
-    // //         println!("DICT: {:?}", sent);
-    // //     }
-    // // }
+    for (i, sent) in dict_sentences.iter().enumerate() {
+        if (i < 12) {
+            println!("DICT: {:?}", sent);
+        }
+    }
 
-    // let qna_sentences = load_csv_qna("data/AI.csv")?;
+    let mut qna_sentences = load_csv_qna("data/AI.csv")?;
 
-    // for (i, sent) in qna_sentences.iter().enumerate() {
-    //     if (i < 12) {
-    //         println!("Q&A: {:?}", sent);
-    //     } else {
-    //         break;
-    //     }
-    // }
+    for (i, sent) in qna_sentences.iter().enumerate() {
+        if (i < 12) {
+            println!("Q&A: {:?}", sent);
+        } else {
+            break;
+        }
+    }
 
     let mut bible_verses = load_csv_bible("data/bible_bbe.csv")?;
 
@@ -406,6 +406,18 @@ pub fn run(
     let mut rng = thread_rng();
 
      // optional: makes keyword matching faster
+    wiki_sentences.shuffle(&mut rng);
+    wiki_sentences.truncate(8192);
+
+    dict_sentences.shuffle(&mut rng);
+    dict_sentences.truncate(8192);
+
+    quote_sentences.shuffle(&mut rng);
+    quote_sentences.truncate(8192);
+
+    qna_sentences.shuffle(&mut rng);
+    qna_sentences.truncate(8192);
+
     mdx_sentences.shuffle(&mut rng);
     mdx_sentences.truncate(8192);
 
@@ -427,35 +439,35 @@ pub fn run(
     // ebooks2.shuffle(&mut rng);
     // ebooks2.truncate(8192);
 
-    let training_stage = TrainingStage::Language; // first
-    // let training_stage = TrainingStage::Structured; // fine-tune
+    // let training_stage = TrainingStage::Language; // first
+    let training_stage = TrainingStage::Structured; // fine-tune
 
-    let mdx_samples = prepare_paired_samples(&mdx_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
-    // let quote_samples = prepare_samples(&quote_sentences, &tokenizer, &keyword_index);
-    // let qna_samples = prepare_samples(&qna_sentences, &tokenizer, &keyword_index);
-    // let mut wiki_samples = prepare_samples(&wiki_sentences, &tokenizer, &keyword_index);
-    // let dict_samples = prepare_samples(&dict_sentences, &tokenizer, &keyword_index);
+    let mut mdx_samples = prepare_paired_samples(&mdx_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
+    let mut quote_samples = prepare_paired_samples(&quote_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
+    let mut qna_samples = prepare_paired_samples(&qna_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
+    let mut wiki_samples = prepare_paired_samples(&wiki_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
+    let mut dict_samples = prepare_paired_samples(&dict_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     let mut bible_samples = prepare_paired_samples(&bible_verses, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
-    let handcrafted_samples = prepare_paired_samples(&handcrafted, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
+    let mut handcrafted_samples = prepare_paired_samples(&handcrafted, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     let mut notion_samples = prepare_paired_samples(&notions, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     // let personal_samples = prepare_samples(&personals, &tokenizer, &keyword_index);
     // let mut ebook_samples = prepare_paired_samples(&ebooks, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     let mut txt_samples = prepare_paired_samples(&txt, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     // let mut ebooks2_samples = prepare_paired_samples(&ebooks2, &tokenizer, &keyword_index, &mut rng, 1, 2);
 
-    println!(
-        "Samples lengths: {} {} {} {} {}",
-        mdx_samples.len(),
-        // quote_samples.len(),
-        // qna_samples.len(),
-        // wiki_samples.len(),
-        bible_samples.len(),
-        handcrafted_samples.len(),
-        notion_samples.len(),
-        // personal_samples.len(),
-        txt_samples.len(),
-        // ebooks2_samples.len()
-    );
+    // println!(
+    //     "Samples lengths: {} {} {} {} {}",
+    //     mdx_samples.len(),
+    //     // quote_samples.len(),
+    //     // qna_samples.len(),
+    //     // wiki_samples.len(),
+    //     bible_samples.len(),
+    //     handcrafted_samples.len(),
+    //     notion_samples.len(),
+    //     // personal_samples.len(),
+    //     txt_samples.len(),
+    //     // ebooks2_samples.len()
+    // );
 
     // bible_samples.shuffle(&mut rng);
     // bible_samples.truncate(2048);
@@ -476,10 +488,10 @@ pub fn run(
     // notion_samples.truncate(2048);
     // // notion_samples.truncate(4096);
     
-    // training_samples.extend(wiki_samples); // Yumon expresses that he is confused by wiki material
-    // training_samples.extend(quote_samples);
-    // training_samples.extend(dict_samples);
-    // training_samples.extend(qna_samples);
+    training_samples.extend(wiki_samples); // Yumon expresses that he is confused by wiki material
+    training_samples.extend(quote_samples);
+    training_samples.extend(dict_samples);
+    training_samples.extend(qna_samples);
     training_samples.extend(bible_samples);
     training_samples.extend(notion_samples);
     training_samples.extend(txt_samples);
