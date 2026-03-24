@@ -16,7 +16,7 @@ use rand::Rng;
 
 use yumon_pet::{
     brain::{
-        model::{GenerationResult, YUMON_SCHEMA, YumonBrain}, samples::WorldContext,
+        model::{GenerationResult, YUMON_SCHEMA, YumonBrain}, samples::WorldContext, train::MAX_SEQ_LEN,
     },
     vision::{self, CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES},
 };
@@ -108,7 +108,7 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let brain_cp = "checkpoints/brain".to_string();
+    let brain_cp = "checkpoints/brain-1024s-structured".to_string();
     let mut app = AppState::new(brain_cp.clone());
 
     let (tx_user, rx_user) = mpsc::channel::<(String, usize, WorldContext)>();
@@ -158,7 +158,7 @@ fn main() -> Result<()> {
                 &emote_probs,
                 user_emote_idx,
                 &prompt,
-                110,
+                MAX_SEQ_LEN,
                 &device,
             );
             // let initial = index.initial_state();

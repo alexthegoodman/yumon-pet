@@ -282,7 +282,7 @@ fn main() {
         std::thread::spawn(move || {
             let device: burn::prelude::Device<Wgpu> = Default::default();
             let (brain, tokenizer) =
-                match YumonBrain::<Wgpu>::load("checkpoints/brain", &device) {
+                match YumonBrain::<Wgpu>::load("checkpoints/brain-1024s-structured", &device) {
                     Ok(m) => m,
                     Err(e) => { eprintln!("[brain] load failed: {e}"); return; }
                 };

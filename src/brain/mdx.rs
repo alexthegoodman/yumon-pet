@@ -260,63 +260,63 @@ pub fn load_handcrafted_sentences(dict_path: &str) -> Result<Vec<String>> {
     Ok(sentences)
 }
 
-// pub fn load_txt_sentences(path: &str) -> Result<Vec<String>> {
-//     println!("📖 Loading txt: {path}");
-
-//     let content = std::fs::read_to_string(path)?;
-//     let mut sentences = Vec::new();
-
-//     for line in content.lines() {
-//         let trimmed = line.trim();
-
-//         for sent in trimmed.split(".") {
-//             if is_good_sentence(&sent) {
-//                 sentences.push(sent.to_string());
-//             }
-//         }
-//     }
-
-//     println!("✅ Loaded {} txt sentences", sentences.len());
-//     Ok(sentences)
-// }
-
 pub fn load_txt_sentences(path: &str) -> Result<Vec<String>> {
     println!("📖 Loading txt: {path}");
 
     let content = std::fs::read_to_string(path)?;
     let mut sentences = Vec::new();
-    let mut buffer = String::new();
 
     for line in content.lines() {
         let trimmed = line.trim();
 
-        for sent in trimmed.split('.') {
-            if !is_good_sentence(&sent) {
-                continue;
-            }
-
-            if buffer.is_empty() {
-                buffer.push_str(sent.trim());
-            } else {
-                buffer.push_str(". ");
-                buffer.push_str(sent.trim());
-            }
-
-            if buffer.len() >= 150 {
-                sentences.push(buffer.clone());
-                buffer.clear();
+        for sent in trimmed.split(".") {
+            if is_good_sentence(&sent) {
+                sentences.push(sent.to_string());
             }
         }
-    }
-
-    // Flush any remaining content
-    if !buffer.is_empty() {
-        sentences.push(buffer);
     }
 
     println!("✅ Loaded {} txt sentences", sentences.len());
     Ok(sentences)
 }
+
+// pub fn load_txt_sentences(path: &str) -> Result<Vec<String>> {
+//     println!("📖 Loading txt: {path}");
+
+//     let content = std::fs::read_to_string(path)?;
+//     let mut sentences = Vec::new();
+//     let mut buffer = String::new();
+
+//     for line in content.lines() {
+//         let trimmed = line.trim();
+
+//         for sent in trimmed.split('.') {
+//             if !is_good_sentence(&sent) {
+//                 continue;
+//             }
+
+//             if buffer.is_empty() {
+//                 buffer.push_str(sent.trim());
+//             } else {
+//                 buffer.push_str(". ");
+//                 buffer.push_str(sent.trim());
+//             }
+
+//             if buffer.len() >= 150 {
+//                 sentences.push(buffer.clone());
+//                 buffer.clear();
+//             }
+//         }
+//     }
+
+//     // Flush any remaining content
+//     if !buffer.is_empty() {
+//         sentences.push(buffer);
+//     }
+
+//     println!("✅ Loaded {} txt sentences", sentences.len());
+//     Ok(sentences)
+// }
 
 fn extract_definition(line: &str) -> Option<String> {
     // Strip etymology brackets at the end e.g. [latin from greek]

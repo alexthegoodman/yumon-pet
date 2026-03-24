@@ -619,28 +619,30 @@ pub fn prepare_paired_samples_split(
         let words: Vec<&str> = sent.split_whitespace().collect();
         if words.len() < 4 { continue; }
 
-        let mid = words.len() / 2;
-        let sent_a = words[..mid].join(" ");
-        let sent_b = words[mid..].join(" ");
+        let point = words.len() / 4;
+        let sent_a = words[..point].join(" ");
+        let sent_b = words[point..].join(" ");
 
         let input_encoded  = tokenizer.encode(&sent_a);
-        let target_preview = tokenizer.encode(&sent_b);
+        // let target_preview = tokenizer.encode(&sent_b);
 
-        let (input_encoded, sent_b_for_target) = if target_preview.len() < input_encoded.len() {
-            (target_preview, &sent_a)
-        } else {
-            (input_encoded, &sent_b)
-        };
+        let sent_b_for_target = sent_b.clone();
 
-        if input_encoded.len() > 150 { continue; }
-        if input_encoded.len() < 40  { continue; }
+        // let (input_encoded, sent_b_for_target) = if target_preview.len() < input_encoded.len() {
+        //     (target_preview, &sent_a)
+        // } else {
+        //     (input_encoded, &sent_b)
+        // };
+
+        // if input_encoded.len() > MAX_SEQ_LEN / 2 { continue; }
+        // if input_encoded.len() < (MAX_SEQ_LEN / 4) - 50 { continue; }
 
         let world = WorldContext::random(&mut rng_local);
         let (action, motion_dir) = derive_action(&world);
 
         let (target_encoded, target_json) = match stage {
             TrainingStage::Language => {
-                let encoded = tokenizer.encode(sent_b_for_target);
+                let encoded = tokenizer.encode(&sent_b_for_target);
                 let json    = sent_b_for_target.clone();
                 (encoded, json)
             }
@@ -662,8 +664,8 @@ pub fn prepare_paired_samples_split(
             }
         };
 
-        if target_encoded.len() > 150 { continue; }
-        if target_encoded.len() < 40  { continue; }
+        // if target_encoded.len() > MAX_SEQ_LEN { continue; }
+        // if target_encoded.len() < (MAX_SEQ_LEN / 2) - 50 { continue; }
         if target_encoded.is_empty() || target_encoded.len() > MAX_SEQ_LEN - 2 { continue; }
 
         let target_labels: Vec<usize> = target_encoded.iter().cloned()

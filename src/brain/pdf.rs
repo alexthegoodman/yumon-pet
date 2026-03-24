@@ -30,7 +30,7 @@
 //     Ok(sentences)
 // }
 
-use crate::brain::wiki::is_good_sentence;
+use crate::brain::{train::MAX_SEQ_LEN, wiki::is_good_sentence};
 use anyhow::Result;
 
 // pub fn load_pdf_ebook_sentences(pdf_path: &str) -> Result<Vec<String>> {
@@ -143,8 +143,8 @@ pub fn load_pdf_ebook_sentences(pdf_path: &str) -> Result<Vec<String>> {
     let mut final_sentences = Vec::new();
     let mut i = 0;
 
-    let bottom_range = 160;
-    let top_range = 540;
+    let bottom_range = MAX_SEQ_LEN * 5;
+    let top_range = MAX_SEQ_LEN * 6;
 
     while i < raw_sentences.len() {
         let mut combined = String::new();
