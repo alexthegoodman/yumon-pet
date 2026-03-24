@@ -8,13 +8,9 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
-    Terminal,
+    Terminal, backend::CrosstermBackend, layout::{Constraint, Direction, Layout}, style::{Color, Modifier, Style}, text::{Line, Span, Text}, widgets::{Block, Borders, List, ListItem, Paragraph}
 };
+use textwrap::wrap;
 use std::{io, sync::mpsc, thread, time::{Duration, Instant}};
 use rand::Rng;
 
@@ -25,6 +21,7 @@ use yumon_pet::{
     vision::{self, CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES},
 };
 
+#[derive(Clone, Debug)]
 enum Message {
     User(String),
     Yumon(GenerationResult),
@@ -208,7 +205,10 @@ fn main() -> Result<()> {
         }
 
         while let Ok(msg) = rx_model.try_recv() {
-            match &msg {
+
+            let mut msg = msg.clone();
+
+            match &mut msg {
                 Message::System(s) if s == "Models loaded!" => app.loading = false,
                 Message::Yumon(r) => {
                     app.loading = false;
@@ -219,9 +219,14 @@ fn main() -> Result<()> {
                     app.agent.raw_output = format!("{:?}", r.raw_output).to_lowercase();
                     app.agent.fsm_state =  r.fsm_state;
                     app.agent.allowed_count =  r.allowed_count;
+
+                    if r.reply.len() < 4 {
+                        r.reply = format!("{:?}", r.raw_output).to_lowercase();
+                    }
                 }
                 _ => {}
             }
+
             app.messages.push(msg);
         }
 
@@ -269,26 +274,37 @@ fn ui(f: &mut ratatui::Frame, app: &AppState) {
         .split(outer[0]);
 
     // ── Chat history ──────────────────────────────────────────────────────────
+
     let items: Vec<ListItem> = app.messages.iter().map(|m| {
         match m {
-            Message::User(s) => ListItem::new(format!("you  {s}"))
-                .style(Style::default().fg(Color::Cyan)),
+            Message::User(s) => {
+                let raw = format!("you  {s}");
+                let wrapped = wrap(&raw, 100); // or your terminal width
+                let lines: Vec<Line> = wrapped.iter().map(|l| Line::from(l.to_string())).collect();
+                ListItem::new(Text::from(lines))
+                    .style(Style::default().fg(Color::Cyan))
+            }
 
             Message::Yumon(r) => {
-                // Only show reply line if action is speak/idle — otherwise
-                // show the action prominently and reply as a sub-line if non-empty
                 let action_str = format!("{:?}", r.action).to_lowercase();
-                let main_line = if r.reply.is_empty() {
+                let raw = if r.reply.is_empty() {
                     format!("yumon  {}", action_display(&action_str))
                 } else {
                     format!("yumon  {}", r.reply)
                 };
-                ListItem::new(main_line)
+                let wrapped = wrap(&raw, 100);
+                let lines: Vec<Line> = wrapped.iter().map(|l| Line::from(l.to_string())).collect();
+                ListItem::new(Text::from(lines))
                     .style(Style::default().fg(Color::Green))
             }
 
-            Message::System(s) => ListItem::new(format!("sys  {s}"))
-                .style(Style::default().fg(Color::Yellow)),
+            Message::System(s) => {
+                let raw = format!("sys  {s}");
+                let wrapped = wrap(&raw, 100);
+                let lines: Vec<Line> = wrapped.iter().map(|l| Line::from(l.to_string())).collect();
+                ListItem::new(Text::from(lines))
+                    .style(Style::default().fg(Color::Yellow))
+            }
         }
     }).collect();
 

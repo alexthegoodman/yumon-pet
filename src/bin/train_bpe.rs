@@ -8,7 +8,7 @@ pub fn main() {
     // ── Load + tokenize wiki corpus ───────────────────────────────────────────
     let mut sentences = Vec::new();
 
-    let wiki_sentences: Result<Vec<String>, anyhow::Error> = load_wiki_sentences(wiki_xml, 50_000);
+    let wiki_sentences: Result<Vec<String>, anyhow::Error> = load_wiki_sentences(wiki_xml, 50_000, 1);
     let wiki_sentences = wiki_sentences.as_ref().expect("Couldn't get wiki_sentences");
 
     for (i, sent) in sentences.iter().enumerate() {

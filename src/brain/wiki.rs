@@ -17,7 +17,7 @@ use quick_xml::events::Event;
 use std::io::BufRead;
 
 /// Returns a vector of clean sentences, up to `max_articles` articles processed.
-pub fn load_wiki_sentences(xml_path: &str, max_articles: usize) -> Result<Vec<String>> {
+pub fn load_wiki_sentences(xml_path: &str, max_articles: usize, split_count: usize) -> Result<Vec<String>> {
     println!("📖 Parsing SimpleWiki XML: {xml_path}");
 
     let file   = std::fs::File::open(xml_path)?;
@@ -39,9 +39,10 @@ pub fn load_wiki_sentences(xml_path: &str, max_articles: usize) -> Result<Vec<St
                 let raw = e.unescape().unwrap_or_default();
                 let cleaned = strip_wiki_markup(&raw);
                 let mut n = 0;
-                for s in split_sentences(&cleaned) {
-                    if n > 50 { break; }
+                let split = split_sentences_chunked(&cleaned, split_count);
+                for s in split {
                     if is_good_sentence(&s) {
+                        if n > 250 { break; }
                         sentences.push(s);
                         n = n + 1;
                     }
@@ -172,9 +173,44 @@ fn split_sentences(text: &str) -> Vec<String> {
     sentences
 }
 
+/// Split text into sentences on `. `, `! `, `? ` boundaries,
+/// returning chunks of `n` consecutive sentences joined together.
+fn split_sentences_chunked(text: &str, n: usize) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut current   = String::new();
+
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+
+    for i in 0..len {
+        current.push(chars[i]);
+        if matches!(chars[i], '.' | '!' | '?') {
+            let next_is_space = i + 1 < len && chars[i + 1] == ' ';
+            let next_is_upper = i + 2 < len && chars[i + 2].is_uppercase();
+            if next_is_space && (next_is_upper || i + 2 >= len) {
+                sentences.push(current.trim().to_string());
+                current = String::new();
+            }
+        }
+    }
+    if !current.trim().is_empty() {
+        sentences.push(current.trim().to_string());
+    }
+
+    // Group into chunks of n
+    // Group into chunks of n, then filter by combined length
+    let min_len = if n > 1 { 50 } else { 30 };
+
+    sentences
+        .chunks(n)
+        .map(|chunk| chunk.join(" "))
+        .filter(|chunk| chunk.len() > min_len)
+        .collect()
+}
+
 pub fn is_good_sentence(s: &str) -> bool {
     let len = s.len();
-    if len < 4 || len > 400 { return false; }
+    if len < 20 || len > 1000 { return false; }
 
     if s.contains("'''") { return false; }
     if s.contains("[[") { return false; }

@@ -49,3 +49,4 @@ three-d-asset = { version = "0.7", features = ["gltf", "png"] }
 # json-repair = "0.4.0" # requires nightly?
 # json-fix = "0.1.1" # bad logs
 fancy-regex = "0.17.0"
+textwrap = "0.16.2"

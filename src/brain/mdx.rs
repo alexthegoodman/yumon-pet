@@ -134,31 +134,75 @@ pub fn load_csv_qna(csv_path: &str) -> Result<Vec<String>> {
     Ok(quotes)
 }
 
+// pub fn load_csv_bible(bible_path: &str) -> Result<Vec<String>> {
+//     println!("📖 Loading bible CSV: {bible_path}");
+
+//     let mut rdr = csv::Reader::from_path(bible_path)?;
+//     let mut quotes = Vec::new();
+
+//     let mut count = 0;
+
+//     for result in rdr.records() {
+//         let record = result?;
+
+//         let id   = record.get(0).unwrap_or("").trim().to_string();
+//         let b = record.get(1).unwrap_or("").trim().to_string();
+//         let c = record.get(2).unwrap_or("").trim().to_string();
+//         let v = record.get(3).unwrap_or("").trim().to_string();
+//         let verse = record.get(4).unwrap_or("").trim().to_string();
+
+//         // if (b == "40" || b == "41" || b == "42" || b == "43") { // gospel only
+//         // if (b == "20") { // proverbs
+//             quotes.push(verse);
+
+//             count = count + 1;
+
+//             if count > 20_000 { break; }
+//         // }
+//     }
+
+//     println!("✅ Loaded {} verses from {bible_path}", quotes.len());
+//     Ok(quotes)
+// }
+
 pub fn load_csv_bible(bible_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading bible CSV: {bible_path}");
 
     let mut rdr = csv::Reader::from_path(bible_path)?;
     let mut quotes = Vec::new();
+    let mut buffer = String::new();
 
     let mut count = 0;
 
     for result in rdr.records() {
         let record = result?;
 
-        let id   = record.get(0).unwrap_or("").trim().to_string();
-        let b = record.get(1).unwrap_or("").trim().to_string();
-        let c = record.get(2).unwrap_or("").trim().to_string();
-        let v = record.get(3).unwrap_or("").trim().to_string();
         let verse = record.get(4).unwrap_or("").trim().to_string();
 
-        // if (b == "40" || b == "41" || b == "42" || b == "43") { // gospel only
-        if (b == "20") { // proverbs
-            quotes.push(verse);
-
-            count = count + 1;
-
-            if count > 20_000 { break; }
+        if verse.is_empty() {
+            continue;
         }
+
+        if buffer.is_empty() {
+            buffer.push_str(&verse);
+        } else {
+            buffer.push(' ');
+            buffer.push_str(&verse);
+        }
+
+        if buffer.len() >= 150 {
+            quotes.push(buffer.clone());
+            buffer.clear();
+
+            count += 1;
+            if count >= 20_000 {
+                break;
+            }
+        }
+    }
+
+    if !buffer.is_empty() {
+        quotes.push(buffer);
     }
 
     println!("✅ Loaded {} verses from {bible_path}", quotes.len());
@@ -216,20 +260,58 @@ pub fn load_handcrafted_sentences(dict_path: &str) -> Result<Vec<String>> {
     Ok(sentences)
 }
 
+// pub fn load_txt_sentences(path: &str) -> Result<Vec<String>> {
+//     println!("📖 Loading txt: {path}");
+
+//     let content = std::fs::read_to_string(path)?;
+//     let mut sentences = Vec::new();
+
+//     for line in content.lines() {
+//         let trimmed = line.trim();
+
+//         for sent in trimmed.split(".") {
+//             if is_good_sentence(&sent) {
+//                 sentences.push(sent.to_string());
+//             }
+//         }
+//     }
+
+//     println!("✅ Loaded {} txt sentences", sentences.len());
+//     Ok(sentences)
+// }
+
 pub fn load_txt_sentences(path: &str) -> Result<Vec<String>> {
     println!("📖 Loading txt: {path}");
 
     let content = std::fs::read_to_string(path)?;
     let mut sentences = Vec::new();
+    let mut buffer = String::new();
 
     for line in content.lines() {
         let trimmed = line.trim();
 
-        for sent in trimmed.split(".") {
-            if is_good_sentence(&sent) {
-                sentences.push(sent.to_string());
+        for sent in trimmed.split('.') {
+            if !is_good_sentence(&sent) {
+                continue;
+            }
+
+            if buffer.is_empty() {
+                buffer.push_str(sent.trim());
+            } else {
+                buffer.push_str(". ");
+                buffer.push_str(sent.trim());
+            }
+
+            if buffer.len() >= 150 {
+                sentences.push(buffer.clone());
+                buffer.clear();
             }
         }
+    }
+
+    // Flush any remaining content
+    if !buffer.is_empty() {
+        sentences.push(buffer);
     }
 
     println!("✅ Loaded {} txt sentences", sentences.len());

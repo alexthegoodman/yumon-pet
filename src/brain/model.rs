@@ -224,9 +224,12 @@ use super::tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN};
 // ── Model dimensions ──────────────────────────────────────────────────────────
 pub const EMBED_DIM:    usize = 128;
 pub const HIDDEN_UNITS: usize = 128;
+// pub const EMBED_DIM:    usize = 256;
+// pub const HIDDEN_UNITS: usize = 256;
 pub const ATTN_HEADS:   usize = 2;
 pub const N_LAYERS:     usize = 2;
 pub const FF_DIM:       usize = 256;
+// pub const FF_DIM:       usize = 512;
 
 pub const TEMPERATURE:  f32   = 0.95;
 pub const TOP_K:        usize = 10;
