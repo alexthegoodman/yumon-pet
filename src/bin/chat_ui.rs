@@ -108,7 +108,7 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let brain_cp = "checkpoints/brain-1024s-structured".to_string();
+    let brain_cp = "checkpoints/brain".to_string();
     let mut app = AppState::new(brain_cp.clone());
 
     let (tx_user, rx_user) = mpsc::channel::<(String, usize, WorldContext)>();

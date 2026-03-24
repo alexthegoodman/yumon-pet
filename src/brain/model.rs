@@ -34,7 +34,7 @@ pub const FF_DIM:       usize = 256;
 pub const TEMPERATURE:  f32   = 0.95;
 pub const TOP_K:        usize = 10;
 
-pub const CONTEXT_DIMS: usize = 132;
+// pub const CONTEXT_DIMS: usize = 132;
 
 pub const YUMON_SCHEMA: &str = r#"{
     "type": "object",

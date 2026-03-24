@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use rand::{Rng, rngs::StdRng};
 use rayon::prelude::*;
-use crate::brain::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, bpe::TokenizerKind, keywords::extract_keywords, model::CONTEXT_DIMS, train::{MAX_SEQ_LEN, keyword_emote_label, matched_classes}};
+use crate::brain::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, bpe::TokenizerKind, keywords::extract_keywords, train::{MAX_SEQ_LEN, keyword_emote_label, matched_classes}};
 use rand::SeedableRng;
 use rand::prelude::SliceRandom;
 
@@ -67,13 +67,13 @@ impl Action {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct WorldEntity {
     pub dir:  CardinalDir,
     pub dist: f32,          // normalised 0..1
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct WorldContext {
     pub obstacle: Option<WorldEntity>,
     pub resource: Option<WorldEntity>,
@@ -154,9 +154,6 @@ pub fn derive_action(world: &WorldContext) -> (Action, CardinalDir) {
 pub struct Sample {
     pub input_ids:       Vec<usize>,
     pub target_labels:   Vec<usize>,
-    pub context_vec:     Vec<f32>,      // replaces the old flat ctx built in forward()
-    pub emote_label:     usize,
-    pub matched_classes: Vec<usize>,
     pub action:          Action,
     pub motion_dir:      CardinalDir,
     pub world:           WorldContext,
@@ -283,321 +280,321 @@ pub struct Sample {
 //     samples
 // }
 
-pub fn prepare_paired_samples_sep(
-    sentences_a:         &[String],
-    sentences_b:         &[String],
-    tokenizer:           &TokenizerKind,
-    keyword_index:       &HashMap<String, Vec<usize>>,
-    rng:                 &mut impl Rng,
-    min_shared_keywords: usize,
-    max_pairs_per_sent:  usize,
-    stage:               TrainingStage,
-) -> Vec<Sample> {
-    println!("prepare paired samples sep");
+// pub fn prepare_paired_samples_sep(
+//     sentences_a:         &[String],
+//     sentences_b:         &[String],
+//     tokenizer:           &TokenizerKind,
+//     keyword_index:       &HashMap<String, Vec<usize>>,
+//     rng:                 &mut impl Rng,
+//     min_shared_keywords: usize,
+//     max_pairs_per_sent:  usize,
+//     stage:               TrainingStage,
+// ) -> Vec<Sample> {
+//     println!("prepare paired samples sep");
 
-    // Keywords extracted separately for each set
-    let kws_a: Vec<Vec<String>> = sentences_a
-        .par_iter()
-        .map(|s| extract_keywords(s).into_iter().map(|(kw, _)| kw).collect())
-        .collect();
+//     // Keywords extracted separately for each set
+//     let kws_a: Vec<Vec<String>> = sentences_a
+//         .par_iter()
+//         .map(|s| extract_keywords(s).into_iter().map(|(kw, _)| kw).collect())
+//         .collect();
 
-    let kws_b: Vec<Vec<String>> = sentences_b
-        .par_iter()
-        .map(|s| extract_keywords(s).into_iter().map(|(kw, _)| kw).collect())
-        .collect();
+//     let kws_b: Vec<Vec<String>> = sentences_b
+//         .par_iter()
+//         .map(|s| extract_keywords(s).into_iter().map(|(kw, _)| kw).collect())
+//         .collect();
 
-    // Index keywords -> sentence_b indices
-    let mut kw_to_b: HashMap<String, Vec<usize>> = HashMap::new();
-    for (j, kws) in kws_b.iter().enumerate() {
-        for kw in kws {
-            kw_to_b.entry(kw.clone()).or_default().push(j);
-        }
-    }
+//     // Index keywords -> sentence_b indices
+//     let mut kw_to_b: HashMap<String, Vec<usize>> = HashMap::new();
+//     for (j, kws) in kws_b.iter().enumerate() {
+//         for kw in kws {
+//             kw_to_b.entry(kw.clone()).or_default().push(j);
+//         }
+//     }
 
-    let bad_words = vec!["sex", "drug", "kill", "rape"];
-    let mut rng_local = rand::thread_rng();
-    let mut samples = Vec::new();
+//     let bad_words = vec!["sex", "drug", "kill", "rape"];
+//     let mut rng_local = rand::thread_rng();
+//     let mut samples = Vec::new();
 
-    for i in 0..sentences_a.len() {
-        let sent_a = &sentences_a[i];
-        if bad_words.iter().any(|&w| sent_a.to_lowercase().contains(w)) { continue; }
+//     for i in 0..sentences_a.len() {
+//         let sent_a = &sentences_a[i];
+//         if bad_words.iter().any(|&w| sent_a.to_lowercase().contains(w)) { continue; }
 
-        let kw_set_a: HashSet<&String> = kws_a[i].iter().collect();
-        if kw_set_a.is_empty() { continue; }
+//         let kw_set_a: HashSet<&String> = kws_a[i].iter().collect();
+//         if kw_set_a.is_empty() { continue; }
 
-        // Find candidate sentences_b by shared keywords
-        let mut candidates: HashSet<usize> = HashSet::new();
-        for kw in &kws_a[i] {
-            if let Some(list) = kw_to_b.get(kw) {
-                for &j in list {
-                    candidates.insert(j);
-                }
-            }
-        }
+//         // Find candidate sentences_b by shared keywords
+//         let mut candidates: HashSet<usize> = HashSet::new();
+//         for kw in &kws_a[i] {
+//             if let Some(list) = kw_to_b.get(kw) {
+//                 for &j in list {
+//                     candidates.insert(j);
+//                 }
+//             }
+//         }
 
-        let mut cands: Vec<usize> = candidates.into_iter().collect();
-        cands.shuffle(rng);
+//         let mut cands: Vec<usize> = candidates.into_iter().collect();
+//         cands.shuffle(rng);
 
-        let mut added = 0;
-        for j in cands {
-            if added >= max_pairs_per_sent { break; }
+//         let mut added = 0;
+//         for j in cands {
+//             if added >= max_pairs_per_sent { break; }
 
-            let sent_b = &sentences_b[j];
-            if bad_words.iter().any(|&w| sent_b.to_lowercase().contains(w)) { continue; }
+//             let sent_b = &sentences_b[j];
+//             if bad_words.iter().any(|&w| sent_b.to_lowercase().contains(w)) { continue; }
 
-            let kw_set_b: HashSet<&String> = kws_b[j].iter().collect();
-            if kw_set_a.intersection(&kw_set_b).count() < min_shared_keywords { continue; }
+//             let kw_set_b: HashSet<&String> = kws_b[j].iter().collect();
+//             if kw_set_a.intersection(&kw_set_b).count() < min_shared_keywords { continue; }
 
-            // No swap needed — caller guarantees a=short, b=long
-            let input_encoded  = tokenizer.encode(sent_a);
-            let target_preview = tokenizer.encode(sent_b);
+//             // No swap needed — caller guarantees a=short, b=long
+//             let input_encoded  = tokenizer.encode(sent_a);
+//             let target_preview = tokenizer.encode(sent_b);
 
-            if input_encoded.len() > 200 { continue; }
-            if input_encoded.len() < 20  { continue; }
-            if input_encoded.is_empty()  { continue; }
+//             if input_encoded.len() > 200 { continue; }
+//             if input_encoded.len() < 20  { continue; }
+//             if input_encoded.is_empty()  { continue; }
 
-            let world = WorldContext::random(&mut rng_local);
-            let (action, motion_dir) = derive_action(&world);
+//             let world = WorldContext::random(&mut rng_local);
+//             let (action, motion_dir) = derive_action(&world);
 
-            let (target_encoded, target_json) = match stage {
-                TrainingStage::Language => {
-                    let encoded = target_preview;
-                    let json    = sent_b.clone();
-                    (encoded, json)
-                }
-                TrainingStage::Structured => {
-                    let world = WorldContext::random(&mut rng_local);
-                    let (action, motion_dir) = derive_action(&world);
-                    let json = serde_json::to_string_pretty(&serde_json::json!({
-                        "action":     action.as_str(),
-                        "motion_dir": format!("{:?}", motion_dir).to_lowercase(),
-                        "reply":      sent_b,
-                    })).unwrap();
-                    let encoded = match tokenizer {
-                        TokenizerKind::Bpe(b) => b.encode_raw(&json)
-                            .unwrap_or_default()
-                            .into_iter().map(|x| x as usize).collect(),
-                        TokenizerKind::Char(c) => c.encode(&json),
-                    };
-                    (encoded, json)
-                }
-            };
+//             let (target_encoded, target_json) = match stage {
+//                 TrainingStage::Language => {
+//                     let encoded = target_preview;
+//                     let json    = sent_b.clone();
+//                     (encoded, json)
+//                 }
+//                 TrainingStage::Structured => {
+//                     let world = WorldContext::random(&mut rng_local);
+//                     let (action, motion_dir) = derive_action(&world);
+//                     let json = serde_json::to_string_pretty(&serde_json::json!({
+//                         "action":     action.as_str(),
+//                         "motion_dir": format!("{:?}", motion_dir).to_lowercase(),
+//                         "reply":      sent_b,
+//                     })).unwrap();
+//                     let encoded = match tokenizer {
+//                         TokenizerKind::Bpe(b) => b.encode_raw(&json)
+//                             .unwrap_or_default()
+//                             .into_iter().map(|x| x as usize).collect(),
+//                         TokenizerKind::Char(c) => c.encode(&json),
+//                     };
+//                     (encoded, json)
+//                 }
+//             };
 
-            if target_encoded.len() > 500 { continue; }
-            if target_encoded.len() < 140 { continue; }
-            if target_encoded.is_empty() || target_encoded.len() > MAX_SEQ_LEN - 2 { continue; }
+//             if target_encoded.len() > 500 { continue; }
+//             if target_encoded.len() < 140 { continue; }
+//             if target_encoded.is_empty() || target_encoded.len() > MAX_SEQ_LEN - 2 { continue; }
 
-            let target_labels: Vec<usize> = target_encoded.iter().cloned()
-                .chain(std::iter::once(EOS_TOKEN))
-                .collect();
+//             let target_labels: Vec<usize> = target_encoded.iter().cloned()
+//                 .chain(std::iter::once(EOS_TOKEN))
+//                 .collect();
 
-            let enc_input: Vec<usize> = std::iter::once(BOS_TOKEN)
-                .chain(input_encoded.iter().cloned())
-                .collect();
+//             let enc_input: Vec<usize> = std::iter::once(BOS_TOKEN)
+//                 .chain(input_encoded.iter().cloned())
+//                 .collect();
 
-            if enc_input.len() > MAX_SEQ_LEN { continue; }
+//             if enc_input.len() > MAX_SEQ_LEN { continue; }
 
-            let pad = |mut v: Vec<usize>| -> Vec<usize> {
-                v.resize(MAX_SEQ_LEN, PAD_TOKEN);
-                v
-            };
+//             let pad = |mut v: Vec<usize>| -> Vec<usize> {
+//                 v.resize(MAX_SEQ_LEN, PAD_TOKEN);
+//                 v
+//             };
 
-            let input_ids     = pad(enc_input);
-            let target_labels = pad(target_labels);
+//             let input_ids     = pad(enc_input);
+//             let target_labels = pad(target_labels);
 
-            let emote_lbl = keyword_emote_label(sent_b);
-            let matched   = matched_classes(sent_b, keyword_index);
+//             let emote_lbl = keyword_emote_label(sent_b);
+//             let matched   = matched_classes(sent_b, keyword_index);
 
-            let mut ctx = Vec::with_capacity(CONTEXT_DIMS);
-            let mut class_probs = vec![1.0f32 / 100.0; 100];
-            for &c in &matched { class_probs[c] = 0.5; }
-            ctx.extend_from_slice(&class_probs);
-            let mut emote_probs = vec![0.0f32; 7];
-            emote_probs[emote_lbl.min(6)] = 1.0;
-            ctx.extend_from_slice(&emote_probs);
-            ctx.extend_from_slice(&emote_probs);
-            ctx.extend_from_slice(&world.to_context_slice());
-            debug_assert_eq!(ctx.len(), CONTEXT_DIMS);
+//             let mut ctx = Vec::with_capacity(CONTEXT_DIMS);
+//             let mut class_probs = vec![1.0f32 / 100.0; 100];
+//             for &c in &matched { class_probs[c] = 0.5; }
+//             ctx.extend_from_slice(&class_probs);
+//             let mut emote_probs = vec![0.0f32; 7];
+//             emote_probs[emote_lbl.min(6)] = 1.0;
+//             ctx.extend_from_slice(&emote_probs);
+//             ctx.extend_from_slice(&emote_probs);
+//             ctx.extend_from_slice(&world.to_context_slice());
+//             debug_assert_eq!(ctx.len(), CONTEXT_DIMS);
 
-            samples.push(Sample {
-                input_ids,
-                target_labels,
-                context_vec:     ctx,
-                emote_label:     emote_lbl,
-                matched_classes: matched,
-                action,
-                motion_dir,
-                world,
-                target_json,
-            });
+//             samples.push(Sample {
+//                 input_ids,
+//                 target_labels,
+//                 context_vec:     ctx,
+//                 emote_label:     emote_lbl,
+//                 matched_classes: matched,
+//                 action,
+//                 motion_dir,
+//                 world,
+//                 target_json,
+//             });
 
-            added += 1;
-        }
-    }
+//             added += 1;
+//         }
+//     }
 
-    samples
-}
+//     samples
+// }
 
-pub fn prepare_paired_samples(
-    sentences:           &[String],
-    tokenizer:           &TokenizerKind,
-    keyword_index:       &HashMap<String, Vec<usize>>,
-    rng:                 &mut impl Rng,
-    min_shared_keywords: usize,
-    max_pairs_per_sent:  usize,
-    stage: TrainingStage,
-) -> Vec<Sample> {
-    println!("prepare paired samples");
+// pub fn prepare_paired_samples(
+//     sentences:           &[String],
+//     tokenizer:           &TokenizerKind,
+//     keyword_index:       &HashMap<String, Vec<usize>>,
+//     rng:                 &mut impl Rng,
+//     min_shared_keywords: usize,
+//     max_pairs_per_sent:  usize,
+//     stage: TrainingStage,
+// ) -> Vec<Sample> {
+//     println!("prepare paired samples");
 
-    let sent_keywords: Vec<Vec<String>> = sentences
-        .par_iter()
-        .map(|s| extract_keywords(s).into_iter().map(|(kw, _)| kw).collect())
-        .collect();
+//     let sent_keywords: Vec<Vec<String>> = sentences
+//         .par_iter()
+//         .map(|s| extract_keywords(s).into_iter().map(|(kw, _)| kw).collect())
+//         .collect();
 
-    let mut kw_to_sentences: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, kws) in sent_keywords.iter().enumerate() {
-        for kw in kws {
-            kw_to_sentences.entry(kw.clone()).or_default().push(i);
-        }
-    }
+//     let mut kw_to_sentences: HashMap<String, Vec<usize>> = HashMap::new();
+//     for (i, kws) in sent_keywords.iter().enumerate() {
+//         for kw in kws {
+//             kw_to_sentences.entry(kw.clone()).or_default().push(i);
+//         }
+//     }
 
-    let bad_words = vec!["sex", "drug", "kill", "rape"];
-    let mut rng_local = rand::thread_rng();
-    let mut samples = Vec::new();
+//     let bad_words = vec!["sex", "drug", "kill", "rape"];
+//     let mut rng_local = rand::thread_rng();
+//     let mut samples = Vec::new();
 
-    for i in 0..sentences.len() {
-        let sent_a = &sentences[i];
-        if bad_words.iter().any(|&w| sent_a.to_lowercase().contains(w)) { continue; }
+//     for i in 0..sentences.len() {
+//         let sent_a = &sentences[i];
+//         if bad_words.iter().any(|&w| sent_a.to_lowercase().contains(w)) { continue; }
 
-        let kws_a: HashSet<&String> = sent_keywords[i].iter().collect();
-        if kws_a.is_empty() { continue; }
+//         let kws_a: HashSet<&String> = sent_keywords[i].iter().collect();
+//         if kws_a.is_empty() { continue; }
 
-        let mut candidates: HashSet<usize> = HashSet::new();
-        for kw in &sent_keywords[i] {
-            if let Some(list) = kw_to_sentences.get(kw) {
-                for &j in list {
-                    if j != i { candidates.insert(j); }
-                }
-            }
-        }
+//         let mut candidates: HashSet<usize> = HashSet::new();
+//         for kw in &sent_keywords[i] {
+//             if let Some(list) = kw_to_sentences.get(kw) {
+//                 for &j in list {
+//                     if j != i { candidates.insert(j); }
+//                 }
+//             }
+//         }
 
-        let mut cands: Vec<usize> = candidates.into_iter().collect();
-        cands.shuffle(rng);
+//         let mut cands: Vec<usize> = candidates.into_iter().collect();
+//         cands.shuffle(rng);
 
-        let mut added = 0;
-        for j in cands {
-            if added >= max_pairs_per_sent { break; }
+//         let mut added = 0;
+//         for j in cands {
+//             if added >= max_pairs_per_sent { break; }
 
-            let sent_b = &sentences[j];
-            if bad_words.iter().any(|&w| sent_b.to_lowercase().contains(w)) { continue; }
+//             let sent_b = &sentences[j];
+//             if bad_words.iter().any(|&w| sent_b.to_lowercase().contains(w)) { continue; }
 
-            let kws_b: HashSet<&String> = sent_keywords[j].iter().collect();
-            if kws_a.intersection(&kws_b).count() < min_shared_keywords { continue; }
+//             let kws_b: HashSet<&String> = sent_keywords[j].iter().collect();
+//             if kws_a.intersection(&kws_b).count() < min_shared_keywords { continue; }
 
-            let input_encoded  = tokenizer.encode(sent_a);
-            let target_preview = tokenizer.encode(sent_b);
+//             let input_encoded  = tokenizer.encode(sent_a);
+//             let target_preview = tokenizer.encode(sent_b);
 
-            let (input_encoded, sent_b_for_target) = if target_preview.len() < input_encoded.len() {
-                (target_preview, sent_a)   // swapped
-            } else {
-                (input_encoded, sent_b)    // original
-            };
+//             let (input_encoded, sent_b_for_target) = if target_preview.len() < input_encoded.len() {
+//                 (target_preview, sent_a)   // swapped
+//             } else {
+//                 (input_encoded, sent_b)    // original
+//             };
 
-            // ── Input: just the prompt sentence ───────────────────────────────
-            // let input_encoded = tokenizer.encode(sent_a);
-            if input_encoded.len() > 140 { continue; }
-            if input_encoded.len() < 20 { continue; }
-            if input_encoded.is_empty() { continue; }
+//             // ── Input: just the prompt sentence ───────────────────────────────
+//             // let input_encoded = tokenizer.encode(sent_a);
+//             if input_encoded.len() > 140 { continue; }
+//             if input_encoded.len() < 20 { continue; }
+//             if input_encoded.is_empty() { continue; }
 
-            // ── Target: JSON-wrapped reply ─────────────────────────────────────
-            let world  = WorldContext::random(&mut rng_local);
-            let (action, motion_dir) = derive_action(&world);
+//             // ── Target: JSON-wrapped reply ─────────────────────────────────────
+//             let world  = WorldContext::random(&mut rng_local);
+//             let (action, motion_dir) = derive_action(&world);
 
-            // ── Target depends on training stage ──────────────────────────────
-            let (target_encoded, target_json) = match stage {
-                TrainingStage::Language => {
-                    let encoded = tokenizer.encode(sent_b_for_target);
-                    let json = sent_b_for_target.clone();
-                    (encoded, json)
-                }
-                TrainingStage::Structured => {
-                    let world = WorldContext::random(&mut rng_local);
-                    let (action, motion_dir) = derive_action(&world);
-                    let json = serde_json::to_string_pretty(&serde_json::json!({
-                        "action":     action.as_str(),
-                        "motion_dir": format!("{:?}", motion_dir).to_lowercase(),
-                        "reply":      sent_b_for_target,
-                    })).unwrap();
-                    let encoded = match tokenizer {
-                        TokenizerKind::Bpe(b) => b.encode_raw(&json)
-                            .unwrap_or_default()
-                            .into_iter().map(|x| x as usize).collect(),
-                        TokenizerKind::Char(c) => c.encode(&json),
-                    };
-                    (encoded, json)
-                }
-            };
+//             // ── Target depends on training stage ──────────────────────────────
+//             let (target_encoded, target_json) = match stage {
+//                 TrainingStage::Language => {
+//                     let encoded = tokenizer.encode(sent_b_for_target);
+//                     let json = sent_b_for_target.clone();
+//                     (encoded, json)
+//                 }
+//                 TrainingStage::Structured => {
+//                     let world = WorldContext::random(&mut rng_local);
+//                     let (action, motion_dir) = derive_action(&world);
+//                     let json = serde_json::to_string_pretty(&serde_json::json!({
+//                         "action":     action.as_str(),
+//                         "motion_dir": format!("{:?}", motion_dir).to_lowercase(),
+//                         "reply":      sent_b_for_target,
+//                     })).unwrap();
+//                     let encoded = match tokenizer {
+//                         TokenizerKind::Bpe(b) => b.encode_raw(&json)
+//                             .unwrap_or_default()
+//                             .into_iter().map(|x| x as usize).collect(),
+//                         TokenizerKind::Char(c) => c.encode(&json),
+//                     };
+//                     (encoded, json)
+//                 }
+//             };
 
-            if target_encoded.len() > 440 { continue; }
-            if target_encoded.len() < 140 { continue; }
+//             if target_encoded.len() > 440 { continue; }
+//             if target_encoded.len() < 140 { continue; }
 
-            // Length guard on target — that's what the model must generate
-            if target_encoded.is_empty()
-                || target_encoded.len() > MAX_SEQ_LEN - 2 { continue; }
+//             // Length guard on target — that's what the model must generate
+//             if target_encoded.is_empty()
+//                 || target_encoded.len() > MAX_SEQ_LEN - 2 { continue; }
 
-            let target_labels: Vec<usize> = target_encoded.iter().cloned()
-                .chain(std::iter::once(EOS_TOKEN))
-                .collect();
+//             let target_labels: Vec<usize> = target_encoded.iter().cloned()
+//                 .chain(std::iter::once(EOS_TOKEN))
+//                 .collect();
 
-            let enc_input: Vec<usize> = std::iter::once(BOS_TOKEN)
-                .chain(input_encoded.iter().cloned())
-                .collect();
+//             let enc_input: Vec<usize> = std::iter::once(BOS_TOKEN)
+//                 .chain(input_encoded.iter().cloned())
+//                 .collect();
 
-            if enc_input.len() > MAX_SEQ_LEN { continue; }
+//             if enc_input.len() > MAX_SEQ_LEN { continue; }
 
-            let pad = |mut v: Vec<usize>| -> Vec<usize> {
-                v.resize(MAX_SEQ_LEN, PAD_TOKEN);
-                v
-            };
+//             let pad = |mut v: Vec<usize>| -> Vec<usize> {
+//                 v.resize(MAX_SEQ_LEN, PAD_TOKEN);
+//                 v
+//             };
 
-            let input_ids     = pad(enc_input);
-            let target_labels = pad(target_labels);
+//             let input_ids     = pad(enc_input);
+//             let target_labels = pad(target_labels);
 
-            let emote_lbl   = keyword_emote_label(sent_b);  // reply drives emote
-            let matched     = matched_classes(sent_b, keyword_index);
+//             let emote_lbl   = keyword_emote_label(sent_b);  // reply drives emote
+//             let matched     = matched_classes(sent_b, keyword_index);
 
-            // Build context vec
-            let mut ctx = Vec::with_capacity(CONTEXT_DIMS);
-            let mut class_probs = vec![1.0f32 / 100.0; 100];
-            for &c in &matched { class_probs[c] = 0.5; }
-            ctx.extend_from_slice(&class_probs);
-            let mut emote_probs = vec![0.0f32; 7];
-            emote_probs[emote_lbl.min(6)] = 1.0;
-            ctx.extend_from_slice(&emote_probs);
-            ctx.extend_from_slice(&emote_probs);
-            ctx.extend_from_slice(&world.to_context_slice());
-            debug_assert_eq!(ctx.len(), CONTEXT_DIMS);
+//             // Build context vec
+//             let mut ctx = Vec::with_capacity(CONTEXT_DIMS);
+//             let mut class_probs = vec![1.0f32 / 100.0; 100];
+//             for &c in &matched { class_probs[c] = 0.5; }
+//             ctx.extend_from_slice(&class_probs);
+//             let mut emote_probs = vec![0.0f32; 7];
+//             emote_probs[emote_lbl.min(6)] = 1.0;
+//             ctx.extend_from_slice(&emote_probs);
+//             ctx.extend_from_slice(&emote_probs);
+//             ctx.extend_from_slice(&world.to_context_slice());
+//             debug_assert_eq!(ctx.len(), CONTEXT_DIMS);
 
-            samples.push(Sample {
-                // pair:            vec![sent_a.clone(), sent_b.clone()],
-                input_ids,
-                // target_ids:      vec![],
-                target_labels,
-                context_vec:     ctx,
-                emote_label:     emote_lbl,
-                matched_classes: matched,
-                action,
-                motion_dir,
-                world,
-                target_json
-            });
+//             samples.push(Sample {
+//                 // pair:            vec![sent_a.clone(), sent_b.clone()],
+//                 input_ids,
+//                 // target_ids:      vec![],
+//                 target_labels,
+//                 context_vec:     ctx,
+//                 emote_label:     emote_lbl,
+//                 matched_classes: matched,
+//                 action,
+//                 motion_dir,
+//                 world,
+//                 target_json
+//             });
 
-            added += 1;
-        }
-    }
+//             added += 1;
+//         }
+//     }
 
-    samples
-}
+//     samples
+// }
 
 pub fn prepare_paired_samples_split(
     // sentences:    &[String],
@@ -619,26 +616,55 @@ pub fn prepare_paired_samples_split(
         let words: Vec<&str> = sent.split_whitespace().collect();
         if words.len() < 4 { continue; }
 
+        let world = WorldContext::random(&mut rng_local);
+        let (action, motion_dir) = derive_action(&world);
+
         let point = words.len() / 4;
         let sent_a = words[..point].join(" ");
         let sent_b = words[point..].join(" ");
 
-        let input_encoded  = tokenizer.encode(&sent_a);
-        // let target_preview = tokenizer.encode(&sent_b);
+        // let input_encoded  = tokenizer.encode(&sent_a);
+
+        let mut obstacle_dir = if let Some(obst) = world.obstacle {
+            obst.dir
+        } else {
+            CardinalDir::None
+        };
+        let mut building_dir = if let Some(obst) = world.building {
+            obst.dir
+        } else {
+            CardinalDir::None
+        };
+        let mut resource_dir = if let Some(obst) = world.resource {
+            obst.dir
+        } else {
+            CardinalDir::None
+        };
+        
+        let (input_encoded, input_json) = match stage {
+            TrainingStage::Language => {
+                let encoded = tokenizer.encode(&sent_a);
+                let json    = sent_a.clone();
+                (encoded, json)
+            }
+            TrainingStage::Structured => {
+                let json = serde_json::to_string_pretty(&serde_json::json!({
+                    "obstacle_dir":     format!("{:?}", obstacle_dir).to_lowercase(),
+                    "building_dir":     format!("{:?}", building_dir).to_lowercase(),
+                    "resource_dir":     format!("{:?}", resource_dir).to_lowercase(),
+                    "message":           sent_a,
+                })).unwrap();
+                let encoded = match tokenizer {
+                    TokenizerKind::Bpe(b) => b.encode_raw(&json)
+                        .unwrap_or_default()
+                        .into_iter().map(|x| x as usize).collect(),
+                    TokenizerKind::Char(c) => c.encode(&json),
+                };
+                (encoded, json)
+            }
+        };
 
         let sent_b_for_target = sent_b.clone();
-
-        // let (input_encoded, sent_b_for_target) = if target_preview.len() < input_encoded.len() {
-        //     (target_preview, &sent_a)
-        // } else {
-        //     (input_encoded, &sent_b)
-        // };
-
-        // if input_encoded.len() > MAX_SEQ_LEN / 2 { continue; }
-        // if input_encoded.len() < (MAX_SEQ_LEN / 4) - 50 { continue; }
-
-        let world = WorldContext::random(&mut rng_local);
-        let (action, motion_dir) = derive_action(&world);
 
         let (target_encoded, target_json) = match stage {
             TrainingStage::Language => {
@@ -647,8 +673,6 @@ pub fn prepare_paired_samples_split(
                 (encoded, json)
             }
             TrainingStage::Structured => {
-                let world = WorldContext::random(&mut rng_local);
-                let (action, motion_dir) = derive_action(&world);
                 let json = serde_json::to_string_pretty(&serde_json::json!({
                     "action":     action.as_str(),
                     "motion_dir": format!("{:?}", motion_dir).to_lowercase(),
@@ -664,8 +688,6 @@ pub fn prepare_paired_samples_split(
             }
         };
 
-        // if target_encoded.len() > MAX_SEQ_LEN { continue; }
-        // if target_encoded.len() < (MAX_SEQ_LEN / 2) - 50 { continue; }
         if target_encoded.is_empty() || target_encoded.len() > MAX_SEQ_LEN - 2 { continue; }
 
         let target_labels: Vec<usize> = target_encoded.iter().cloned()
@@ -678,6 +700,9 @@ pub fn prepare_paired_samples_split(
 
         if enc_input.len() > MAX_SEQ_LEN { continue; }
 
+        if enc_input.len() + target_encoded.len() > MAX_SEQ_LEN { continue; }
+        if enc_input.len() + target_encoded.len() < MAX_SEQ_LEN / 2 { continue; }
+
         let pad = |mut v: Vec<usize>| -> Vec<usize> {
             v.resize(MAX_SEQ_LEN, PAD_TOKEN);
             v
@@ -686,26 +711,9 @@ pub fn prepare_paired_samples_split(
         let input_ids     = pad(enc_input);
         let target_labels = pad(target_labels);
 
-        let emote_lbl = keyword_emote_label(&sent_b);
-        let matched   = matched_classes(&sent_b, keyword_index);
-
-        let mut ctx = Vec::with_capacity(CONTEXT_DIMS);
-        let mut class_probs = vec![1.0f32 / 100.0; 100];
-        for &c in &matched { class_probs[c] = 0.5; }
-        ctx.extend_from_slice(&class_probs);
-        let mut emote_probs = vec![0.0f32; 7];
-        emote_probs[emote_lbl.min(6)] = 1.0;
-        ctx.extend_from_slice(&emote_probs);
-        ctx.extend_from_slice(&emote_probs);
-        ctx.extend_from_slice(&world.to_context_slice());
-        debug_assert_eq!(ctx.len(), CONTEXT_DIMS);
-
         samples.push(Sample {
             input_ids,
             target_labels,
-            context_vec:     ctx,
-            emote_label:     emote_lbl,
-            matched_classes: matched,
             action,
             motion_dir,
             world,
