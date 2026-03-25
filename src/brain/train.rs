@@ -4,16 +4,17 @@ use anyhow::Result;
 use burn::{
     grad_clipping::GradientClippingConfig, module::AutodiffModule, nn::loss::CrossEntropyLossConfig, optim::{AdamConfig, AdamWConfig, GradientsParams, Optimizer}, prelude::*, tensor::{Int, TensorData, backend::AutodiffBackend}
 };
-use rand::{Rng, seq::SliceRandom, thread_rng};
+use rand::{Rng, rngs::StdRng, seq::SliceRandom, thread_rng};
 use indicatif::{ProgressBar, ProgressStyle};
 use ratatui::{Terminal, TerminalOptions, Viewport, prelude::CrosstermBackend};
 use std::collections::HashMap;
+use rand::SeedableRng;
 
 use crate::{brain::{PAD_TOKEN, 
     bpe::{BpeTokenizer, CL_ID, CR_ID, TokenizerKind}, 
     chart::{TrainingState, render}, 
-    mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences, load_txt_sentences}, 
-    pdf::{load_pdf_ebook_sentences, load_pdfs}, samples::{TrainingStage, WorldContext, prepare_paired_samples_split}, 
+    mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences, load_qa_pairs, load_qa_singles, load_txt_sentences}, 
+    pdf::{load_pdf_ebook_sentences, load_pdfs}, samples::{TrainingStage, WorldContext, prepare_paired_samples_split, prepare_paired_samples_split_sep}, 
     wiki::save_sentences_to_file}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 use crate::brain::{
     // CONTEXT_DIMS,
@@ -31,6 +32,7 @@ pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 // pub const MAX_SEQ_LEN:  usize = 512;
 // pub const MAX_SEQ_LEN:  usize = 1024;
 // pub const MAX_SEQ_LEN:  usize = 256;
+pub const MAX_SEQ_LEN_CHARS:  usize = 180;
 pub const MAX_SEQ_LEN:  usize = 180;
 // pub const MAX_SEQ_LEN:  usize = 90;
 // pub const MAX_SEQ_LEN:  usize = 100;
@@ -277,23 +279,23 @@ pub fn run(
         }
     }
 
-    let mut quote_sentences = load_csv_quotes("data/quotes.csv")?;
+    // let mut quote_sentences = load_csv_quotes("data/quotes.csv")?;
 
-    for (i, sent) in quote_sentences.iter().enumerate() {
-        if (i < 12) {
-            println!("QUOTE: {:?}", sent);
-        } else {
-            break;
-        }
-    }
+    // for (i, sent) in quote_sentences.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("QUOTE: {:?}", sent);
+    //     } else {
+    //         break;
+    //     }
+    // }
 
-    let mut dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt")?;
+    // let mut dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt")?;
 
-    for (i, sent) in dict_sentences.iter().enumerate() {
-        if (i < 12) {
-            println!("DICT: {:?}", sent);
-        }
-    }
+    // for (i, sent) in dict_sentences.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("DICT: {:?}", sent);
+    //     }
+    // }
 
     let mut qna_sentences = load_csv_qna("data/AI.csv")?;
 
@@ -305,15 +307,15 @@ pub fn run(
         }
     }
 
-    let mut bible_verses = load_csv_bible("data/bible_bbe.csv")?;
+    // let mut bible_verses = load_csv_bible("data/bible_bbe.csv")?;
 
-    for (i, sent) in bible_verses.iter().enumerate() {
-        if (i < 12) {
-            println!("Verse: {:?}", sent);
-        } else {
-            break;
-        }
-    }
+    // for (i, sent) in bible_verses.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("Verse: {:?}", sent);
+    //     } else {
+    //         break;
+    //     }
+    // }
 
     let mut handcrafted = load_handcrafted_sentences("data/handcrafted.txt")?;
 
@@ -325,13 +327,13 @@ pub fn run(
         }
     }
 
-    let mut notions = load_notion_sentences("data/notion/")?;
+    // let mut notions = load_notion_sentences("data/notion/")?;
 
-    for (i, sent) in notions.iter().enumerate() {
-        if (i < 12) {
-            println!("notion: {:?}", sent);
-        }
-    }
+    // for (i, sent) in notions.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("notion: {:?}", sent);
+    //     }
+    // }
 
     // let personals = load_notion_sentences("data/personal/")?;
 
@@ -362,6 +364,14 @@ pub fn run(
     for (i, sent) in txt.iter().enumerate() {
         if (i < 12) {
             println!("txt: {:?}", sent);
+        }
+    }
+
+    let mut my_qna = load_qa_pairs("data/handcrafted_pairs.txt")?;
+
+    for (i, sent) in my_qna.iter().enumerate() {
+        if (i < 12) {
+            println!("qa: {:?}", sent);
         }
     }
 
@@ -399,7 +409,7 @@ pub fn run(
     //     }
     // }
 
-    sentences.extend(mdx_sentences.clone());
+    // sentences.extend(mdx_sentences.clone());
     // sentences.extend(quote_sentences.clone());
     // sentences.extend(qna_sentences.clone());
     sentences.extend(handcrafted.clone());
@@ -424,14 +434,18 @@ pub fn run(
     // ── Prepare samples with label-indexed context ────────────────────────────
     let mut training_samples = Vec::new();
 
-    let mut rng = thread_rng();
+    // let mut rng = thread_rng();
+
+    // reproducable behavior
+    let seed: u64 = 4815162342;
+    let mut rng = StdRng::seed_from_u64(seed);
 
     //  // optional: makes keyword matching faster
     // // wiki_sentences.shuffle(&mut rng);
     // wiki_sentences.truncate(8192);
 
     wiki_long_sentences.shuffle(&mut rng);
-    wiki_long_sentences.truncate(50_000);
+    wiki_long_sentences.truncate(8192);
 
     // // wiki_sentences.extend(wiki_long_sentences); // combine for sample prep
     // // wiki_sentences.shuffle(&mut rng);
@@ -439,17 +453,17 @@ pub fn run(
     // dict_sentences.shuffle(&mut rng);
     // dict_sentences.truncate(8192);
 
-    quote_sentences.shuffle(&mut rng);
-    quote_sentences.truncate(8192);
+    // quote_sentences.shuffle(&mut rng);
+    // quote_sentences.truncate(8192);
 
-    // qna_sentences.shuffle(&mut rng);
-    // qna_sentences.truncate(8192);
+    qna_sentences.shuffle(&mut rng);
+    qna_sentences.truncate(8192);
 
     // mdx_sentences.shuffle(&mut rng);
     // mdx_sentences.truncate(8192);
 
-    bible_verses.shuffle(&mut rng);
-    bible_verses.truncate(8192);
+    // bible_verses.shuffle(&mut rng);
+    // bible_verses.truncate(8192);
 
     // handcrafted.shuffle(&mut rng);
     // handcrafted.truncate(8192);
@@ -457,8 +471,8 @@ pub fn run(
     // notions.shuffle(&mut rng);
     // notions.truncate(8192);
 
-    txt.shuffle(&mut rng);
-    txt.truncate(8192);
+    // txt.shuffle(&mut rng);
+    // txt.truncate(8192);
 
     // ebooks.shuffle(&mut rng);
     // ebooks.truncate(8192);
@@ -469,27 +483,28 @@ pub fn run(
     // let training_stage = TrainingStage::Language; // first
     let training_stage = TrainingStage::Structured; // fine-tune
 
-    // let mut mdx_samples = prepare_paired_samples(&mdx_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
-    let mut quote_samples = prepare_paired_samples_split(quote_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
-    // let mut qna_samples = prepare_paired_samples(&qna_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
+    let mut mdx_samples = prepare_paired_samples_split(mdx_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
+    // let mut quote_samples = prepare_paired_samples_split(quote_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
+    let mut qna_samples = prepare_paired_samples_split(qna_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
     let mut wiki_samples = prepare_paired_samples_split(wiki_long_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
     // let mut dict_samples = prepare_paired_samples(&dict_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
-    let mut bible_samples = prepare_paired_samples_split(bible_verses, &tokenizer, &keyword_index, &mut rng, training_stage);
-    // let mut handcrafted_samples = prepare_paired_samples(&handcrafted, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
+    // let mut bible_samples = prepare_paired_samples_split(bible_verses, &tokenizer, &keyword_index, &mut rng, training_stage);
+    let mut handcrafted_samples = prepare_paired_samples_split(handcrafted, &tokenizer, &keyword_index, &mut rng, training_stage);
     // let mut notion_samples = prepare_paired_samples(&notions, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     // let personal_samples = prepare_samples(&personals, &tokenizer, &keyword_index);
     // let mut ebook_samples = prepare_paired_samples_split(ebooks, &tokenizer, &keyword_index, &mut rng, training_stage);
     let mut txt_samples = prepare_paired_samples_split(txt, &tokenizer, &keyword_index, &mut rng, training_stage);
     // let mut ebooks2_samples = prepare_paired_samples_split(&ebooks2, &tokenizer, &keyword_index, &mut rng, training_stage);
+    let mut my_qna_samples = prepare_paired_samples_split_sep(my_qna, &tokenizer, &keyword_index, &mut rng, training_stage);
 
     println!(
         "Samples lengths: {} {} {} {}",
         // mdx_samples.len(),
-        quote_samples.len(),
-        // qna_samples.len(),
+        // quote_samples.len(),
+        qna_samples.len(),
         wiki_samples.len(),
-        bible_samples.len(),
-        // handcrafted_samples.len(),
+        // bible_samples.len(),
+        handcrafted_samples.len(),
         // notion_samples.len(),
         // // personal_samples.len(),
         txt_samples.len(),
@@ -501,23 +516,23 @@ pub fn run(
     // bible_samples.truncate(2048);
     // // bible_samples.truncate(4096);
 
-    wiki_samples.shuffle(&mut rng);
-    // wiki_samples.truncate(2048);
-    wiki_samples.truncate(500_000);
+    // wiki_samples.shuffle(&mut rng);
+    // // wiki_samples.truncate(2048);
+    // wiki_samples.truncate(500_000);
 
     // dict_samples.shuffle(&mut rng);
     // dict_samples.truncate(2048);
 
-    quote_samples.shuffle(&mut rng);
-    // quote_samples.truncate(2048);
-    quote_samples.truncate(100_000);
+    // quote_samples.shuffle(&mut rng);
+    // // quote_samples.truncate(2048);
+    // quote_samples.truncate(100_000);
 
     // qna_samples.shuffle(&mut rng);
     // qna_samples.truncate(2048);
 
-    // txt_samples.shuffle(&mut rng);
-    // // ebook_samples.truncate(2048);
-    // txt_samples.truncate(2048);
+    txt_samples.shuffle(&mut rng);
+    // ebook_samples.truncate(2048);
+    txt_samples.truncate(2048);
 
     // ebook_samples.shuffle(&mut rng);
     // // ebook_samples.truncate(2048);
@@ -532,13 +547,13 @@ pub fn run(
     // notion_samples.truncate(2048);
     // // // notion_samples.truncate(4096);
     
-    training_samples.extend(wiki_samples); // Yumon expresses that he is confused by wiki material
-    training_samples.extend(quote_samples);
+    // training_samples.extend(wiki_samples); // Yumon expresses that he is confused by wiki material
+    // training_samples.extend(quote_samples);
     // training_samples.extend(dict_samples);
     // training_samples.extend(qna_samples);
     // training_samples.extend(bible_samples);
     // training_samples.extend(notion_samples);
-    training_samples.extend(bible_samples);
+    // training_samples.extend(bible_samples);
     training_samples.extend(txt_samples);
     // training_samples.extend(ebook_samples);
     // training_samples.extend(ebooks2_samples);
@@ -547,13 +562,18 @@ pub fn run(
     // training_samples.truncate(500_000);
     // training_samples.truncate(65536);
     // training_samples.truncate(16384); // maybe at 128 hidden size? maybe need 256?
-    // training_samples.truncate(8192); // limit total for now
+    training_samples.truncate(8192); // limit total for now
     // training_samples.truncate(1024); 
-    training_samples.truncate(2048); 
+    // training_samples.truncate(2048); 
+    // training_samples.truncate(256); 
     // training_samples.truncate(4096); 
 
     // training_samples.extend(mdx_samples);
-    // training_samples.extend(handcrafted_samples); // always add after to include all of these
+    // training_samples.extend(handcrafted_samples.clone()); // always add after to include all of these
+    // training_samples.extend(handcrafted_samples.clone()); // oversample
+    training_samples.extend(handcrafted_samples); // oversample
+    training_samples.extend(mdx_samples);
+    training_samples.extend(my_qna_samples);
     // training_samples.extend(personal_samples);
 
     println!(
@@ -631,9 +651,9 @@ pub fn run(
     
     // lr over time
     // let first_lr = 1e-4;
-    // let first_lr = 0.003; // even better for 8?
+    let first_lr = 0.003; // even better for 8?
     // let first_lr = 0.001; // batch sizes like 8
-    let first_lr = 0.0003; // for batch size 4?
+    // let first_lr = 0.0003; // for batch size 4?
     // let first_lr = 1e-6; // flat immediately
     let last_lr = 1e-8;
 
@@ -718,7 +738,7 @@ pub fn run(
             // let mut all_contexts: Vec<f32> = Vec::with_capacity(current_batch_size * CONTEXT_DIMS);
             let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
             // let mut all_emote_targets: Vec<i32> = Vec::with_capacity(current_batch_size);
-            let mut all_enc_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
+            // let mut all_enc_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
             // let mut all_dec_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
             let mut all_dec_input_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
 
@@ -735,36 +755,41 @@ pub fn run(
                 // // all_lang_targets.extend(sample.target_labels.iter().map(|&t| t as i32));
                 // all_emote_targets.push(sample.emote_label as i32);
 
-                all_enc_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
+                // all_enc_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
                 // all_dec_ids.extend(sample.target_labels.iter().map(|&t| t as i32));
 
                 // Inside the for &i in batch_idx loop, after let sample = &training_samples[i];
 
-                let target_labels = &sample.target_labels;  // [tok0, tok1, ..., EOS, PAD, PAD, ...]
+                // let target_labels = &sample.target_labels;  // [tok0, tok1, ..., EOS, PAD, PAD, ...]
 
-                // Find real length (includes EOS, stops before first PAD)
-                let real_len = target_labels.iter()
-                    .position(|&t| t == PAD_TOKEN)
-                    .unwrap_or(MAX_SEQ_LEN);
+                // // Find real length (includes EOS, stops before first PAD)
+                // let real_len = target_labels.iter()
+                //     .position(|&t| t == PAD_TOKEN)
+                //     .unwrap_or(MAX_SEQ_LEN);
 
-                // ── Decoder INPUT (exactly like generate_* loops) ─────────────
-                let mut dec_input: Vec<i32> = vec![BOS_TOKEN as i32];
-                dec_input.extend(
-                    target_labels[0..real_len.saturating_sub(1)]
-                        .iter()
-                        .map(|&t| t as i32)
-                );
-                dec_input.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
+                // // ── Decoder INPUT (exactly like generate_* loops) ─────────────
+                // let mut dec_input: Vec<i32> = vec![BOS_TOKEN as i32];
+                // dec_input.extend(
+                //     target_labels[0..real_len.saturating_sub(1)]
+                //         .iter()
+                //         .map(|&t| t as i32)
+                // );
+                // dec_input.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
 
-                // ── Loss TARGETS (shifted correctly, includes first token + EOS) ──
-                let mut lang_targets: Vec<i32> = target_labels[0..real_len]  // ← CHANGED: start at 0
-                    .iter()
-                    .map(|&t| t as i32)
-                    .collect();
-                lang_targets.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
+                // // ── Loss TARGETS (shifted correctly, includes first token + EOS) ──
+                // let mut lang_targets: Vec<i32> = target_labels[0..real_len]  // ← CHANGED: start at 0
+                //     .iter()
+                //     .map(|&t| t as i32)
+                //     .collect();
+                // lang_targets.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
 
-                all_dec_input_ids.extend(dec_input);
-                all_lang_targets.extend(lang_targets);
+                // all_dec_input_ids.extend(dec_input);
+                // all_lang_targets.extend(lang_targets);
+
+                // input_ids is the full sequence [BOS, sent_a..., sent_b..., EOS, PAD...]
+                // target_labels is already shifted  [sent_a..., sent_b..., EOS, PAD...]
+                all_dec_input_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
+                all_lang_targets.extend(sample.target_labels.iter().map(|&t| t as i32));
             }
 
             // ── Stack into real batched tensors (ONE allocation) ───────────────
@@ -788,10 +813,10 @@ pub fn run(
             //     &device,
             // );
 
-            let enc_t = Tensor::<TrainBackend, 2, Int>::from_ints(
-                TensorData::new(all_enc_ids, [current_batch_size, MAX_SEQ_LEN]),
-                &device,
-            );
+            // let enc_t = Tensor::<TrainBackend, 2, Int>::from_ints(
+            //     TensorData::new(all_enc_ids, [current_batch_size, MAX_SEQ_LEN]),
+            //     &device,
+            // );
 
             // let dec_t = Tensor::<TrainBackend, 2, Int>::from_ints(
             //     TensorData::new(all_dec_ids, [current_batch_size, MAX_SEQ_LEN]),
@@ -806,7 +831,7 @@ pub fn run(
             // ── SINGLE forward pass (this is where the 20× speedup happens) ─────
             // let (token_logits, emote_logits) = model.forward(ids_t, context_t);
 
-            let token_logits = model.forward(enc_t, dec_t);
+            let token_logits = model.forward(dec_t);
 
             // ── Loss (now automatically batched) ───────────────────────────────
             let vocab = tokenizer.vocab_size();
@@ -819,7 +844,7 @@ pub fn run(
             // let total_loss = lang_loss + emote_loss.mul_scalar(EMOTE_WEIGHT);
             let total_loss  = lang_loss;
 
-            // Backward + step (exactly one per real batch)
+            // // Backward + step (exactly one per real batch)
             let grads = GradientsParams::from_grads(total_loss.backward(), &model);
             model = optimizer.step(
                 current_lr, 
@@ -827,6 +852,24 @@ pub fn run(
                 model, 
                 grads
             );
+
+            // // Before step
+            // let w_before: Vec<f32> = model.token_head.weight.val()
+            //     .to_data().to_vec().unwrap();
+
+            // let grads = GradientsParams::from_grads(total_loss.backward(), &model);
+            // model = optimizer.step(current_lr, model, grads);
+
+            // // After step  
+            // let w_after: Vec<f32> = model.token_head.weight.val()
+            //     .to_data().to_vec().unwrap();
+
+            // println!("weight delta: {:?}", 
+            //     w_before.iter().zip(&w_after)
+            //     .map(|(a,b)| (b-a).abs())
+            //     .take(5)
+            //     .collect::<Vec<_>>()
+            // );
 
             // Logging (same feel as before)
             let loss_val: f32 = total_loss.clone().inner().to_data().to_vec::<f32>().unwrap()[0];

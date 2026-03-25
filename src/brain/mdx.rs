@@ -28,8 +28,14 @@ pub fn load_mdx_sentences(mdx_dir: &str) -> Result<Vec<String>> {
         }
     }
 
-    println!("✅ Loaded {} sentences from {} MDX files", sentences.len(), files_loaded);
-    Ok(sentences)
+    let mut final_sentences = Vec::new();
+
+    for sents in sentences.chunks(2) { // appropriate length, decent connections
+        final_sentences.push(sents.join(" "));
+    }
+
+    println!("✅ Loaded {} sentences from {} MDX files", final_sentences.len(), files_loaded);
+    Ok(final_sentences)
 }
 
 pub fn load_notion_sentences(notion_dir: &str) -> Result<Vec<String>> {
@@ -256,6 +262,12 @@ pub fn load_handcrafted_sentences(dict_path: &str) -> Result<Vec<String>> {
         }
     }
 
+    // let mut final_sentences = Vec::new();
+
+    // for sents in sentences.chunks(2) { // appropriate length, decent connections
+    //     final_sentences.push(sents.join(" "));
+    // }
+
     println!("✅ Loaded {} handcrafted sentences", sentences.len());
     Ok(sentences)
 }
@@ -270,7 +282,7 @@ pub fn load_txt_sentences(path: &str) -> Result<Vec<String>> {
         let trimmed = line.trim();
 
         for sent in trimmed.split(".") {
-            if is_good_sentence(&sent) {
+            if is_good_sentence(&sent) && sent.len() > 50 { // have a nice sensible minimum length
                 sentences.push(sent.to_string());
             }
         }
@@ -278,6 +290,68 @@ pub fn load_txt_sentences(path: &str) -> Result<Vec<String>> {
 
     println!("✅ Loaded {} txt sentences", sentences.len());
     Ok(sentences)
+}
+
+pub fn load_qa_pairs(path: &str) -> Result<Vec<(String, String)>> {
+    println!("📖 Loading QA pairs: {path}");
+
+    let content = std::fs::read_to_string(path)?;
+    
+    // 1. Collect non-empty, trimmed lines
+    let lines: Vec<String> = content
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let mut pairs = Vec::new();
+
+    // 2. Iterate through lines in steps of 2
+    for chunk in lines.chunks(2) {
+        if chunk.len() == 2 {
+            let question = chunk[0].clone();
+            let answer = chunk[1].clone();
+            
+            // You can still apply your "is_good" logic here
+            if is_good_sentence(&question) && is_good_sentence(&answer) {
+                pairs.push((question, answer));
+            }
+        }
+    }
+
+    println!("✅ Loaded {} QA pairs", pairs.len());
+    Ok(pairs)
+}
+
+pub fn load_qa_singles(path: &str) -> Result<Vec<String>> {
+    println!("📖 Loading QA singles: {path}");
+
+    let content = std::fs::read_to_string(path)?;
+    
+    // 1. Collect non-empty, trimmed lines
+    let lines: Vec<String> = content
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let mut pairs = Vec::new();
+
+    // 2. Iterate through lines in steps of 2
+    for chunk in lines.chunks(2) {
+        if chunk.len() == 2 {
+            let question = chunk[0].clone();
+            let answer = chunk[1].clone();
+            
+            // You can still apply your "is_good" logic here
+            if is_good_sentence(&question) && is_good_sentence(&answer) {
+                pairs.push(question + " " + &answer);
+            }
+        }
+    }
+
+    println!("✅ Loaded {} QA singles", pairs.len());
+    Ok(pairs)
 }
 
 // pub fn load_txt_sentences(path: &str) -> Result<Vec<String>> {

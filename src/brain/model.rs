@@ -1,6 +1,6 @@
 use burn::{
     nn::{
-        Dropout, DropoutConfig, Embedding, EmbeddingConfig, Linear, LinearConfig, RotaryEncoding, RotaryEncodingConfig,
+        Dropout, DropoutConfig, Embedding, EmbeddingConfig, Initializer, Linear, LinearConfig, RotaryEncoding, RotaryEncodingConfig
     },
     prelude::*,
     record::{BinFileRecorder, FullPrecisionSettings, Recorder},
@@ -22,16 +22,25 @@ use crate::{
 use super::tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN};
 
 // ── Model dimensions ──────────────────────────────────────────────────────────
-pub const EMBED_DIM:    usize = 128;
-pub const HIDDEN_UNITS: usize = 128;
+pub const EMBED_DIM:    usize = 64;
+pub const HIDDEN_UNITS: usize = 64;
+// pub const EMBED_DIM:    usize = 128;
+// pub const HIDDEN_UNITS: usize = 128;
 // pub const EMBED_DIM:    usize = 256;
 // pub const HIDDEN_UNITS: usize = 256;
+// pub const EMBED_DIM:    usize = 512;
+// pub const HIDDEN_UNITS: usize = 512;
 pub const ATTN_HEADS:   usize = 2;
 pub const N_LAYERS:     usize = 2;
+// pub const N_LAYERS:     usize = 8;
+// pub const ATTN_HEADS:   usize = 4;
+// pub const N_LAYERS:     usize = 16;
 pub const FF_DIM:       usize = 256;
 // pub const FF_DIM:       usize = 512;
+// pub const FF_DIM:       usize = 1024;
 
-pub const TEMPERATURE:  f32   = 0.95;
+pub const TEMPERATURE:  f32   = 0.75;
+// pub const TEMPERATURE:  f32   = 0.25;
 pub const TOP_K:        usize = 10;
 
 // pub const CONTEXT_DIMS: usize = 132;
@@ -46,6 +55,72 @@ pub const YUMON_SCHEMA: &str = r#"{
     "required": ["action", "motion_dir", "reply"]
 }"#;
 
+// ═════════════════════════════════════════════════════════════════════════════
+// "Soft" Mixture of Experts
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[derive(Config, Debug)]
+pub struct MoEConfig {
+    d_model:    usize,
+    d_hidden:   usize,
+    n_experts:  usize,
+    #[config(default = 2)]
+    top_k:      usize,
+}
+
+impl MoEConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> MoE<B> {
+        let experts = (0..self.n_experts)
+            .map(|_| MLPConfig::new(self.d_model, self.d_hidden).init(device))
+            .collect();
+        MoE {
+            experts,
+            router: LinearConfig::new(self.d_model, self.n_experts)
+                .with_bias(false)
+                .init(device),
+            n_experts: self.n_experts,
+            top_k: self.top_k,
+        }
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct MoE<B: Backend> {
+    experts:   Vec<MLP<B>>,
+    router:    Linear<B>,
+    n_experts: usize,
+    top_k:     usize,
+}
+
+impl<B: Backend> MoE<B> {
+    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        let [batch, seq, d_model] = x.dims();
+
+        // Router logits → softmax weights
+        // [batch, seq, n_experts]
+        let logits = self.router.forward(x.clone());
+        let weights = burn::tensor::activation::softmax(logits, 2);
+
+        // Run ALL experts, then mask — avoids dynamic indexing
+        // [batch, seq, d_model] for each expert
+        let expert_outputs: Vec<Tensor<B, 3>> = self.experts
+            .iter()
+            .map(|e| e.forward(x.clone()))
+            .collect();
+
+        // Stack → [batch, seq, n_experts, d_model]
+        let stacked = Tensor::stack(expert_outputs, 2);
+
+        // Weighted sum over experts
+        // weights: [batch, seq, n_experts] → [batch, seq, n_experts, 1]
+        let w = weights.unsqueeze_dim::<4>(3);
+
+        // [batch, seq, n_experts, d_model] * [batch, seq, n_experts, 1]
+        // → sum over expert dim → [batch, seq, d_model]
+        // (stacked * w).sum_dim(2).squeeze(2)
+        (stacked * w).sum_dim(2).squeeze::<3>()
+    }
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // RMSNorm
@@ -93,6 +168,45 @@ impl SiLU {
     }
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Linear Force
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[derive(Config, Debug)]
+pub struct LinearForceConfig {
+    d_model:    usize,
+    d_hidden:   usize,
+}
+
+impl LinearForceConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> MLP<B> {
+        MLP {
+            w1:   LinearConfig::new(self.d_model, self.d_hidden).with_bias(false).init(device),
+            w2:   LinearConfig::new(self.d_hidden, self.d_model).with_bias(false).init(device),
+            w3:   LinearConfig::new(self.d_model, self.d_hidden).with_bias(false).init(device),
+            silu: SiLU::new(),
+        }
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct LinearForce<B: Backend> {
+    w1:   Linear<B>,
+    w2:   Linear<B>,
+    w3:   Linear<B>,
+    silu: SiLU,
+}
+
+impl<B: Backend> LinearForce<B> {
+    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        let one = self.silu.forward(self.w1.forward(x));
+        let two = self.silu.forward(self.w2.forward(one));
+        let three = self.silu.forward(self.w3.forward(two));
+
+        three
+    }
+}
+
 
 // ═════════════════════════════════════════════════════════════════════════════
 // SwiGLU MLP  (same gated structure as Llama)
@@ -107,9 +221,24 @@ pub struct MLPConfig {
 impl MLPConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> MLP<B> {
         MLP {
-            w1:   LinearConfig::new(self.d_model, self.d_hidden).with_bias(false).init(device),
-            w2:   LinearConfig::new(self.d_hidden, self.d_model).with_bias(false).init(device),
-            w3:   LinearConfig::new(self.d_model, self.d_hidden).with_bias(false).init(device),
+            w1:   LinearConfig::new(self.d_model, self.d_hidden)
+                .with_initializer(Initializer::KaimingUniform {
+                    gain: 1.0 / f64::sqrt(3.0),
+                    fan_out_only: false,
+                })
+                .with_bias(false).init(device),
+            w2:   LinearConfig::new(self.d_hidden, self.d_model)
+                .with_initializer(Initializer::KaimingUniform {
+                    gain: 1.0 / f64::sqrt(3.0),
+                    fan_out_only: false,
+                })
+                .with_bias(false).init(device),
+            w3:   LinearConfig::new(self.d_model, self.d_hidden)
+                .with_initializer(Initializer::KaimingUniform {
+                    gain: 1.0 / f64::sqrt(3.0),
+                    fan_out_only: false,
+                })
+                .with_bias(false).init(device),
             silu: SiLU::new(),
         }
     }
@@ -155,10 +284,18 @@ impl SelfAttentionConfig {
         assert!(self.d_model % self.n_heads == 0);
         let head_dim = self.d_model / self.n_heads;
         SelfAttention {
-            q: LinearConfig::new(self.d_model, self.d_model).with_bias(false).init(device),
-            k: LinearConfig::new(self.d_model, self.d_model).with_bias(false).init(device),
-            v: LinearConfig::new(self.d_model, self.d_model).with_bias(false).init(device),
-            o: LinearConfig::new(self.d_model, self.d_model).with_bias(false).init(device),
+            q: LinearConfig::new(self.d_model, self.d_model)
+            .with_initializer(Initializer::XavierUniform { gain: 1.0 })
+            .with_bias(false).init(device),
+            k: LinearConfig::new(self.d_model, self.d_model)
+            .with_initializer(Initializer::XavierUniform { gain: 1.0 })
+            .with_bias(false).init(device),
+            v: LinearConfig::new(self.d_model, self.d_model)
+            .with_initializer(Initializer::XavierUniform { gain: 1.0 })
+            .with_bias(false).init(device),
+            o: LinearConfig::new(self.d_model, self.d_model)
+            .with_initializer(Initializer::XavierUniform { gain: 1.0 })
+            .with_bias(false).init(device),
             n_heads: self.n_heads,
             head_dim,
         }
@@ -195,8 +332,10 @@ impl<B: Backend> SelfAttention<B> {
              .swap_dims(1, 2)          // [batch, heads, seq, head_dim]
         };
 
-        let q = rope.forward(reshape(self.q.forward(x.clone()))) * scale;
-        let k = rope.forward(reshape(self.k.forward(x.clone()))) * scale;
+        // let q = rope.forward(reshape(self.q.forward(x.clone()))) * scale;
+        // let k = rope.forward(reshape(self.k.forward(x.clone()))) * scale;
+        let q = rope.forward(reshape(self.q.forward(x.clone())));
+        let k = rope.forward(reshape(self.k.forward(x.clone())));
         let v =              reshape(self.v.forward(x));
 
         let mut qk = q.matmul(k.transpose()); // [batch, heads, seq, seq]
@@ -231,99 +370,106 @@ impl<B: Backend> SelfAttention<B> {
 // Cross-Attention  (Q from decoder, K/V from encoder memory)
 // ═════════════════════════════════════════════════════════════════════════════
 
-#[derive(Config, Debug)]
-pub struct CrossAttentionConfig {
-    d_model: usize,
-    n_heads: usize,
-}
+// #[derive(Config, Debug)]
+// pub struct CrossAttentionConfig {
+//     d_model: usize,
+//     n_heads: usize,
+// }
 
-impl CrossAttentionConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> CrossAttentionBlock<B> {
-        assert!(self.d_model % self.n_heads == 0);
-        let head_dim = self.d_model / self.n_heads;
-        CrossAttentionBlock {
-            q: LinearConfig::new(self.d_model, self.d_model).with_bias(false).init(device),
-            k: LinearConfig::new(self.d_model, self.d_model).with_bias(false).init(device),
-            v: LinearConfig::new(self.d_model, self.d_model).with_bias(false).init(device),
-            o: LinearConfig::new(self.d_model, self.d_model).with_bias(false).init(device),
-            gate: LinearConfig::new(self.d_model, self.n_heads).with_bias(true).init(device),
-            n_heads: self.n_heads,
-            head_dim,
-        }
-    }
-}
+// impl CrossAttentionConfig {
+//     pub fn init<B: Backend>(&self, device: &B::Device) -> CrossAttentionBlock<B> {
+//         assert!(self.d_model % self.n_heads == 0);
+//         let head_dim = self.d_model / self.n_heads;
+//         CrossAttentionBlock {
+//             q: LinearConfig::new(self.d_model, self.d_model).with_bias(false).init(device),
+//             k: LinearConfig::new(self.d_model, self.d_model).with_bias(false).init(device),
+//             v: LinearConfig::new(self.d_model, self.d_model).with_bias(false).init(device),
+//             o: LinearConfig::new(self.d_model, self.d_model).with_bias(false).init(device),
+//             gate: LinearConfig::new(self.d_model, self.n_heads).with_bias(true).init(device),
+//             n_heads: self.n_heads,
+//             head_dim,
+//         }
+//     }
+// }
 
-#[derive(Module, Debug)]
-pub struct CrossAttentionBlock<B: Backend> {
-    q: Linear<B>,
-    k: Linear<B>,
-    v: Linear<B>,
-    o: Linear<B>,
-    n_heads:  usize,
-    head_dim: usize,
-    gate: Linear<B>,      // new: d_model → n_heads
-}
+// #[derive(Module, Debug)]
+// pub struct CrossAttentionBlock<B: Backend> {
+//     q: Linear<B>,
+//     k: Linear<B>,
+//     v: Linear<B>,
+//     o: Linear<B>,
+//     n_heads:  usize,
+//     head_dim: usize,
+//     gate: Linear<B>,      // new: d_model → n_heads
+// }
 
-impl<B: Backend> CrossAttentionBlock<B> {
-    /// x:      [batch, dec_len, d_model]  — decoder states
-    /// memory: [batch, enc_len, d_model]  — encoder output
-    /// rope:   shared RotaryEncoding (applied to both Q and K)
-    /// enc_pad_mask: optional [batch, enc_len] bool — true where encoder input was padded
-    pub fn forward(
-        &self,
-        x:            Tensor<B, 3>,
-        memory:       Tensor<B, 3>,
-        rope:         &RotaryEncoding<B>,
-        enc_pad_mask: Option<Tensor<B, 2, Bool>>,
-    ) -> Tensor<B, 3> {
-        let [batch, dec_len, _] = x.dims();
-        let [_, enc_len, _]     = memory.dims();
-        let scale = (self.head_dim as f64).powf(-0.25);
+// impl<B: Backend> CrossAttentionBlock<B> {
+//     /// x:      [batch, dec_len, d_model]  — decoder states
+//     /// memory: [batch, enc_len, d_model]  — encoder output
+//     /// rope:   shared RotaryEncoding (applied to both Q and K)
+//     /// enc_pad_mask: optional [batch, enc_len] bool — true where encoder input was padded
+//     pub fn forward(
+//         &self,
+//         x:            Tensor<B, 3>,
+//         memory:       Tensor<B, 3>,
+//         rope:         &RotaryEncoding<B>,
+//         enc_pad_mask: Option<Tensor<B, 2, Bool>>,
+//     ) -> Tensor<B, 3> {
+//         let [batch, dec_len, _] = x.dims();
+//         let [_, enc_len, _]     = memory.dims();
+//         let scale = (self.head_dim as f64).powf(-0.25);
 
-        let reshape_dec = |t: Tensor<B, 3>| {
-            t.reshape([batch, dec_len, self.n_heads, self.head_dim])
-             .swap_dims(1, 2)
-        };
-        let reshape_enc = |t: Tensor<B, 3>| {
-            t.reshape([batch, enc_len, self.n_heads, self.head_dim])
-             .swap_dims(1, 2)
-        };
+//         let reshape_dec = |t: Tensor<B, 3>| {
+//             t.reshape([batch, dec_len, self.n_heads, self.head_dim])
+//              .swap_dims(1, 2)
+//         };
+//         let reshape_enc = |t: Tensor<B, 3>| {
+//             t.reshape([batch, enc_len, self.n_heads, self.head_dim])
+//              .swap_dims(1, 2)
+//         };
 
-        // Q from decoder, K/V from memory; RoPE on Q and K
-        // let q = rope.forward(reshape_dec(self.q.forward(x)))      * scale;
-        // let k = rope.forward(reshape_enc(self.k.forward(memory.clone()))) * scale;
-        // perhaps rope should only be used in the selfattention not crossattention?
-        let q = reshape_dec(self.q.forward(x.clone()))      * scale;
-        let k = reshape_enc(self.k.forward(memory.clone())) * scale;
-        let v = reshape_enc(self.v.forward(memory));
+//         // Q from decoder, K/V from memory; RoPE on Q and K
+//         // let q = rope.forward(reshape_dec(self.q.forward(x)))      * scale;
+//         // let k = rope.forward(reshape_enc(self.k.forward(memory.clone()))) * scale;
+//         // perhaps rope should only be used in the selfattention not crossattention?
+//         let q = reshape_dec(self.q.forward(x.clone()))      * scale;
+//         let k = reshape_enc(self.k.forward(memory.clone())) * scale;
+//         let v = reshape_enc(self.v.forward(memory));
 
-        let mut qk = q.matmul(k.transpose()); // [batch, heads, dec_len, enc_len]
+//         let mut qk = q.matmul(k.transpose()); // [batch, heads, dec_len, enc_len]
 
-        if let Some(pmask) = enc_pad_mask {
-            let pmask_f = pmask
-                .unsqueeze_dim::<3>(1)
-                .unsqueeze_dim::<4>(2)
-                .float()
-                .mul_scalar(-1e9);
-            qk = qk + pmask_f;
-        }
+//         if let Some(pmask) = enc_pad_mask {
+//             let pmask_f = pmask
+//                 .unsqueeze_dim::<3>(1)
+//                 .unsqueeze_dim::<4>(2)
+//                 .float()
+//                 .mul_scalar(-1e9);
+//             qk = qk + pmask_f;
+//         }
 
-        let w = burn::tensor::activation::softmax(qk, 3);
-        let out = w.matmul(v)
-            .swap_dims(1, 2)
-            .flatten(2, 3);
+//         let w = burn::tensor::activation::softmax(qk, 3);
+//         let out = w.matmul(v)
+//             .swap_dims(1, 2)
+//             .flatten(2, 3);
 
-        // let gates = sigmoid(self.gate.forward(x))
-        //     .reshape([batch, dec_len, self.n_heads, 1])
-        //     .swap_dims(1, 2)
-        //     .expand([batch, self.n_heads, dec_len, self.head_dim])
-        //     .flatten(2, 3);
+//         // let w = burn::tensor::activation::softmax(qk, 3);
+    
+//         // // Keep as 4D [batch, heads, dec_len, head_dim]
+//         // let out_4d = w.matmul(v)
+//         //     .swap_dims(1, 2); // [batch, dec_len, heads, head_dim]
 
-        // self.o.forward(out * gates)
+//         // // Gate: [batch, dec_len, n_heads] → [batch, dec_len, n_heads, 1]
+//         // let gates = sigmoid(self.gate.forward(x))
+//         //     .reshape([batch, dec_len, self.n_heads, 1]);
 
-        self.o.forward(out)
-    }
-}
+//         // // Broadcast over head_dim, then flatten
+//         // let out = (out_4d * gates).flatten(2, 3); // [batch, dec_len, d_model]
+
+//         // self.o.forward(out)
+
+//         self.o.forward(out)
+//     }
+// }
 
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -332,46 +478,48 @@ impl<B: Backend> CrossAttentionBlock<B> {
 //   pre-norm → MLP       → residual
 // ═════════════════════════════════════════════════════════════════════════════
 
-#[derive(Config, Debug)]
-pub struct EncoderBlockConfig {
-    d_model:  usize,
-    d_hidden: usize,
-    n_heads:  usize,
-}
+// #[derive(Config, Debug)]
+// pub struct EncoderBlockConfig {
+//     d_model:  usize,
+//     d_hidden: usize,
+//     n_heads:  usize,
+// }
 
-impl EncoderBlockConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> EncoderBlock<B> {
-        EncoderBlock {
-            attn_norm: RMSNormConfig::new(self.d_model).init(device),
-            attn:      SelfAttentionConfig::new(self.d_model, self.n_heads).init(device),
-            mlp_norm:  RMSNormConfig::new(self.d_model).init(device),
-            mlp:       MLPConfig::new(self.d_model, self.d_hidden).init(device),
-        }
-    }
-}
+// impl EncoderBlockConfig {
+//     pub fn init<B: Backend>(&self, device: &B::Device) -> EncoderBlock<B> {
+//         EncoderBlock {
+//             attn_norm: RMSNormConfig::new(self.d_model).init(device),
+//             attn:      SelfAttentionConfig::new(self.d_model, self.n_heads).init(device),
+//             mlp_norm:  RMSNormConfig::new(self.d_model).init(device),
+//             mlp:       MLPConfig::new(self.d_model, self.d_hidden).init(device),
+//             // mlp: MoEConfig::new(self.d_model, self.d_hidden, 4).init(device), // doesnt help, not with soft
+//         }
+//     }
+// }
 
-#[derive(Module, Debug)]
-pub struct EncoderBlock<B: Backend> {
-    attn_norm: RMSNorm<B>,
-    attn:      SelfAttention<B>,
-    mlp_norm:  RMSNorm<B>,
-    mlp:       MLP<B>,
-}
+// #[derive(Module, Debug)]
+// pub struct EncoderBlock<B: Backend> {
+//     attn_norm: RMSNorm<B>,
+//     attn:      SelfAttention<B>,
+//     mlp_norm:  RMSNorm<B>,
+//     mlp:       MLP<B>,
+//     // mlp: MoE<B>,
+// }
 
-impl<B: Backend> EncoderBlock<B> {
-    pub fn forward(
-        &self,
-        x:        Tensor<B, 3>,
-        rope:     &RotaryEncoding<B>,
-        pad_mask: Option<Tensor<B, 2, Bool>>,
-    ) -> Tensor<B, 3> {
-        // self-attention with residual
-        let x = x.clone()
-            + self.attn.forward(self.attn_norm.forward(x), rope, None, pad_mask);
-        // MLP with residual
-        x.clone() + self.mlp.forward(self.mlp_norm.forward(x))
-    }
-}
+// impl<B: Backend> EncoderBlock<B> {
+//     pub fn forward(
+//         &self,
+//         x:        Tensor<B, 3>,
+//         rope:     &RotaryEncoding<B>,
+//         pad_mask: Option<Tensor<B, 2, Bool>>,
+//     ) -> Tensor<B, 3> {
+//         // self-attention with residual
+//         let x = x.clone()
+//             + self.attn.forward(self.attn_norm.forward(x), rope, None, pad_mask);
+//         // MLP with residual
+//         x.clone() + self.mlp.forward(self.mlp_norm.forward(x))
+//     }
+// }
 
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -393,10 +541,11 @@ impl DecoderBlockConfig {
         DecoderBlock {
             self_attn_norm:  RMSNormConfig::new(self.d_model).init(device),
             self_attn:       SelfAttentionConfig::new(self.d_model, self.n_heads).init(device),
-            cross_attn_norm: RMSNormConfig::new(self.d_model).init(device),
-            cross_attn:      CrossAttentionConfig::new(self.d_model, self.n_heads).init(device),
+            // cross_attn_norm: RMSNormConfig::new(self.d_model).init(device),
+            // cross_attn:      CrossAttentionConfig::new(self.d_model, self.n_heads).init(device),
             mlp_norm:        RMSNormConfig::new(self.d_model).init(device),
             mlp:             MLPConfig::new(self.d_model, self.d_hidden).init(device),
+            // mlp: MoEConfig::new(self.d_model, self.d_hidden, 4).init(device),
         }
     }
 }
@@ -405,21 +554,22 @@ impl DecoderBlockConfig {
 pub struct DecoderBlock<B: Backend> {
     self_attn_norm:  RMSNorm<B>,
     self_attn:       SelfAttention<B>,
-    cross_attn_norm: RMSNorm<B>,
-    cross_attn:      CrossAttentionBlock<B>,
+    // cross_attn_norm: RMSNorm<B>,
+    // cross_attn:      CrossAttentionBlock<B>,
     mlp_norm:        RMSNorm<B>,
     mlp:             MLP<B>,
+    // mlp:             MoE<B>
 }
 
 impl<B: Backend> DecoderBlock<B> {
     pub fn forward(
         &self,
         x:            Tensor<B, 3>,
-        memory:       Tensor<B, 3>,
+        // memory:       Tensor<B, 3>,
         rope:         &RotaryEncoding<B>,
         causal_mask:  Tensor<B, 2>,
         dec_pad_mask: Option<Tensor<B, 2, Bool>>,
-        enc_pad_mask: Option<Tensor<B, 2, Bool>>,
+        // enc_pad_mask: Option<Tensor<B, 2, Bool>>,
     ) -> Tensor<B, 3> {
         // masked self-attention
         let x = x.clone()
@@ -430,13 +580,13 @@ impl<B: Backend> DecoderBlock<B> {
                 dec_pad_mask,
             );
         // cross-attention
-        let x = x.clone()
-            + self.cross_attn.forward(
-                self.cross_attn_norm.forward(x.clone()),
-                memory,
-                rope,
-                enc_pad_mask,
-            );
+        // let x = x.clone()
+        //     + self.cross_attn.forward(
+        //         self.cross_attn_norm.forward(x.clone()),
+        //         memory,
+        //         rope,
+        //         enc_pad_mask,
+        //     );
         // MLP
         x.clone() + self.mlp.forward(self.mlp_norm.forward(x))
     }
@@ -452,10 +602,10 @@ pub struct YumonBrain<B: Backend> {
     // Shared RoPE (one instance, passed by reference to all blocks)
     rope: RotaryEncoding<B>,
 
-    // Encoder
-    enc_embedding: Embedding<B>,
-    enc_blocks:    Vec<EncoderBlock<B>>,
-    enc_norm:      RMSNorm<B>,
+    // // Encoder
+    // enc_embedding: Embedding<B>,
+    // enc_blocks:    Vec<EncoderBlock<B>>,
+    // enc_norm:      RMSNorm<B>,
 
     // Context injection
     // context_proj:  Linear<B>,
@@ -466,7 +616,7 @@ pub struct YumonBrain<B: Backend> {
     dec_norm:      RMSNorm<B>,
 
     dropout:          Dropout,
-    token_head:       Linear<B>,
+    pub token_head:       Linear<B>,
     // yumon_emote_head: Linear<B>,
 }
 
@@ -486,9 +636,9 @@ impl YumonBrainConfig {
 
         let rope = RotaryEncodingConfig::new(MAX_SEQ_LEN, EMBED_DIM / ATTN_HEADS).init(device);
 
-        let enc_blocks = (0..N_LAYERS)
-            .map(|_| EncoderBlockConfig::new(EMBED_DIM, FF_DIM, ATTN_HEADS).init(device))
-            .collect();
+        // let enc_blocks = (0..N_LAYERS)
+        //     .map(|_| EncoderBlockConfig::new(EMBED_DIM, FF_DIM, ATTN_HEADS).init(device))
+        //     .collect();
 
         let dec_blocks = (0..N_LAYERS)
             .map(|_| DecoderBlockConfig::new(EMBED_DIM, FF_DIM, ATTN_HEADS).init(device))
@@ -497,9 +647,9 @@ impl YumonBrainConfig {
         YumonBrain {
             rope,
 
-            enc_embedding: EmbeddingConfig::new(self.vocab_size, EMBED_DIM).init(device),
-            enc_blocks,
-            enc_norm:      RMSNormConfig::new(EMBED_DIM).init(device),
+            // enc_embedding: EmbeddingConfig::new(self.vocab_size, EMBED_DIM).init(device),
+            // enc_blocks,
+            // enc_norm:      RMSNormConfig::new(EMBED_DIM).init(device),
 
             // context_proj:  LinearConfig::new(CONTEXT_DIMS, EMBED_DIM).init(device),
 
@@ -516,94 +666,94 @@ impl YumonBrainConfig {
 
 impl<B: Backend> YumonBrain<B> {
     // ── Encoder ──────────────────────────────────────────────────────────────
-    pub fn encode(
-        &self,
-        enc_tokens:  Tensor<B, 2, Int>,
-        // context_vec: Tensor<B, 2>,
-    ) -> Tensor<B, 3> {
-        let enc_tokens_cl = enc_tokens.clone();
+    // pub fn encode(
+    //     &self,
+    //     enc_tokens:  Tensor<B, 2, Int>,
+    //     // context_vec: Tensor<B, 2>,
+    // ) -> Tensor<B, 3> {
+    //     let enc_tokens_cl = enc_tokens.clone();
         
-        let [batch, enc_len] = enc_tokens.dims();
+    //     let [batch, enc_len] = enc_tokens.dims();
 
-        let pad_mask = enc_tokens.equal_elem(PAD_TOKEN as u32); // [batch, enc_len]
+    //     let pad_mask = enc_tokens.equal_elem(PAD_TOKEN as u32); // [batch, enc_len]
 
-        let mut x = self.dropout.forward(
-            self.enc_embedding.forward(enc_tokens_cl)
-        );
-        // NOTE: No positional embedding — RoPE handles position inside attention
+    //     let mut x = self.dropout.forward(
+    //         self.enc_embedding.forward(enc_tokens_cl)
+    //     );
 
-        // Context injection: project context_vec and broadcast across sequence
-        // let ctx: Tensor<B, 3> = self.context_proj.forward(context_vec)
-        //     .unsqueeze_dim(1)
-        //     .expand([batch, enc_len, EMBED_DIM]);
-        // let ctx: Tensor<B, 3> = self.context_proj.forward(context_vec)
-        //     .unsqueeze_dim(1);
-        // let ctx = ctx
-        //     .expand([batch, enc_len, EMBED_DIM]);
+    //     for block in &self.enc_blocks {
+    //         x = block.forward(x, &self.rope, Some(pad_mask.clone()));
+    //     }
 
-        // x = x + ctx;
-
-        for block in &self.enc_blocks {
-            x = block.forward(x, &self.rope, Some(pad_mask.clone()));
-        }
-
-        self.enc_norm.forward(x)
-    }
+    //     self.enc_norm.forward(x)
+    // }
 
     // ── Decoder ──────────────────────────────────────────────────────────────
-    pub fn decode(
-        &self,
-        dec_tokens:  Tensor<B, 2, Int>,
-        memory:      Tensor<B, 3>,
-        enc_pad_mask: Option<Tensor<B, 2, Bool>>,
-    ) -> Tensor<B, 3> {
-        let dec_tokens_cl = dec_tokens.clone();
+    // pub fn decode(
+    //     &self,
+    //     dec_tokens:  Tensor<B, 2, Int>,
+    //     memory:      Tensor<B, 3>,
+    //     enc_pad_mask: Option<Tensor<B, 2, Bool>>,
+    // ) -> Tensor<B, 3> {
+    //     let dec_tokens_cl = dec_tokens.clone();
 
-        let [batch, dec_len] = dec_tokens.dims();
+    //     let [batch, dec_len] = dec_tokens.dims();
 
-        let dec_pad_mask = dec_tokens.equal_elem(PAD_TOKEN as u32);
+    //     let dec_pad_mask = dec_tokens.equal_elem(PAD_TOKEN as u32);
 
-        let mut x = self.dropout.forward(
-            self.dec_embedding.forward(dec_tokens_cl)
-        );
+    //     let mut x = self.dropout.forward(
+    //         self.dec_embedding.forward(dec_tokens_cl)
+    //     );
 
-        let cmask = causal_mask::<B>(dec_len, &x.device());
+    //     let cmask = causal_mask::<B>(dec_len, &x.device());
 
+    //     for block in &self.dec_blocks {
+    //         x = block.forward(
+    //             x,
+    //             // memory.clone(),
+    //             &self.rope,
+    //             cmask.clone(),
+    //             Some(dec_pad_mask.clone()),
+    //             // enc_pad_mask.clone(),
+    //         );
+    //     }
+
+    //     let x = self.dec_norm.forward(x);
+
+    //     let token_logits = self.token_head.forward(x.clone());
+
+    //     // Emote head — use last non-pad decoder position
+    //     // let last = x
+    //     //     .slice([0..batch, dec_len - 1..dec_len])
+    //     //     .reshape([batch, EMBED_DIM]);
+    //     // let emote_logits = self.yumon_emote_head.forward(last);
+
+    //     token_logits
+    // }
+
+    // // ── Forward ───────────────────────────────────────────────────────────────
+    // pub fn forward(
+    //     &self,
+    //     enc_tokens:  Tensor<B, 2, Int>,
+    //     dec_tokens:  Tensor<B, 2, Int>,
+    //     // context_vec: Tensor<B, 2>,
+    // ) -> Tensor<B, 3> {
+    //     let enc_tokens_cl = enc_tokens.clone();
+    //     let enc_pad_mask = enc_tokens.equal_elem(PAD_TOKEN as u32);
+    //     let memory = self.encode(enc_tokens_cl);
+    //     self.decode(dec_tokens, memory, Some(enc_pad_mask))
+    // }
+
+    pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+        let tokens_embed = tokens.clone();
+        let [batch, seq] = tokens.dims();
+        let pad_mask = tokens.equal_elem(PAD_TOKEN as i32);
+        let mut x = self.dropout.forward(self.dec_embedding.forward(tokens_embed));
+        let cmask = causal_mask::<B>(seq, &x.device());
         for block in &self.dec_blocks {
-            x = block.forward(
-                x,
-                memory.clone(),
-                &self.rope,
-                cmask.clone(),
-                Some(dec_pad_mask.clone()),
-                enc_pad_mask.clone(),
-            );
+            x = block.forward(x, &self.rope, cmask.clone(), Some(pad_mask.clone()));
         }
-
-        let x = self.dec_norm.forward(x);
-
-        let token_logits = self.token_head.forward(x.clone());
-
-        // Emote head — use last non-pad decoder position
-        // let last = x
-        //     .slice([0..batch, dec_len - 1..dec_len])
-        //     .reshape([batch, EMBED_DIM]);
-        // let emote_logits = self.yumon_emote_head.forward(last);
-
-        token_logits
-    }
-
-    // ── Forward ───────────────────────────────────────────────────────────────
-    pub fn forward(
-        &self,
-        enc_tokens:  Tensor<B, 2, Int>,
-        dec_tokens:  Tensor<B, 2, Int>,
-        // context_vec: Tensor<B, 2>,
-    ) -> Tensor<B, 3> {
-        let enc_tokens_cl = enc_tokens.clone();
-        let enc_pad_mask = enc_tokens.equal_elem(PAD_TOKEN as u32);
-        let memory = self.encode(enc_tokens_cl);
-        self.decode(dec_tokens, memory, Some(enc_pad_mask))
+        self.token_head.forward(self.dec_norm.forward(x))
     }
 
     // ── Startup: build outlines Vocabulary from BPE tokenizer ─────────────────
@@ -821,20 +971,6 @@ impl<B: Backend> YumonBrain<B> {
         max_tokens:     usize,
         device:         &B::Device,
     ) -> GenerationResult {
-        // ── Build context tensor ───────────────────────────────────────────────
-        // let mut ctx_flat = Vec::with_capacity(CONTEXT_DIMS);
-        // ctx_flat.extend_from_slice(class_probs);
-        // ctx_flat.extend_from_slice(emote_probs);
-        // let mut onehot = vec![0.0f32; EMOTE_CLASSES];
-        // onehot[user_emote_idx.min(EMOTE_CLASSES - 1)] = 1.0;
-        // ctx_flat.extend_from_slice(&onehot);
-        // ctx_flat.extend_from_slice(&world.to_context_slice());
-
-        // let context_t = Tensor::<B, 2>::from_floats(
-        //     TensorData::new(ctx_flat, [1, CONTEXT_DIMS]),
-        //     device,
-        // );
-
         // ── Encode input once ──────────────────────────────────────────────────
         let enc_ids: Vec<i32> = {
             let mut ids = vec![BOS_TOKEN as i32];
@@ -854,7 +990,7 @@ impl<B: Backend> YumonBrain<B> {
 
         let enc_pad_mask = enc_tokens_t.equal_elem(PAD_TOKEN as u32);
 
-        let memory = self.encode(enc_tokens_t_cl);  // run once
+        // let memory = self.encode(enc_tokens_t_cl);  // run once
 
         // ── Decode autoregressively — no FSM masking ───────────────────────────
         let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
@@ -874,7 +1010,7 @@ impl<B: Backend> YumonBrain<B> {
                 device,
             );
 
-            let token_logits = self.decode(dec_tokens_t, memory.clone(), Some(enc_pad_mask.clone()));
+            let token_logits = self.forward(dec_tokens_t);
             // last_emote_logits = Some(emote_logits.to_data().to_vec::<f32>().unwrap());
 
             let vocab_size  = tokenizer.vocab_size();
@@ -966,105 +1102,105 @@ impl<B: Backend> YumonBrain<B> {
         }
     }
 
-    // good for debugging raw json output as well as TrainingStage::Language
-    pub fn generate_unmasked(
-        &self,
-        tokenizer:      &TokenizerKind,
-        world:          &WorldContext,
-        class_probs:    &[f32],
-        emote_probs:    &[f32],
-        user_emote_idx: usize,
-        seed_text:      &str,
-        max_tokens:     usize,
-        device:         &B::Device,
-    ) -> GenerationResult {
-        // ── Build context tensor ───────────────────────────────────────────────
-        // let mut ctx_flat = Vec::with_capacity(CONTEXT_DIMS);
-        // ctx_flat.extend_from_slice(class_probs);
-        // ctx_flat.extend_from_slice(emote_probs);
-        // let mut onehot = vec![0.0f32; EMOTE_CLASSES];
-        // onehot[user_emote_idx.min(EMOTE_CLASSES - 1)] = 1.0;
-        // ctx_flat.extend_from_slice(&onehot);
-        // ctx_flat.extend_from_slice(&world.to_context_slice());
+    // // good for debugging raw json output as well as TrainingStage::Language
+    // pub fn generate_unmasked(
+    //     &self,
+    //     tokenizer:      &TokenizerKind,
+    //     world:          &WorldContext,
+    //     class_probs:    &[f32],
+    //     emote_probs:    &[f32],
+    //     user_emote_idx: usize,
+    //     seed_text:      &str,
+    //     max_tokens:     usize,
+    //     device:         &B::Device,
+    // ) -> GenerationResult {
+    //     // ── Build context tensor ───────────────────────────────────────────────
+    //     // let mut ctx_flat = Vec::with_capacity(CONTEXT_DIMS);
+    //     // ctx_flat.extend_from_slice(class_probs);
+    //     // ctx_flat.extend_from_slice(emote_probs);
+    //     // let mut onehot = vec![0.0f32; EMOTE_CLASSES];
+    //     // onehot[user_emote_idx.min(EMOTE_CLASSES - 1)] = 1.0;
+    //     // ctx_flat.extend_from_slice(&onehot);
+    //     // ctx_flat.extend_from_slice(&world.to_context_slice());
 
-        // let context_t = Tensor::<B, 2>::from_floats(
-        //     TensorData::new(ctx_flat, [1, CONTEXT_DIMS]),
-        //     device,
-        // );
+    //     // let context_t = Tensor::<B, 2>::from_floats(
+    //     //     TensorData::new(ctx_flat, [1, CONTEXT_DIMS]),
+    //     //     device,
+    //     // );
 
-        // ── Encode input once ──────────────────────────────────────────────────
-        let enc_ids: Vec<i32> = {
-            let mut ids = vec![BOS_TOKEN as i32];
-            if !seed_text.is_empty() {
-                ids.extend(tokenizer.encode(seed_text).iter().map(|&t| t as i32));
-            }
-            ids.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
-            ids
-        };
+    //     // ── Encode input once ──────────────────────────────────────────────────
+    //     let enc_ids: Vec<i32> = {
+    //         let mut ids = vec![BOS_TOKEN as i32];
+    //         if !seed_text.is_empty() {
+    //             ids.extend(tokenizer.encode(seed_text).iter().map(|&t| t as i32));
+    //         }
+    //         ids.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
+    //         ids
+    //     };
 
-        let enc_tokens_t = Tensor::<B, 2, Int>::from_ints(
-            TensorData::new(enc_ids, [1, MAX_SEQ_LEN]),
-            device,
-        );
+    //     let enc_tokens_t = Tensor::<B, 2, Int>::from_ints(
+    //         TensorData::new(enc_ids, [1, MAX_SEQ_LEN]),
+    //         device,
+    //     );
 
-        let enc_tokens_t_cl = enc_tokens_t.clone();
+    //     let enc_tokens_t_cl = enc_tokens_t.clone();
 
-        let enc_pad_mask = enc_tokens_t.equal_elem(PAD_TOKEN as u32);
+    //     let enc_pad_mask = enc_tokens_t.equal_elem(PAD_TOKEN as u32);
 
-        let memory = self.encode(enc_tokens_t_cl);  // run once
+    //     let memory = self.encode(enc_tokens_t_cl);  // run once
 
-        // ── Decode autoregressively — no FSM masking ───────────────────────────
-        let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
-        let mut rng = rand::thread_rng();
-        let mut last_emote_logits: Option<Vec<f32>> = None;
+    //     // ── Decode autoregressively — no FSM masking ───────────────────────────
+    //     let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
+    //     let mut rng = rand::thread_rng();
+    //     let mut last_emote_logits: Option<Vec<f32>> = None;
 
-        for _ in 0..max_tokens {
-            let clamped_len = dec_ids.len().min(MAX_SEQ_LEN);
-            let mut padded = dec_ids[dec_ids.len() - clamped_len..].to_vec();
-            padded.resize(MAX_SEQ_LEN, PAD_TOKEN);
+    //     for _ in 0..max_tokens {
+    //         let clamped_len = dec_ids.len().min(MAX_SEQ_LEN);
+    //         let mut padded = dec_ids[dec_ids.len() - clamped_len..].to_vec();
+    //         padded.resize(MAX_SEQ_LEN, PAD_TOKEN);
 
-            let dec_tokens_t = Tensor::<B, 2, Int>::from_ints(
-                TensorData::new(
-                    padded.iter().map(|&t| t as i32).collect::<Vec<_>>(),
-                    [1, MAX_SEQ_LEN],
-                ),
-                device,
-            );
+    //         let dec_tokens_t = Tensor::<B, 2, Int>::from_ints(
+    //             TensorData::new(
+    //                 padded.iter().map(|&t| t as i32).collect::<Vec<_>>(),
+    //                 [1, MAX_SEQ_LEN],
+    //             ),
+    //             device,
+    //         );
 
-            let token_logits = self.decode(dec_tokens_t, memory.clone(), Some(enc_pad_mask.clone()));
-            // last_emote_logits = Some(emote_logits.to_data().to_vec::<f32>().unwrap());
+    //         let token_logits = self.decode(dec_tokens_t, memory.clone(), Some(enc_pad_mask.clone()));
+    //         // last_emote_logits = Some(emote_logits.to_data().to_vec::<f32>().unwrap());
 
-            let vocab_size  = tokenizer.vocab_size();
-            let last_logits = token_logits
-                .slice([0..1, clamped_len - 1..clamped_len, 0..vocab_size])
-                .reshape([vocab_size]);
+    //         let vocab_size  = tokenizer.vocab_size();
+    //         let last_logits = token_logits
+    //             .slice([0..1, clamped_len - 1..clamped_len, 0..vocab_size])
+    //             .reshape([vocab_size]);
 
-            // no masking — pure model output
-            let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
-            let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
+    //         // no masking — pure model output
+    //         let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
+    //         let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
 
-            if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
-            dec_ids.push(next_token);
-        }
+    //         if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
+    //         dec_ids.push(next_token);
+    //     }
 
-        // ── Decode tokens → string (skip BOS) ─────────────────────────────────
-        let raw_output = tokenizer.decode(&dec_ids[1..]);
+    //     // ── Decode tokens → string (skip BOS) ─────────────────────────────────
+    //     let raw_output = tokenizer.decode(&dec_ids[1..]);
 
-        let parsed: serde_json::Value = serde_json::from_str(&raw_output)
-            .unwrap_or(serde_json::json!({
-                "action": "idle", "motion_dir": "none", "reply": ""
-            }));
+    //     let parsed: serde_json::Value = serde_json::from_str(&raw_output)
+    //         .unwrap_or(serde_json::json!({
+    //             "action": "idle", "motion_dir": "none", "reply": ""
+    //         }));
 
-        GenerationResult {
-            reply:           parsed["reply"].as_str().unwrap_or("").to_string(),
-            action:          Action::Speak,
-            motion_dir:      CardinalDir::None,
-            yumon_emote_idx: last_emote_logits.as_deref().map(argmax).unwrap_or(4),
-            raw_output,
-            fsm_state:       0,
-            allowed_count:   None,
-        }
-    }
+    //     GenerationResult {
+    //         reply:           parsed["reply"].as_str().unwrap_or("").to_string(),
+    //         action:          Action::Speak,
+    //         motion_dir:      CardinalDir::None,
+    //         yumon_emote_idx: last_emote_logits.as_deref().map(argmax).unwrap_or(4),
+    //         raw_output,
+    //         fsm_state:       0,
+    //         allowed_count:   None,
+    //     }
+    // }
 
     // ── Checkpoint I/O ────────────────────────────────────────────────────────
 

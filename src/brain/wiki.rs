@@ -17,7 +17,7 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 use std::io::BufRead;
 
-use crate::brain::train::MAX_SEQ_LEN;
+use crate::brain::train::{MAX_SEQ_LEN, MAX_SEQ_LEN_CHARS};
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -277,7 +277,7 @@ fn split_sentences(text: &str) -> Vec<String> {
 // }
 
 fn split_sentences_chunked(text: &str) -> Vec<String> {
-    let min_len = (MAX_SEQ_LEN as f32 * 0.65).floor().to_usize();
+    let min_len = (MAX_SEQ_LEN_CHARS as f32 * 0.65).floor().to_usize();
     let mut sentences = Vec::new();
     let mut current = String::new();
 
