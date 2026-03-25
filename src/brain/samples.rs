@@ -276,7 +276,7 @@ pub fn prepare_paired_samples_split(
         if bad_words.iter().any(|&w| sent.to_lowercase().contains(w)) { continue; }
 
         let words: Vec<&str> = sent.split_whitespace().collect();
-        if words.len() < 4 { continue; }
+        if words.len() < 3 { continue; }
 
         let world = WorldContext::random(&mut rng_local);
         let (action, motion_dir) = derive_action(&world);
@@ -364,31 +364,31 @@ pub fn prepare_paired_samples_split(
         if enc_input.len() > MAX_SEQ_LEN { continue; }
 
         if enc_input.len() + target_encoded.len() > MAX_SEQ_LEN { continue; }
-        if enc_input.len() + target_encoded.len() < MAX_SEQ_LEN / 2 { continue; }
+        if enc_input.len() + target_encoded.len() < MAX_SEQ_LEN / 6 { continue; }
 
         let pad = |mut v: Vec<usize>| -> Vec<usize> {
             v.resize(MAX_SEQ_LEN, PAD_TOKEN);
             v
         };
 
-        // let input_ids     = pad(enc_input);
-        // let target_labels = pad(target_labels);
+        let input_ids     = pad(enc_input);
+        let target_labels = pad(target_labels);
 
-        // Combine into one sequence
-        let full_input: Vec<usize> = std::iter::once(BOS_TOKEN)
-            .chain(input_encoded.iter().cloned())
-            .chain(target_encoded.iter().cloned())
-            .chain(std::iter::once(EOS_TOKEN))
-            .collect();
+        // // Combine into one sequence
+        // let full_input: Vec<usize> = std::iter::once(BOS_TOKEN)
+        //     .chain(input_encoded.iter().cloned())
+        //     .chain(target_encoded.iter().cloned())
+        //     .chain(std::iter::once(EOS_TOKEN))
+        //     .collect();
 
-        if full_input.len() > MAX_SEQ_LEN { continue; }
-        if full_input.len() < MAX_SEQ_LEN / 2 { continue; }
+        // if full_input.len() > MAX_SEQ_LEN { continue; }
+        // if full_input.len() < MAX_SEQ_LEN / 2 { continue; }
 
-        // target_labels is full_input shifted left by 1 (drop BOS, add trailing PAD)
-        let mut target_labels: Vec<usize> = full_input[1..].to_vec();
-        target_labels.resize(MAX_SEQ_LEN, PAD_TOKEN);
+        // // target_labels is full_input shifted left by 1 (drop BOS, add trailing PAD)
+        // let mut target_labels: Vec<usize> = full_input[1..].to_vec();
+        // target_labels.resize(MAX_SEQ_LEN, PAD_TOKEN);
 
-        let input_ids = pad(full_input);
+        // let input_ids = pad(full_input);
 
         samples.push(Sample {
             input_ids,
@@ -503,31 +503,31 @@ pub fn prepare_paired_samples_split_sep(
         if enc_input.len() > MAX_SEQ_LEN { continue; }
 
         if enc_input.len() + target_encoded.len() > MAX_SEQ_LEN { continue; }
-        if enc_input.len() + target_encoded.len() < MAX_SEQ_LEN / 2 { continue; }
+        if enc_input.len() + target_encoded.len() < MAX_SEQ_LEN / 6 { continue; }
 
         let pad = |mut v: Vec<usize>| -> Vec<usize> {
             v.resize(MAX_SEQ_LEN, PAD_TOKEN);
             v
         };
 
-        // let input_ids     = pad(enc_input);
-        // let target_labels = pad(target_labels);
+        let input_ids     = pad(enc_input);
+        let target_labels = pad(target_labels);
 
-        // Combine into one sequence
-        let full_input: Vec<usize> = std::iter::once(BOS_TOKEN)
-            .chain(input_encoded.iter().cloned())
-            .chain(target_encoded.iter().cloned())
-            .chain(std::iter::once(EOS_TOKEN))
-            .collect();
+        // // Combine into one sequence
+        // let full_input: Vec<usize> = std::iter::once(BOS_TOKEN)
+        //     .chain(input_encoded.iter().cloned())
+        //     .chain(target_encoded.iter().cloned())
+        //     .chain(std::iter::once(EOS_TOKEN))
+        //     .collect();
 
-        if full_input.len() > MAX_SEQ_LEN { continue; }
-        if full_input.len() < MAX_SEQ_LEN / 2 { continue; }
+        // if full_input.len() > MAX_SEQ_LEN { continue; }
+        // if full_input.len() < MAX_SEQ_LEN / 2 { continue; }
 
-        // target_labels is full_input shifted left by 1 (drop BOS, add trailing PAD)
-        let mut target_labels: Vec<usize> = full_input[1..].to_vec();
-        target_labels.resize(MAX_SEQ_LEN, PAD_TOKEN);
+        // // target_labels is full_input shifted left by 1 (drop BOS, add trailing PAD)
+        // let mut target_labels: Vec<usize> = full_input[1..].to_vec();
+        // target_labels.resize(MAX_SEQ_LEN, PAD_TOKEN);
 
-        let input_ids = pad(full_input);
+        // let input_ids = pad(full_input);
 
         samples.push(Sample {
             input_ids,

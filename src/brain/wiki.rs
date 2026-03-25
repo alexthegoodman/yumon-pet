@@ -390,7 +390,7 @@ pub fn clean_sentence(s: &str) -> String {
 pub fn is_good_sentence(s: &str) -> bool {
     let len = s.len();
     // Adjusted bounds: 4000 is quite long for a sentence, but fine for a "chunk"
-    if len < 20 || len > 4000 { return false; }
+    if len < 5 || len > 4000 { return false; }
 
     // List of "red flag" patterns and their allowed limits
     // If any of these appear MORE than 4 times, we reject the string.

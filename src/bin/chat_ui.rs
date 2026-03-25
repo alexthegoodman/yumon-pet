@@ -147,7 +147,16 @@ fn main() -> Result<()> {
         let class_probs = vec![1.0 / CIFAR_CLASSES as f32; CIFAR_CLASSES];
         let emote_probs = vec![1.0 / EMOTE_CLASSES as f32; EMOTE_CLASSES];
 
-        while let Ok((prompt, user_emote_idx, world)) = rx_user.recv() {
+        while let Ok((prompt_text, user_emote_idx, world)) = rx_user.recv() {
+
+            let prompt = serde_json::to_string_pretty(&serde_json::json!({
+                "obstacle_dir": "none",
+                "building_dir": "none",
+                "resource_dir": "none",
+                "message":      prompt_text,
+            }))
+            .unwrap();
+
             // let result = brain_model.generate_unmasked( // good for debug or for TrainingStage::Language?
             let result = brain_model.generate_unmasked_parsed(
             // let result = brain_model.generate_structured( // good for TrainingStage::Structured JSON?

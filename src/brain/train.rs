@@ -31,9 +31,9 @@ pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 // pub const MAX_SEQ_LEN:  usize = 25;
 // pub const MAX_SEQ_LEN:  usize = 512;
 // pub const MAX_SEQ_LEN:  usize = 1024;
-pub const MAX_SEQ_LEN:  usize = 256;
+// pub const MAX_SEQ_LEN:  usize = 256;
 pub const MAX_SEQ_LEN_CHARS:  usize = 180;
-// pub const MAX_SEQ_LEN:  usize = 180;
+pub const MAX_SEQ_LEN:  usize = 180;
 // pub const MAX_SEQ_LEN:  usize = 90;
 // pub const MAX_SEQ_LEN:  usize = 100;
 // pub const MAX_SEQ_LEN:  usize = 80; // better for outlines structured output?
@@ -259,15 +259,15 @@ pub fn run(
     // let _ = save_sentences_to_file(&wiki_long_sentences, "data/wiki_extract.txt");
     // println!("Saved!");
 
-    let mut wiki_long_sentences = load_txt_sentences("data/wiki_extract.txt")?;
+    // let mut wiki_long_sentences = load_txt_sentences("data/wiki_extract.txt")?;
 
-    for (i, sent) in wiki_long_sentences.iter().enumerate() {
-        if (i < 12) {
-            println!("WIKI LONG: {:?}", sent);
-        } else {
-            break;
-        }
-    }
+    // for (i, sent) in wiki_long_sentences.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("WIKI LONG: {:?}", sent);
+    //     } else {
+    //         break;
+    //     }
+    // }
 
     let mut mdx_sentences = load_mdx_sentences("data/(poems)/")?;
 
@@ -444,8 +444,8 @@ pub fn run(
     // // wiki_sentences.shuffle(&mut rng);
     // wiki_sentences.truncate(8192);
 
-    wiki_long_sentences.shuffle(&mut rng);
-    wiki_long_sentences.truncate(50_000);
+    // wiki_long_sentences.shuffle(&mut rng);
+    // wiki_long_sentences.truncate(50_000);
 
     // // wiki_sentences.extend(wiki_long_sentences); // combine for sample prep
     // // wiki_sentences.shuffle(&mut rng);
@@ -486,7 +486,7 @@ pub fn run(
     let mut mdx_samples = prepare_paired_samples_split(mdx_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
     // let mut quote_samples = prepare_paired_samples_split(quote_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
     let mut qna_samples = prepare_paired_samples_split(qna_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
-    let mut wiki_samples = prepare_paired_samples_split(wiki_long_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
+    // let mut wiki_samples = prepare_paired_samples_split(wiki_long_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
     // let mut dict_samples = prepare_paired_samples(&dict_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     let mut bible_samples = prepare_paired_samples_split(bible_verses, &tokenizer, &keyword_index, &mut rng, training_stage);
     let mut handcrafted_samples = prepare_paired_samples_split(handcrafted, &tokenizer, &keyword_index, &mut rng, training_stage);
@@ -498,27 +498,30 @@ pub fn run(
     let mut my_qna_samples = prepare_paired_samples_split_sep(my_qna, &tokenizer, &keyword_index, &mut rng, training_stage);
 
     println!(
-        "Samples lengths: {} {} {} {} {}",
+        "Samples lengths: {} {} {} {} {} {} {}",
         // mdx_samples.len(),
         // quote_samples.len(),
         qna_samples.len(),
-        wiki_samples.len(),
+        // wiki_samples.len(),
         bible_samples.len(),
         handcrafted_samples.len(),
         // notion_samples.len(),
         // // personal_samples.len(),
         txt_samples.len(),
         // ebook_samples.len(),
-        // ebooks2_samples.len()
+        // ebooks2_samples.len(),
+        handcrafted_samples.len(),
+        mdx_samples.len(),
+        my_qna_samples.len(),
     );
 
     bible_samples.shuffle(&mut rng);
     bible_samples.truncate(4096);
     // // bible_samples.truncate(4096);
 
-    wiki_samples.shuffle(&mut rng);
-    // wiki_samples.truncate(2048);
-    wiki_samples.truncate(10_000);
+    // wiki_samples.shuffle(&mut rng);
+    // // wiki_samples.truncate(2048);
+    // wiki_samples.truncate(10_000);
 
     // dict_samples.shuffle(&mut rng);
     // dict_samples.truncate(2048);
@@ -547,16 +550,16 @@ pub fn run(
     // notion_samples.truncate(2048);
     // // // notion_samples.truncate(4096);
     
-    training_samples.extend(wiki_samples); // Yumon expresses that he is confused by wiki material
-    // training_samples.extend(quote_samples);
-    // training_samples.extend(dict_samples);
-    training_samples.extend(qna_samples);
+    // training_samples.extend(wiki_samples); // Yumon expresses that he is confused by wiki material
+    // // training_samples.extend(quote_samples);
+    // // training_samples.extend(dict_samples);
+    // training_samples.extend(qna_samples);
+    // // training_samples.extend(bible_samples);
+    // // training_samples.extend(notion_samples);
     // training_samples.extend(bible_samples);
-    // training_samples.extend(notion_samples);
-    training_samples.extend(bible_samples);
-    training_samples.extend(txt_samples);
-    // training_samples.extend(ebook_samples);
-    // training_samples.extend(ebooks2_samples);
+    // training_samples.extend(txt_samples);
+    // // training_samples.extend(ebook_samples);
+    // // training_samples.extend(ebooks2_samples);
     
     training_samples.shuffle(&mut rng);
     // training_samples.truncate(500_000);
@@ -738,58 +741,48 @@ pub fn run(
             // let mut all_contexts: Vec<f32> = Vec::with_capacity(current_batch_size * CONTEXT_DIMS);
             let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
             // let mut all_emote_targets: Vec<i32> = Vec::with_capacity(current_batch_size);
-            // let mut all_enc_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
+            let mut all_enc_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
             // let mut all_dec_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
             let mut all_dec_input_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
 
             for &i in batch_idx {
                 let sample = &training_samples[i];
 
-                // all_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
-
-                // // // ← pass sample.world instead of rebuilding from scratch
-                // let class_probs = peaked_class_probs(&sample.matched_classes, &mut rng);
-                // let ctx_flat = build_context(&class_probs, sample.emote_label, &sample.world, &mut rng);
-                // all_contexts.extend(ctx_flat);
-
-                // // all_lang_targets.extend(sample.target_labels.iter().map(|&t| t as i32));
-                // all_emote_targets.push(sample.emote_label as i32);
-
-                // all_enc_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
+                all_enc_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
                 // all_dec_ids.extend(sample.target_labels.iter().map(|&t| t as i32));
 
                 // Inside the for &i in batch_idx loop, after let sample = &training_samples[i];
 
-                // let target_labels = &sample.target_labels;  // [tok0, tok1, ..., EOS, PAD, PAD, ...]
+                let target_labels = &sample.target_labels;  // [tok0, tok1, ..., EOS, PAD, PAD, ...]
 
-                // // Find real length (includes EOS, stops before first PAD)
-                // let real_len = target_labels.iter()
-                //     .position(|&t| t == PAD_TOKEN)
-                //     .unwrap_or(MAX_SEQ_LEN);
+                // Find real length (includes EOS, stops before first PAD)
+                let real_len = target_labels.iter()
+                    .position(|&t| t == PAD_TOKEN)
+                    .unwrap_or(MAX_SEQ_LEN);
 
-                // // ── Decoder INPUT (exactly like generate_* loops) ─────────────
-                // let mut dec_input: Vec<i32> = vec![BOS_TOKEN as i32];
-                // dec_input.extend(
-                //     target_labels[0..real_len.saturating_sub(1)]
-                //         .iter()
-                //         .map(|&t| t as i32)
-                // );
-                // dec_input.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
+                // ── Decoder INPUT (exactly like generate_* loops) ─────────────
+                let mut dec_input: Vec<i32> = vec![BOS_TOKEN as i32];
+                dec_input.extend(
+                    target_labels[0..real_len.saturating_sub(1)]
+                        .iter()
+                        .map(|&t| t as i32)
+                );
+                dec_input.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
 
-                // // ── Loss TARGETS (shifted correctly, includes first token + EOS) ──
-                // let mut lang_targets: Vec<i32> = target_labels[0..real_len]  // ← CHANGED: start at 0
-                //     .iter()
-                //     .map(|&t| t as i32)
-                //     .collect();
-                // lang_targets.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
+                // ── Loss TARGETS (shifted correctly, includes first token + EOS) ──
+                let mut lang_targets: Vec<i32> = target_labels[0..real_len]  // ← CHANGED: start at 0
+                    .iter()
+                    .map(|&t| t as i32)
+                    .collect();
+                lang_targets.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
 
-                // all_dec_input_ids.extend(dec_input);
-                // all_lang_targets.extend(lang_targets);
+                all_dec_input_ids.extend(dec_input);
+                all_lang_targets.extend(lang_targets);
 
                 // input_ids is the full sequence [BOS, sent_a..., sent_b..., EOS, PAD...]
                 // target_labels is already shifted  [sent_a..., sent_b..., EOS, PAD...]
-                all_dec_input_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
-                all_lang_targets.extend(sample.target_labels.iter().map(|&t| t as i32));
+                // all_dec_input_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
+                // all_lang_targets.extend(sample.target_labels.iter().map(|&t| t as i32));
             }
 
             // ── Stack into real batched tensors (ONE allocation) ───────────────
@@ -813,10 +806,10 @@ pub fn run(
             //     &device,
             // );
 
-            // let enc_t = Tensor::<TrainBackend, 2, Int>::from_ints(
-            //     TensorData::new(all_enc_ids, [current_batch_size, MAX_SEQ_LEN]),
-            //     &device,
-            // );
+            let enc_t = Tensor::<TrainBackend, 2, Int>::from_ints(
+                TensorData::new(all_enc_ids, [current_batch_size, MAX_SEQ_LEN]),
+                &device,
+            );
 
             // let dec_t = Tensor::<TrainBackend, 2, Int>::from_ints(
             //     TensorData::new(all_dec_ids, [current_batch_size, MAX_SEQ_LEN]),
@@ -831,7 +824,8 @@ pub fn run(
             // ── SINGLE forward pass (this is where the 20× speedup happens) ─────
             // let (token_logits, emote_logits) = model.forward(ids_t, context_t);
 
-            let token_logits = model.forward(dec_t);
+            let token_logits = model.forward(enc_t, dec_t);
+            // let token_logits = model.forward(dec_t);
 
             // ── Loss (now automatically batched) ───────────────────────────────
             let vocab = tokenizer.vocab_size();
