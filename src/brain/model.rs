@@ -22,7 +22,9 @@ use crate::{
 use super::tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN};
 
 // ── Model dimensions ──────────────────────────────────────────────────────────
-pub const EMBED_DIM:    usize = 64;
+// pub const EMBED_DIM:    usize = 32; // xtra tiny
+// pub const HIDDEN_UNITS: usize = 32;
+pub const EMBED_DIM:    usize = 64; // best loss surprsingly (for our seq length?)
 pub const HIDDEN_UNITS: usize = 64;
 // pub const EMBED_DIM:    usize = 128;
 // pub const HIDDEN_UNITS: usize = 128;
@@ -35,6 +37,7 @@ pub const N_LAYERS:     usize = 2;
 // pub const N_LAYERS:     usize = 8;
 // pub const ATTN_HEADS:   usize = 4;
 // pub const N_LAYERS:     usize = 16;
+// pub const FF_DIM:       usize = 128; // xtra tiny
 pub const FF_DIM:       usize = 256;
 // pub const FF_DIM:       usize = 512;
 // pub const FF_DIM:       usize = 1024;

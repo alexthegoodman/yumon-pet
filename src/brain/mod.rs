@@ -1,4 +1,4 @@
-/// Language brain subsystem — LSTM character/word model for Yumon replies.
+#![allow(warnings)]
 
 pub mod model;
 pub mod wiki;

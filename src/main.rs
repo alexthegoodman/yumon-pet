@@ -1,4 +1,5 @@
 #![recursion_limit = "256"]
+#![allow(warnings)]
 
 /// Yumon ePet — Entry point
 ///
