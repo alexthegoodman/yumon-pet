@@ -42,7 +42,8 @@ pub const FF_DIM:       usize = 256;
 // pub const FF_DIM:       usize = 512;
 // pub const FF_DIM:       usize = 1024;
 
-pub const TEMPERATURE:  f32   = 0.75;
+pub const TEMPERATURE:  f32   = 0.9;
+// pub const TEMPERATURE:  f32   = 0.75;
 // pub const TEMPERATURE:  f32   = 0.25;
 pub const TOP_K:        usize = 10;
 
@@ -1032,18 +1033,36 @@ impl<B: Backend> YumonBrain<B> {
 
         let fixed = fix_json_syntax(&raw_output).fixed;
 
+        // let extract = |key: &str| -> String {
+        //     regex::Regex::new(&format!(r#"\s*{key}"?\s*:?\s*"([^"]*)"#))
+        //         .ok()
+        //         .and_then(|re| re.captures(&fixed))
+        //         .and_then(|caps| caps.get(1))
+        //         .map(|m| m.as_str().to_string())
+        //         .unwrap_or_default()
+        // };
         let extract = |key: &str| -> String {
-            regex::Regex::new(&format!(r#"\s*{key}"?\s*:?\s*"([^"]*)"#))
+            fancy_regex::Regex::new(&format!(r#"(?<=\s*"{key}"\s*:\s*)"([^"]*)""#))
                 .ok()
-                .and_then(|re| re.captures(&fixed))
+                .and_then(|re| re.captures(&fixed).ok().flatten())
                 .and_then(|caps| caps.get(1))
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_default()
         };
 
-        let parsed_action     = extract("action");
-        let parsed_motion_dir = extract("motion_dir");
+        let mut parsed_action     = extract("action");
+        let mut parsed_motion_dir = extract("motion_dir");
         let mut parsed_reply  = extract("reply");
+
+        // println!("parsed {:?} {:?} {:?}", parsed_action, parsed_motion_dir, parsed_reply);
+
+        if parsed_action.is_empty() || parsed_action.len() < 3 {
+            parsed_action     = extract(" action");
+            parsed_motion_dir = extract(" motion_dir");
+            parsed_reply  = extract(" reply");
+        }
+
+        // println!("parsed {:?} {:?} {:?}", parsed_action, parsed_motion_dir, parsed_reply);
 
         if parsed_reply.is_empty() || parsed_reply.len() < 4 {
             let parsed: serde_json::Value = serde_json::from_str(&fixed)
@@ -1064,8 +1083,16 @@ impl<B: Backend> YumonBrain<B> {
                     })
                 });
 
-            parsed_reply = parsed["reply"].to_string();
+            parsed_action = parsed["action"].to_string().trim().to_string();
+            parsed_motion_dir = parsed["motion_dir"].to_string().trim().to_string();
+            parsed_reply = parsed["reply"].to_string().trim().to_string();
         }
+
+        parsed_action = parsed_action.replace("\"", "").trim().to_string();
+        parsed_motion_dir = parsed_motion_dir.replace("\"", "").trim().to_string();
+        parsed_reply = parsed_reply.replace("\"", "").trim().to_string();
+
+        // println!("parsed {:?} {:?} {:?}", parsed_action, parsed_motion_dir, parsed_reply);
 
         let action = match parsed_action.as_str() {
             "speak"  => Action::Speak,
@@ -1087,6 +1114,7 @@ impl<B: Backend> YumonBrain<B> {
             .as_str()
             .to_string();
 
+        // TODO: add to output json
         let yumon_emote_idx = last_emote_logits
             .as_deref()
             .map(argmax)

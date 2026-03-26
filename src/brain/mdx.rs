@@ -313,7 +313,7 @@ pub fn load_qa_pairs(path: &str) -> Result<Vec<(String, String)>> {
             let answer = chunk[1].clone();
             
             // You can still apply your "is_good" logic here
-            if is_good_sentence(&question) && is_good_sentence(&answer) {
+            if is_good_sentence(&(question.clone() + &answer)) {
                 pairs.push((question, answer));
             }
         }
