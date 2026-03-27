@@ -99,6 +99,8 @@ pub fn load_pdf_ebook_sentences(pdf_path: &str) -> Result<Vec<String>> {
     let mut raw_sentences = Vec::new();
     let mut current_buffer = String::new();
 
+    let mut line_num = 0;
+
     for line in raw.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() { continue; }
@@ -108,15 +110,17 @@ pub fn load_pdf_ebook_sentences(pdf_path: &str) -> Result<Vec<String>> {
         }
         current_buffer.push_str(trimmed);
 
+        line_num = line_num + 1;
+
         while let Some(dot_index) = current_buffer.find(". ") {
             let sentence: String = current_buffer.drain(..dot_index + 1).collect();
             let cleaned = sentence.trim();
 
-            if is_good_sentence(cleaned) {
+            if is_good_sentence(cleaned) && line_num > 200 { // skip intro junk
                 raw_sentences.push(cleaned.to_string());
             }
 
-            if raw_sentences.len() > 20_000 {
+            if raw_sentences.len() > 50_000 {
                 break; 
             }
         }
@@ -143,8 +147,8 @@ pub fn load_pdf_ebook_sentences(pdf_path: &str) -> Result<Vec<String>> {
     let mut final_sentences = Vec::new();
     let mut i = 0;
 
-    let bottom_range = MAX_SEQ_LEN * 5;
-    let top_range = MAX_SEQ_LEN * 6;
+    let bottom_range = MAX_SEQ_LEN * 1;
+    let top_range = MAX_SEQ_LEN * 3;
 
     while i < raw_sentences.len() {
         let mut combined = String::new();

@@ -297,27 +297,27 @@ pub fn run(
     //     }
     // }
 
-    let mut qna_sentences = load_csv_qna("data/AI.csv")?;
+    // let mut qna_sentences = load_csv_qna("data/AI.csv")?;
 
-    for (i, sent) in qna_sentences.iter().enumerate() {
-        if (i < 12) {
-            println!("Q&A: {:?}", sent);
-        } else {
-            break;
-        }
-    }
+    // for (i, sent) in qna_sentences.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("Q&A: {:?}", sent);
+    //     } else {
+    //         break;
+    //     }
+    // }
 
-    let mut bible_verses = load_csv_bible("data/bible_bbe.csv")?;
+    // let mut bible_verses = load_csv_bible("data/bible_bbe.csv")?;
 
-    for (i, sent) in bible_verses.iter().enumerate() {
-        if (i < 12) {
-            println!("Verse: {:?}", sent);
-        } else {
-            break;
-        }
-    }
+    // for (i, sent) in bible_verses.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("Verse: {:?}", sent);
+    //     } else {
+    //         break;
+    //     }
+    // }
 
-    let mut handcrafted = load_handcrafted_sentences("data/handcrafted.txt")?;
+    let mut handcrafted = load_handcrafted_sentences("archive/handcrafted.txt")?;
 
     for (i, sent) in handcrafted.iter().enumerate() {
         if (i < 12) {
@@ -359,15 +359,15 @@ pub fn run(
     //     }
     // }
 
-    let mut txt = load_txt_sentences("data/creative_stories.txt")?;
+    // let mut txt = load_txt_sentences("data/creative_stories.txt")?;
 
-    for (i, sent) in txt.iter().enumerate() {
-        if (i < 12) {
-            println!("txt: {:?}", sent);
-        }
-    }
+    // for (i, sent) in txt.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("txt: {:?}", sent);
+    //     }
+    // }
 
-    let mut my_qna = load_qa_pairs("data/handcrafted_pairs.txt")?;
+    let mut my_qna = load_qa_pairs("archive/handcrafted_pairs.txt")?;
 
     for (i, sent) in my_qna.iter().enumerate() {
         if (i < 12) {
@@ -383,31 +383,32 @@ pub fn run(
     //     }
     // }
 
-    // let all_ebooks = vec![
-    //     // "data/ebooks/comp_arch.pdf".to_string(),
-    //     // "data/ebooks/cuda-programming.pdf".to_string(),
-    //     // "data/ebooks/embedded_c.pdf".to_string(),
-    //     "data/ebooks/faa-h-8083-25c.pdf".to_string(),
-    //     "data/ebooks/algor_intro.pdf".to_string(),
-    //     "data/ebooks/intro_engineer.pdf".to_string(),
-    //     "data/ebooks/meap.pdf".to_string(),
-    //     "data/ebooks/missiles.pdf".to_string(),
-    //     "data/ebooks/os_concepts.pdf".to_string(),
-    //     // "data/ebooks/precalculus.pdf".to_string(),
-    //     "data/ebooks/real-time-embedded.pdf".to_string(),
-    //     "data/ebooks/riscv.pdf".to_string(),
-    //     "data/ebooks/rtos.pdf".to_string(),
-    //     "data/ebooks/stephen_hawking_a_brief_history_of_time.pdf".to_string(),
-    //     // "data/ebooks/tdd-for-c.pdf".to_string(),
-    // ];
+    let all_ebooks = vec![
+        // // "data/ebooks/comp_arch.pdf".to_string(),
+        // // "data/ebooks/cuda-programming.pdf".to_string(),
+        // // "data/ebooks/embedded_c.pdf".to_string(),
+        // "data/ebooks/faa-h-8083-25c.pdf".to_string(),
+        // "data/ebooks/algor_intro.pdf".to_string(),
+        // "data/ebooks/intro_engineer.pdf".to_string(),
+        // "data/ebooks/meap.pdf".to_string(),
+        // "data/ebooks/missiles.pdf".to_string(),
+        // "data/ebooks/os_concepts.pdf".to_string(),
+        // // "data/ebooks/precalculus.pdf".to_string(),
+        // "data/ebooks/real-time-embedded.pdf".to_string(),
+        // "data/ebooks/riscv.pdf".to_string(),
+        // "data/ebooks/rtos.pdf".to_string(),
+        // "data/ebooks/stephen_hawking_a_brief_history_of_time.pdf".to_string(),
+        // // "data/ebooks/tdd-for-c.pdf".to_string(),
+        // "data/ebooks/survival_handbook.pdf".to_string(),
+    ];
 
-    // let mut ebooks = load_pdfs(all_ebooks);
+    let mut ebooks = load_pdfs(all_ebooks);
 
-    // for (i, sent) in ebooks.iter().enumerate() {
-    //     if (i < 12) {
-    //         println!("ebook: {:?}", sent);
-    //     }
-    // }
+    for (i, sent) in ebooks.iter().enumerate() {
+        if (i < 12) {
+            println!("ebook: {:?}", sent);
+        }
+    }
 
     // sentences.extend(mdx_sentences.clone());
     // sentences.extend(quote_sentences.clone());
@@ -456,8 +457,8 @@ pub fn run(
     // quote_sentences.shuffle(&mut rng);
     // quote_sentences.truncate(8192);
 
-    qna_sentences.shuffle(&mut rng);
-    qna_sentences.truncate(8192);
+    // qna_sentences.shuffle(&mut rng);
+    // qna_sentences.truncate(8192);
 
     // mdx_sentences.shuffle(&mut rng);
     // mdx_sentences.truncate(8192);
@@ -485,29 +486,29 @@ pub fn run(
 
     let mut mdx_samples = prepare_paired_samples_split(mdx_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
     // let mut quote_samples = prepare_paired_samples_split(quote_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
-    let mut qna_samples = prepare_paired_samples_split(qna_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
+    // let mut qna_samples = prepare_paired_samples_split(qna_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
     // let mut wiki_samples = prepare_paired_samples_split(wiki_long_sentences, &tokenizer, &keyword_index, &mut rng, training_stage);
     // let mut dict_samples = prepare_paired_samples(&dict_sentences, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
-    let mut bible_samples = prepare_paired_samples_split(bible_verses, &tokenizer, &keyword_index, &mut rng, training_stage);
+    // let mut bible_samples = prepare_paired_samples_split(bible_verses, &tokenizer, &keyword_index, &mut rng, training_stage);
     let mut handcrafted_samples = prepare_paired_samples_split(handcrafted, &tokenizer, &keyword_index, &mut rng, training_stage);
     // let mut notion_samples = prepare_paired_samples(&notions, &tokenizer, &keyword_index, &mut rng, 1, 2, training_stage);
     // let personal_samples = prepare_samples(&personals, &tokenizer, &keyword_index);
     // let mut ebook_samples = prepare_paired_samples_split(ebooks, &tokenizer, &keyword_index, &mut rng, training_stage);
-    let mut txt_samples = prepare_paired_samples_split(txt, &tokenizer, &keyword_index, &mut rng, training_stage);
+    // let mut txt_samples = prepare_paired_samples_split(txt, &tokenizer, &keyword_index, &mut rng, training_stage);
     // let mut ebooks2_samples = prepare_paired_samples_split(&ebooks2, &tokenizer, &keyword_index, &mut rng, training_stage);
     let mut my_qna_samples = prepare_paired_samples_split_sep(my_qna, &tokenizer, &keyword_index, &mut rng, training_stage);
 
     println!(
-        "Samples lengths: {} {} {} {} {} {} {}",
+        "Samples lengths: {} {} {}",
         // mdx_samples.len(),
         // quote_samples.len(),
-        qna_samples.len(),
+        // qna_samples.len(),
         // wiki_samples.len(),
-        bible_samples.len(),
-        handcrafted_samples.len(),
+        // bible_samples.len(),
+        // handcrafted_samples.len(),
         // notion_samples.len(),
         // // personal_samples.len(),
-        txt_samples.len(),
+        // txt_samples.len(),
         // ebook_samples.len(),
         // ebooks2_samples.len(),
         handcrafted_samples.len(),
@@ -515,8 +516,8 @@ pub fn run(
         my_qna_samples.len(),
     );
 
-    bible_samples.shuffle(&mut rng);
-    bible_samples.truncate(4096);
+    // bible_samples.shuffle(&mut rng);
+    // bible_samples.truncate(4096);
     // // bible_samples.truncate(4096);
 
     // wiki_samples.shuffle(&mut rng);
@@ -533,13 +534,13 @@ pub fn run(
     // qna_samples.shuffle(&mut rng);
     // qna_samples.truncate(2048);
 
-    txt_samples.shuffle(&mut rng);
-    // ebook_samples.truncate(2048);
-    txt_samples.truncate(4096);
+    // txt_samples.shuffle(&mut rng);
+    // // ebook_samples.truncate(2048);
+    // txt_samples.truncate(4096);
 
     // ebook_samples.shuffle(&mut rng);
     // // ebook_samples.truncate(2048);
-    // ebook_samples.truncate(500_000);
+    // ebook_samples.truncate(4096);
 
     // ebooks2_samples.shuffle(&mut rng);
     // ebooks2_samples.truncate(100_000);
@@ -558,18 +559,18 @@ pub fn run(
     // // training_samples.extend(notion_samples);
     // training_samples.extend(bible_samples);
     // training_samples.extend(txt_samples);
-    // // training_samples.extend(ebook_samples);
+    // training_samples.extend(ebook_samples);
     // // training_samples.extend(ebooks2_samples);
     
-    training_samples.shuffle(&mut rng);
-    // training_samples.truncate(500_000);
-    // training_samples.truncate(65536);
-    // training_samples.truncate(16384); // maybe at 128 hidden size? maybe need 256?
-    // training_samples.truncate(8192); // limit total for now
-    // training_samples.truncate(1024); 
-    // training_samples.truncate(2048); 
-    // training_samples.truncate(256); 
-    training_samples.truncate(4096); 
+    // training_samples.shuffle(&mut rng);
+    // // training_samples.truncate(500_000);
+    // // training_samples.truncate(65536);
+    // // training_samples.truncate(16384); // maybe at 128 hidden size? maybe need 256?
+    // // training_samples.truncate(8192); // limit total for now
+    // // training_samples.truncate(1024); 
+    // // training_samples.truncate(2048); 
+    // // training_samples.truncate(256); 
+    // training_samples.truncate(4096); 
 
     // training_samples.extend(mdx_samples);
     // training_samples.extend(handcrafted_samples.clone()); // always add after to include all of these
@@ -578,6 +579,8 @@ pub fn run(
     training_samples.extend(mdx_samples);
     training_samples.extend(my_qna_samples);
     // training_samples.extend(personal_samples);
+
+    training_samples.shuffle(&mut rng);
 
     println!(
         "Training samples: {}",

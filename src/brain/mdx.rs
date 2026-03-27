@@ -16,8 +16,8 @@ pub fn load_mdx_sentences(mdx_dir: &str) -> Result<Vec<String>> {
         let content = std::fs::read_to_string(path)?;
 
         for line in content.lines() {
-            let trimmed = line.trim();
-            if is_good_sentence(trimmed) {
+            let trimmed = line.trim().replace("<br />", "");
+            if is_good_sentence(&trimmed) && !trimmed.starts_with("# ") {
                 sentences.push(trimmed.to_string());
             }
         }
@@ -255,7 +255,7 @@ pub fn load_handcrafted_sentences(dict_path: &str) -> Result<Vec<String>> {
     let mut sentences = Vec::new();
 
     for line in content.lines() {
-        let trimmed = line.trim();
+        let trimmed = line.trim().replace("<br />", "");
 
          if is_good_sentence(&trimmed) {
             sentences.push(trimmed.to_string());

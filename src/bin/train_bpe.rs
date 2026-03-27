@@ -62,7 +62,7 @@ pub fn main() {
     //     }
     // }
 
-    let handcrafted = load_handcrafted_sentences("data/handcrafted.txt");
+    let handcrafted = load_handcrafted_sentences("archive/handcrafted.txt");
     let handcrafted = handcrafted.as_ref().expect("Couldn't get handcrafted");
 
     for (i, sent) in handcrafted.iter().enumerate() {
@@ -89,7 +89,7 @@ pub fn main() {
     //     }
     // }
 
-    let mut my_qna = load_qa_pairs("data/handcrafted_pairs.txt");
+    let mut my_qna = load_qa_pairs("archive/handcrafted_pairs.txt");
     let my_qna = my_qna.as_ref().expect("Couldn't get handcrafted");
 
     let mut handcrafted_qa = Vec::new();
@@ -102,7 +102,7 @@ pub fn main() {
         }
     }
 
-    // let ebooks = load_pdf_ebook_sentences("data/algorithms_ebook.pdf");
+    // let ebooks = load_pdf_ebook_sentences("data/ebooks/survival_handbook.pdf");
     // let ebooks = ebooks.as_ref().expect("Couldn't get handcrafted");
 
     // for (i, sent) in ebooks.iter().enumerate() {
@@ -131,6 +131,7 @@ pub fn main() {
     // sentences.extend(notions);
     // // sentences.extend(ebooks);
     // sentences.extend(txt);
+    // sentences.extend(ebooks);
         
     let bpe = BpeTokenizer::train(
         sentences, 
