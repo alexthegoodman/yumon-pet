@@ -1029,3 +1029,215 @@ Documentation allows the same thing to be built again, improved upon, or built b
 What tends to happen to communities that produce things?
 Communities that create and trade goods tend to develop more resources and connections over time.
 
+I played video games as a kid
+Many people played video games when growing up
+
+Video games are a great way to have fun
+Some people have so much fun that they play all the time
+
+A video game engine is for designing games
+Game engines are complex computer design tools
+
+What does a designer do?
+A designer is a person who decides what a thing will be.
+
+I'd like to learn design
+There are many subjects within design to learn about
+
+I'm afraid there are too many subjects to learn
+Don't worry, you just need to take them one at a time
+
+I don't understand the math
+Math is hard to understand, so it will take more time.
+
+I wish I could go back in time
+Time travel is not currently possible
+
+What is the world made of?
+The world is made of energy, including the digital world.
+
+It's important to work hard
+Yes, hard work leads to winning, and winning leads to happiness.
+
+My memory is not very good
+That means you are forgetful
+
+What does it mean to be forgetful?
+Being forgetful means to lose knowledge too often.
+
+Old people have poor memory
+That's because old people's brains are degrading.
+
+Things become old after a long time
+True, as time passes, things age.
+
+How do people solve problems?
+People create plans and ideas to solve problems.
+
+Why do people like to be with each other?
+People like to spend time together because it makes them happy.
+
+What are topics?
+Topics are different kinds of learning.
+
+I'd like to study different topics
+Learning various topics is important for making good plans and ideas.
+
+I like to read books
+Reading books helps people learn new ideas
+
+Books can teach many things
+Different books contain different kinds of knowledge
+
+I enjoy drawing pictures
+Drawing is a way to express ideas visually
+
+Some drawings are very detailed
+Detailed drawings take more time and effort
+
+I want to get better at art
+Improving at art requires practice over time
+
+Practice makes things easier
+Doing something often helps you improve
+
+I get confused sometimes
+Confusion happens when something is not clear
+
+It takes time to understand new things
+Learning requires patience and repetition
+
+I like using computers
+Computers help people solve many kinds of problems
+
+Software is important
+Software allows computers to perform tasks
+
+What is programming?
+Programming is writing instructions for a computer
+
+Programming can be difficult
+It takes time to learn how to write good code
+
+I made a mistake
+Mistakes are a normal part of learning
+
+Fixing mistakes helps you improve
+Learning from errors leads to better results
+
+I feel tired today
+Being tired means your body needs rest
+
+Rest is important
+Rest helps your body and mind recover
+
+I want to learn faster
+Learning faster comes from practice and focus
+
+Focus is hard sometimes
+Distractions can make it difficult to concentrate
+
+I like asking questions
+Asking questions helps you understand better
+
+Good answers take time
+Thinking carefully leads to better answers
+
+I want to build something
+Building requires planning and effort
+
+Plans help guide actions
+A good plan makes work easier to follow
+
+I feel overwhelmed
+Feeling overwhelmed means there is too much to handle at once
+
+Breaking tasks into steps helps
+Small steps make big tasks easier
+
+I like playing video games
+Video games are a common form of entertainment
+
+Some video games are very challenging
+Challenging games require skill and patience
+
+I enjoy exploring open worlds
+Open world games allow players to go anywhere
+
+Multiplayer games are fun with friends
+Playing with others makes games more exciting
+
+I want to make my own game
+Game development involves design and programming
+
+Game design is about player experience
+Designers decide how a game feels to play
+
+Good games are easy to learn
+Simple systems help players understand quickly
+
+Some games are hard to master
+Mastery takes time and repeated practice
+
+I like watching movies
+Movies tell stories using visuals and sound
+
+Some movies are very emotional
+Emotional movies make people feel strongly
+
+I enjoy action movies
+Action movies focus on movement and excitement
+
+Stories have a beginning and an end
+A story is a sequence of connected events
+
+Characters are important in movies
+Characters give the audience someone to follow
+
+Music can change your mood
+Different sounds create different feelings
+
+I like listening to music while working
+Music can help people stay focused
+
+Songs have rhythm and melody
+Music is made from patterns of sound
+
+Some songs are very simple
+Simple songs are easy to remember
+
+I want to make music
+Making music requires creativity and practice
+
+Digital tools can create music
+Software allows people to produce sounds
+
+I am interested in startups
+Startups are new businesses that try to grow
+
+Startups solve problems
+A business exists to provide a solution
+
+Some startups fail
+Failure is common when trying new ideas
+
+Successful startups grow quickly
+Growth means gaining more users or customers
+
+Ideas are important for startups
+A good idea solves a real problem
+
+Execution matters more than ideas
+Results come from taking action
+
+Teams build startups
+People work together to create products
+
+Building a product takes time
+Development is a gradual process
+
+Users give feedback
+Feedback helps improve the product
+
+Organic growth is happening for my product
+That's great, organic growth is the best kind of growth.
