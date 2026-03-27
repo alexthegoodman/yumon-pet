@@ -657,10 +657,11 @@ pub fn run(
     
     // lr over time
     // let first_lr = 1e-4;
-    let first_lr = 0.003; // even better for 8?
-    // let first_lr = 0.001; // batch sizes like 8
-    // let first_lr = 0.0003; // for batch size 4?
-    // let first_lr = 1e-6; // flat immediately
+    // let first_lr = 0.003; // even better for 8?
+    let first_lr = 0.001; // batch sizes like 8
+    // let first_lr = 0.0001; // for batch size 4?
+    // let first_lr = 0.000003;
+    // let first_lr = 3e-6; // flat immediately
     let last_lr = 1e-8;
 
     // let first_lr = 1e-6;
@@ -676,7 +677,7 @@ pub fn run(
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::with_options(
         backend,
-        TerminalOptions { viewport: Viewport::Inline(16) },
+        TerminalOptions { viewport: Viewport::Inline(26) },
     )?;
 
     let total_batches = training_samples.len() / batch_size;
@@ -692,6 +693,8 @@ pub fn run(
         total_batches,          // ← same value your loop uses for num_batches
         current_lr: first_lr as f64,
         global_step: 0,
+        entropy: 0.0,
+        entropy_history: vec![],
     };
 
     // ── Training loop ─────────────────────────────────────────────────────────
@@ -827,8 +830,28 @@ pub fn run(
             // ── SINGLE forward pass (this is where the 20× speedup happens) ─────
             // let (token_logits, emote_logits) = model.forward(ids_t, context_t);
 
-            let token_logits = model.forward(enc_t, dec_t);
+            let token_logits = model.forward(enc_t, dec_t.clone());
             // let token_logits = model.forward(dec_t);
+
+            // ── Entropy (predictive) ──────────────────────────────────────────────
+            let probs = burn::tensor::activation::softmax(token_logits.clone(), 2); // [B, S, vocab]
+            let log_probs = (probs.clone() + 1e-10).log();                          // avoid log(0)
+
+            let token_entropy = (probs * log_probs)
+                .sum_dim(2)
+                .neg()
+                .squeeze::<2>();  // [B, S, 1] → [B, S]
+
+            let non_pad_mask = dec_t
+                .clone()
+                .equal_elem(PAD_TOKEN as u32)
+                .bool_not()
+                .float();  // [B, S]
+
+            let entropy_val: f32 = (token_entropy * non_pad_mask.clone())
+                .sum()
+                .div(non_pad_mask.sum())
+                .into_scalar();
 
             // ── Loss (now automatically batched) ───────────────────────────────
             let vocab = tokenizer.vocab_size();
@@ -882,6 +905,7 @@ pub fn run(
             // state.current_loss = loss_val;
             // let loss_scale = 100.0; // 1 for normal, 100.0 for structured? helps see minor improvements in TUI
             let loss_scale = 1.0; 
+            state.entropy = entropy_val;
             state.current_loss = loss_val * loss_scale; // Don't scale the actual loss used for backprop, just the display value.
             state.avg_loss = (epoch_loss * loss_scale) / (batch_num + 1) as f32; // Don't scale the actual loss used for backprop, just the display value.
             state.batch = batch_num + 1;
@@ -889,6 +913,7 @@ pub fn run(
             state.global_step += 1;
             state.loss_history.push((state.global_step as f64, loss_val as f64 * loss_scale as f64)); // Don't scale the actual loss used for backprop, just the display value.
             state.avg_loss_history.push((state.global_step as f64, state.avg_loss as f64));
+            state.entropy_history.push((state.global_step as f64, entropy_val as f64));
 
             // optional: sliding window so chart doesn't compress
             // if state.loss_history.len() > 500 {

@@ -28,9 +28,12 @@ use three_d::renderer::geometry::Mesh;
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
-const YUMON_COUNT: usize = 4;
-const SPAWN_RADIUS: f32 = 3.5;
-const ARENA: f32 = 6.0;
+// const YUMON_COUNT: usize = 4;
+// const SPAWN_RADIUS: f32 = 3.5;
+// const ARENA: f32 = 6.0;
+const YUMON_COUNT: usize = 40;
+const SPAWN_RADIUS: f32 = 30.5;
+const ARENA: f32 = 60.0;
 const WALL_H: f32 = 1.2;
 const WALL_T: f32 = 0.35;
 const MOVE_SPEED: f32 = 1.8;
@@ -44,6 +47,51 @@ const MODEL_PATHS: [&str; YUMON_COUNT] = [
     "data/models/animal-giraffe.glb",
     "data/models/animal-lion.glb",
     "data/models/animal-parrot.glb",
+
+    "data/models/animal-fish.glb",
+    "data/models/animal-giraffe.glb",
+    "data/models/animal-lion.glb",
+    "data/models/animal-parrot.glb",
+
+    "data/models/animal-fish.glb",
+    "data/models/animal-giraffe.glb",
+    "data/models/animal-lion.glb",
+    "data/models/animal-parrot.glb",
+
+    "data/models/animal-fish.glb",
+    "data/models/animal-giraffe.glb",
+    "data/models/animal-lion.glb",
+    "data/models/animal-parrot.glb",
+
+    "data/models/animal-fish.glb",
+    "data/models/animal-giraffe.glb",
+    "data/models/animal-lion.glb",
+    "data/models/animal-parrot.glb",
+
+    "data/models/animal-fish.glb",
+    "data/models/animal-giraffe.glb",
+    "data/models/animal-lion.glb",
+    "data/models/animal-parrot.glb",
+
+    "data/models/animal-fish.glb",
+    "data/models/animal-giraffe.glb",
+    "data/models/animal-lion.glb",
+    "data/models/animal-parrot.glb",
+
+    "data/models/animal-fish.glb",
+    "data/models/animal-giraffe.glb",
+    "data/models/animal-lion.glb",
+    "data/models/animal-parrot.glb",
+
+    "data/models/animal-fish.glb",
+    "data/models/animal-giraffe.glb",
+    "data/models/animal-lion.glb",
+    "data/models/animal-parrot.glb",
+
+    "data/models/animal-fish.glb",
+    "data/models/animal-giraffe.glb",
+    "data/models/animal-lion.glb",
+    "data/models/animal-parrot.glb",
 ];
 
 const TINTS: [Srgba; YUMON_COUNT] = [
@@ -51,9 +99,56 @@ const TINTS: [Srgba; YUMON_COUNT] = [
     Srgba { r: 110, g: 170, b: 220, a: 255 },
     Srgba { r: 130, g: 210, b: 140, a: 255 },
     Srgba { r: 215, g: 185, b:  90, a: 255 },
+
+     Srgba { r: 220, g: 110, b: 110, a: 255 },
+    Srgba { r: 110, g: 170, b: 220, a: 255 },
+    Srgba { r: 130, g: 210, b: 140, a: 255 },
+    Srgba { r: 215, g: 185, b:  90, a: 255 },
+
+     Srgba { r: 220, g: 110, b: 110, a: 255 },
+    Srgba { r: 110, g: 170, b: 220, a: 255 },
+    Srgba { r: 130, g: 210, b: 140, a: 255 },
+    Srgba { r: 215, g: 185, b:  90, a: 255 },
+
+     Srgba { r: 220, g: 110, b: 110, a: 255 },
+    Srgba { r: 110, g: 170, b: 220, a: 255 },
+    Srgba { r: 130, g: 210, b: 140, a: 255 },
+    Srgba { r: 215, g: 185, b:  90, a: 255 },
+    
+     Srgba { r: 220, g: 110, b: 110, a: 255 },
+    Srgba { r: 110, g: 170, b: 220, a: 255 },
+    Srgba { r: 130, g: 210, b: 140, a: 255 },
+    Srgba { r: 215, g: 185, b:  90, a: 255 },
+
+     Srgba { r: 220, g: 110, b: 110, a: 255 },
+    Srgba { r: 110, g: 170, b: 220, a: 255 },
+    Srgba { r: 130, g: 210, b: 140, a: 255 },
+    Srgba { r: 215, g: 185, b:  90, a: 255 },
+
+     Srgba { r: 220, g: 110, b: 110, a: 255 },
+    Srgba { r: 110, g: 170, b: 220, a: 255 },
+    Srgba { r: 130, g: 210, b: 140, a: 255 },
+    Srgba { r: 215, g: 185, b:  90, a: 255 },
+
+     Srgba { r: 220, g: 110, b: 110, a: 255 },
+    Srgba { r: 110, g: 170, b: 220, a: 255 },
+    Srgba { r: 130, g: 210, b: 140, a: 255 },
+    Srgba { r: 215, g: 185, b:  90, a: 255 },
+
+     Srgba { r: 220, g: 110, b: 110, a: 255 },
+    Srgba { r: 110, g: 170, b: 220, a: 255 },
+    Srgba { r: 130, g: 210, b: 140, a: 255 },
+    Srgba { r: 215, g: 185, b:  90, a: 255 },
+
+     Srgba { r: 220, g: 110, b: 110, a: 255 },
+    Srgba { r: 110, g: 170, b: 220, a: 255 },
+    Srgba { r: 130, g: 210, b: 140, a: 255 },
+    Srgba { r: 215, g: 185, b:  90, a: 255 },
 ];
 
-const YUMON_NAMES: [&str; YUMON_COUNT] = ["Ember", "Ripple", "Fern", "Sol"];
+const YUMON_NAMES: [&str; YUMON_COUNT] = ["Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol",
+                                            "Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol",
+                                            "Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol"];
 
 // ─── World objects ────────────────────────────────────────────────────────────
 

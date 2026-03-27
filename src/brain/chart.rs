@@ -9,6 +9,8 @@ pub struct TrainingState {
     pub total_batches: usize,
     pub current_lr: f64,
     pub global_step: usize,
+    pub entropy: f32,
+    pub entropy_history: Vec<(f64, f64)>,
 }
 
 use ratatui::{
@@ -31,12 +33,13 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
 
     // ── Top bar: epoch / batch / lr / loss ──────────────────────────────────
     let stats = format!(
-        " Epoch {}/{} │ Batch {}/{} │ LR {:.2e} │ Loss {:.4} │ Avg {:.4}",
+        " Epoch {}/{} │ Batch {}/{} │ LR {:.2e} │ Loss {:.4} │ Avg {:.4} | Entropy: {:.4}",
         state.epoch, state.total_epochs,
         state.batch, state.total_batches,
         state.current_lr,
         state.current_loss,
         state.avg_loss,
+        state.entropy
     );
     let para = Paragraph::new(stats)
         .block(Block::default().borders(Borders::ALL).title("Training"));
@@ -47,6 +50,13 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
         .map(|&(_, l)| l)
         .fold(0.0_f64, f64::max)
         .max(0.01);
+
+    let entropy_ds = Dataset::default()
+        .name("entropy")
+        .marker(symbols::Marker::Braille)
+        .graph_type(GraphType::Line)
+        .style(Style::default().fg(Color::Magenta))
+        .data(&state.entropy_history);
 
     let loss_ds = Dataset::default()
         .name("loss")
@@ -63,7 +73,7 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
         .data(&state.avg_loss_history);
 
     let n = state.global_step.max(1) as f64;
-    let chart = Chart::new(vec![loss_ds, avg_ds])
+    let chart = Chart::new(vec![loss_ds, avg_ds, entropy_ds])
         .block(Block::default().title("Loss").borders(Borders::ALL))
         .x_axis(
             Axis::default()

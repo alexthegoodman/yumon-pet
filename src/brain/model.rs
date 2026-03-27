@@ -436,8 +436,10 @@ impl<B: Backend> CrossAttentionBlock<B> {
         // let q = rope.forward(reshape_dec(self.q.forward(x)))      * scale;
         // let k = rope.forward(reshape_enc(self.k.forward(memory.clone()))) * scale;
         // perhaps rope should only be used in the selfattention not crossattention?
-        let q = reshape_dec(self.q.forward(x.clone()))      * scale;
-        let k = reshape_enc(self.k.forward(memory.clone())) * scale;
+        // let q = reshape_dec(self.q.forward(x.clone()))      * scale;
+        // let k = reshape_enc(self.k.forward(memory.clone())) * scale;
+        let q = reshape_dec(self.q.forward(x.clone()));
+        let k = reshape_enc(self.k.forward(memory.clone()));
         let v = reshape_enc(self.v.forward(memory));
 
         let mut qk = q.matmul(k.transpose()); // [batch, heads, dec_len, enc_len]
@@ -451,11 +453,15 @@ impl<B: Backend> CrossAttentionBlock<B> {
             qk = qk + pmask_f;
         }
 
+        // normal only softmax
         let w = burn::tensor::activation::softmax(qk, 3);
         let out = w.matmul(v)
             .swap_dims(1, 2)
             .flatten(2, 3);
 
+        self.o.forward(out)
+
+        // alternative, softmax with sigmoid gate
         // let w = burn::tensor::activation::softmax(qk, 3);
     
         // // Keep as 4D [batch, heads, dec_len, head_dim]
@@ -470,8 +476,6 @@ impl<B: Backend> CrossAttentionBlock<B> {
         // let out = (out_4d * gates).flatten(2, 3); // [batch, dec_len, d_model]
 
         // self.o.forward(out)
-
-        self.o.forward(out)
     }
 }
 
@@ -722,12 +726,6 @@ impl<B: Backend> YumonBrain<B> {
         let x = self.dec_norm.forward(x);
 
         let token_logits = self.token_head.forward(x.clone());
-
-        // Emote head — use last non-pad decoder position
-        // let last = x
-        //     .slice([0..batch, dec_len - 1..dec_len])
-        //     .reshape([batch, EMBED_DIM]);
-        // let emote_logits = self.yumon_emote_head.forward(last);
 
         token_logits
     }

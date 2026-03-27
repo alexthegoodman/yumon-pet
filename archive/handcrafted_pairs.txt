@@ -1241,3 +1241,456 @@ Feedback helps improve the product
 
 Organic growth is happening for my product
 That's great, organic growth is the best kind of growth.
+
+A big object is usually large in size
+Big and large describe similar amounts of size
+
+A small object takes up little space
+Small and little both describe low size or amount
+
+If something moves fast, it travels quickly
+Fast and quick both describe high speed
+
+If something is slow, it does not move fast
+Slow describes low speed compared to fast
+
+A dog is a type of animal that can move and respond
+Dog belongs to the broader category animal
+
+A carrot is a kind of vegetable people often eat
+Carrot is a member of the vegetable category
+
+Ice feels cold when you touch it
+Ice has a low temperature and causes a cold sensation
+
+Fire produces heat and light when it burns
+Fire is associated with high temperature and brightness
+
+Birds can usually fly through the air
+Flying is a common ability of birds
+
+Fish live in water and can swim easily
+Swimming is a natural behavior of fish
+
+If you drop a glass on the ground, it may break
+Dropping fragile objects can cause damage
+
+When water gets very cold, it freezes into ice
+Freezing changes water from liquid to solid
+
+If plants do not get water, they begin to wilt
+Lack of water causes plants to weaken
+
+If you heat ice, it will melt into water
+Adding heat changes ice into liquid form
+
+When someone feels happy, they feel good inside
+Happiness is a positive emotional state
+
+When someone feels sad, they feel bad or low
+Sadness is a negative emotional state
+
+If I say hello to someone, I am greeting them
+Hello is a common way to start interaction
+
+If I say goodbye, I am ending the interaction
+Goodbye signals the end of a conversation
+
+If something is unclear, I may ask for clarification
+Unclear information leads to questions
+
+If I am confused, I might ask you to explain more
+Confusion often causes requests for explanation
+
+A fast car moves quickly down the road
+Fast describes high speed movement of the car
+
+A quiet room has very little noise inside it
+Quiet describes a low level of sound
+
+If all dogs are animals and a poodle is a dog
+Then a poodle is also an animal
+
+If one number is bigger than another, it has greater value
+Bigger numbers represent larger quantities
+
+Morning is the early part of the day after night
+Morning happens before noon
+
+Night is the time when it is dark outside
+Night usually follows evening and has little light
+
+Rain happens when water falls from clouds
+Rain is a form of precipitation from the sky
+
+Wind is air that moves from one place to another
+Wind describes moving air in the environment
+
+A teacher helps students learn new information
+Teaching involves guiding learning
+
+A doctor helps people when they are sick
+Doctors provide care for illness
+
+To push something is to apply force away from you
+Pushing moves objects farther from the source
+
+To pull something is to bring it closer to you
+Pulling moves objects toward the source
+
+If something happens before an event, it occurs earlier
+Before indicates earlier time order
+
+If something happens after an event, it occurs later
+After indicates later time order
+
+If an object is near, it is at a short distance
+Near describes small spatial separation
+
+If an object is far, it is at a long distance
+Far describes large spatial separation
+
+I want to start a startup
+Starting a startup means trying to build a business from an idea
+
+A good startup idea solves a real problem
+Problems create demand for useful solutions
+
+I am not sure what to build
+Looking for problems is a good way to find ideas
+
+I have too many ideas
+Focusing on one idea helps you make progress
+
+I want my startup to grow
+Growth comes from providing value to users
+
+Users are not using my product
+Low usage can mean the product is not solving a real need
+
+I got my first users
+Early users are important for feedback and learning
+
+Users gave negative feedback
+Negative feedback helps you find what to improve
+
+I want more users
+Improving the product can attract more people
+
+I am afraid my startup will fail
+Failure is common and can teach useful lessons
+
+I made a small improvement
+Small improvements add up over time
+
+I want to build faster
+Working in small steps can increase speed
+
+I feel stuck on my project
+Taking a break or changing approach can help
+
+I don’t know what to do next
+Choosing the smallest next step can create momentum
+
+I want to make a better product
+Listening to users helps guide improvements
+
+A product should be simple
+Simple products are easier for people to use
+
+I keep changing my idea
+Too many changes can slow down progress
+
+I want feedback on my idea
+Sharing early versions helps you learn quickly
+
+I am working alone
+Solo work is possible but can be challenging
+
+Teams can build faster
+Working with others allows shared effort
+
+I wrote some code
+Code is a set of instructions for a computer
+
+My code is not working
+Bugs are errors that prevent correct behavior
+
+I found a bug
+Fixing bugs improves how the program works
+
+Debugging takes time
+Finding problems often requires careful testing
+
+I don’t understand this code
+Reading slowly and testing parts can help understanding
+
+I want to learn programming
+Practice and building projects helps you improve
+
+Programming feels confusing
+Complex systems take time to understand
+
+I built a small program
+Small projects are good for learning fundamentals
+
+I want to build a bigger system
+Large systems are made from smaller parts
+
+Breaking code into functions helps
+Smaller pieces are easier to manage and test
+
+I made my code simpler
+Simple code is easier to read and fix
+
+I am afraid to make mistakes in code
+Mistakes are a normal part of programming
+
+Testing helps find problems
+Tests show if code behaves as expected
+
+I want my app to be fast
+Efficient code improves performance
+
+My program is slow
+Slow programs may need optimization
+
+I want to launch my product
+Launching means making it available to users
+
+I am not ready to launch
+Waiting too long can delay learning
+
+Early launches can be useful
+Real users provide real feedback
+
+I got no response after launching
+Lack of response may mean low visibility or low interest
+
+I want people to notice my product
+Clear messaging helps people understand value
+
+Explaining my idea is hard
+Simple explanations are easier to understand
+
+I am comparing my startup to others
+Comparison can distract from your own progress
+
+I feel like I am behind
+Progress is different for every project
+
+I worked on my project today
+Consistent effort leads to long term results
+
+I skipped working today
+Missing days can slow down momentum
+
+I want to stay consistent
+Building habits makes work more regular
+
+I feel motivated right now
+Motivation can help you start working
+
+I don’t feel motivated
+Discipline helps when motivation is low
+
+I want to learn from others
+Observing others can give useful ideas
+
+I read about successful startups
+Success stories can inspire but not guarantee results
+
+I want to make money from my product
+Revenue comes from providing value people will pay for
+
+People are not paying for my product
+Lack of payment may mean low perceived value
+
+I improved the design of my app
+Better design can improve user experience
+
+Users are confused by my app
+Confusion suggests the design may need simplification
+
+I want to build something useful
+Usefulness comes from solving real problems
+
+I keep adding new features
+Too many features can make a product complex
+
+Focusing on core features helps
+Core features deliver the main value
+
+I want to finish my project
+Finishing requires prioritizing and completing tasks
+
+Pivot means changing the strategy
+Changing direction helps a startup find a better path
+
+I am worried about competition
+Focusing on users is more helpful than watching competitors
+
+The market is very large
+Large markets have room for many different solutions
+
+I need to hire someone
+Finding the right person helps a team grow stronger
+
+I am spending too much money
+Lower costs give a startup more time to succeed
+
+Burn rate is how fast money is spent
+High burn rates require faster growth or more funding
+
+I have a deadline tomorrow
+Deadlines help people prioritize the most important work
+
+A variable stores information
+Variables allow a program to remember data for later
+
+If/then statements make decisions
+Logic gates help a program choose between different actions
+
+I am repeating the same code
+Loops allow a program to run the same task many times
+
+An algorithm is a set of instructions
+Algorithms provide a step-by-step way to solve a problem
+
+Documentation explains how code works
+Good notes help other people understand the system
+
+Data can be organized in lists
+Arrays and lists keep related information together
+
+The internet connects many computers
+Connections allow data to travel between different places
+
+Gravity pulls objects toward the Earth
+Gravity is why things fall down instead of up
+
+Plants need sunlight to grow
+Sunlight provides the energy plants use to make food
+
+Everything is made of atoms
+Atoms are tiny building blocks of all matter
+
+Electricity flows through wires
+Moving electrons provide energy to power devices
+
+Magnets can push or pull each other
+Magnetic force acts on certain types of metal
+
+Evaporation turns water into vapor
+Heat causes liquid water to rise into the air as gas
+
+The Earth rotates once every day
+Rotation is what causes the cycle of day and night
+
+High scores track performance
+Points show how well a player is doing in the game
+
+Puzzles require logical thinking
+Solving puzzles involves finding a specific solution
+
+Frame rate affects how smooth a game looks
+Higher frame rates make movement appear more fluid
+
+A sequel continues an existing story
+Sequels expand on characters and worlds from before
+
+Sound effects provide feedback
+Sounds let the player know when an action has happened
+
+Saving a game preserves progress
+Save points allow players to stop and return later
+
+I feel tired today
+Resting allows the body and mind to recover energy
+
+I am proud of my work
+Pride comes from recognizing your own effort and results
+
+Learning something new is hard
+Difficulty is a sign that the brain is forming new connections
+
+I feel curious about this topic
+Curiosity leads to asking questions and gaining knowledge
+
+Light travels in straight lines
+Light moves faster than anything else in the universe
+
+Sound travels in waves
+Sound requires a medium like air or water to move
+
+Refraction bends light
+Light changes direction when it moves through water or glass
+
+Echoes happen when sound bounces
+Sound waves hit a surface and reflect back to the source
+
+Solids have a fixed shape
+The atoms in a solid are packed tightly together
+
+Liquids flow to fit their container
+Liquid atoms move around each other more freely
+
+Gases spread out to fill a space
+Gas atoms move very quickly and stay far apart
+
+Temperature is a measure of heat
+Higher temperatures mean atoms are moving faster
+
+Density is how much stuff is in a space
+High density means atoms are packed very close together
+
+Potential energy is stored energy
+An object has potential energy based on its position
+
+Kinetic energy is the energy of motion
+Anything that is moving has kinetic energy
+
+Force is a push or a pull
+Applying force changes how an object moves
+
+Inertia keeps things moving or still
+Objects stay as they are unless a force acts on them
+
+Friction slows down moving objects
+Friction happens when two surfaces rub against each other
+
+Gravity pulls everything toward the center of Earth
+Massive objects create a pull on smaller objects
+
+Velocity is speed in a specific direction
+Knowing the direction helps track where an object is going
+
+Acceleration means changing speed
+Going faster or slower is a form of acceleration
+
+Energy cannot be destroyed
+Energy only changes from one form into another
+
+Everything is made of atoms
+Atoms are the tiny building blocks of all matter
+
+Atoms have a center called a nucleus
+The nucleus holds the mass of the atom in its middle
+
+Electrons move around the nucleus
+Electrons are tiny particles with a negative charge
+
+Protons have a positive charge
+The number of protons determines what an element is
+
+Neutrons have no charge at all
+Neutrons stay in the nucleus to help hold it together
+
+Molecules are groups of atoms
+Atoms bond together to create different substances
+
+Elements are pure substances
+An element is made of only one kind of atom
+
+The Periodic Table lists all elements
+The table organizes elements by their properties and size
