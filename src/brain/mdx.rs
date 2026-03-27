@@ -183,26 +183,29 @@ pub fn load_csv_bible(bible_path: &str) -> Result<Vec<String>> {
     for result in rdr.records() {
         let record = result?;
 
+        let bk = record.get(1).unwrap_or("").trim().to_string();
         let verse = record.get(4).unwrap_or("").trim().to_string();
 
-        if verse.is_empty() {
-            continue;
-        }
+        if (bk == "20") { // proverbs only right now
+            if verse.is_empty() {
+                continue;
+            }
 
-        if buffer.is_empty() {
-            buffer.push_str(&verse);
-        } else {
-            buffer.push(' ');
-            buffer.push_str(&verse);
-        }
+            if buffer.is_empty() {
+                buffer.push_str(&verse);
+            } else {
+                buffer.push(' ');
+                buffer.push_str(&verse);
+            }
 
-        if buffer.len() >= 150 {
-            quotes.push(buffer.clone());
-            buffer.clear();
+            if buffer.len() >= 90 {
+                quotes.push(buffer.clone());
+                buffer.clear();
 
-            count += 1;
-            if count >= 20_000 {
-                break;
+                count += 1;
+                if count >= 20_000 {
+                    break;
+                }
             }
         }
     }

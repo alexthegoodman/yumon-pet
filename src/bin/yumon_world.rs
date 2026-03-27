@@ -36,7 +36,7 @@ const WALL_T: f32 = 0.35;
 const MOVE_SPEED: f32 = 1.8;
 const TRAVEL_DIST: f32 = 2.5;
 const BUBBLE_TTL: f32 = 7.0;
-const ACTION_INTERVAL_SECS: u64 = 30;
+const ACTION_INTERVAL_SECS: u64 = 10;
 
 /// Fill these in with your Kenney GLB paths.
 const MODEL_PATHS: [&str; YUMON_COUNT] = [
@@ -148,7 +148,7 @@ struct Yumon {
 
 impl Yumon {
     fn new(id: usize, pos: Vec3) -> Self {
-        let stagger = Duration::from_secs(5 + id as u64 * 10);
+        let stagger = Duration::from_secs(5 + id as u64);
         Self {
             id,
             pos,
@@ -182,15 +182,16 @@ impl Yumon {
 
         self.push_log(format!("[RAW]: {:?}", r.raw_output));
         self.push_log(format!("[ACTION]: {:?}", r.action));
+
+        if !r.reply.is_empty() {
+            self.set_speech(r.reply.clone());
+            self.push_log(format!("💬 {}", r.reply));
+        } else {
+            self.push_log(format!("({emote})"));
+        }
         
         match r.action {
             Action::Speak | Action::Idle => {
-                if !r.reply.is_empty() {
-                    self.set_speech(r.reply.clone());
-                    self.push_log(format!("💬 {}", r.reply));
-                } else {
-                    self.push_log(format!("({emote})"));
-                }
                 self.anim   = AnimState::Idle;
                 self.target = self.pos;
             }

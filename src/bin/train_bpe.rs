@@ -53,14 +53,14 @@ pub fn main() {
     //     }
     // }
 
-    // let bible_verses = load_csv_bible("data/bible_bbe.csv");
-    // let bible_verses = bible_verses.as_ref().expect("Couldn't get bible_verses");
+    let bible_verses = load_csv_bible("data/bible_bbe.csv");
+    let bible_verses = bible_verses.as_ref().expect("Couldn't get bible_verses");
 
-    // for (i, sent) in bible_verses.iter().enumerate() {
-    //     if (i < 12) {
-    //         println!("Verse: {:?}", sent);
-    //     }
-    // }
+    for (i, sent) in bible_verses.iter().enumerate() {
+        if (i < 12) {
+            println!("Verse: {:?}", sent);
+        }
+    }
 
     let handcrafted = load_handcrafted_sentences("archive/handcrafted.txt");
     let handcrafted = handcrafted.as_ref().expect("Couldn't get handcrafted");
@@ -123,7 +123,7 @@ pub fn main() {
     // sentences.extend(wiki_sentences);
     sentences.extend(mdx_sentences);
     // sentences.extend(qna_sentences);
-    // sentences.extend(bible_verses);
+    sentences.extend(bible_verses);
     sentences.extend(handcrafted);
     sentences.extend(&handcrafted_qa);
     // sentences.extend(quote_sentences);

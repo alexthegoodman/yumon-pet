@@ -284,7 +284,7 @@ fn ui(f: &mut ratatui::Frame, app: &AppState) {
 
     // ── Chat history ──────────────────────────────────────────────────────────
 
-    let items: Vec<ListItem> = app.messages.iter().map(|m| {
+    let items: Vec<ListItem> = app.messages.iter().rev().take(15).rev().map(|m| {
         match m {
             Message::User(s) => {
                 let raw = format!("you  {s}");
