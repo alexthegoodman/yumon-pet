@@ -1,9 +1,9 @@
 // Procedurally generate questions to answer, save qa pairs to file
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -463,7 +463,7 @@ impl App {
         self.input.clear();
     }
 
-    fn save_to_file(&mut self) -> io::Result<()> {
+    fn save_to_file_json(&mut self) -> io::Result<()> {
         let answer = self.input.trim().to_string();
         if answer.is_empty() {
             self.status_msg = "⚠  Answer is empty — nothing saved.".to_string();
@@ -483,7 +483,7 @@ impl App {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open("qa_journal.jsonl")?;
+            .open("data/qa_journal.jsonl")?;
 
         let line = serde_json::to_string(&entry)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
@@ -492,6 +492,33 @@ impl App {
 
         self.history_count += 1;
         self.status_msg = format!("✓  Saved! ({} answered so far)", self.history_count);
+        Ok(())
+    }
+
+    fn save_to_file_txt(&mut self) -> io::Result<()> {
+        let answer = self.input.trim().to_string();
+        if answer.is_empty() {
+            self.status_msg = "⚠  Answer is empty — nothing saved.".to_string();
+            return Ok(());
+        }
+
+        // Prepare the file for appending
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("data/qa_journal.txt")?;
+
+        // Write in the requested format: Question line, Answer line, Space line
+        writeln!(file, "{}", self.current_q)?;
+        writeln!(file, "{}", answer)?;
+        writeln!(file, "")?; // The "space line"
+
+        self.history_count += 1;
+        self.status_msg = format!("✓  Saved to TXT! ({} total)", self.history_count);
+        
+        // Clear the input for the next question
+        self.input.clear();
+        
         Ok(())
     }
 }
@@ -595,13 +622,14 @@ fn main() -> io::Result<()> {
         terminal.draw(|f| ui(f, &app))?;
 
         if let Event::Key(key) = event::read()? {
+            if key.kind != event::KeyEventKind::Press { continue; }
             match (key.modifiers, key.code) {
                 // Quit
                 (KeyModifiers::CONTROL, KeyCode::Char('q')) | (_, KeyCode::Esc) => break,
 
                 // Submit answer → save + next question
                 (_, KeyCode::Enter) => {
-                    if let Err(e) = app.save_to_file() {
+                    if let Err(e) = app.save_to_file_txt() {
                         app.status_msg = format!("✗  Error saving: {e}");
                     }
                     app.generate_new_question();

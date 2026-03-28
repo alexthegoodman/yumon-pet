@@ -102,6 +102,19 @@ pub fn main() {
         }
     }
 
+    let mut my_qna2 = load_qa_pairs("data/qa_journal.txt");
+    let my_qna2 = my_qna2.as_ref().expect("Couldn't get handcrafted");
+
+    let mut handcrafted_qa2 = Vec::new();
+
+    for (i, sent) in my_qna2.iter().enumerate() {
+        handcrafted_qa2.push(sent.0.clone() + " " + &sent.1.clone());
+
+        if (i < 12) {
+            println!("qa: {:?}", sent);
+        }
+    }
+
     // let ebooks = load_pdf_ebook_sentences("data/ebooks/survival_handbook.pdf");
     // let ebooks = ebooks.as_ref().expect("Couldn't get handcrafted");
 
@@ -126,6 +139,7 @@ pub fn main() {
     sentences.extend(bible_verses);
     sentences.extend(handcrafted);
     sentences.extend(&handcrafted_qa);
+    sentences.extend(&handcrafted_qa2);
     // sentences.extend(quote_sentences);
     // sentences.extend(dict_sentences);
     // sentences.extend(notions);
