@@ -7,7 +7,7 @@ use crate::brain::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, bpe::TokenizerKind, keywords
 use rand::SeedableRng;
 use rand::prelude::SliceRandom;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TrainingStage {
     Language,   // phase 1: plain sentence → sentence
     Structured, // phase 2: sentence → JSON
@@ -159,104 +159,105 @@ pub struct Sample {
     pub motion_dir:      CardinalDir,
     pub world:           WorldContext,
     pub target_json: String,
+    pub pair: (String, String),
 }
 
 // ── prepare_samples ────────────────────────────────────────────────────────────
 
-pub fn prepare_paired_samples_singles(
-    // sentences:    &[String],
-    sentences:  Vec<String>,
-    tokenizer:    &TokenizerKind,
-    keyword_index: &HashMap<String, Vec<usize>>,
-    rng:          &mut impl Rng,
-    stage:        TrainingStage,
-) -> Vec<Sample> {
-    println!("prepare paired samples split");
+// pub fn prepare_paired_samples_singles(
+//     // sentences:    &[String],
+//     sentences:  Vec<String>,
+//     tokenizer:    &TokenizerKind,
+//     keyword_index: &HashMap<String, Vec<usize>>,
+//     rng:          &mut impl Rng,
+//     stage:        TrainingStage,
+// ) -> Vec<Sample> {
+//     println!("prepare paired samples split");
 
-    let bad_words = vec!["sex", "drug", "kill", "rape", "nazi"];
-    let mut rng_local = rand::thread_rng();
-    let mut samples = Vec::new();
+//     let bad_words = vec!["sex", "drug", "kill", "rape", "nazi"];
+//     let mut rng_local = rand::thread_rng();
+//     let mut samples = Vec::new();
 
-    for sent in sentences {
-        if bad_words.iter().any(|&w| sent.to_lowercase().contains(w)) { continue; }
+//     for sent in sentences {
+//         if bad_words.iter().any(|&w| sent.to_lowercase().contains(w)) { continue; }
 
-        let words: Vec<&str> = sent.split_whitespace().collect();
-        if words.len() < 4 { continue; }
+//         let words: Vec<&str> = sent.split_whitespace().collect();
+//         if words.len() < 4 { continue; }
 
-        let world = WorldContext::random(&mut rng_local);
-        let (action, motion_dir) = derive_action(&world);
+//         let world = WorldContext::random(&mut rng_local);
+//         let (action, motion_dir) = derive_action(&world);
 
-        // let input_encoded  = tokenizer.encode(&sent_a);
+//         // let input_encoded  = tokenizer.encode(&sent_a);
 
-        let mut obstacle_dir = if let Some(obst) = world.obstacle {
-            obst.dir
-        } else {
-            CardinalDir::None
-        };
-        let mut building_dir = if let Some(obst) = world.building {
-            obst.dir
-        } else {
-            CardinalDir::None
-        };
-        let mut resource_dir = if let Some(obst) = world.resource {
-            obst.dir
-        } else {
-            CardinalDir::None
-        };
+//         let mut obstacle_dir = if let Some(obst) = world.obstacle {
+//             obst.dir
+//         } else {
+//             CardinalDir::None
+//         };
+//         let mut building_dir = if let Some(obst) = world.building {
+//             obst.dir
+//         } else {
+//             CardinalDir::None
+//         };
+//         let mut resource_dir = if let Some(obst) = world.resource {
+//             obst.dir
+//         } else {
+//             CardinalDir::None
+//         };
         
-        let (input_encoded, input_json) = match stage {
-            TrainingStage::Language => {
-                let encoded = tokenizer.encode(&sent);
-                let json    = sent.clone();
-                (encoded, json)
-            }
-            TrainingStage::Structured => {
-                let json = serde_json::to_string_pretty(&serde_json::json!({
-                    "obstacle_dir":     format!("{:?}", obstacle_dir).to_lowercase(),
-                    "building_dir":     format!("{:?}", building_dir).to_lowercase(),
-                    "resource_dir":     format!("{:?}", resource_dir).to_lowercase(),
-                    "message":           sent,
-                })).unwrap();
-                let encoded = match tokenizer {
-                    TokenizerKind::Bpe(b) => b.encode_raw(&json)
-                        .unwrap_or_default()
-                        .into_iter().map(|x| x as usize).collect(),
-                    TokenizerKind::Char(c) => c.encode(&json),
-                };
-                (encoded, json)
-            }
-        };
+//         let (input_encoded, input_json) = match stage {
+//             TrainingStage::Language => {
+//                 let encoded = tokenizer.encode(&sent);
+//                 let json    = sent.clone();
+//                 (encoded, json)
+//             }
+//             TrainingStage::Structured => {
+//                 let json = serde_json::to_string_pretty(&serde_json::json!({
+//                     "obstacle_dir":     format!("{:?}", obstacle_dir).to_lowercase(),
+//                     "building_dir":     format!("{:?}", building_dir).to_lowercase(),
+//                     "resource_dir":     format!("{:?}", resource_dir).to_lowercase(),
+//                     "message":           sent,
+//                 })).unwrap();
+//                 let encoded = match tokenizer {
+//                     TokenizerKind::Bpe(b) => b.encode_raw(&json)
+//                         .unwrap_or_default()
+//                         .into_iter().map(|x| x as usize).collect(),
+//                     TokenizerKind::Char(c) => c.encode(&json),
+//                 };
+//                 (encoded, json)
+//             }
+//         };
 
-        let enc_input: Vec<usize> = std::iter::once(BOS_TOKEN)
-            .chain(input_encoded.iter().cloned())
-            .collect();
+//         let enc_input: Vec<usize> = std::iter::once(BOS_TOKEN)
+//             .chain(input_encoded.iter().cloned())
+//             .collect();
 
-        if enc_input.len() > MAX_SEQ_LEN { continue; }
-        if enc_input.len() < MAX_SEQ_LEN / 2 { continue; }
+//         if enc_input.len() > MAX_SEQ_LEN { continue; }
+//         if enc_input.len() < MAX_SEQ_LEN / 2 { continue; }
 
-        let pad = |mut v: Vec<usize>| -> Vec<usize> {
-            v.resize(MAX_SEQ_LEN, PAD_TOKEN);
-            v
-        };
+//         let pad = |mut v: Vec<usize>| -> Vec<usize> {
+//             v.resize(MAX_SEQ_LEN, PAD_TOKEN);
+//             v
+//         };
 
-        let input_ids     = pad(enc_input);
+//         let input_ids     = pad(enc_input);
 
-        let mut target: Vec<usize> = input_encoded.clone();
-        target.push(EOS_TOKEN);
-        let target_labels = pad(target);
+//         let mut target: Vec<usize> = input_encoded.clone();
+//         target.push(EOS_TOKEN);
+//         let target_labels = pad(target);
 
-        samples.push(Sample {
-            input_ids,
-            target_labels,
-            action,
-            motion_dir,
-            world,
-            target_json: String::new(),
-        });
-    }
+//         samples.push(Sample {
+//             input_ids,
+//             target_labels,
+//             action,
+//             motion_dir,
+//             world,
+//             target_json: String::new(),
+//         });
+//     }
 
-    samples
-}
+//     samples
+// }
 
 pub fn prepare_paired_samples_split(
     // sentences:    &[String],
@@ -397,6 +398,7 @@ pub fn prepare_paired_samples_split(
             motion_dir,
             world,
             target_json,
+            pair: (sent_a, sent_b)
         });
     }
 
@@ -536,6 +538,7 @@ pub fn prepare_paired_samples_split_sep(
             motion_dir,
             world,
             target_json,
+            pair: (sent_a, sent_b)
         });
     }
 

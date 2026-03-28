@@ -144,8 +144,8 @@ fn main() -> Result<()> {
             }
         };
 
-        let class_probs = vec![1.0 / CIFAR_CLASSES as f32; CIFAR_CLASSES];
-        let emote_probs = vec![1.0 / EMOTE_CLASSES as f32; EMOTE_CLASSES];
+        // let class_probs = vec![1.0 / CIFAR_CLASSES as f32; CIFAR_CLASSES];
+        // let emote_probs = vec![1.0 / EMOTE_CLASSES as f32; EMOTE_CLASSES];
 
         while let Ok((prompt_text, user_emote_idx, world)) = rx_user.recv() {
 
@@ -162,10 +162,10 @@ fn main() -> Result<()> {
             // let result = brain_model.generate_structured( // good for TrainingStage::Structured JSON?
                 &tokenizer,
                 // &index,
-                &world,
-                &class_probs,
-                &emote_probs,
-                user_emote_idx,
+                // &world,
+                // &class_probs,
+                // &emote_probs,
+                // user_emote_idx,
                 &prompt,
                 MAX_SEQ_LEN,
                 &device,

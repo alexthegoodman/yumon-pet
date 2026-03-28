@@ -20,7 +20,7 @@ use three_d::{egui::{CollapsingHeader, Color32, RichText, SidePanel}, *};
 use yumon_pet::{
     brain::{
         bpe::TokenizerKind,
-        model::{GenerationResult, YUMON_SCHEMA, YumonBrain}, samples::{Action, CardinalDir, WorldContext},
+        model::{GenerationResult, YUMON_SCHEMA, YumonBrain}, samples::{Action, CardinalDir, WorldContext}, train::MAX_SEQ_LEN,
     },
     vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES},
 };
@@ -475,14 +475,13 @@ fn main() {
                 Err(e) => { eprintln!("[brain] index failed: {e}"); return; }
             };
 
-            let class_probs = vec![1.0 / CIFAR_CLASSES as f32; CIFAR_CLASSES];
-            let emote_probs = vec![1.0 / EMOTE_CLASSES as f32; EMOTE_CLASSES];
+            // let class_probs = vec![1.0 / CIFAR_CLASSES as f32; CIFAR_CLASSES];
+            // let emote_probs = vec![1.0 / EMOTE_CLASSES as f32; EMOTE_CLASSES];
 
             while let Ok(p) = rx_prompt.recv() {
                 let result = brain.generate_unmasked_parsed(
-                    &tokenizer, &p.world_ctx,
-                    &class_probs, &emote_probs,
-                    p.emote_idx, &p.prompt, 110, &device,
+                    &tokenizer,
+                    &p.prompt, MAX_SEQ_LEN, &device,
                 );
                 let _ = tx.send((p.yumon_id, result));
             }

@@ -11,6 +11,7 @@ pub struct TrainingState {
     pub global_step: usize,
     pub entropy: f32,
     pub entropy_history: Vec<(f64, f64)>,
+    pub last_reply: String,
 }
 
 use ratatui::{
@@ -33,13 +34,14 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
 
     // ── Top bar: epoch / batch / lr / loss ──────────────────────────────────
     let stats = format!(
-        " Epoch {}/{} │ Batch {}/{} │ LR {:.2e} │ Loss {:.4} │ Avg {:.4} | Entropy: {:.4}",
+        " Epoch {}/{} │ Batch {}/{} │ LR {:.2e} │ Loss {:.4} │ Avg {:.4} | Entropy: {:.4} | Last Reply: {:?}",
         state.epoch, state.total_epochs,
         state.batch, state.total_batches,
         state.current_lr,
         state.current_loss,
         state.avg_loss,
-        state.entropy
+        state.entropy,
+        state.last_reply
     );
     let para = Paragraph::new(stats)
         .block(Block::default().borders(Borders::ALL).title("Training"));

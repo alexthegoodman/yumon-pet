@@ -49,6 +49,17 @@ pub const TOP_K:        usize = 10;
 
 // pub const CONTEXT_DIMS: usize = 132;
 
+pub const YUMON_SCHEMA_INPUT: &str = r#"{
+    "type": "object",
+    "properties": {
+        "obstacle_dir": { "type": "string", "enum": ["north","south","east","west","none"] },
+        "building_dir": { "type": "string", "enum": ["north","south","east","west","none"] },
+        "resource_dir": { "type": "string", "enum": ["north","south","east","west","none"] },
+        "message":        { "type": "string" }
+    },
+    "required": ["obstacle_dir", "building_dir", "resource_dir", "message"]
+}"#;
+
 pub const YUMON_SCHEMA: &str = r#"{
     "type": "object",
     "properties": {
@@ -962,10 +973,10 @@ impl<B: Backend> YumonBrain<B> {
     pub fn generate_unmasked_parsed(
         &self,
         tokenizer:      &TokenizerKind,
-        world:          &WorldContext,
-        class_probs:    &[f32],
-        emote_probs:    &[f32],
-        user_emote_idx: usize,
+        // world:          &WorldContext,
+        // class_probs:    &[f32],
+        // emote_probs:    &[f32],
+        // user_emote_idx: usize,
         seed_text:      &str,
         max_tokens:     usize,
         device:         &B::Device,

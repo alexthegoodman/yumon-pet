@@ -11,6 +11,7 @@ pub mod pdf;
 pub mod samples;
 pub mod keywords;
 pub mod fixer;
+pub mod loader;
 
 // Re-export tokenizer for convenience
 pub use tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, UNK_TOKEN};
