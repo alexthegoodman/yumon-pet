@@ -7,6 +7,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use cubecl::wgpu::WgpuDevice;
 use ratatui::{
     Terminal, backend::CrosstermBackend, layout::{Constraint, Direction, Layout}, style::{Color, Modifier, Style}, text::{Line, Span, Text}, widgets::{Block, Borders, List, ListItem, Paragraph}
 };
@@ -57,7 +58,8 @@ struct AppState {
     messages:            Vec<Message>,
     loading:             bool,
     brain_cp:            String,
-    device:              Device<Wgpu>,
+    // device:              Device<Wgpu>,
+    device:              WgpuDevice,
     last_yumon_speak:    Instant,
     next_speak_interval: Duration,
     agent:               AgentState,

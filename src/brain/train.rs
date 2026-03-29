@@ -144,7 +144,8 @@ pub fn run(
     batch_size:        usize,
     max_articles:      usize,
 ) -> Result<()> {
-    let device: <TrainBackend as Backend>::Device = Default::default();
+    // let device: <TrainBackend as Backend>::Device = Default::default();
+    let device = burn::backend::wgpu::WgpuDevice::default();
 
     // ── Build label keyword index ─────────────────────────────────────────────
     let label_keywords   = build_label_keywords();
@@ -154,8 +155,8 @@ pub fn run(
 
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
 
-    // let training_stage = TrainingStage::Language;
-    let training_stage = TrainingStage::Structured;
+    let training_stage = TrainingStage::Language;
+    // let training_stage = TrainingStage::Structured;
  
     let training_samples = DataLoader::new(training_stage)
         // per-file limits — None means "take everything"
