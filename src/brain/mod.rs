@@ -12,6 +12,7 @@ pub mod samples;
 pub mod keywords;
 pub mod fixer;
 pub mod loader;
+pub mod flash_attn;
 
 // Re-export tokenizer for convenience
 pub use tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, UNK_TOKEN};

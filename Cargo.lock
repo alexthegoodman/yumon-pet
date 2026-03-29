@@ -9176,6 +9176,8 @@ dependencies = [
  "clap",
  "crossterm",
  "csv",
+ "cubecl",
+ "derive-new",
  "directories",
  "fancy-regex 0.17.0",
  "fastrand",

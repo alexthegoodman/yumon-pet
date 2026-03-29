@@ -50,3 +50,5 @@ three-d-asset = { version = "0.7", features = ["gltf", "png"] }
 # json-fix = "0.1.1" # bad logs
 fancy-regex = "0.17.0"
 textwrap = "0.16.2"
+cubecl = { version = "0.9", features = ["wgpu"] }
+derive-new = "0.7"
