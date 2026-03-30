@@ -1,7 +1,7 @@
-use yumon_pet::brain::{bpe::{self, BpeTokenizer}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences, load_qa_pairs, load_txt_sentences}, pdf::load_pdf_ebook_sentences, wiki::load_wiki_sentences};
+use yumon_pet::{brain::{PAD_TOKEN, bpe::{self, BpeTokenizer, TokenizerKind}, loader::{DataLoader, FileKind}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences, load_qa_pairs, load_txt_sentences}, pdf::load_pdf_ebook_sentences, samples::TrainingStage, train::{build_keyword_index, build_label_keywords}, wiki::load_wiki_sentences}, vision::CIFAR_CLASSES};
 
 pub fn main() {
-    let wiki_xml = "data/simplewiki-latest-pages-articles.xml";
+    // let wiki_xml = "data/simplewiki-latest-pages-articles.xml";
     
     // let sentences = load_wiki_sentences(wiki_xml, 25_000);
 
@@ -17,103 +17,103 @@ pub fn main() {
     //     }
     // }
 
-    let mdx_sentences = load_mdx_sentences("data/(poems)/");
-    let mdx_sentences = mdx_sentences.as_ref().expect("Couldn't get mdx_sentences");
+    // let mdx_sentences = load_mdx_sentences("data/(poems)/");
+    // let mdx_sentences = mdx_sentences.as_ref().expect("Couldn't get mdx_sentences");
 
-    for (i, sent) in mdx_sentences.iter().enumerate() {
-        if (i < 12) {
-            println!("MDX: {:?}", sent);
-        }
-    }
-
-    // let quote_sentences = load_csv_quotes("data/quotes.csv");
-    // let quote_sentences = quote_sentences.as_ref().expect("Couldn't get quote_sentences");
-
-    // for (i, sent) in quote_sentences.iter().enumerate() {
+    // for (i, sent) in mdx_sentences.iter().enumerate() {
     //     if (i < 12) {
-    //         println!("QUOTE: {:?}", sent);
+    //         println!("MDX: {:?}", sent);
     //     }
     // }
 
-    // let dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt");
-    // let dict_sentences = dict_sentences.as_ref().expect("Couldn't get dict_sentences");
+    // // let quote_sentences = load_csv_quotes("data/quotes.csv");
+    // // let quote_sentences = quote_sentences.as_ref().expect("Couldn't get quote_sentences");
 
-    // for (i, sent) in dict_sentences.iter().enumerate() {
+    // // for (i, sent) in quote_sentences.iter().enumerate() {
+    // //     if (i < 12) {
+    // //         println!("QUOTE: {:?}", sent);
+    // //     }
+    // // }
+
+    // // let dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt");
+    // // let dict_sentences = dict_sentences.as_ref().expect("Couldn't get dict_sentences");
+
+    // // for (i, sent) in dict_sentences.iter().enumerate() {
+    // //     if (i < 12) {
+    // //         println!("DICT: {:?}", sent);
+    // //     }
+    // // }
+
+    // // let qna_sentences = load_csv_qna("data/AI.csv");
+    // // let qna_sentences = qna_sentences.as_ref().expect("Couldn't get qna_sentences");
+
+    // // for (i, sent) in qna_sentences.iter().enumerate() {
+    // //     if (i < 12) {
+    // //         println!("Q&A: {:?}", sent);
+    // //     }
+    // // }
+
+    // let bible_verses = load_csv_bible("data/bible_bbe.csv");
+    // let bible_verses = bible_verses.as_ref().expect("Couldn't get bible_verses");
+
+    // for (i, sent) in bible_verses.iter().enumerate() {
     //     if (i < 12) {
-    //         println!("DICT: {:?}", sent);
+    //         println!("Verse: {:?}", sent);
     //     }
     // }
 
-    // let qna_sentences = load_csv_qna("data/AI.csv");
-    // let qna_sentences = qna_sentences.as_ref().expect("Couldn't get qna_sentences");
+    // let handcrafted = load_handcrafted_sentences("archive/handcrafted.txt");
+    // let handcrafted = handcrafted.as_ref().expect("Couldn't get handcrafted");
 
-    // for (i, sent) in qna_sentences.iter().enumerate() {
+    // for (i, sent) in handcrafted.iter().enumerate() {
     //     if (i < 12) {
-    //         println!("Q&A: {:?}", sent);
+    //         println!("handcrafted: {:?}", sent);
     //     }
     // }
 
-    let bible_verses = load_csv_bible("data/bible_bbe.csv");
-    let bible_verses = bible_verses.as_ref().expect("Couldn't get bible_verses");
+    // // let notions = load_notion_sentences("data/notion/");
+    // // let notions = notions.as_ref().expect("Couldn't get handcrafted");
 
-    for (i, sent) in bible_verses.iter().enumerate() {
-        if (i < 12) {
-            println!("Verse: {:?}", sent);
-        }
-    }
+    // // for (i, sent) in notions.iter().enumerate() {
+    // //     if (i < 12) {
+    // //         println!("notion: {:?}", sent);
+    // //     }
+    // // }
 
-    let handcrafted = load_handcrafted_sentences("archive/handcrafted.txt");
-    let handcrafted = handcrafted.as_ref().expect("Couldn't get handcrafted");
+    // // let txt = load_txt_sentences("data/creative_stories.txt");
+    // // let txt = txt.as_ref().expect("Couldn't get txt");
 
-    for (i, sent) in handcrafted.iter().enumerate() {
-        if (i < 12) {
-            println!("handcrafted: {:?}", sent);
-        }
-    }
+    // // for (i, sent) in txt.iter().enumerate() {
+    // //     if (i < 12) {
+    // //         println!("txt: {:?}", sent);
+    // //     }
+    // // }
 
-    // let notions = load_notion_sentences("data/notion/");
-    // let notions = notions.as_ref().expect("Couldn't get handcrafted");
+    // let mut my_qna = load_qa_pairs("archive/handcrafted_pairs.txt");
+    // let my_qna = my_qna.as_ref().expect("Couldn't get handcrafted");
 
-    // for (i, sent) in notions.iter().enumerate() {
+    // let mut handcrafted_qa = Vec::new();
+
+    // for (i, sent) in my_qna.iter().enumerate() {
+    //     handcrafted_qa.push(sent.0.clone() + " " + &sent.1.clone());
+
     //     if (i < 12) {
-    //         println!("notion: {:?}", sent);
+    //         println!("qa: {:?}", sent);
     //     }
     // }
 
-    // let txt = load_txt_sentences("data/creative_stories.txt");
-    // let txt = txt.as_ref().expect("Couldn't get txt");
+    // let mut my_qna2 = load_qa_pairs("data/qa_journal.txt");
+    // let my_qna2 = my_qna2.as_ref().expect("Couldn't get handcrafted");
 
-    // for (i, sent) in txt.iter().enumerate() {
+    // let mut handcrafted_qa2 = Vec::new();
+
+    // for (i, sent) in my_qna2.iter().enumerate() {
+    //     handcrafted_qa2.push(sent.0.clone() + " " + &sent.1.clone());
+
     //     if (i < 12) {
-    //         println!("txt: {:?}", sent);
+    //         println!("qa: {:?}", sent);
     //     }
     // }
-
-    let mut my_qna = load_qa_pairs("archive/handcrafted_pairs.txt");
-    let my_qna = my_qna.as_ref().expect("Couldn't get handcrafted");
-
-    let mut handcrafted_qa = Vec::new();
-
-    for (i, sent) in my_qna.iter().enumerate() {
-        handcrafted_qa.push(sent.0.clone() + " " + &sent.1.clone());
-
-        if (i < 12) {
-            println!("qa: {:?}", sent);
-        }
-    }
-
-    let mut my_qna2 = load_qa_pairs("data/qa_journal.txt");
-    let my_qna2 = my_qna2.as_ref().expect("Couldn't get handcrafted");
-
-    let mut handcrafted_qa2 = Vec::new();
-
-    for (i, sent) in my_qna2.iter().enumerate() {
-        handcrafted_qa2.push(sent.0.clone() + " " + &sent.1.clone());
-
-        if (i < 12) {
-            println!("qa: {:?}", sent);
-        }
-    }
 
     // let ebooks = load_pdf_ebook_sentences("data/ebooks/survival_handbook.pdf");
     // let ebooks = ebooks.as_ref().expect("Couldn't get handcrafted");
@@ -132,20 +132,38 @@ pub fn main() {
     //         println!("ebook: {:?}", sent);
     //     }
     // }
+
+    let mut chats = load_handcrafted_chats("archive/handcrafted_pairs.txt");
+    let chats = chats.as_ref().expect("Couldn't get handcrafted");
+
+    let mut chats_combined = Vec::new();
+
+    for (i, block) in chats.blocks.iter().enumerate() {
+        for (x, memory) in block.memories.iter().enumerate() {
+            chats_combined.push(&memory.human);
+            chats_combined.push(&memory.bot);
+
+            if (i < 12) {
+                println!("qa human: {:?}", memory.human);
+                println!("qa bot: {:?}", memory.bot);
+            }
+        }
+    }
     
     // sentences.extend(wiki_sentences);
-    sentences.extend(mdx_sentences);
-    // sentences.extend(qna_sentences);
-    sentences.extend(bible_verses);
-    sentences.extend(handcrafted);
-    sentences.extend(&handcrafted_qa);
-    sentences.extend(&handcrafted_qa2);
+    // sentences.extend(mdx_sentences);
+    // // sentences.extend(qna_sentences);
+    // sentences.extend(bible_verses);
+    // sentences.extend(handcrafted);
+    // sentences.extend(&handcrafted_qa);
+    // sentences.extend(&handcrafted_qa2);
     // sentences.extend(quote_sentences);
     // sentences.extend(dict_sentences);
     // sentences.extend(notions);
     // // sentences.extend(ebooks);
     // sentences.extend(txt);
     // sentences.extend(ebooks);
+    sentences.extend(chats_combined);
         
     let bpe = BpeTokenizer::train(
         sentences, 
@@ -156,4 +174,48 @@ pub fn main() {
     let bpe = bpe.as_ref().expect("Couldn't train bpe");
 
     bpe.save("yumon_bpe").as_ref().expect("Couldn't save bpe");
+
+    // ----------------------
+    // ── Check samples sizes ─────────────────────────────────────────────
+    // ----------------------
+    let label_keywords   = build_label_keywords();
+    let keyword_index    = build_keyword_index(&label_keywords);
+    println!("🏷  CIFAR-100 keyword index: {} unique keywords across {} classes",
+             keyword_index.len(), CIFAR_CLASSES);
+
+    let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe").expect("Couldn't get bpe"));
+
+    let training_stage = TrainingStage::Language;
+ 
+    let training_samples = DataLoader::new(training_stage)
+        .add("archive/handcrafted_pairs.txt",   FileKind::Chats, None)
+        .total_limit(4096)
+        .seed(4815162342)
+        .load(&tokenizer, &keyword_index).expect("Couldn't get samples");
+    
+    println!("language training samples: {}", training_samples.len());
+    
+    // debug print — first 200 samples
+    for (i, sample) in training_samples.iter().enumerate() {
+        if i >= 200 { break; }
+        println!("language input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
+        println!("language target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
+    }
+
+    let training_stage = TrainingStage::Structured;
+ 
+    let training_samples = DataLoader::new(training_stage)
+        .add("archive/handcrafted_pairs.txt",   FileKind::Chats, None)
+        .total_limit(4096)
+        .seed(4815162342)
+        .load(&tokenizer, &keyword_index).expect("Couldn't get samples");
+    
+    println!("structured training samples: {}", training_samples.len());
+    
+    // debug print — first 200 samples
+    for (i, sample) in training_samples.iter().enumerate() {
+        if i >= 200 { break; }
+        println!("structured input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
+        println!("structured target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
+    }
 }

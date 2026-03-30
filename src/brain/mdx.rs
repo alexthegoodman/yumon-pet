@@ -275,6 +275,85 @@ pub fn load_handcrafted_sentences(dict_path: &str) -> Result<Vec<String>> {
     Ok(sentences)
 }
 
+#[derive(Debug, Clone)]
+pub struct Memory {
+    pub human: String,
+    pub bot: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChatBlock {
+    pub memories: Vec<Memory>,
+}
+
+#[derive(Debug)]
+pub struct HandcraftedChats {
+    pub blocks: Vec<ChatBlock>,
+}
+
+pub fn load_handcrafted_chats(dict_path: &str) -> Result<HandcraftedChats> {
+    println!("📖 Loading handcrafted: {dict_path}");
+
+    let content = std::fs::read_to_string(dict_path)?;
+
+    let mut blocks = Vec::new();
+    let mut current_block: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            if !current_block.is_empty() {
+                blocks.push(parse_block(&current_block));
+                current_block.clear();
+            }
+        } else {
+            current_block.push(trimmed.to_string());
+        }
+    }
+
+    // Handle trailing block with no final blank line
+    if !current_block.is_empty() {
+        blocks.push(parse_block(&current_block));
+    }
+
+    println!(
+        "✅ Loaded {} blocks ({} memories total)",
+        blocks.len(),
+        blocks.iter().map(|b| b.memories.len()).sum::<usize>()
+    );
+
+    Ok(HandcraftedChats { blocks })
+}
+
+fn parse_block(lines: &[String]) -> ChatBlock {
+    let mut memories = Vec::new();
+    let mut i = 0;
+
+    while i + 1 < lines.len() {
+        memories.push(Memory {
+            human: lines[i].clone(),
+            bot: lines[i + 1].clone(),
+        });
+        i += 2;
+    }
+
+    ChatBlock { memories }
+}
+
+fn flush_block(block: &[String], memories: &mut Vec<Memory>) {
+    // Odd-indexed lines (0, 2, 4...) are human; even-indexed (1, 3, 5...) are bot
+    let mut i = 0;
+    while i + 1 < block.len() {
+        memories.push(Memory {
+            human: block[i].clone(),
+            bot: block[i + 1].clone(),
+        });
+        i += 2;
+    }
+    // If block has an odd number of lines, the last human turn has no bot reply — skip it
+}
+
 pub fn load_txt_sentences(path: &str) -> Result<Vec<String>> {
     println!("📖 Loading txt: {path}");
 

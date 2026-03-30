@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use rand::{Rng, rngs::StdRng};
 use rayon::prelude::*;
-use crate::brain::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, bpe::TokenizerKind, keywords::extract_keywords, train::{MAX_SEQ_LEN, keyword_emote_label, matched_classes}};
+use crate::brain::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, bpe::TokenizerKind, keywords::extract_keywords, mdx::HandcraftedChats, train::{MAX_SEQ_LEN, keyword_emote_label, matched_classes}};
 use rand::SeedableRng;
 use rand::prelude::SliceRandom;
 
@@ -540,6 +540,139 @@ pub fn prepare_paired_samples_split_sep(
             target_json,
             pair: (sent_a, sent_b)
         });
+    }
+
+    samples
+}
+
+pub fn prepare_paired_samples_chats(
+    chats:         HandcraftedChats,
+    tokenizer:     &TokenizerKind,
+    keyword_index: &HashMap<String, Vec<usize>>,
+    rng:           &mut impl Rng,
+    stage:         TrainingStage,
+) -> Vec<Sample> {
+    println!("prepare paired samples chat");
+
+    let bad_words = vec!["sex", "drug", "kill", "rape", "nazi"];
+    let mut rng_local = rand::thread_rng();
+    let mut samples = Vec::new();
+
+    for block in &chats.blocks {
+        for (i, memory) in block.memories.iter().enumerate() {
+            let sent = &memory.human;
+
+            if bad_words.iter().any(|&w| sent.to_lowercase().contains(w)) { continue; }
+
+            let words: Vec<&str> = sent.split_whitespace().collect();
+            if words.len() < 3 { continue; }
+
+            let world = WorldContext::random(&mut rng_local);
+            let (action, motion_dir) = derive_action(&world);
+
+            let mut obstacle_dir = if let Some(obst) = world.obstacle {
+                obst.dir
+            } else {
+                CardinalDir::None
+            };
+            let mut building_dir = if let Some(obst) = world.building {
+                obst.dir
+            } else {
+                CardinalDir::None
+            };
+            let mut resource_dir = if let Some(obst) = world.resource {
+                obst.dir
+            } else {
+                CardinalDir::None
+            };
+
+            // Build the memories array: all pairs in this block before the current one
+            let prior_memories: Vec<serde_json::Value> = block.memories[..i]
+                .iter()
+                .map(|m| serde_json::json!({
+                    "human": m.human,
+                    "yumon": m.bot,
+                }))
+                .collect();
+
+            let (input_encoded, input_json) = match stage {
+                TrainingStage::Language => {
+                    let encoded = tokenizer.encode(sent);
+                    let json    = sent.clone();
+                    (encoded, json)
+                }
+                TrainingStage::Structured => {
+                    let json = serde_json::to_string_pretty(&serde_json::json!({
+                        "obstacle_dir": format!("{:?}", obstacle_dir).to_lowercase(),
+                        "building_dir": format!("{:?}", building_dir).to_lowercase(),
+                        "resource_dir": format!("{:?}", resource_dir).to_lowercase(),
+                        "memories":     prior_memories,
+                        "message":      memory.human,
+                    })).unwrap();
+                    let encoded = match tokenizer {
+                        TokenizerKind::Bpe(b) => b.encode_raw(&json)
+                            .unwrap_or_default()
+                            .into_iter().map(|x| x as usize).collect(),
+                        TokenizerKind::Char(c) => c.encode(&json),
+                    };
+                    (encoded, json)
+                }
+            };
+
+            let (target_encoded, target_json) = match stage {
+                TrainingStage::Language => {
+                    let encoded = tokenizer.encode(&memory.bot);
+                    let json    = memory.bot.clone();
+                    (encoded, json)
+                }
+                TrainingStage::Structured => {
+                    let json = serde_json::to_string_pretty(&serde_json::json!({
+                        "action":     action.as_str(),
+                        "motion_dir": format!("{:?}", motion_dir).to_lowercase(),
+                        "reply":      memory.bot,
+                    })).unwrap();
+                    let encoded = match tokenizer {
+                        TokenizerKind::Bpe(b) => b.encode_raw(&json)
+                            .unwrap_or_default()
+                            .into_iter().map(|x| x as usize).collect(),
+                        TokenizerKind::Char(c) => c.encode(&json),
+                    };
+                    (encoded, json)
+                }
+            };
+
+            if target_encoded.is_empty() || target_encoded.len() > MAX_SEQ_LEN - 2 { continue; }
+
+            let target_labels: Vec<usize> = target_encoded.iter().cloned()
+                .chain(std::iter::once(EOS_TOKEN))
+                .collect();
+
+            let enc_input: Vec<usize> = std::iter::once(BOS_TOKEN)
+                .chain(input_encoded.iter().cloned())
+                .collect();
+
+            if enc_input.len() > MAX_SEQ_LEN { continue; }
+            if enc_input.len() + target_encoded.len() > MAX_SEQ_LEN { continue; }
+            // if enc_input.len() + target_encoded.len() < MAX_SEQ_LEN / 6 { continue; }
+
+            let pad = |mut v: Vec<usize>| -> Vec<usize> {
+                v.resize(MAX_SEQ_LEN, PAD_TOKEN);
+                v
+            };
+
+            let input_ids     = pad(enc_input);
+            let target_labels = pad(target_labels);
+
+            samples.push(Sample {
+                input_ids,
+                target_labels,
+                action,
+                motion_dir,
+                world,
+                target_json,
+                pair: (memory.human.clone(), memory.bot.clone()),
+            });
+        }
     }
 
     samples

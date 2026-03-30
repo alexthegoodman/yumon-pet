@@ -35,9 +35,9 @@ struct AgentState {
     motion_dir: String,
     emote:      String,
     raw_output: String,
-pub fsm_state:       u32,      // ← final FSM state
+    
+    pub fsm_state:       u32,      // ← final FSM state
     pub allowed_count:   Option<usize>, // ← None if masking never fired
-
 }
 
 impl Default for AgentState {
@@ -47,6 +47,7 @@ impl Default for AgentState {
             motion_dir: "none".into(),
             emote:      "neutral".into(),
             raw_output: String::new(),
+
             fsm_state:           0,
             allowed_count:       None
         }
@@ -63,6 +64,7 @@ struct AppState {
     last_yumon_speak:    Instant,
     next_speak_interval: Duration,
     agent:               AgentState,
+    recent_memories:     Vec<(String, String)>,  // (human, bot) pairs
 }
 
 impl AppState {
@@ -77,7 +79,7 @@ impl AppState {
             last_yumon_speak:    Instant::now(),
             next_speak_interval: Duration::from_secs(rng.gen_range(30..120)),
             agent:               AgentState::default(),
-            
+            recent_memories: Vec::new(),
         }
     }
 }
@@ -113,7 +115,8 @@ fn main() -> Result<()> {
     let brain_cp = "checkpoints/brain".to_string();
     let mut app = AppState::new(brain_cp.clone());
 
-    let (tx_user, rx_user) = mpsc::channel::<(String, usize, WorldContext)>();
+    // let (tx_user, rx_user) = mpsc::channel::<(String, usize, WorldContext)>();
+    let (tx_user, rx_user) = mpsc::channel::<(String, usize, WorldContext, Vec<(String, String)>)>();
     let (tx_model, rx_model) = mpsc::channel::<Message>();
 
     let device = app.device.clone();
@@ -149,36 +152,37 @@ fn main() -> Result<()> {
         // let class_probs = vec![1.0 / CIFAR_CLASSES as f32; CIFAR_CLASSES];
         // let emote_probs = vec![1.0 / EMOTE_CLASSES as f32; EMOTE_CLASSES];
 
-        while let Ok((prompt_text, user_emote_idx, world)) = rx_user.recv() {
+        while let Ok((prompt_text, user_emote_idx, world, memories)) = rx_user.recv() {
+
+            // let prompt = serde_json::to_string_pretty(&serde_json::json!({
+            //     "obstacle_dir": "none",
+            //     "building_dir": "none",
+            //     "resource_dir": "none",
+            //     "message":      prompt_text,
+            // }))
+            // .unwrap();
+
+            let memories_json: Vec<serde_json::Value> = memories
+                .iter()
+                .map(|(h, b)| serde_json::json!({ "human": h, "bot": b }))
+                .collect();
 
             let prompt = serde_json::to_string_pretty(&serde_json::json!({
                 "obstacle_dir": "none",
                 "building_dir": "none",
                 "resource_dir": "none",
+                "memories":     memories_json,
                 "message":      prompt_text,
             }))
             .unwrap();
 
-            // let result = brain_model.generate_unmasked( // good for debug or for TrainingStage::Language?
             let result = brain_model.generate_unmasked_parsed(
-            // let result = brain_model.generate_structured( // good for TrainingStage::Structured JSON?
                 &tokenizer,
-                // &index,
-                // &world,
-                // &class_probs,
-                // &emote_probs,
-                // user_emote_idx,
                 &prompt,
                 MAX_SEQ_LEN,
                 &device,
             );
-            // let initial = index.initial_state();
-            // let allowed = index.allowed_tokens(&initial);
-            // tx_model.send(Message::System(format!(
-            //     "index initial={:?} allowed={:?}",
-            //     initial,
-            //     allowed.as_ref().map(|a| a.len())
-            // ))).unwrap();
+
             tx_model.send(Message::Yumon(result)).unwrap();
         }
     });
@@ -203,7 +207,8 @@ fn main() -> Result<()> {
                                 app.messages.push(Message::User(input.clone()));
                                 app.loading = true;
                                 // No spatial context from text input — world is empty
-                                tx_user.send((input, 4, WorldContext::default())).unwrap();
+                                // tx_user.send((input, 4, WorldContext::default())).unwrap();
+                                tx_user.send((input, 4, WorldContext::default(), app.recent_memories.clone())).unwrap();
                             }
                         }
                         KeyCode::Char(c) => app.input.push(c),
@@ -221,18 +226,41 @@ fn main() -> Result<()> {
 
             match &mut msg {
                 Message::System(s) if s == "Models loaded!" => app.loading = false,
+                // Message::Yumon(r) => {
+                //     app.loading = false;
+                //     // Update sidebar agent state
+                //     app.agent.action     = format!("{:?}", r.action).to_lowercase();
+                //     app.agent.motion_dir = format!("{:?}", r.motion_dir).to_lowercase();
+                //     app.agent.emote      = EMOTE_NAMES[r.yumon_emote_idx].to_string();
+                //     app.agent.raw_output = format!("{:?}", r.raw_output).to_lowercase();
+                //     app.agent.fsm_state =  r.fsm_state;
+                //     app.agent.allowed_count =  r.allowed_count;
+
+                //     if r.reply.len() < 4 {
+                //         r.reply = format!("{:?}", r.raw_output).to_lowercase();
+                //     }
+                // }
                 Message::Yumon(r) => {
                     app.loading = false;
-                    // Update sidebar agent state
                     app.agent.action     = format!("{:?}", r.action).to_lowercase();
                     app.agent.motion_dir = format!("{:?}", r.motion_dir).to_lowercase();
                     app.agent.emote      = EMOTE_NAMES[r.yumon_emote_idx].to_string();
                     app.agent.raw_output = format!("{:?}", r.raw_output).to_lowercase();
-                    app.agent.fsm_state =  r.fsm_state;
-                    app.agent.allowed_count =  r.allowed_count;
+                    app.agent.fsm_state  = r.fsm_state;
+                    app.agent.allowed_count = r.allowed_count;
 
                     if r.reply.len() < 4 {
                         r.reply = format!("{:?}", r.raw_output).to_lowercase();
+                    }
+
+                    // Store the last human message + this reply as a memory
+                    if let Some(Message::User(human)) = app.messages.last() {
+                        let human = human.clone();
+                        let bot   = r.reply.clone();
+                        app.recent_memories.push((human, bot));
+                        if app.recent_memories.len() > 3 {
+                            app.recent_memories.remove(0);
+                        }
                     }
                 }
                 _ => {}
@@ -242,14 +270,14 @@ fn main() -> Result<()> {
         }
 
         // Yumon autonomous thought timer — inject a random world context
-        if !app.loading && app.last_yumon_speak.elapsed() >= app.next_speak_interval {
-            app.loading = true;
-            app.last_yumon_speak = Instant::now();
-            let mut rng = rand::thread_rng();
-            app.next_speak_interval = Duration::from_secs(rng.gen_range(30..120));
-            let world = WorldContext::random(&mut rng);
-            tx_user.send(("".to_string(), 4, world)).unwrap();
-        }
+        // if !app.loading && app.last_yumon_speak.elapsed() >= app.next_speak_interval {
+        //     app.loading = true;
+        //     app.last_yumon_speak = Instant::now();
+        //     let mut rng = rand::thread_rng();
+        //     app.next_speak_interval = Duration::from_secs(rng.gen_range(30..120));
+        //     let world = WorldContext::random(&mut rng);
+        //     tx_user.send(("".to_string(), 4, world)).unwrap();
+        // }
 
         if last_tick.elapsed() >= tick_rate {
             last_tick = Instant::now();
@@ -327,27 +355,20 @@ fn ui(f: &mut ratatui::Frame, app: &AppState) {
     let status_color = if app.loading { Color::Yellow } else { Color::Green };
     let status_str   = if app.loading { "thinking" } else { "idle" };
 
-    // let sidebar_text = format!(
-    //     " status\n {}\n\n action\n {}\n\n heading\n {}\n\n emote\n {}\n\n raw\n {}\n\n\n esc to quit",
-    //     status_str,
-    //     action_display(&app.agent.action),
-    //     dir_arrow(&app.agent.motion_dir),
-    //     app.agent.emote,
-    //     app.agent.raw_output
-    // );
+    let memory_str: String = app.recent_memories
+        .iter()
+        .map(|(h, b)| format!("human: {h} | yumon: {b}"))
+        .collect::<Vec<_>>()
+        .join("\n ");
 
     let sidebar_text = format!(
-        " status\n {}\n\n action\n {}\n\n heading\n {}\n\n emote\n {}\n\n raw\n {}\n\n fsm\n state={} allowed={}\n\n esc to quit",
+        " status\n {}\n\n action\n {}\n\n heading\n {}\n\n emote\n {}\n\n raw\n {}\n\n memory\n {}\n\n esc to quit",
         status_str,
         action_display(&app.agent.action),
         dir_arrow(&app.agent.motion_dir),
         app.agent.emote,
-        wrap_str(&app.agent.raw_output, 20),  // keep sidebar from overflowing
-        app.agent.fsm_state,
-        app.agent.allowed_count
-            .map(|n| if n == 0 { "NONE - mask not firing!".to_string() } 
-                    else { format!("{n} tokens") })
-            .unwrap_or("pending".into()),
+        wrap_str(&app.agent.raw_output, 40),  // keep sidebar from overflowing
+        wrap_str(&memory_str, 40)
     );
 
     let sidebar = Paragraph::new(sidebar_text)

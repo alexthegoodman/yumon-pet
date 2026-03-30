@@ -27,8 +27,9 @@ pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 // pub const MAX_SEQ_LEN:  usize = 512;
 // pub const MAX_SEQ_LEN:  usize = 1024;
 // pub const MAX_SEQ_LEN:  usize = 256;
+pub const MAX_SEQ_LEN:  usize = 320;
 pub const MAX_SEQ_LEN_CHARS:  usize = 180;
-pub const MAX_SEQ_LEN:  usize = 180;
+// pub const MAX_SEQ_LEN:  usize = 180;
 // pub const MAX_SEQ_LEN:  usize = 90;
 // pub const MAX_SEQ_LEN:  usize = 100;
 // pub const MAX_SEQ_LEN:  usize = 80; // better for outlines structured output?
@@ -155,16 +156,17 @@ pub fn run(
 
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
 
-    let training_stage = TrainingStage::Language;
-    // let training_stage = TrainingStage::Structured;
+    // let training_stage = TrainingStage::Language;
+    let training_stage = TrainingStage::Structured;
  
     let training_samples = DataLoader::new(training_stage)
         // per-file limits — None means "take everything"
-        .add("data/(poems)/",                   FileKind::Mdx,         None)
-        .add("data/bible_bbe.csv",              FileKind::BibleCsv,    Some(1024))
-        .add("archive/handcrafted.txt",         FileKind::Handcrafted, None)
-        .add("archive/handcrafted_pairs.txt",   FileKind::QaPairs, None)
-        .add("data/qa_journal.txt",             FileKind::QaPairs, None)
+        // .add("data/(poems)/",                   FileKind::Mdx,         None)
+        // .add("data/bible_bbe.csv",              FileKind::BibleCsv,    Some(1024))
+        // .add("archive/handcrafted.txt",         FileKind::Handcrafted, None)
+        // .add("archive/handcrafted_pairs.txt",   FileKind::QaPairs, None)
+        // .add("data/qa_journal.txt",             FileKind::QaPairs, None)
+        .add("archive/handcrafted_pairs.txt",   FileKind::Chats, None)
         // global cap after merging all sources
         .total_limit(4096)
         // reproducible seed (same default as before: 4815162342)
