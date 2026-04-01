@@ -10,7 +10,7 @@ use ratatui::{Terminal, TerminalOptions, Viewport, prelude::CrosstermBackend};
 use std::collections::HashMap;
 use rand::SeedableRng;
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, CL_ID, CR_ID, TokenizerKind}, chart::{TrainingState, render}, loader::{DataLoader, FileKind}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences, load_qa_pairs, load_qa_singles, load_txt_sentences}, pdf::{load_pdf_ebook_sentences, load_pdfs}, samples::{TrainingStage, WorldContext, prepare_paired_samples_split, prepare_paired_samples_split_sep}, wiki::save_sentences_to_file}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, CL_ID, CR_ID, TokenizerKind}, chart::{TrainingState, render}, loader::{DataLoader, FileKind}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences, load_qa_pairs, load_qa_singles, load_txt_sentences}, pdf::{load_pdf_ebook_sentences, load_pdfs}, samples::{TrainingStage, WorldContext, prepare_paired_samples_split, prepare_paired_samples_split_sep}, wiki::{save_sentence_pairs_to_file}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 use crate::brain::{
     // CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
@@ -156,8 +156,8 @@ pub fn run(
 
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
 
-    // let training_stage = TrainingStage::Language;
-    let training_stage = TrainingStage::Structured;
+    let training_stage = TrainingStage::Language;
+    // let training_stage = TrainingStage::Structured;
  
     let training_samples = DataLoader::new(training_stage)
         // per-file limits — None means "take everything"
@@ -167,6 +167,12 @@ pub fn run(
         // .add("archive/handcrafted_pairs.txt",   FileKind::QaPairs, None)
         // .add("data/qa_journal.txt",             FileKind::QaPairs, None)
         .add("archive/handcrafted_pairs.txt",   FileKind::Chats, None)
+        // // .add("archive/ov_chats.txt",   FileKind::Chats, None)
+        // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
+        // .add("archive/arena_extract.txt",   FileKind::Chats, None)
+        // .add("data/wiki_extract.txt",   FileKind::Txt, Some(1_000_000))
+        // .total_limit(32768)
+        // .total_limit(1_000_000)
         // global cap after merging all sources
         .total_limit(4096)
         // reproducible seed (same default as before: 4815162342)
@@ -174,7 +180,7 @@ pub fn run(
         .load(&tokenizer, &keyword_index)?;
     
     println!("Training samples: {}", training_samples.len());
-    
+
     // debug print — first 12 samples
     for (i, sample) in training_samples.iter().enumerate() {
         if i >= 12 { break; }
@@ -187,6 +193,8 @@ pub fn run(
         println!("input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
         println!("target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
     }
+
+    // save_sentence_pairs_to_file(training_samples.clone(), "data/arena_extract.txt");
 
     // ── Init model + optimizer ────────────────────────────────────────────────
     // ── Resume from checkpoint if one exists ─────────────────────────────────
@@ -242,8 +250,8 @@ pub fn run(
     
     // lr over time
     // let first_lr = 1e-4;
-    // let first_lr = 0.003; // even better for 8?
-    let first_lr = 0.001; // batch sizes like 8
+    let first_lr = 0.003; // even better for 8?
+    // let first_lr = 0.001; // batch sizes like 8
     // let first_lr = 0.0001; // for batch size 4?
     // let first_lr = 0.000003;
     // let first_lr = 3e-6; // flat immediately

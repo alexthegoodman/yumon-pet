@@ -15,26 +15,53 @@ use anyhow::Result;
 use burn::prelude::ToElement;
 use quick_xml::Reader;
 use quick_xml::events::Event;
+use std::collections::HashSet;
 use std::io::BufRead;
 
+use crate::brain::samples::Sample;
 use crate::brain::train::{MAX_SEQ_LEN, MAX_SEQ_LEN_CHARS};
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
-pub fn save_sentences_to_file(sentences: &[String], output_path: &str) -> Result<()> {
-    println!("💾 Saving {} sentences to: {}", sentences.len(), output_path);
-    
+pub fn save_sentence_pairs_to_file(training_samples: Vec<Sample>, output_path: &str) -> Result<()> {
+    // println!("💾 Saving {} pairs to: {}", pairs.len(), output_path);
+
     let file = File::create(output_path)?;
     let mut writer = BufWriter::new(file);
 
-    for sentence in sentences {
-        // We write each sentence followed by a newline
-        writeln!(writer, "{}", sentence)?;
+    let is_dirty = |s: &str| {
+        s.contains("As an AI language model") ||
+        s.contains("I'm sorry") ||
+        s.contains("Messages sent") ||
+        s.contains("<div>") ||
+        s.contains('\n') ||
+        s.contains("I am sorry") ||
+        s.contains("I apologize") ||
+        s.contains("language model") ||
+        s.contains("1.") ||
+        s.contains("I can help you with")
+    };
+
+    let mut saved = 0;
+    let mut removed = 0;
+
+    for sample in training_samples {
+        let (sent1, sent2) = &sample.pair;
+
+        if is_dirty(sent1) || is_dirty(sent2) {
+            removed += 1;
+            continue; // skip the whole pair
+        }
+
+        writeln!(writer, "{}", sent1)?;
+        writeln!(writer, "{}", sent2)?;
+        writeln!(writer)?; // newline-sent separator
+        saved += 1;
     }
 
-    writer.flush()?; // Ensure everything is written to disk
-    println!("✅ Save complete.");
+    writer.flush()?;
+    println!("✅ Saved {} pairs ({} removed).", saved, removed);
     Ok(())
 }
 

@@ -1,4 +1,4 @@
-use yumon_pet::{brain::{PAD_TOKEN, bpe::{self, BpeTokenizer, TokenizerKind}, loader::{DataLoader, FileKind}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences, load_qa_pairs, load_txt_sentences}, pdf::load_pdf_ebook_sentences, samples::TrainingStage, train::{build_keyword_index, build_label_keywords}, wiki::load_wiki_sentences}, vision::CIFAR_CLASSES};
+use yumon_pet::{brain::{PAD_TOKEN, bpe::{self, BpeTokenizer, TokenizerKind}, loader::{DataLoader, FileKind}, mdx::{load_arena_chats, load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences, load_qa_pairs, load_txt_sentences}, pdf::load_pdf_ebook_sentences, samples::TrainingStage, train::{build_keyword_index, build_label_keywords}, wiki::load_wiki_sentences}, vision::CIFAR_CLASSES};
 
 pub fn main() {
     // let wiki_xml = "data/simplewiki-latest-pages-articles.xml";
@@ -9,6 +9,15 @@ pub fn main() {
     let mut sentences = Vec::new();
 
     // let wiki_sentences: Result<Vec<String>, anyhow::Error> = load_wiki_sentences(wiki_xml, 50_000, 1);
+    // let wiki_sentences = wiki_sentences.as_ref().expect("Couldn't get wiki_sentences");
+
+    // for (i, sent) in sentences.iter().enumerate() {
+    //     if (i < 12) {
+    //         println!("WIKI: {:?}", sent);
+    //     }
+    // }
+
+    // let wiki_sentences: Result<Vec<String>, anyhow::Error> = load_txt_sentences("data/wiki_extract.txt");
     // let wiki_sentences = wiki_sentences.as_ref().expect("Couldn't get wiki_sentences");
 
     // for (i, sent) in sentences.iter().enumerate() {
@@ -149,6 +158,40 @@ pub fn main() {
             }
         }
     }
+
+    // let mut chats2 = load_handcrafted_chats("archive/ov_chats.txt");
+    // let chats2 = chats2.as_ref().expect("Couldn't get ov chats");
+
+    // let mut chats_combined2 = Vec::new();
+
+    // for (i, block) in chats2.blocks.iter().enumerate() {
+    //     for (x, memory) in block.memories.iter().enumerate() {
+    //         chats_combined2.push(&memory.human);
+    //         chats_combined2.push(&memory.bot);
+
+    //         if (i < 12) {
+    //             println!("qa human: {:?}", memory.human);
+    //             println!("qa bot: {:?}", memory.bot);
+    //         }
+    //     }
+    // }
+
+    // let mut chats3 = load_arena_chats("data/chatbot_arena_conversations.json");
+    // let chats3 = chats3.as_ref().expect("Couldn't get arena chats");
+
+    // let mut chats_combined3 = Vec::new();
+
+    // for (i, block) in chats3.blocks.iter().enumerate() {
+    //     for (x, memory) in block.memories.iter().enumerate() {
+    //         chats_combined3.push(&memory.human);
+    //         chats_combined3.push(&memory.bot);
+
+    //         if (i < 12) {
+    //             println!("arena human: {:?}", memory.human);
+    //             println!("arena bot: {:?}", memory.bot);
+    //         }
+    //     }
+    // }
     
     // sentences.extend(wiki_sentences);
     // sentences.extend(mdx_sentences);
@@ -164,6 +207,9 @@ pub fn main() {
     // sentences.extend(txt);
     // sentences.extend(ebooks);
     sentences.extend(chats_combined);
+    // sentences.extend(chats_combined2);
+    // sentences.extend(chats_combined3);
+    // sentences.extend(wiki_sentences);
         
     let bpe = BpeTokenizer::train(
         sentences, 
@@ -189,15 +235,18 @@ pub fn main() {
  
     let training_samples = DataLoader::new(training_stage)
         .add("archive/handcrafted_pairs.txt",   FileKind::Chats, None)
+        // .add("archive/ov_chats.txt",   FileKind::Chats, None)
+        // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
+        // .add("data/wiki_extract.txt",   FileKind::Txt, Some(200_000))
         .total_limit(4096)
         .seed(4815162342)
         .load(&tokenizer, &keyword_index).expect("Couldn't get samples");
     
     println!("language training samples: {}", training_samples.len());
     
-    // debug print — first 200 samples
+    // debug print — first samples
     for (i, sample) in training_samples.iter().enumerate() {
-        if i >= 200 { break; }
+        if i >= 50 { break; }
         println!("language input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
         println!("language target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
     }
@@ -206,15 +255,18 @@ pub fn main() {
  
     let training_samples = DataLoader::new(training_stage)
         .add("archive/handcrafted_pairs.txt",   FileKind::Chats, None)
+        // .add("archive/ov_chats.txt",   FileKind::Chats, None)
+        // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
+        // .add("data/wiki_extract.txt",   FileKind::Txt, Some(200_000))
         .total_limit(4096)
         .seed(4815162342)
         .load(&tokenizer, &keyword_index).expect("Couldn't get samples");
     
     println!("structured training samples: {}", training_samples.len());
     
-    // debug print — first 200 samples
+    // debug print — first samples
     for (i, sample) in training_samples.iter().enumerate() {
-        if i >= 200 { break; }
+        if i >= 50 { break; }
         println!("structured input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
         println!("structured target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
     }

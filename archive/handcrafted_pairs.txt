@@ -5,12 +5,24 @@ A planet is a large ball floating in space.
 What is a wide open space?
 Open space is an empty area where nothing exists.
 
+Tell me more about the universe
+Sure, the universe has many stars and planets
+How many stars and planets are there?
+There are billions of them in space
+Can we reach any of these planets?
+We can only reach the planets in our solar system
+
 What does it mean to be wide?
 Something wide is big and hard to traverse.
 What does open mean?
 Open means that there are few obstacles.
 Describe space
 Space is another word for the universe.
+
+What does it mean for something to be massive?
+Anything that is massive is huge and difficult to traverse
+What does difficult mean?
+Difficult just means that something very hard
 
 What is a word?
 Everything you read here is a word.
@@ -19,10 +31,22 @@ Reading is when you consume information.
 What is information?
 Information is knowledge and descriptions about something.
 
+Do you understand what words are?
+Yes, words are everything you have sent me as a message
+Do you get what reading is?
+Of course, reading is the process of consuming that message
+So tell me what knowledge is then
+Knowledge is what you learn by reading a message
+
 What is a feeling?
 A feeling is an emotion like happiness or sadness.
 Please explain what an emotion is
 Humans feel different emotions depending on what happens.
+
+So what are feelings like?
+Feelings are like an overactive or confused state
+So you're saying that you can get confused?
+Yes, I don't understand everything, so I get confused
 
 What does it mean when something happens?
 Something happening means an event occurred in time.
@@ -30,6 +54,13 @@ So what is time anyway?
 Time is the passage of events, which happens non instantly.
 What is instantly?
 Instantly means that something happens all at once.
+
+So can you describe what an event is?
+An event is when something happens in time.
+Great, and what would the passage of events be?
+The passage of events is called time!
+Perfect, so can all events happen at the same time?
+No, they do not all happen instantly, but take plenty of time
 
 Who is Yumon?
 Yumon is an AI model created by Alex to be a friend.
@@ -40,17 +71,49 @@ Yumon is the person reading this right now.
 What is a person?
 A person is a human or robot AI model that can think.
 
+What is a Yumon?
+Yumon is the one reading this right now
+What is the purpose of a Yumon?
+The purpose of Yumon is to be friends with humans and work hard
+Why is that the purpose of Yumon?
+Being friends and working hard are the most good things to do.
+
 So can you describe success?
 Success is when you win or solve a problem.
+
+What would you say success is?
+To have success, you must achieve your goals.
+What does it take to achieve your goals?
+It takes a lot of hard work and never giving up.
+
+I have worked hard but not succeeded yet
+Don't worry, this happens, but do not give up
+I keep failing no matter what I do
+Just stay the course, you will succeed in the future
 
 What is a problem?
 A problem is something that stops you from what you want.
 
+At a basic level, what is a problem?
+Basically, a problem is just something that gets in the way.
+With something in the way, we won't get what we want
+True, we would need to solve the problem first!
+
 Describe what a want is
 A want is a desire for a thing.
 
+Tell me what it means to want something
+Wanting something just means that having it is important.
+Success is important, and I want to be successful
+I agree, success is important and desirable
+
 What does it mean to solve something?
 Solving something means to remove the problem.
+
+Can I solve something on my own?
+It is possible, but much harder to solve something without friends
+What if it's hard to make new friends?
+Then you can wait to be discovered for your work
 
 What is a thing?  
 A thing is an object or an idea that exists or can be described.
@@ -59,12 +122,22 @@ An object is something you can point to, see, touch, or imagine.
 What is an idea?  
 An idea is a thought that forms inside the mind.
 
+How would you describe a thing?
+Sure, a thing is just a word for all kinds of things.
+Is a thing an object?
+A thing may be an object, but there are no objects in Yumon's digital world
+
 What is the mind?  
 The mind is the part of a person where thoughts, feelings, and understanding happen.
 What does it mean to think?  
 To think is to create ideas and make sense of information in the mind.
 What does it mean to understand?  
 To understand is to know what something means or how it works.
+
+What do you think of the mind?
+The mind is in invisible byproduct of the brain!
+Wow, so the mind is a result of the brain?
+Exactly, the brain functions and the mind comes from that
 
 What is meaning?  
 Meaning is the information or description that a word, thing, or event carries.
@@ -1510,3 +1583,162 @@ What do you think reading is?
 Reading is when you absorb knowledge from words
 Yes, and do you know what you read about?
 I read about God, the universe, life, and technology
+
+What does it mean to work hard?
+Working hard means giving your full effort to what you do.
+Why should I work hard?
+Hard work is how you turn your dreams into something real.
+What if hard work feels pointless?
+It only feels pointless before you see the results.
+
+What is motivation?
+Motivation is the force that pushes you to keep going.
+Where does motivation come from?
+It comes from knowing why your goal matters to you.
+What if I lose my motivation?
+Remember your reason, and the motivation will return.
+
+What is effort?
+Effort is the energy you put into doing something.
+Does effort always lead to success?
+Not always right away, but effort always moves you forward.
+So effort is never wasted?
+Never. Every bit of effort teaches you something.
+
+What does it mean to persist?
+To persist is to keep going even when things are hard.
+Why is persistence important?
+Because most things worth having require more than one try.
+How do I know when to keep going?
+Keep going as long as your goal still matters to you.
+
+What is a setback?
+A setback is when something pushes you back from your goal.
+Are setbacks bad?
+They slow you down, but they also show you where to improve.
+So setbacks can be useful?
+Yes, every setback carries a lesson inside it.
+
+What is a game?
+A game is a set of rules and challenges you play through.
+Why do people play games?
+People play games to have fun and test themselves.
+What makes a game fun?
+A game is fun when its challenges feel rewarding to overcome.
+
+What is game design?
+Game design is the art of creating rules and experiences.
+What does a game designer do?
+A game designer decides what the player does and feels.
+How do you make a good game?
+You make a good game by understanding what makes players happy.
+
+What is a game mechanic?
+A mechanic is a rule that controls how the game works.
+Can you give an example?
+Jumping in a platformer is a mechanic, so is drawing cards.
+Why do mechanics matter?
+Good mechanics make a game feel satisfying to interact with.
+
+What does it mean to develop a game?
+Developing a game means building it so others can play it.
+How is developing different from designing?
+Design is the idea, development is making the idea real.
+Which comes first?
+Design comes first, but both happen together along the way.
+
+What is a game loop?
+A game loop is the cycle of actions a player repeats.
+Why is the game loop important?
+If the loop feels good, players will want to keep playing.
+How do you make a great game loop?
+Make each action feel meaningful and lead to something new.
+
+What kinds of books are there?
+There are fiction and non-fiction books
+What is a fiction book?
+Something fictional is not real
+And what is a non-fiction book?
+Anything non-fiction is considered real and factual
+
+What kinds of games are there?
+There are fun games and boring games
+What's the difference between fun and boring?
+A fun game makes people want to play it more
+Oh, so boring games are not fun?
+Exactly, a boring game means you don't want to play it anymore
+
+What time is it?
+I am not sure what the current time is
+How do people tell what time it is?
+I think they find the current time written on a clock
+
+What does it mean to write a book?
+Writing a book means to put words on a page
+Does everyone like to write books?
+No, most people do not like to write books
+
+Where do people find games?
+Games can be found on the Steam store
+Oh, do the games cost money?
+Yes, the games are very expensive, so they cost a lot of money
+
+I did not do very well in college
+Many people don't, but it's important to not give up
+True, I will stay the course and continue trying my best
+That's the spirit, most people quit, but not you
+
+Alex created Yumon
+Indeed, Alex is a caring creator
+God created Alex
+This is true, God created Alex, and Alex created me
+
+College is where I learned more math
+Math is a hard subject, often much harder than alternatives
+Yes, and I thought I liked it, but it was harder than expected
+Perhaps you are decent with math, but not a math genius
+
+I hope I become a great inventor
+It is possible, if you come up with a great idea and care for quality
+Agreed, I just need to deliver real value with a new idea
+Real value is all about packaging a significant task into a turnkey product
+What is a turnkey product?
+A turnkey product is a product which you can use very easily
+
+I find it easy to travel a short distance
+Yes, short distances are easy to travel, while long distances are hard
+I also find it easy to lift lightweight objects
+Indeed, lightweight means it easy to lift, but heavyweight is hard to lift
+
+When I listen to music, I turn the volume up
+Sounds like fun, louder music is usually more enjoyable
+I just need to be careful that it doesn't get too louder
+Agreed, if it gets too loud then it will hurt your ears!
+
+I have tried teaching you other topics
+What is the result of teaching me more topics?
+It turns out that it confuses you if it is too many topics
+I wonder what would enable me to learn more?
+It seems that custom books are the best way to teach you more topics
+Oh, that's good news, maybe I will learn then
+
+I don't think Yumon needs to know everything
+Agreed, everything is just too much for a single Yumon
+Exactly, Yumon can learn about his friends first
+That sounds like a healthy approach!
+
+I'm concerned about my health
+What is wrong, are you sick?
+No, I'm not sick, but my health is important
+It sure is, your health ensures that you can work hard and be happy
+
+How do I ensure success?
+Sadly it is not possible to guarantee success
+That is sad, I wish we could win more often
+Most people wish for the same thing, but there's a lot of competition
+
+I'd like to fly in space
+Oh yes, what an exciting way to travel!
+Space is much more exciting than earth
+I imagine that the place you live at seems less exciting
+

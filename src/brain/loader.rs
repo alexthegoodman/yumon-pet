@@ -4,7 +4,7 @@ use rand::{seq::SliceRandom, SeedableRng};
 use rand::rngs::StdRng;
 
 use crate::brain::bpe::TokenizerKind;
-use crate::brain::mdx::{load_csv_bible, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs};
+use crate::brain::mdx::{load_arena_chats, load_csv_bible, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_txt_sentences};
 use crate::brain::samples::{Sample, TrainingStage, prepare_paired_samples_chats, prepare_paired_samples_split, prepare_paired_samples_split_sep};
 
 // ── File-source descriptor ────────────────────────────────────────────────────
@@ -24,6 +24,8 @@ pub enum FileKind {
     Handcrafted,
     QaPairs,
     Chats,
+    JsonChats,
+    Txt
     // extend with WikiXml, Txt, Pdf, … as needed
 }
 
@@ -88,6 +90,12 @@ impl DataLoader {
                 sentences.len()
             );
 
+            // Per-file limit before sample prep to reduce load
+            if let Some(n) = entry.limit {
+                sentences.shuffle(&mut rng);
+                sentences.truncate(n);
+            }
+
             // 2. Prepare training samples
             let mut samples = match entry.kind {
                 FileKind::QaPairs => {
@@ -102,6 +110,12 @@ impl DataLoader {
                         chats, tokenizer, keyword_index, &mut rng, self.stage,
                     )
                 }
+                FileKind::JsonChats => {
+                    let chats = load_arena_chats(&entry.path)?;
+                    prepare_paired_samples_chats(
+                        chats, tokenizer, keyword_index, &mut rng, self.stage,
+                    )
+                },
                 _ => {
                     prepare_paired_samples_split(
                         sentences, tokenizer, keyword_index, &mut rng, self.stage,
@@ -143,9 +157,11 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
         FileKind::Mdx         => load_mdx_sentences(path),
         FileKind::BibleCsv    => load_csv_bible(path),
         FileKind::Handcrafted => load_handcrafted_sentences(path),
+        FileKind::Txt         => load_txt_sentences(path),
         // QA pairs are handled separately — return empty here
         FileKind::QaPairs     => Ok(Vec::new()),
-        FileKind::Chats       => Ok(Vec::new())
+        FileKind::Chats       => Ok(Vec::new()),
+        FileKind::JsonChats       => Ok(Vec::new())
     }
 }
 

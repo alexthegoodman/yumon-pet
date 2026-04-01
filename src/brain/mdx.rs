@@ -326,6 +326,83 @@ pub fn load_handcrafted_chats(dict_path: &str) -> Result<HandcraftedChats> {
     Ok(HandcraftedChats { blocks })
 }
 
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct ConversationTurn {
+    content: String,
+    role: String,
+}
+
+#[derive(Deserialize)]
+struct ArenaEntry {
+    conversation_a: Vec<ConversationTurn>,
+    conversation_b: Vec<ConversationTurn>,
+    winner: String,
+}
+
+fn first_sentence(text: &str) -> String {
+    text.split(['.', '!', '?'])
+        .next()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|s| s + ".")
+        .unwrap_or_else(|| text.trim().to_string())
+}
+
+fn extract_memories(conversation: &[ConversationTurn]) -> Vec<Memory> {
+    let mut memories = Vec::new();
+    let mut i = 0;
+
+    while i + 1 < conversation.len() {
+        let turn = &conversation[i];
+        let reply = &conversation[i + 1];
+
+        if turn.role == "user" && reply.role == "assistant" {
+            memories.push(Memory {
+                human: turn.content.trim().to_string(),
+                bot: first_sentence(&reply.content),
+            });
+        }
+        i += 2;
+    }
+
+    memories
+}
+
+pub fn load_arena_chats(path: &str) -> Result<HandcraftedChats> {
+    println!("📖 Loading arena JSONL: {path}");
+
+    let content = std::fs::read_to_string(path)?;
+    let mut blocks = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+
+        let entry: ArenaEntry = serde_json::from_str(trimmed)?;
+
+        // Pick the winning conversation, or fall back to conversation_a
+        let convo = match entry.winner.as_str() {
+            "model_b" => &entry.conversation_b,
+            _         => &entry.conversation_a,
+        };
+
+        let memories = extract_memories(convo);
+        if !memories.is_empty() {
+            blocks.push(ChatBlock { memories });
+        }
+    }
+
+    println!(
+        "✅ Loaded {} blocks ({} memories total)",
+        blocks.len(),
+        blocks.iter().map(|b| b.memories.len()).sum::<usize>()
+    );
+
+    Ok(HandcraftedChats { blocks })
+}
+
 fn parse_block(lines: &[String]) -> ChatBlock {
     let mut memories = Vec::new();
     let mut i = 0;
@@ -364,7 +441,7 @@ pub fn load_txt_sentences(path: &str) -> Result<Vec<String>> {
         let trimmed = line.trim();
 
         for sent in trimmed.split(".") {
-            if is_good_sentence(&sent) && sent.len() > 50 { // have a nice sensible minimum length
+            if is_good_sentence(&sent) && sent.len() > 30 { // have a nice sensible minimum length
                 sentences.push(sent.to_string());
             }
         }

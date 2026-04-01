@@ -17,7 +17,7 @@ use rand::Rng;
 
 use yumon_pet::{
     brain::{
-        model::{GenerationResult, YUMON_SCHEMA, YumonBrain}, samples::WorldContext, train::MAX_SEQ_LEN,
+        model::{GenerationResult, YUMON_SCHEMA, YumonBrain}, samples::{TrainingStage, WorldContext}, train::MAX_SEQ_LEN,
     },
     vision::{self, CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES},
 };
@@ -167,14 +167,21 @@ fn main() -> Result<()> {
                 .map(|(h, b)| serde_json::json!({ "human": h, "bot": b }))
                 .collect();
 
-            let prompt = serde_json::to_string_pretty(&serde_json::json!({
-                "obstacle_dir": "none",
-                "building_dir": "none",
-                "resource_dir": "none",
-                "memories":     memories_json,
-                "message":      prompt_text,
-            }))
-            .unwrap();
+            let training_stage = TrainingStage::Language;
+            // let training_stage = TrainingStage::Structured;
+
+            let prompt = if training_stage == TrainingStage::Language {
+                prompt_text
+            } else { 
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "obstacle_dir": "none",
+                    "building_dir": "none",
+                    "resource_dir": "none",
+                    "memories":     memories_json,
+                    "message":      prompt_text,
+                }))
+                .unwrap() 
+            };
 
             let result = brain_model.generate_unmasked_parsed(
                 &tokenizer,
