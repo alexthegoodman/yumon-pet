@@ -78,6 +78,7 @@ impl DataLoader {
         self,
         tokenizer:     &TokenizerKind,
         keyword_index: &HashMap<std::string::String, Vec<usize>>,
+        max_seq_len:   usize,
     ) -> anyhow::Result<Vec<Sample>> {
         let mut rng = StdRng::seed_from_u64(self.seed);
         let mut all: Vec<Sample> = Vec::new();
@@ -102,24 +103,24 @@ impl DataLoader {
                 FileKind::QaPairs => {
                     let pairs = load_qa_pairs_raw(&entry.path)?;
                     prepare_paired_samples_split_sep(
-                        pairs, tokenizer, keyword_index, &mut rng, self.stage,
+                        pairs, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
                     )
                 }
                 FileKind::Chats => {
                     let chats = load_handcrafted_chats(&entry.path)?;
                     prepare_paired_samples_chats(
-                        chats, tokenizer, keyword_index, &mut rng, self.stage,
+                        chats, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
                     )
                 }
                 FileKind::JsonChats => {
                     let chats = load_arena_chats(&entry.path)?;
                     prepare_paired_samples_chats(
-                        chats, tokenizer, keyword_index, &mut rng, self.stage,
+                        chats, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
                     )
                 },
                 _ => {
                     prepare_paired_samples_split(
-                        sentences, tokenizer, keyword_index, &mut rng, self.stage,
+                        sentences, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
                     )
                 }
             };

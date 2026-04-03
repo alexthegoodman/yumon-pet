@@ -248,7 +248,7 @@ pub fn main() {
         // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
         .total_limit(4096)
         .seed(4815162342)
-        .load(&tokenizer, &keyword_index).expect("Couldn't get samples");
+        .load(&tokenizer, &keyword_index, 320).expect("Couldn't get samples");
     
     println!("language training samples: {}", training_samples.len());
     
@@ -269,7 +269,7 @@ pub fn main() {
         // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
         .total_limit(4096)
         .seed(4815162342)
-        .load(&tokenizer, &keyword_index).expect("Couldn't get samples");
+        .load(&tokenizer, &keyword_index, 320).expect("Couldn't get samples");
     
     println!("structured training samples: {}", training_samples.len());
     

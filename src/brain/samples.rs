@@ -267,6 +267,7 @@ pub fn prepare_paired_samples_split(
     keyword_index: &HashMap<String, Vec<usize>>,
     rng:          &mut impl Rng,
     stage:        TrainingStage,
+    max_seq_len:  usize,
 ) -> Vec<Sample> {
     println!("prepare paired samples split");
 
@@ -353,7 +354,7 @@ pub fn prepare_paired_samples_split(
             }
         };
 
-        if target_encoded.is_empty() || target_encoded.len() > MAX_SEQ_LEN - 2 { continue; }
+        if target_encoded.is_empty() || target_encoded.len() > max_seq_len - 2 { continue; }
 
         let target_labels: Vec<usize> = target_encoded.iter().cloned()
             .chain(std::iter::once(EOS_TOKEN))
@@ -363,34 +364,18 @@ pub fn prepare_paired_samples_split(
             .chain(input_encoded.iter().cloned())
             .collect();
 
-        if enc_input.len() > MAX_SEQ_LEN { continue; }
+        if enc_input.len() > max_seq_len { continue; }
 
-        if enc_input.len() + target_encoded.len() > MAX_SEQ_LEN { continue; }
-        if enc_input.len() + target_encoded.len() < MAX_SEQ_LEN / 6 { continue; }
+        if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
+        if enc_input.len() + target_encoded.len() < max_seq_len / 6 { continue; }
 
         let pad = |mut v: Vec<usize>| -> Vec<usize> {
-            v.resize(MAX_SEQ_LEN, PAD_TOKEN);
+            v.resize(max_seq_len, PAD_TOKEN);
             v
         };
 
         let input_ids     = pad(enc_input);
         let target_labels = pad(target_labels);
-
-        // // Combine into one sequence
-        // let full_input: Vec<usize> = std::iter::once(BOS_TOKEN)
-        //     .chain(input_encoded.iter().cloned())
-        //     .chain(target_encoded.iter().cloned())
-        //     .chain(std::iter::once(EOS_TOKEN))
-        //     .collect();
-
-        // if full_input.len() > MAX_SEQ_LEN { continue; }
-        // if full_input.len() < MAX_SEQ_LEN / 2 { continue; }
-
-        // // target_labels is full_input shifted left by 1 (drop BOS, add trailing PAD)
-        // let mut target_labels: Vec<usize> = full_input[1..].to_vec();
-        // target_labels.resize(MAX_SEQ_LEN, PAD_TOKEN);
-
-        // let input_ids = pad(full_input);
 
         samples.push(Sample {
             input_ids,
@@ -413,6 +398,7 @@ pub fn prepare_paired_samples_split_sep(
     keyword_index: &HashMap<String, Vec<usize>>,
     rng:          &mut impl Rng,
     stage:        TrainingStage,
+    max_seq_len:  usize,
 ) -> Vec<Sample> {
     println!("prepare paired samples split");
 
@@ -493,7 +479,7 @@ pub fn prepare_paired_samples_split_sep(
             }
         };
 
-        if target_encoded.is_empty() || target_encoded.len() > MAX_SEQ_LEN - 2 { continue; }
+        if target_encoded.is_empty() || target_encoded.len() > max_seq_len - 2 { continue; }
 
         let target_labels: Vec<usize> = target_encoded.iter().cloned()
             .chain(std::iter::once(EOS_TOKEN))
@@ -503,34 +489,18 @@ pub fn prepare_paired_samples_split_sep(
             .chain(input_encoded.iter().cloned())
             .collect();
 
-        if enc_input.len() > MAX_SEQ_LEN { continue; }
+        if enc_input.len() > max_seq_len { continue; }
 
-        if enc_input.len() + target_encoded.len() > MAX_SEQ_LEN { continue; }
-        if enc_input.len() + target_encoded.len() < MAX_SEQ_LEN / 6 { continue; }
+        if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
+        if enc_input.len() + target_encoded.len() < max_seq_len / 6 { continue; }
 
         let pad = |mut v: Vec<usize>| -> Vec<usize> {
-            v.resize(MAX_SEQ_LEN, PAD_TOKEN);
+            v.resize(max_seq_len, PAD_TOKEN);
             v
         };
 
         let input_ids     = pad(enc_input);
         let target_labels = pad(target_labels);
-
-        // // Combine into one sequence
-        // let full_input: Vec<usize> = std::iter::once(BOS_TOKEN)
-        //     .chain(input_encoded.iter().cloned())
-        //     .chain(target_encoded.iter().cloned())
-        //     .chain(std::iter::once(EOS_TOKEN))
-        //     .collect();
-
-        // if full_input.len() > MAX_SEQ_LEN { continue; }
-        // if full_input.len() < MAX_SEQ_LEN / 2 { continue; }
-
-        // // target_labels is full_input shifted left by 1 (drop BOS, add trailing PAD)
-        // let mut target_labels: Vec<usize> = full_input[1..].to_vec();
-        // target_labels.resize(MAX_SEQ_LEN, PAD_TOKEN);
-
-        // let input_ids = pad(full_input);
 
         samples.push(Sample {
             input_ids,
@@ -551,7 +521,8 @@ pub fn prepare_paired_samples_chats(
     tokenizer:     &TokenizerKind,
     keyword_index: &HashMap<String, Vec<usize>>,
     rng:           &mut impl Rng,
-    stage:         TrainingStage,
+    stage:        TrainingStage,
+    max_seq_len:  usize,
 ) -> Vec<Sample> {
     println!("prepare paired samples chat");
 
@@ -642,7 +613,7 @@ pub fn prepare_paired_samples_chats(
                 }
             };
 
-            if target_encoded.is_empty() || target_encoded.len() > MAX_SEQ_LEN - 2 { continue; }
+            if target_encoded.is_empty() || target_encoded.len() > max_seq_len - 2 { continue; }
 
             let target_labels: Vec<usize> = target_encoded.iter().cloned()
                 .chain(std::iter::once(EOS_TOKEN))
@@ -652,12 +623,11 @@ pub fn prepare_paired_samples_chats(
                 .chain(input_encoded.iter().cloned())
                 .collect();
 
-            if enc_input.len() > MAX_SEQ_LEN { continue; }
-            if enc_input.len() + target_encoded.len() > MAX_SEQ_LEN { continue; }
-            // if enc_input.len() + target_encoded.len() < MAX_SEQ_LEN / 6 { continue; }
+            if enc_input.len() > max_seq_len { continue; }
+            if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
 
             let pad = |mut v: Vec<usize>| -> Vec<usize> {
-                v.resize(MAX_SEQ_LEN, PAD_TOKEN);
+                v.resize(max_seq_len, PAD_TOKEN);
                 v
             };
 

@@ -144,31 +144,40 @@ pub struct StageConfig {
     pub batch_size: usize,
     pub first_lr: f64,
     pub last_lr: f64,
+    pub weight_decay: f32,
+    pub epsilon: f32,
+    pub smoothing: f32,
 }
 
 pub struct RunConfig {
     pub name: String,
+    pub embed_dim: usize,
+    pub hidden_units: usize,
+    pub n_layers: usize,
+    pub attn_heads: usize,
+    pub ff_dim: usize,
+    pub max_seq_len: usize,
     pub stages: Vec<StageConfig>,
 }
 
 fn load_stage_data(
     stage: TrainingStage, 
     tokenizer: &TokenizerKind, 
-    keyword_index: &HashMap<String, Vec<usize>>
+    keyword_index: &HashMap<String, Vec<usize>>,
+    max_seq_len: usize,
 ) -> Result<Vec<crate::brain::samples::Sample>> {
     let mut loader = DataLoader::new(stage);
     match stage {
         TrainingStage::Language => {
             loader = loader
-                // .add("data/wiki_extract.txt", FileKind::Txt, Some(10000))
-                .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
+                .add("archive/handcrafted.txt", FileKind::Handcrafted, None);
         }
         TrainingStage::Structured => {
             loader = loader
                 .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
         }
     }
-    loader.total_limit(4096).seed(4815162342).load(tokenizer, keyword_index)
+    loader.total_limit(4096).seed(4815162342).load(tokenizer, keyword_index, max_seq_len)
 }
 
 pub fn run(
@@ -185,28 +194,109 @@ pub fn run(
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
 
     // ── Configure Runs ──────────────────────────────────────────────────────────
+    // Configurations explore three axes: model size (tiny→large), depth (shallow→deep),
+    // and training aggressiveness (fast→careful). Names reflect the dominant characteristic.
     let runs = vec![
+
+        // ── Baseline: small & fast ──────────────────────────────────────────
         RunConfig {
-            name: "run_1".to_string(),
+            name: "tiny_shallow_fast".to_string(),
+            embed_dim: 128, hidden_units: 128, n_layers: 2, attn_heads: 2, ff_dim: 512, max_seq_len: 256,
             stages: vec![
-                StageConfig { stage: TrainingStage::Language, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.05, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6 },
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.15, epochs: 5,  batch_size, first_lr: 1e-3, last_lr: 1e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.10, epochs: 5,  batch_size, first_lr: 1e-3, last_lr: 1e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
             ],
         },
+
+        // ── Small model, moderate training ─────────────────────────────────
         RunConfig {
-            name: "run_2".to_string(),
+            name: "small_shallow_balanced".to_string(),
+            embed_dim: 256, hidden_units: 256, n_layers: 2, attn_heads: 4, ff_dim: 1024, max_seq_len: 320,
             stages: vec![
-                StageConfig { stage: TrainingStage::Language, loss_threshold: 0.08, epochs: 15, batch_size, first_lr: 5e-5, last_lr: 1e-7 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.04, epochs: 15, batch_size, first_lr: 5e-5, last_lr: 1e-7 },
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.10, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.05, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
             ],
         },
+
+        // ── Small model, deep — tests whether more layers help at small width ─
         RunConfig {
-            name: "run_3".to_string(),
+            name: "small_deep_balanced".to_string(),
+            embed_dim: 256, hidden_units: 256, n_layers: 6, attn_heads: 4, ff_dim: 1024, max_seq_len: 320,
             stages: vec![
-                StageConfig { stage: TrainingStage::Language, loss_threshold: 0.05, epochs: 20, batch_size, first_lr: 1e-5, last_lr: 1e-8 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.02, epochs: 20, batch_size, first_lr: 1e-5, last_lr: 1e-8 },
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.10, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.05, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
             ],
-        }
+        },
+
+        // ── Medium model, moderate training ────────────────────────────────
+        RunConfig {
+            name: "medium_balanced".to_string(),
+            embed_dim: 384, hidden_units: 384, n_layers: 4, attn_heads: 6, ff_dim: 1536, max_seq_len: 320,
+            stages: vec![
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.08, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.04, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+            ],
+        },
+
+        // ── Medium model, high weight decay — tests regularisation ──────────
+        RunConfig {
+            name: "medium_high_wd".to_string(),
+            embed_dim: 384, hidden_units: 384, n_layers: 4, attn_heads: 6, ff_dim: 1536, max_seq_len: 320,
+            stages: vec![
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.08, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.1,  epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.04, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.1,  epsilon: 1e-7, smoothing: 0.1 },
+            ],
+        },
+
+        // ── Medium model, label smoothing sweep — tests soft targets ────────
+        RunConfig {
+            name: "medium_smooth02".to_string(),
+            embed_dim: 384, hidden_units: 384, n_layers: 4, attn_heads: 6, ff_dim: 1536, max_seq_len: 320,
+            stages: vec![
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.08, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.2 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.04, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.2 },
+            ],
+        },
+
+        // ── Large model, moderate training ─────────────────────────────────
+        RunConfig {
+            name: "large_balanced".to_string(),
+            embed_dim: 512, hidden_units: 512, n_layers: 4, attn_heads: 8, ff_dim: 2048, max_seq_len: 320,
+            stages: vec![
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.08, epochs: 15, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.04, epochs: 15, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+            ],
+        },
+
+        // ── Large model, deep — high capacity ceiling ───────────────────────
+        RunConfig {
+            name: "large_deep".to_string(),
+            embed_dim: 512, hidden_units: 512, n_layers: 8, attn_heads: 8, ff_dim: 2048, max_seq_len: 320,
+            stages: vec![
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.06, epochs: 15, batch_size, first_lr: 3e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.03, epochs: 15, batch_size, first_lr: 3e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+            ],
+        },
+
+        // ── Long context — tests seq-len sensitivity at medium size ─────────
+        // RunConfig {
+        //     name: "medium_long_ctx".to_string(),
+        //     embed_dim: 384, hidden_units: 384, n_layers: 4, attn_heads: 6, ff_dim: 1536, max_seq_len: 512,
+        //     stages: vec![
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.08, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.04, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
+
+        // ── Careful/slow: small model, long training, low lr ───────────────
+        RunConfig {
+            name: "small_deep_careful".to_string(),
+            embed_dim: 256, hidden_units: 256, n_layers: 4, attn_heads: 4, ff_dim: 1024, max_seq_len: 256,
+            stages: vec![
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 20, batch_size, first_lr: 1e-5, last_lr: 1e-8, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.02, epochs: 20, batch_size, first_lr: 1e-5, last_lr: 1e-8, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+            ],
+        },
     ];
 
     for run_cfg in runs {
@@ -216,7 +306,6 @@ pub fn run(
 
         println!("\n🚀 Starting Run: {}", run_cfg.name);
 
-        // We'll load from run_dir if it exists, otherwise start fresh.
         let (mut model, mut epochs_already_done) = if std::path::Path::new(run_dir_str).join("model.bin").exists() {
             match YumonBrain::<TrainBackend>::load(run_dir_str, &device) {
                 Ok((m, _tok)) => {
@@ -226,28 +315,50 @@ pub fn run(
                              run_cfg.name, meta.epochs_trained, meta.final_loss);
                     (m, meta.epochs_trained)
                 }
-                Err(_) => (YumonBrainConfig::new(tokenizer.vocab_size()).init(&device), 0)
+                Err(_) => {
+                    let config = YumonBrainConfig {
+                        vocab_size: tokenizer.vocab_size(),
+                        embed_dim: run_cfg.embed_dim,
+                        hidden_units: run_cfg.hidden_units,
+                        n_layers: run_cfg.n_layers,
+                        attn_heads: run_cfg.attn_heads,
+                        ff_dim: run_cfg.ff_dim,
+                        max_seq_len: run_cfg.max_seq_len,
+                        dropout_rate: 0.05,
+                    };
+                    (config.init(&device), 0)
+                }
             }
         } else {
             println!("🆕 Starting fresh run: {}", run_cfg.name);
-            (YumonBrainConfig::new(tokenizer.vocab_size()).init(&device), 0)
+            let config = YumonBrainConfig {
+                vocab_size: tokenizer.vocab_size(),
+                embed_dim: run_cfg.embed_dim,
+                hidden_units: run_cfg.hidden_units,
+                n_layers: run_cfg.n_layers,
+                attn_heads: run_cfg.attn_heads,
+                ff_dim: run_cfg.ff_dim,
+                max_seq_len: run_cfg.max_seq_len,
+                dropout_rate: 0.05,
+            };
+            (config.init(&device), 0)
         };
 
         for (stage_idx, stage_cfg) in run_cfg.stages.iter().enumerate() {
             println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
             
-            let training_samples = load_stage_data(stage_cfg.stage.clone(), &tokenizer, &keyword_index)?;
+            let training_samples = load_stage_data(stage_cfg.stage.clone(), &tokenizer, &keyword_index, run_cfg.max_seq_len)?;
             println!("Training samples: {}", training_samples.len());
 
             let mut optimizer = AdamWConfig::new()
-                .with_epsilon(1e-7)
+                .with_epsilon(stage_cfg.epsilon)
                 .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
-                .with_weight_decay(0.01)
+                .with_weight_decay(stage_cfg.weight_decay)
                 .init();
 
             let ce_loss = CrossEntropyLossConfig::new()
                 .with_pad_tokens(Some(vec![PAD_TOKEN as usize]))
-                .with_smoothing(Some(0.1))
+                .with_smoothing(Some(stage_cfg.smoothing))
                 .init(&device);
 
             let mut rng = rand::thread_rng();
@@ -299,30 +410,30 @@ pub fn run(
                     let current_batch_size = batch_idx.len();
                     if current_batch_size == 0 { continue; }
 
-                    let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
-                    let mut all_enc_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
-                    let mut all_dec_input_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
+                    let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
+                    let mut all_enc_ids: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
+                    let mut all_dec_input_ids: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
 
                     for &i in batch_idx {
                         let sample = &training_samples[i];
                         all_enc_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
                         let target_labels = &sample.target_labels;
-                        let real_len = target_labels.iter().position(|&t| t == PAD_TOKEN).unwrap_or(MAX_SEQ_LEN);
+                        let real_len = target_labels.iter().position(|&t| t == PAD_TOKEN).unwrap_or(run_cfg.max_seq_len);
 
                         let mut dec_input: Vec<i32> = vec![BOS_TOKEN as i32];
                         dec_input.extend(target_labels[0..real_len.saturating_sub(1)].iter().map(|&t| t as i32));
-                        dec_input.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
+                        dec_input.resize(run_cfg.max_seq_len, PAD_TOKEN as i32);
 
                         let mut lang_targets: Vec<i32> = target_labels[0..real_len].iter().map(|&t| t as i32).collect();
-                        lang_targets.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
+                        lang_targets.resize(run_cfg.max_seq_len, PAD_TOKEN as i32);
 
                         all_dec_input_ids.extend(dec_input);
                         all_lang_targets.extend(lang_targets);
                     }
 
-                    let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * MAX_SEQ_LEN]), &device);
-                    let enc_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_enc_ids, [current_batch_size, MAX_SEQ_LEN]), &device);
-                    let dec_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_dec_input_ids, [current_batch_size, MAX_SEQ_LEN]), &device);
+                    let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), &device);
+                    let enc_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_enc_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
+                    let dec_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_dec_input_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
 
                     let token_logits = model.forward(enc_t, dec_t.clone());
 
@@ -335,7 +446,7 @@ pub fn run(
 
                     // Loss
                     let vocab = tokenizer.vocab_size();
-                    let logits_2d = token_logits.reshape([current_batch_size * MAX_SEQ_LEN, vocab]);
+                    let logits_2d = token_logits.reshape([current_batch_size * run_cfg.max_seq_len, vocab]);
                     let lang_loss = ce_loss.forward(logits_2d, lang_target_t);
 
                     let grads = GradientsParams::from_grads(lang_loss.backward(), &model);
@@ -371,10 +482,16 @@ pub fn run(
                     vocab_size:     tokenizer.vocab_size(),
                     epochs_trained: epochs_already_done + epoch + 1,
                     final_loss,
-                    batch_size,
-                    training_stage: stage_cfg.stage
+                    batch_size: stage_cfg.batch_size,
+                    training_stage: stage_cfg.stage.clone(),
+                    embed_dim: run_cfg.embed_dim,
+                    hidden_units: run_cfg.hidden_units,
+                    n_layers: run_cfg.n_layers,
+                    attn_heads: run_cfg.attn_heads,
+                    ff_dim: run_cfg.ff_dim,
+                    max_seq_len: run_cfg.max_seq_len,
                 };
-                model.valid().save(run_dir_str, &tokenizer, &meta)?;
+                model.save(run_dir_str, &tokenizer, &meta)?;
 
                 // periodic inference
                 {
@@ -385,7 +502,7 @@ pub fn run(
                             "obstacle_dir": "none", "building_dir": "none", "resource_dir": "none", "message": prompt_text,
                         })).unwrap() 
                     } else { prompt_text };
-                    let result = inference_model.generate_unmasked_parsed(&tokenizer, &prompt, MAX_SEQ_LEN, &device);
+                    let result = inference_model.generate_unmasked_parsed(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
                     state.last_reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
                 }
             }
