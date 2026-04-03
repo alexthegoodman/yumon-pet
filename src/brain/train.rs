@@ -137,6 +137,40 @@ pub fn softmax(logits: &[f32]) -> Vec<f32> {
 
 // ─── Main training entry point ────────────────────────────────────────────────
 
+pub struct StageConfig {
+    pub stage: TrainingStage,
+    pub loss_threshold: f32,
+    pub epochs: usize,
+    pub batch_size: usize,
+    pub first_lr: f64,
+    pub last_lr: f64,
+}
+
+pub struct RunConfig {
+    pub name: String,
+    pub stages: Vec<StageConfig>,
+}
+
+fn load_stage_data(
+    stage: TrainingStage, 
+    tokenizer: &TokenizerKind, 
+    keyword_index: &HashMap<String, Vec<usize>>
+) -> Result<Vec<crate::brain::samples::Sample>> {
+    let mut loader = DataLoader::new(stage);
+    match stage {
+        TrainingStage::Language => {
+            loader = loader
+                // .add("data/wiki_extract.txt", FileKind::Txt, Some(10000))
+                .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
+        }
+        TrainingStage::Structured => {
+            loader = loader
+                .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
+        }
+    }
+    loader.total_limit(4096).seed(4815162342).load(tokenizer, keyword_index)
+}
+
 pub fn run(
     wiki_xml:          &str,
     _vision_checkpoint: &str,  // reserved for future real-image fine-tuning
@@ -145,423 +179,230 @@ pub fn run(
     batch_size:        usize,
     max_articles:      usize,
 ) -> Result<()> {
-    // let device: <TrainBackend as Backend>::Device = Default::default();
     let device = burn::backend::wgpu::WgpuDevice::default();
-
-    // ── Build label keyword index ─────────────────────────────────────────────
     let label_keywords   = build_label_keywords();
     let keyword_index    = build_keyword_index(&label_keywords);
-    println!("🏷  CIFAR-100 keyword index: {} unique keywords across {} classes",
-             keyword_index.len(), CIFAR_CLASSES);
-
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
 
-    // let training_stage = TrainingStage::Language;
-    let training_stage = TrainingStage::Structured;
- 
-    let training_samples = DataLoader::new(training_stage)
-        // per-file limits — None means "take everything"
-        // .add("data/(poems)/",                   FileKind::Mdx,         None)
-        // .add("data/bible_bbe.csv",              FileKind::BibleCsv,    Some(1024))
-        // .add("archive/handcrafted.txt",         FileKind::Handcrafted, None)
-        // .add("archive/handcrafted_pairs.txt",   FileKind::QaPairs, None)
-        // .add("data/qa_journal.txt",             FileKind::QaPairs, None)
-        .add("archive/handcrafted_pairs.txt",   FileKind::Chats, None)
-        // // .add("archive/ov_chats.txt",   FileKind::Chats, None)
-        // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
-        // .add("archive/arena_extract.txt",   FileKind::Chats, None)
-        // .add("data/wiki_extract.txt",   FileKind::Txt, Some(1_000_000))
-        // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
-        // .total_limit(32768)
-        // .total_limit(1_000_000)
-        // global cap after merging all sources
-        .total_limit(4096)
-        // reproducible seed (same default as before: 4815162342)
-        .seed(4815162342)
-        .load(&tokenizer, &keyword_index)?;
-    
-    println!("Training samples: {}", training_samples.len());
-
-    // debug print — first 12 samples
-    for (i, sample) in training_samples.iter().enumerate() {
-        if i >= 12 { break; }
-        println!("INPUT:  {:?}", tokenizer.decode(&sample.input_ids));
-        println!("TARGET: {:?}", tokenizer.decode(
-            &sample.target_labels.iter()
-                .map(|&t| if t == PAD_TOKEN { PAD_TOKEN } else { t })
-                .collect::<Vec<_>>()
-        ));
-        println!("input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
-        println!("target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
-    }
-
-    // save_sentence_pairs_to_file(training_samples.clone(), "data/arena_extract.txt");
-
-    // ── Init model + optimizer ────────────────────────────────────────────────
-    // ── Resume from checkpoint if one exists ─────────────────────────────────
-    let checkpoint_meta = std::path::Path::new(out_dir).join("metadata.json");
-    let checkpoint_model = std::path::Path::new(out_dir).join("model.bin"); // BinFileRecorder ext
-
-    let (mut model, epochs_already_done) = if checkpoint_model.exists() && checkpoint_meta.exists() {
-        match YumonBrain::<TrainBackend>::load(out_dir, &device) {
-            Ok((m, _tok)) => {
-                let meta_json = std::fs::read_to_string(&checkpoint_meta)?;
-                let meta: BrainMetadata = serde_json::from_str(&meta_json)?;
-                println!("▶️  Resuming from checkpoint ({} epochs done, loss={:.4})",
-                         meta.epochs_trained, meta.final_loss);
-                (m, meta.epochs_trained)
-            }
-            Err(e) => {
-                eprintln!("⚠️  Checkpoint found but failed to load ({e}) — starting fresh.");
-                (YumonBrainConfig::new(tokenizer.vocab_size()).init(&device), 0)
-            }
+    // ── Configure Runs ──────────────────────────────────────────────────────────
+    let runs = vec![
+        RunConfig {
+            name: "run_1".to_string(),
+            stages: vec![
+                StageConfig { stage: TrainingStage::Language, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.05, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6 },
+            ],
+        },
+        RunConfig {
+            name: "run_2".to_string(),
+            stages: vec![
+                StageConfig { stage: TrainingStage::Language, loss_threshold: 0.08, epochs: 15, batch_size, first_lr: 5e-5, last_lr: 1e-7 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.04, epochs: 15, batch_size, first_lr: 5e-5, last_lr: 1e-7 },
+            ],
+        },
+        RunConfig {
+            name: "run_3".to_string(),
+            stages: vec![
+                StageConfig { stage: TrainingStage::Language, loss_threshold: 0.05, epochs: 20, batch_size, first_lr: 1e-5, last_lr: 1e-8 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.02, epochs: 20, batch_size, first_lr: 1e-5, last_lr: 1e-8 },
+            ],
         }
-    } else {
-        println!("🆕 No checkpoint found — starting fresh.");
-        (YumonBrainConfig::new(tokenizer.vocab_size()).init(&device), 0)
-    };
+    ];
 
-    if epochs_already_done >= epochs {
-        println!("✅ Already trained for {epochs_already_done} epochs (requested {epochs}). Nothing to do.");
-        return Ok(());
-    }
+    for run_cfg in runs {
+        let run_dir = std::path::Path::new(out_dir).join(&run_cfg.name);
+        std::fs::create_dir_all(&run_dir)?;
+        let run_dir_str = run_dir.to_str().unwrap();
 
-    let remaining_epochs = epochs - epochs_already_done;
-    println!("📅 Training for {remaining_epochs} more epoch(s) (to reach {epochs} total).");
+        println!("\n🚀 Starting Run: {}", run_cfg.name);
 
-    // let mut optimizer = AdamConfig::new()
-    //     .with_epsilon(1e-7)
-    //     .with_weight_decay(Some(burn::optim::decay::WeightDecayConfig::new(1e-5)))
-    //     .init();
-
-    let mut optimizer = AdamWConfig::new()
-        .with_epsilon(1e-7)
-        .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
-        .with_weight_decay(0.01)
-        // .with_weight_decay(Some(burn::optim::decay::WeightDecayConfig::new(1e-5)))
-        .init();
-
-    // let ce_loss = CrossEntropyLossConfig::new().init(&device);
-    let ce_loss = CrossEntropyLossConfig::new()
-        .with_pad_tokens(Some(vec![PAD_TOKEN as usize]))
-        .with_smoothing(Some(0.1))
-        .init(&device);
-    let mut rng = rand::thread_rng();
-    let mut final_loss = 0.0f32;
-    
-    // lr over time
-    // let first_lr = 1e-4;
-    // let first_lr = 0.003; // even better for 8?
-    // let first_lr = 0.001; // batch sizes like 8
-    let first_lr = 0.0001; // for batch size 4?
-    // let first_lr = 0.000003;
-    // let first_lr = 3e-6; // flat immediately
-    let last_lr = 1e-8;
-
-    // let first_lr = 1e-6;
-    // let last_lr = 1e-7;
-
-    // let first_lr = 1e-7;
-    // let last_lr = 1e-8;
-
-    // let first_lr = 0.0001;
-    // let last_lr = 1e-8;
-
-    use std::io::stdout;
-    let backend = CrosstermBackend::new(stdout());
-    let mut terminal = Terminal::with_options(
-        backend,
-        TerminalOptions { viewport: Viewport::Inline(26) },
-    )?;
-
-    let total_batches = training_samples.len() / batch_size;
-
-    let mut state = TrainingState {
-        loss_history: vec![],
-        avg_loss_history: vec![],
-        current_loss: 0.0,
-        avg_loss: 0.0,
-        epoch: epochs_already_done + 1,
-        total_epochs: epochs,
-        batch: 0,
-        total_batches,          // ← same value your loop uses for num_batches
-        current_lr: first_lr as f64,
-        global_step: 0,
-        entropy: 0.0,
-        entropy_history: vec![],
-        last_reply: String::new()
-    };
-
-    // ── Training loop ─────────────────────────────────────────────────────────
-    for epoch in 0..remaining_epochs {
-        let absolute_epoch = epochs_already_done + epoch + 1;
-
-        let mut idx: Vec<usize> = (0..training_samples.len()).collect();
-        use rand::seq::SliceRandom;
-        idx.shuffle(&mut rng);
-
-        let num_batches = idx.len().max(1) / batch_size;
-        // let pb = make_progress(num_batches, absolute_epoch, epochs);
-        let mut epoch_loss = 0.0f32;
-
-        for batch_num in 0..num_batches {
-            // cosine annealing
-            // let current_lr = {
-            //     let total_steps = remaining_epochs * (training_samples.len() / batch_size);
-            //     let step = epoch * (training_samples.len() / batch_size) + batch_num;
-            //     let progress = step as f64 / total_steps as f64;
-            //     let cosine = (std::f64::consts::PI * progress).cos();
-            //     (last_lr + 0.5 * (first_lr - last_lr) * (1.0 + cosine)) as f64
-            // };
-
-            // // linear
-            let current_lr = {
-                let total_steps = remaining_epochs * (training_samples.len() / batch_size);
-                let step = epoch * (training_samples.len() / batch_size) + batch_num;
-                let t = step as f64 / total_steps as f64;
-                (first_lr as f64 * (1.0 - t) + last_lr as f64 * t)
-            };
-
-            // // exp decay
-            // let current_lr = {
-            //     let total_steps = remaining_epochs * (training_samples.len() / batch_size);
-            //     let step = epoch * (training_samples.len() / batch_size) + batch_num;
-            //     let t = step as f64 / total_steps as f64;
-            //     (first_lr as f64 * (last_lr as f64 / first_lr as f64).powf(t))
-            // };
-
-            let batch_start = batch_num * batch_size;
-            let batch_end = (batch_start + batch_size).min(training_samples.len());
-            let batch_idx = &idx[batch_start..batch_end];
-            let current_batch_size = batch_idx.len();  // in case last batch is smaller
-
-            if current_batch_size == 0 { continue; }
-
-            // ── Collect everything into flat vectors (fast) ─────────────────────
-            // let mut all_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
-            // let mut all_contexts: Vec<f32> = Vec::with_capacity(current_batch_size * CONTEXT_DIMS);
-            let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
-            // let mut all_emote_targets: Vec<i32> = Vec::with_capacity(current_batch_size);
-            let mut all_enc_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
-            // let mut all_dec_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
-            let mut all_dec_input_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
-
-            for &i in batch_idx {
-                let sample = &training_samples[i];
-
-                all_enc_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
-                // all_dec_ids.extend(sample.target_labels.iter().map(|&t| t as i32));
-
-                // Inside the for &i in batch_idx loop, after let sample = &training_samples[i];
-
-                let target_labels = &sample.target_labels;  // [tok0, tok1, ..., EOS, PAD, PAD, ...]
-
-                // Find real length (includes EOS, stops before first PAD)
-                let real_len = target_labels.iter()
-                    .position(|&t| t == PAD_TOKEN)
-                    .unwrap_or(MAX_SEQ_LEN);
-
-                // ── Decoder INPUT (exactly like generate_* loops) ─────────────
-                let mut dec_input: Vec<i32> = vec![BOS_TOKEN as i32];
-                dec_input.extend(
-                    target_labels[0..real_len.saturating_sub(1)]
-                        .iter()
-                        .map(|&t| t as i32)
-                );
-                dec_input.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
-
-                // ── Loss TARGETS (shifted correctly, includes first token + EOS) ──
-                let mut lang_targets: Vec<i32> = target_labels[0..real_len]  // ← CHANGED: start at 0
-                    .iter()
-                    .map(|&t| t as i32)
-                    .collect();
-                lang_targets.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
-
-                all_dec_input_ids.extend(dec_input);
-                all_lang_targets.extend(lang_targets);
-
-                // input_ids is the full sequence [BOS, sent_a..., sent_b..., EOS, PAD...]
-                // target_labels is already shifted  [sent_a..., sent_b..., EOS, PAD...]
-                // all_dec_input_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
-                // all_lang_targets.extend(sample.target_labels.iter().map(|&t| t as i32));
+        // For each run, we might want to start fresh or resume from the last stage.
+        // According to the request: "1 checkpoint for each run (shared checkpoint between stages of a run)".
+        // We'll load from run_dir if it exists, otherwise start fresh.
+        let (mut model, mut epochs_already_done) = if std::path::Path::new(run_dir_str).join("model.bin").exists() {
+            match YumonBrain::<TrainBackend>::load(run_dir_str, &device) {
+                Ok((m, _tok)) => {
+                    let meta_json = std::fs::read_to_string(std::path::Path::new(run_dir_str).join("metadata.json"))?;
+                    let meta: BrainMetadata = serde_json::from_str(&meta_json)?;
+                    println!("▶️  Resuming run {} from checkpoint ({} epochs done, loss={:.4})", 
+                             run_cfg.name, meta.epochs_trained, meta.final_loss);
+                    (m, meta.epochs_trained)
+                }
+                Err(_) => (YumonBrainConfig::new(tokenizer.vocab_size()).init(&device), 0)
             }
-
-            // ── Stack into real batched tensors (ONE allocation) ───────────────
-            // let ids_t = Tensor::<TrainBackend, 2, Int>::from_ints(
-            //     TensorData::new(all_ids, [current_batch_size, MAX_SEQ_LEN]),
-            //     &device,
-            // );
-
-            // let context_t = Tensor::<TrainBackend, 2>::from_floats(
-            //     TensorData::new(all_contexts, [current_batch_size, CONTEXT_DIMS]),
-            //     &device,
-            // );
-
-            let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(
-                TensorData::new(all_lang_targets, [current_batch_size * MAX_SEQ_LEN]),
-                &device,
-            );
-
-            // let emote_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(
-            //     TensorData::new(all_emote_targets, [current_batch_size]),
-            //     &device,
-            // );
-
-            let enc_t = Tensor::<TrainBackend, 2, Int>::from_ints(
-                TensorData::new(all_enc_ids, [current_batch_size, MAX_SEQ_LEN]),
-                &device,
-            );
-
-            // let dec_t = Tensor::<TrainBackend, 2, Int>::from_ints(
-            //     TensorData::new(all_dec_ids, [current_batch_size, MAX_SEQ_LEN]),
-            //     &device,
-            // );
-
-            let dec_t = Tensor::<TrainBackend, 2, Int>::from_ints(  // now shifted input
-                TensorData::new(all_dec_input_ids, [current_batch_size, MAX_SEQ_LEN]),
-                &device,
-            );
-
-            // ── SINGLE forward pass (this is where the 20× speedup happens) ─────
-            // let (token_logits, emote_logits) = model.forward(ids_t, context_t);
-
-            let token_logits = model.forward(enc_t, dec_t.clone());
-            // let token_logits = model.forward(dec_t);
-
-            // ── Entropy (predictive) ──────────────────────────────────────────────
-            let probs = burn::tensor::activation::softmax(token_logits.clone(), 2); // [B, S, vocab]
-            let log_probs = (probs.clone() + 1e-10).log();                          // avoid log(0)
-
-            let token_entropy = (probs * log_probs)
-                .sum_dim(2)
-                .neg()
-                .squeeze::<2>();  // [B, S, 1] → [B, S]
-
-            let non_pad_mask = dec_t
-                .clone()
-                .equal_elem(PAD_TOKEN as u32)
-                .bool_not()
-                .float();  // [B, S]
-
-            let entropy_val: f32 = (token_entropy * non_pad_mask.clone())
-                .sum()
-                .div(non_pad_mask.sum())
-                .into_scalar();
-
-            // ── Loss (now automatically batched) ───────────────────────────────
-            let vocab = tokenizer.vocab_size();
-            let logits_2d = token_logits.reshape([current_batch_size * MAX_SEQ_LEN, vocab]);  // [B*S, vocab]
-
-            let lang_loss = ce_loss.forward(logits_2d, lang_target_t);
-
-            // let emote_loss = ce_loss.forward(emote_logits, emote_target_t);  // [B, C] and [B]
-
-            // let total_loss = lang_loss + emote_loss.mul_scalar(EMOTE_WEIGHT);
-            let total_loss  = lang_loss;
-
-            // // Backward + step (exactly one per real batch)
-            let grads = GradientsParams::from_grads(total_loss.backward(), &model);
-            model = optimizer.step(
-                current_lr, 
-                // 1e-6,
-                model, 
-                grads
-            );
-
-            // // Before step
-            // let w_before: Vec<f32> = model.token_head.weight.val()
-            //     .to_data().to_vec().unwrap();
-
-            // let grads = GradientsParams::from_grads(total_loss.backward(), &model);
-            // model = optimizer.step(current_lr, model, grads);
-
-            // // After step  
-            // let w_after: Vec<f32> = model.token_head.weight.val()
-            //     .to_data().to_vec().unwrap();
-
-            // println!("weight delta: {:?}", 
-            //     w_before.iter().zip(&w_after)
-            //     .map(|(a,b)| (b-a).abs())
-            //     .take(5)
-            //     .collect::<Vec<_>>()
-            // );
-
-            // Logging (same feel as before)
-            let loss_val: f32 = total_loss.clone().inner().to_data().to_vec::<f32>().unwrap()[0];
-            epoch_loss += loss_val;
-
-            let batches_done = (batch_num + 1) as f32;
-            let avg_loss = epoch_loss / batches_done;
-
-            // pb.set_prefix(format!("{:.4} avg_loss={:.4} current_lr={:.7}", loss_val, avg_loss, current_lr));
-            // pb.inc(1);
-
-            // instead of pb.set_prefix(...) and pb.inc(1)
-            // state.current_loss = loss_val;
-            // let loss_scale = 100.0; // 1 for normal, 100.0 for structured? helps see minor improvements in TUI
-            let loss_scale = 1.0; 
-            state.entropy = entropy_val;
-            state.current_loss = loss_val * loss_scale; // Don't scale the actual loss used for backprop, just the display value.
-            state.avg_loss = (epoch_loss * loss_scale) / (batch_num + 1) as f32; // Don't scale the actual loss used for backprop, just the display value.
-            state.batch = batch_num + 1;
-            state.current_lr = current_lr;
-            state.global_step += 1;
-            state.loss_history.push((state.global_step as f64, loss_val as f64 * loss_scale as f64)); // Don't scale the actual loss used for backprop, just the display value.
-            state.avg_loss_history.push((state.global_step as f64, state.avg_loss as f64));
-            state.entropy_history.push((state.global_step as f64, entropy_val as f64));
-
-            // optional: sliding window so chart doesn't compress
-            // if state.loss_history.len() > 500 {
-            //     state.loss_history.remove(0);
-            //     state.avg_loss_history.remove(0);
-            // }
-
-            terminal.draw(|frame| render(frame, &state))?;
-        }
-
-        final_loss = epoch_loss / num_batches.max(1) as f32;
-        // pb.finish_with_message(format!("epoch {absolute_epoch}/{epochs}  loss={final_loss:.4}"));
-
-        let meta = BrainMetadata {
-            vocab_size:     tokenizer.vocab_size(),
-            epochs_trained: absolute_epoch,
-            final_loss,
+        } else {
+            println!("🆕 Starting fresh run: {}", run_cfg.name);
+            (YumonBrainConfig::new(tokenizer.vocab_size()).init(&device), 0)
         };
-        model.valid().save(out_dir, &tokenizer, &meta)?;
 
-        // periodic inference
-        {
-            let inference_model = model.valid();
+        for (stage_idx, stage_cfg) in run_cfg.stages.iter().enumerate() {
+            println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
+            
+            let training_samples = load_stage_data(stage_cfg.stage.clone(), &tokenizer, &keyword_index)?;
+            println!("Training samples: {}", training_samples.len());
 
-            let prompt_text = "What is the universe?".to_string();
+            let mut optimizer = AdamWConfig::new()
+                .with_epsilon(1e-7)
+                .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
+                .with_weight_decay(0.01)
+                .init();
 
-            let prompt = if training_stage == TrainingStage::Structured { 
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "obstacle_dir": "none",
-                    "building_dir": "none",
-                    "resource_dir": "none",
-                    "message":      prompt_text,
-                }))
-                .unwrap() 
-            } else {
-                prompt_text
+            let ce_loss = CrossEntropyLossConfig::new()
+                .with_pad_tokens(Some(vec![PAD_TOKEN as usize]))
+                .with_smoothing(Some(0.1))
+                .init(&device);
+
+            let mut rng = rand::thread_rng();
+            use std::io::stdout;
+            let backend = CrosstermBackend::new(stdout());
+            let mut terminal = Terminal::with_options(
+                backend,
+                TerminalOptions { viewport: Viewport::Inline(26) },
+            )?;
+
+            let total_batches = training_samples.len() / stage_cfg.batch_size;
+            let mut state = TrainingState {
+                loss_history: vec![],
+                avg_loss_history: vec![],
+                current_loss: 0.0,
+                avg_loss: 0.0,
+                epoch: 0,
+                total_epochs: stage_cfg.epochs,
+                batch: 0,
+                total_batches,
+                current_lr: stage_cfg.first_lr,
+                global_step: 0,
+                entropy: 0.0,
+                entropy_history: vec![],
+                last_reply: String::new()
             };
 
-            let result = inference_model.generate_unmasked_parsed(
-                &tokenizer,
-                &prompt,
-                MAX_SEQ_LEN,
-                &device,
-            );
-            
-            state.last_reply = if training_stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+            let mut final_loss = 0.0f32;
+
+            'epoch_loop: for epoch in 0..stage_cfg.epochs {
+                state.epoch = epoch + 1;
+                let mut idx: Vec<usize> = (0..training_samples.len()).collect();
+                idx.shuffle(&mut rng);
+                let num_batches = idx.len().max(1) / stage_cfg.batch_size;
+                let mut epoch_loss = 0.0f32;
+
+                for batch_num in 0..num_batches {
+                    let current_lr = {
+                        let total_steps = stage_cfg.epochs * num_batches;
+                        let step = epoch * num_batches + batch_num;
+                        let t = step as f64 / total_steps as f64;
+                        (stage_cfg.first_lr * (1.0 - t) + stage_cfg.last_lr * t)
+                    };
+
+                    let batch_start = batch_num * stage_cfg.batch_size;
+                    let batch_end = (batch_start + stage_cfg.batch_size).min(training_samples.len());
+                    let batch_idx = &idx[batch_start..batch_end];
+                    let current_batch_size = batch_idx.len();
+                    if current_batch_size == 0 { continue; }
+
+                    let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
+                    let mut all_enc_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
+                    let mut all_dec_input_ids: Vec<i32> = Vec::with_capacity(current_batch_size * MAX_SEQ_LEN);
+
+                    for &i in batch_idx {
+                        let sample = &training_samples[i];
+                        all_enc_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
+                        let target_labels = &sample.target_labels;
+                        let real_len = target_labels.iter().position(|&t| t == PAD_TOKEN).unwrap_or(MAX_SEQ_LEN);
+
+                        let mut dec_input: Vec<i32> = vec![BOS_TOKEN as i32];
+                        dec_input.extend(target_labels[0..real_len.saturating_sub(1)].iter().map(|&t| t as i32));
+                        dec_input.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
+
+                        let mut lang_targets: Vec<i32> = target_labels[0..real_len].iter().map(|&t| t as i32).collect();
+                        lang_targets.resize(MAX_SEQ_LEN, PAD_TOKEN as i32);
+
+                        all_dec_input_ids.extend(dec_input);
+                        all_lang_targets.extend(lang_targets);
+                    }
+
+                    let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * MAX_SEQ_LEN]), &device);
+                    let enc_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_enc_ids, [current_batch_size, MAX_SEQ_LEN]), &device);
+                    let dec_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_dec_input_ids, [current_batch_size, MAX_SEQ_LEN]), &device);
+
+                    let token_logits = model.forward(enc_t, dec_t.clone());
+
+                    // Entropy
+                    let probs = burn::tensor::activation::softmax(token_logits.clone(), 2);
+                    let log_probs = (probs.clone() + 1e-10).log();
+                    let token_entropy = (probs * log_probs).sum_dim(2).neg().squeeze::<2>();
+                    let non_pad_mask = dec_t.clone().equal_elem(PAD_TOKEN as u32).bool_not().float();
+                    let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).sum().div(non_pad_mask.sum()).into_scalar();
+
+                    // Loss
+                    let vocab = tokenizer.vocab_size();
+                    let logits_2d = token_logits.reshape([current_batch_size * MAX_SEQ_LEN, vocab]);
+                    let lang_loss = ce_loss.forward(logits_2d, lang_target_t);
+
+                    let grads = GradientsParams::from_grads(lang_loss.backward(), &model);
+                    model = optimizer.step(current_lr, model, grads);
+
+                    let loss_val: f32 = lang_loss.clone().inner().to_data().to_vec::<f32>().unwrap()[0];
+                    epoch_loss += loss_val;
+
+                    state.entropy = entropy_val;
+                    state.current_loss = loss_val;
+                    state.avg_loss = epoch_loss / (batch_num + 1) as f32;
+                    state.batch = batch_num + 1;
+                    state.current_lr = current_lr;
+                    state.global_step += 1;
+                    state.loss_history.push((state.global_step as f64, loss_val as f64));
+                    state.avg_loss_history.push((state.global_step as f64, state.avg_loss as f64));
+                    state.entropy_history.push((state.global_step as f64, entropy_val as f64));
+
+                    terminal.draw(|frame| render(frame, &state))?;
+
+                    // Loss Threshold Exit
+                    if state.avg_loss < stage_cfg.loss_threshold {
+                        println!("\n🎯 Loss Threshold Reached: {:.4} < {:.4}. Ending Stage.", state.avg_loss, stage_cfg.loss_threshold);
+                        final_loss = state.avg_loss;
+                        break 'epoch_loop;
+                    }
+                }
+                final_loss = epoch_loss / num_batches.max(1) as f32;
+
+                // Save checkpoint after each epoch
+                let meta = BrainMetadata {
+                    vocab_size:     tokenizer.vocab_size(),
+                    epochs_trained: epochs_already_done + epoch + 1,
+                    final_loss,
+                };
+                model.valid().save(run_dir_str, &tokenizer, &meta)?;
+
+                // periodic inference
+                {
+                    let inference_model = model.valid();
+                    let prompt_text = "What is the universe?".to_string();
+                    let prompt = if stage_cfg.stage == TrainingStage::Structured { 
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "obstacle_dir": "none", "building_dir": "none", "resource_dir": "none", "message": prompt_text,
+                        })).unwrap() 
+                    } else { prompt_text };
+                    let result = inference_model.generate_unmasked_parsed(&tokenizer, &prompt, MAX_SEQ_LEN, &device);
+                    state.last_reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+                }
+            }
+            epochs_already_done += state.epoch;
+            terminal.clear()?;
+
+            // Save Chart Image at end of stage
+            let chart_path = format!("{}/{}_stage_{}.png", run_dir_str, run_cfg.name, stage_idx + 1);
+            if let Err(e) = state.save_chart_image(&chart_path) {
+                eprintln!("⚠️  Failed to save chart image: {}", e);
+            } else {
+                println!("📊 Chart saved to {}", chart_path);
+            }
+
+            println!("✅ Stage complete. Final loss: {:.4}", final_loss);
         }
     }
 
-    // after the epoch loop
-    terminal.clear()?;
-
-    println!("✅ Brain training complete. Final loss: {final_loss:.4}");
+    println!("✅ All training runs complete.");
     Ok(())
 }
 
