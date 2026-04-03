@@ -216,8 +216,6 @@ pub fn run(
 
         println!("\n🚀 Starting Run: {}", run_cfg.name);
 
-        // For each run, we might want to start fresh or resume from the last stage.
-        // According to the request: "1 checkpoint for each run (shared checkpoint between stages of a run)".
         // We'll load from run_dir if it exists, otherwise start fresh.
         let (mut model, mut epochs_already_done) = if std::path::Path::new(run_dir_str).join("model.bin").exists() {
             match YumonBrain::<TrainBackend>::load(run_dir_str, &device) {
@@ -269,8 +267,9 @@ pub fn run(
                 epoch: 0,
                 total_epochs: stage_cfg.epochs,
                 batch: 0,
-                total_batches,
+                total_batches: total_batches,
                 current_lr: stage_cfg.first_lr,
+                lr_history: vec![],
                 global_step: 0,
                 entropy: 0.0,
                 entropy_history: vec![],
@@ -354,6 +353,7 @@ pub fn run(
                     state.loss_history.push((state.global_step as f64, loss_val as f64));
                     state.avg_loss_history.push((state.global_step as f64, state.avg_loss as f64));
                     state.entropy_history.push((state.global_step as f64, entropy_val as f64));
+                    state.lr_history.push((state.global_step as f64, current_lr));
 
                     terminal.draw(|frame| render(frame, &state))?;
 

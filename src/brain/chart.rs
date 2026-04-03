@@ -8,6 +8,7 @@ pub struct TrainingState {
     pub batch: usize,
     pub total_batches: usize,
     pub current_lr: f64,
+    pub lr_history: Vec<(f64, f64)>,
     pub global_step: usize,
     pub entropy: f32,
     pub entropy_history: Vec<(f64, f64)>,
@@ -88,11 +89,11 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
                 .labels(["0".to_string(), format!("{:.3}", max_loss)]),
         );
     frame.render_widget(chart, chunks[1]);
-    }
+}
 
-    use image::{Rgb, RgbImage};
+use image::{Rgb, RgbImage};
 
-    impl TrainingState {
+impl TrainingState {
     pub fn save_chart_image(&self, path: &str) -> anyhow::Result<()> {
         let width = 1200;
         let height = 800;
@@ -115,7 +116,7 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
         let max_steps = self.global_step.max(1) as f64;
 
         let to_x = |step: f64| (margin as f64 + (step / max_steps) * graph_width as f64) as u32;
-        let to_y = |loss: f64| (height as f64 - margin as f64 - (loss / (max_loss * 1.1)) * graph_height as f64) as u32;
+        let to_y = |val: f64| (height as f64 - margin as f64 - (val / (max_loss * 1.1)) * graph_height as f64) as u32;
 
         // Draw axes
         let white = Rgb([200, 200, 200]);
@@ -138,10 +139,21 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
         let magenta = Rgb([255, 0, 255]);
         self.draw_line(&mut img, &self.entropy_history, magenta, to_x, to_y);
 
+        // Draw Learning Rate (Green)
+        // Scale LR to match max_loss for visibility
+        let max_lr = self.lr_history.iter()
+            .map(|&(_, lr)| lr)
+            .fold(0.0_f64, f64::max)
+            .max(1e-10);
+
+        let lr_scale = (max_loss * 0.8) / max_lr;
+        let green = Rgb([0, 255, 0]);
+        let to_y_lr = |lr: f64| to_y(lr * lr_scale);
+        self.draw_line(&mut img, &self.lr_history, green, to_x, to_y_lr);
+
         img.save(path)?;
         Ok(())
     }
-
     fn draw_line<FX, FY>(&self, img: &mut RgbImage, data: &[(f64, f64)], color: Rgb<u8>, to_x: FX, to_y: FY)
     where
         FX: Fn(f64) -> u32,
