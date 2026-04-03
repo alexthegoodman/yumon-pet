@@ -371,6 +371,8 @@ pub fn run(
                     vocab_size:     tokenizer.vocab_size(),
                     epochs_trained: epochs_already_done + epoch + 1,
                     final_loss,
+                    batch_size,
+                    training_stage: stage_cfg.stage
                 };
                 model.valid().save(run_dir_str, &tokenizer, &meta)?;
 

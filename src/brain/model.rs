@@ -15,7 +15,7 @@ use super::tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN};
 use crate::{
     brain::{
         bpe::{BpeTokenizer, EOS_ID, TokenizerKind}, 
-        fixer::fix_json_syntax, samples::{Action, CardinalDir, WorldContext}, train::MAX_SEQ_LEN
+        fixer::fix_json_syntax, samples::{Action, CardinalDir, TrainingStage, WorldContext}, train::MAX_SEQ_LEN
     },
     vision::EMOTE_CLASSES,
 };
@@ -983,6 +983,8 @@ pub struct BrainMetadata {
     pub vocab_size:     usize,
     pub epochs_trained: usize,
     pub final_loss:     f32,
+    pub batch_size:     usize,
+    pub training_stage: TrainingStage,
 }
 
 // ─── Sampling helpers ─────────────────────────────────────────────────────────
