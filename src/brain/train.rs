@@ -156,8 +156,8 @@ pub fn run(
 
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
 
-    let training_stage = TrainingStage::Language;
-    // let training_stage = TrainingStage::Structured;
+    // let training_stage = TrainingStage::Language;
+    let training_stage = TrainingStage::Structured;
  
     let training_samples = DataLoader::new(training_stage)
         // per-file limits — None means "take everything"
@@ -171,6 +171,7 @@ pub fn run(
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
         // .add("archive/arena_extract.txt",   FileKind::Chats, None)
         // .add("data/wiki_extract.txt",   FileKind::Txt, Some(1_000_000))
+        // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
         // .total_limit(32768)
         // .total_limit(1_000_000)
         // global cap after merging all sources
@@ -250,9 +251,9 @@ pub fn run(
     
     // lr over time
     // let first_lr = 1e-4;
-    let first_lr = 0.003; // even better for 8?
+    // let first_lr = 0.003; // even better for 8?
     // let first_lr = 0.001; // batch sizes like 8
-    // let first_lr = 0.0001; // for batch size 4?
+    let first_lr = 0.0001; // for batch size 4?
     // let first_lr = 0.000003;
     // let first_lr = 3e-6; // flat immediately
     let last_lr = 1e-8;

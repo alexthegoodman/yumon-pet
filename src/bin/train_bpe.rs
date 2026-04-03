@@ -1,6 +1,12 @@
-use yumon_pet::{brain::{PAD_TOKEN, bpe::{self, BpeTokenizer, TokenizerKind}, loader::{DataLoader, FileKind}, mdx::{load_arena_chats, load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences, load_qa_pairs, load_txt_sentences}, pdf::load_pdf_ebook_sentences, samples::TrainingStage, train::{build_keyword_index, build_label_keywords}, wiki::load_wiki_sentences}, vision::CIFAR_CLASSES};
+use yumon_pet::{brain::{PAD_TOKEN, bpe::{self, BpeTokenizer, TokenizerKind}, loader::{DataLoader, FileKind}, mdx::{load_arena_chats, load_csv_bible, load_csv_qna, load_csv_quotes, load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences, load_qa_pairs, load_specific_dict_sentences, load_txt_sentences}, pdf::load_pdf_ebook_sentences, samples::TrainingStage, train::{build_keyword_index, build_label_keywords}, wiki::load_wiki_sentences}, vision::CIFAR_CLASSES};
 
 pub fn main() {
+    // let all_words = load_csv_words("archive/word_counts.csv");
+    // let all_words =  all_words.as_ref().expect("Couldn't get words");
+    
+    // let dict_sentences = load_specific_dict_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt", all_words);
+    // let dict_sentences = dict_sentences.as_ref().expect("Couldn't get dict_sentences");
+
     // let wiki_xml = "data/simplewiki-latest-pages-articles.xml";
     
     // let sentences = load_wiki_sentences(wiki_xml, 25_000);
@@ -207,6 +213,7 @@ pub fn main() {
     // sentences.extend(txt);
     // sentences.extend(ebooks);
     sentences.extend(chats_combined);
+    // sentences.extend(dict_sentences);
     // sentences.extend(chats_combined2);
     // sentences.extend(chats_combined3);
     // sentences.extend(wiki_sentences);
@@ -238,6 +245,7 @@ pub fn main() {
         // .add("archive/ov_chats.txt",   FileKind::Chats, None)
         // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
         // .add("data/wiki_extract.txt",   FileKind::Txt, Some(200_000))
+        // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
         .total_limit(4096)
         .seed(4815162342)
         .load(&tokenizer, &keyword_index).expect("Couldn't get samples");
@@ -258,6 +266,7 @@ pub fn main() {
         // .add("archive/ov_chats.txt",   FileKind::Chats, None)
         // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
         // .add("data/wiki_extract.txt",   FileKind::Txt, Some(200_000))
+        // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
         .total_limit(4096)
         .seed(4815162342)
         .load(&tokenizer, &keyword_index).expect("Couldn't get samples");

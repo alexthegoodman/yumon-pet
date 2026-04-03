@@ -167,8 +167,8 @@ fn main() -> Result<()> {
                 .map(|(h, b)| serde_json::json!({ "human": h, "bot": b }))
                 .collect();
 
-            let training_stage = TrainingStage::Language;
-            // let training_stage = TrainingStage::Structured;
+            // let training_stage = TrainingStage::Language;
+            let training_stage = TrainingStage::Structured;
 
             let prompt = if training_stage == TrainingStage::Language {
                 prompt_text

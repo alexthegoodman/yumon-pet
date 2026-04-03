@@ -251,6 +251,74 @@ pub fn load_dictionary_sentences(dict_path: &str) -> Result<Vec<String>> {
     Ok(sentences)
 }
 
+pub fn load_csv_words(csv_path: &str) -> Result<Vec<String>> {
+    println!("📖 Loading words CSV: {csv_path}");
+
+    let mut rdr = csv::Reader::from_path(csv_path)?;
+    let mut words = Vec::new();
+
+    let mut count = 0;
+
+    for result in rdr.records() {
+        let record = result?;
+
+        let word_count   = record.get(0).unwrap_or("").trim().to_string();
+        let word = record.get(1).unwrap_or("").trim().to_string();
+
+        words.push(word);
+
+        count = count + 1;
+
+        if count > 10_000 { break; }
+    }
+
+    println!("✅ Loaded {} words from {csv_path}", words.len());
+    Ok(words)
+}
+
+pub fn contains_word(trimmed: &str, selected_words: &Vec<String>) -> bool {
+    let mut contains_word = false;
+    for word in selected_words {
+        if trimmed.contains(word) {
+            contains_word = true;
+        }
+    }
+    contains_word
+}
+
+pub fn load_specific_dict_sentences(dict_path: &str, selected_words: &Vec<String>) -> Result<Vec<String>> {
+    println!("📖 Loading dictionary: {dict_path}");
+
+    let content = std::fs::read_to_string(dict_path)?;
+    let mut sentences = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Skip empty lines or very short lines
+        if trimmed.len() < 10 {
+            continue;
+        }
+
+        // Skip lines that are just a single letter (section headers like "A")
+        if trimmed.chars().all(|c| c.is_alphabetic() || c.is_whitespace())
+            && trimmed.split_whitespace().count() <= 1
+        {
+            continue;
+        }
+
+        // Try to extract a clean definition sentence
+        // if let Some(sentence) = extract_definition(trimmed) {
+            if is_good_sentence(&trimmed) && contains_word(trimmed, &selected_words) {
+                sentences.push(trimmed.to_string());
+            }
+        // }
+    }
+
+    println!("✅ Loaded {} dictionary sentences", sentences.len());
+    Ok(sentences)
+}
+
 pub fn load_handcrafted_sentences(dict_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading handcrafted: {dict_path}");
 

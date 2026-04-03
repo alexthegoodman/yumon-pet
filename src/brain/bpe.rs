@@ -94,9 +94,9 @@ impl BpeTokenizer {
 
         let trainer = BpeTrainerBuilder::new()
             .vocab_size(vocab_size)
-            .min_frequency(2)           // ignore hapax legomena
+            // .min_frequency(2) // ignore hapax legomena
+            .min_frequency(2)       // better for smaller corpus    
             .special_tokens(special_tokens.clone())
-            // .continuing_subword_prefix("##".to_string()) // WordPiece-style visible joins (not needed with ByteLevel)
             .show_progress(true)
             .build();
 

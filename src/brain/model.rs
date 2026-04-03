@@ -26,23 +26,23 @@ use crate::brain::flash_attn::attention::{DecoderBlock, DecoderBlockConfig, Enco
 // ── Model dimensions ──────────────────────────────────────────────────────────
 // pub const EMBED_DIM:    usize = 32; // xtra tiny, good loss
 // pub const HIDDEN_UNITS: usize = 32;
-pub const EMBED_DIM:    usize = 64; // best loss surprsingly (for our seq length?)
-pub const HIDDEN_UNITS: usize = 64;
+// pub const EMBED_DIM:    usize = 64; // best loss surprsingly (for our seq length?)
+// pub const HIDDEN_UNITS: usize = 64;
 // pub const EMBED_DIM:    usize = 128; // outputs break down, many repeated tokens, etc
 // pub const HIDDEN_UNITS: usize = 128;
-// pub const EMBED_DIM:    usize = 256;
-// pub const HIDDEN_UNITS: usize = 256;
+pub const EMBED_DIM:    usize = 256;
+pub const HIDDEN_UNITS: usize = 256;
 // pub const EMBED_DIM:    usize = 512;
 // pub const HIDDEN_UNITS: usize = 512;
-pub const ATTN_HEADS:   usize = 2; // sweet spot
+// pub const ATTN_HEADS:   usize = 2; // sweet spot
 pub const N_LAYERS:     usize = 2; // swwet spot
 // pub const N_LAYERS:     usize = 8;
-// pub const ATTN_HEADS:   usize = 4;
+pub const ATTN_HEADS:   usize = 4;
 // pub const N_LAYERS:     usize = 16;
 // pub const FF_DIM:       usize = 128; // xtra tiny
-pub const FF_DIM:       usize = 256; // sweet spot
+// pub const FF_DIM:       usize = 256; // sweet spot
 // pub const FF_DIM:       usize = 512;
-// pub const FF_DIM:       usize = 1024;
+pub const FF_DIM:       usize = 1024;
 
 pub const TEMPERATURE:  f32   = 0.9;
 // pub const TEMPERATURE:  f32   = 0.75;

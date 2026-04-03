@@ -4,7 +4,7 @@ use rand::{seq::SliceRandom, SeedableRng};
 use rand::rngs::StdRng;
 
 use crate::brain::bpe::TokenizerKind;
-use crate::brain::mdx::{load_arena_chats, load_csv_bible, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_txt_sentences};
+use crate::brain::mdx::{load_arena_chats, load_csv_bible, load_csv_words, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_specific_dict_sentences, load_txt_sentences};
 use crate::brain::samples::{Sample, TrainingStage, prepare_paired_samples_chats, prepare_paired_samples_split, prepare_paired_samples_split_sep};
 
 // ── File-source descriptor ────────────────────────────────────────────────────
@@ -25,7 +25,8 @@ pub enum FileKind {
     QaPairs,
     Chats,
     JsonChats,
-    Txt
+    Txt,
+    SpecificDict
     // extend with WikiXml, Txt, Pdf, … as needed
 }
 
@@ -158,6 +159,15 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
         FileKind::BibleCsv    => load_csv_bible(path),
         FileKind::Handcrafted => load_handcrafted_sentences(path),
         FileKind::Txt         => load_txt_sentences(path),
+        FileKind::SpecificDict => {
+            let all_words = load_csv_words("archive/word_counts.csv");
+            let all_words =  all_words.as_ref().expect("Couldn't get words");
+            
+            let dict_sentences = load_specific_dict_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt", all_words);
+            // let dict_sentences = dict_sentences.as_ref().expect("Couldn't get dict_sentences");
+
+            dict_sentences
+        },
         // QA pairs are handled separately — return empty here
         FileKind::QaPairs     => Ok(Vec::new()),
         FileKind::Chats       => Ok(Vec::new()),
