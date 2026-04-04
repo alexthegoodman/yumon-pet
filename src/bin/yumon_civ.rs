@@ -23,7 +23,7 @@ const TECH_COLS: usize = 20;
 const TECH_ROWS: usize = 5;
 
 /// Change this to spawn more or fewer AI opponents.
-const NUM_AI_PLAYERS: usize = 3;
+const NUM_AI_PLAYERS: usize = 24;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tile { DeepWater, ShallowWater, Sand, Plains, Forest, Hills, Mountain, Snow }
@@ -31,8 +31,8 @@ enum Tile { DeepWater, ShallowWater, Sand, Plains, Forest, Hills, Mountain, Snow
 impl Tile {
     fn from_height(h: f64) -> Self {
         match h {
-            h if h < -0.35 => Tile::DeepWater,
-            h if h < -0.05 => Tile::ShallowWater,
+            h if h < -0.55 => Tile::DeepWater,
+            h if h < -0.35 => Tile::ShallowWater,
             h if h < 0.02  => Tile::Sand,
             h if h < 0.25  => Tile::Plains,
             h if h < 0.45  => Tile::Forest,
@@ -83,10 +83,22 @@ impl Tile {
 }
 
 #[derive(Clone)]
+struct Stat {
+    food: i32,
+    atk: i32,
+    prod: i32,
+    mov: i32,
+    def: i32,
+    gold: i32,
+    sci: i32,
+    cult: i32
+}
+
+#[derive(Clone)]
 struct Tech {
     name: &'static str,
     unit: Option<&'static str>,
-    stats: &'static str,
+    stats: Stat,
     desc: &'static str,
     cost: u32,
 }
@@ -125,10 +137,10 @@ impl Track {
 }
 
 fn all_techs() -> Vec<(Track, Vec<Tech>)> {
-    let costs: [u32; 20] = [1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,6,6,7,8];
+    let costs: [u32; 20] = [3,3,3,7,8,9,9,9,12,15,18,22,26,30,32,36,38,42,45,52];
     macro_rules! track {
         ($track:expr, [ $( ($n:expr, $u:expr, $s:expr, $d:expr) ),* $(,)? ]) => {{
-            let raw: Vec<(&str, Option<&str>, &str, &str)> = vec![ $( ($n, $u, $s, $d) ),* ];
+            let raw: Vec<(&str, Option<&str>, Stat, &str)> = vec![ $( ($n, $u, $s, $d) ),* ];
             let techs: Vec<Tech> = raw.into_iter().enumerate().map(|(i, (n,u,s,d))| Tech {
                 name: n, unit: u, stats: s, desc: d, cost: costs[i],
             }).collect();
@@ -137,114 +149,114 @@ fn all_techs() -> Vec<(Track, Vec<Tech>)> {
     }
     vec![
         track!(Track::Military, [
-            ("Foraging",       Some("Scout"),          "+1 food",          "Ranging parties map the land."),
-            ("Stone Tools",    Some("Warrior"),        "+1 atk",           "Chipped flint arms the first fighters."),
-            ("Spear",          Some("Spearman"),       "+1 atk +1 food",   "Hafted point for hunting and combat."),
-            ("Hunting",        Some("Archer"),         "+1 food +1 prod",  "Bow and trap techniques."),
-            ("Bronze Weapons", Some("Swordsman"),      "+2 atk",           "Smelted bronze blades."),
-            ("Shield Craft",   Some("Heavy Infantry"), "+2 def",           "Wicker and hide shields."),
-            ("Phalanx",        Some("Hoplite"),        "+2 atk +2 def",    "Locked-shield spear wall."),
-            ("War Chariot",    Some("Chariot"),        "+2 atk +1 mov",    "Horse-drawn shock flanks."),
-            ("Iron Forging",   Some("Iron Swordsman"), "+3 atk",           "Harder iron replaces bronze."),
-            ("Siege Craft",    Some("Catapult"),       "+2 atk +1 prod",   "Tension engines hurl stones."),
-            ("Cavalry",        Some("Knight"),         "+3 atk +2 mov",    "Armored horsemen break lines."),
-            ("Crossbow",       Some("Crossbowman"),    "+2 atk +1 def",    "Mechanical bow penetrates plate."),
-            ("Plate Armor",    Some("Man-at-Arms"),    "+4 def",           "Full steel plate cuts casualties."),
-            ("Cannon",         Some("Cannon"),         "+4 atk",           "Gunpowder shatters stone walls."),
-            ("Musketry",       Some("Musketeer"),      "+3 atk +1 def",    "Matchlock firearms replace bows."),
-            ("Mil. Drill",     Some("Grenadier"),      "+3 atk +2 def",    "Drill and explosive grenades."),
-            ("Field Artillery",Some("Field Gun"),      "+5 atk",           "Mobile cannon supports infantry."),
-            ("Rifling",        Some("Rifleman"),       "+4 atk +1 def",    "Grooved barrels improve accuracy."),
-            ("Conscription",   Some("Line Infantry"),  "+5 atk +3 def",    "Mass levy troops."),
-            ("Industrial War", Some("Artillery"),      "+6 atk +2 def",    "Rail-supplied breech-loading guns."),
+            ("Foraging",       Some("Scout"),          Stat { food: 1, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 },          "Ranging parties map the land."),
+            ("Stone Tools",    Some("Warrior"),        Stat { food: 0, atk: 1, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 },           "Chipped flint arms the first fighters."),
+            ("Spear",          Some("Spearman"),       Stat { food: 0, atk: 1, prod: 1, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 },   "Hafted point for hunting and combat."),
+            ("Hunting",        Some("Archer"),         Stat { food: 1, atk: 0, prod: 1, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 },  "Bow and trap techniques."),
+            ("Bronze Weapons", Some("Swordsman"),      Stat { food: 0, atk: 2, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 },           "Smelted bronze blades."),
+            ("Shield Craft",   Some("Heavy Infantry"), Stat { food: 0, atk: 2, prod: 0, mov: 0, def: 2, gold: 0, sci: 0, cult: 0 },           "Wicker and hide shields."),
+            ("Phalanx",        Some("Hoplite"),        Stat { food: 0, atk: 2, prod: 0, mov: 1, def: 0, gold: 0, sci: 0, cult: 0 },    "Locked-shield spear wall."),
+            ("War Chariot",    Some("Chariot"),        Stat { food: 0, atk: 3, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 },    "Horse-drawn shock flanks."),
+            ("Iron Forging",   Some("Iron Swordsman"), Stat { food: 0, atk: 2, prod: 1, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 },           "Harder iron replaces bronze."),
+            ("Siege Craft",    Some("Catapult"),       Stat { food: 0, atk: 3, prod: 0, mov: 2, def: 0, gold: 0, sci: 0, cult: 0 },   "Tension engines hurl stones."),
+            ("Cavalry",        Some("Knight"),         Stat { food: 0, atk: 3, prod: 0, mov: 2, def: 0, gold: 0, sci: 0, cult: 0 },    "Armored horsemen break lines."),
+            ("Crossbow",       Some("Crossbowman"),    Stat { food: 0, atk: 2, prod: 0, mov: 0, def: 1, gold: 0, sci: 0, cult: 0 },    "Mechanical bow penetrates plate."),
+            ("Plate Armor",    Some("Man-at-Arms"),    Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 4, gold: 0, sci: 0, cult: 0 },           "Full steel plate cuts casualties."),
+            ("Cannon",         Some("Cannon"),         Stat { food: 0, atk: 4, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 },           "Gunpowder shatters stone walls."),
+            ("Musketry",       Some("Musketeer"),      Stat { food: 0, atk: 3, prod: 0, mov: 0, def: 1, gold: 0, sci: 0, cult: 0 },    "Matchlock firearms replace bows."),
+            ("Mil. Drill",     Some("Grenadier"),      Stat { food: 0, atk: 3, prod: 0, mov: 0, def: 2, gold: 0, sci: 0, cult: 0 },    "Drill and explosive grenades."),
+            ("Field Artillery",Some("Field Gun"),      Stat { food: 0, atk: 5, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 },           "Mobile cannon supports infantry."),
+            ("Rifling",        Some("Rifleman"),       Stat { food: 0, atk: 4, prod: 0, mov: 0, def: 1, gold: 0, sci: 0, cult: 0 },    "Grooved barrels improve accuracy."),
+            ("Conscription",   Some("Line Infantry"),  Stat { food: 0, atk: 5, prod: 0, mov: 0, def: 3, gold: 0, sci: 0, cult: 0 },    "Mass levy troops."),
+            ("Industrial War", Some("Artillery"),      Stat { food: 0, atk: 6, prod: 0, mov: 0, def: 2, gold: 0, sci: 0, cult: 0 },    "Rail-supplied breech-loading guns."),
         ]),
         track!(Track::Economy, [
-            ("Gathering",     Some("Settler"),        "+2 food",           "Systematic collection of plants."),
-            ("Barter",        Some("Trader"),         "+1 gold",           "Exchange of surplus goods."),
-            ("Farming",       Some("Farmer"),         "+3 food",           "Settled cultivation of wheat."),
-            ("Herding",       Some("Herder"),         "+2 food +1 prod",   "Domesticated cattle."),
-            ("Irrigation",    None,                   "+4 food +1 gold",   "Canals extend arable land."),
-            ("Markets",       Some("Merchant"),       "+3 gold",           "Permanent stalls concentrate trade."),
-            ("Coinage",       None,                   "+4 gold",           "Standardized tokens."),
-            ("Galley",        Some("Galley"),         "+2 gold +1 food",   "Oared warship opens coastal trade."),
-            ("Guilds",        Some("Artisan"),        "+3 prod +2 gold",   "Craftsmen associations."),
-            ("Banking",       None,                   "+5 gold",           "Letters of credit and lending."),
-            ("Taxation",      None,                   "+4 gold +1 prod",   "State collection funds armies."),
-            ("Carrack",       Some("Carrack"),        "+4 gold +1 food",   "Deep-hulled ocean trade vessel."),
-            ("Joint Stock",   Some("Colonist"),       "+5 gold +1 food",   "Shared ownership spreads risk."),
-            ("Mercantilism",  None,                   "+6 gold +1 prod",   "State-directed surplus trade."),
-            ("Plantation",    Some("Overseer"),       "+6 food +2 gold",   "Large-scale cash crops."),
-            ("Manufacture",   Some("Engineer"),       "+5 prod +2 gold",   "Centralized craft production."),
-            ("Steam Power",   None,                   "+7 prod +3 gold",   "Coal-fired engines."),
-            ("Cotton Gin",    None,                   "+5 food +5 prod",   "Mechanical fiber separation."),
-            ("Rail Trade",    Some("Rail Merchant"),  "+8 gold +2 prod",   "Locomotives connect markets."),
-            ("Stock Exchange",None,                   "+10 gold +3 prod",  "Public equity markets."),
+            ("Gathering",     Some("Settler"),        Stat { food: 2, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 },           "Systematic collection of plants."),
+            ("Barter",        Some("Trader"),         Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 1, sci: 0, cult: 0 },           "Exchange of surplus goods."),
+            ("Farming",       Some("Farmer"),         Stat { food: 3, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 },           "Settled cultivation of wheat."),
+            ("Herding",       Some("Herder"),        Stat { food: 2, atk: 0, prod: 1, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 },   "Domesticated cattle."),
+            ("Irrigation",    None,                  Stat { food: 4, atk: 0, prod: 0, mov: 0, def: 0, gold: 1, sci: 0, cult: 0 },   "Canals extend arable land."),
+            ("Markets",       Some("Merchant"),       Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 3, sci: 0, cult: 0 },           "Permanent stalls concentrate trade."),
+            ("Coinage",       None,                   Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 4, sci: 0, cult: 0 },           "Standardized tokens."),
+            ("Galley",        Some("Galley"),         Stat { food: 1, atk: 0, prod: 0, mov: 0, def: 0, gold: 2, sci: 0, cult: 0 },   "Oared warship opens coastal trade."),
+            ("Guilds",        Some("Artisan"),        Stat { food: 0, atk: 0, prod: 3, mov: 0, def: 0, gold: 2, sci: 0, cult: 0 },   "Craftsmen associations."),
+            ("Banking",       None,                   Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 5, sci: 0, cult: 0 },           "Letters of credit and lending."),
+            ("Taxation",      None,                  Stat { food: 0, atk: 0, prod: 1, mov: 0, def: 0, gold: 4, sci: 0, cult: 0 },   "State collection funds armies."),
+            ("Carrack",       Some("Carrack"),       Stat { food: 1, atk: 0, prod: 0, mov: 0, def: 0, gold: 4, sci: 0, cult: 0 },   "Deep-hulled ocean trade vessel."),
+            ("Joint Stock",   Some("Colonist"),      Stat { food: 1, atk: 0, prod: 0, mov: 0, def: 0, gold: 5, sci: 0, cult: 0 },   "Shared ownership spreads risk."),
+            ("Mercantilism",  None,                  Stat { food: 0, atk: 0, prod: 1, mov: 0, def: 0, gold: 6, sci: 0, cult: 0 },   "State-directed surplus trade."),
+            ("Plantation",    Some("Overseer"),      Stat { food: 6, atk: 0, prod: 0, mov: 0, def: 0, gold: 2, sci: 0, cult: 0 },   "Large-scale cash crops."),
+            ("Manufacture",   Some("Engineer"),      Stat { food: 0, atk: 0, prod: 5, mov: 0, def: 0, gold: 2, sci: 0, cult: 0 },   "Centralized craft production."),
+            ("Steam Power",   None,                  Stat { food: 0, atk: 0, prod: 7, mov: 0, def: 0, gold: 3, sci: 0, cult: 0 },   "Coal-fired engines."),
+            ("Cotton Gin",    None,                  Stat { food: 5, atk: 0, prod: 5, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 },   "Mechanical fiber separation."),
+            ("Rail Trade",    Some("Rail Merchant"), Stat { food: 0, atk: 0, prod: 2, mov: 0, def: 0, gold: 8, sci: 0, cult: 0 },   "Locomotives connect markets."),
+            ("Stock Exchange",None,                  Stat { food: 0, atk: 0, prod: 3, mov: 0, def: 0, gold: 10, sci: 0, cult: 0 },  "Public equity markets."),
         ]),
         track!(Track::Infrastructure, [
-            ("Fire",         Some("Worker"),    "+1 food +1 prod",   "Controlled flame for warmth."),
-            ("Shelter",      None,              "+2 food",           "Hides form weatherproof dwellings."),
-            ("Pottery",      None,              "+1 food +1 gold",   "Fired clay stores grain."),
-            ("Well",         None,              "+2 food +1 pop",    "Deep shafts access groundwater."),
-            ("Roads",        None,              "+1 mov +1 gold",    "Packed earth connects settlements."),
-            ("Masonry",      Some("Mason"),     "+2 prod +1 def",    "Cut stone for walls and towers."),
-            ("Aqueduct",     None,              "+3 food +1 pop",    "Channels bring water to cities."),
-            ("Granary",      None,              "+4 food",           "Sealed silos protect harvests."),
-            ("Harbor",       Some("Galley"),    "+2 gold +1 food",   "Docks enable maritime trade."),
-            ("Paved Roads",  None,              "+2 mov +2 gold",    "Cobbled surfaces survive loads."),
-            ("Castle",       Some("Garrison"),  "+3 def +1 gold",    "Stone keeps anchor defense."),
-            ("Windmill",     None,              "+3 prod +1 food",   "Wind-driven millstones."),
-            ("Sewers",       None,              "+2 food +1 pop",    "Channels remove city waste."),
-            ("Lighthouse",   Some("Carrack"),   "+3 gold +1 mov",    "Beacons guide ships to port."),
-            ("Cathedral",    Some("Priest"),    "+3 cult +1 gold",   "Stone churches serve faith."),
-            ("Canal",        None,              "+4 gold +2 mov",    "Waterways bypass terrain."),
-            ("Frigate",      Some("Frigate"),   "+4 gold +2 atk",    "Broadside warship."),
-            ("Iron Bridge",  None,              "+3 mov +2 prod",    "Cast iron spans rivers."),
-            ("Telegraph",    None,              "+4 gold +2 sci",    "Electrical signals transmit orders."),
-            ("Railroad",     Some("Ironclad"),  "+5 mov +4 prod",    "Steam rail reshapes the map."),
+            ("Fire",           Some("Worker"),    Stat { food: 1, atk: 0, prod: 1, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 }, "Controlled flame for warmth."),
+            ("Shelter",        None,              Stat { food: 2, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 }, "Hides form weatherproof dwellings."),
+            ("Pottery",        None,              Stat { food: 1, atk: 0, prod: 0, mov: 0, def: 0, gold: 1, sci: 0, cult: 0 }, "Fired clay stores grain."),
+            ("Well",           None,              Stat { food: 2, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 }, "Deep shafts access groundwater."),
+            ("Roads",          None,              Stat { food: 0, atk: 0, prod: 0, mov: 1, def: 0, gold: 1, sci: 0, cult: 0 }, "Packed earth connects settlements."),
+            ("Masonry",        Some("Mason"),     Stat { food: 0, atk: 0, prod: 2, mov: 0, def: 1, gold: 0, sci: 0, cult: 0 }, "Cut stone for walls and towers."),
+            ("Aqueduct",       None,              Stat { food: 3, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 }, "Channels bring water to cities."),
+            ("Granary",        None,              Stat { food: 4, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 }, "Sealed silos protect harvests."),
+            ("Harbor",         Some("Galley"),    Stat { food: 1, atk: 0, prod: 0, mov: 0, def: 0, gold: 2, sci: 0, cult: 0 }, "Docks enable maritime trade."),
+            ("Paved Roads",    None,              Stat { food: 0, atk: 0, prod: 0, mov: 2, def: 0, gold: 2, sci: 0, cult: 0 }, "Cobbled surfaces survive loads."),
+            ("Castle",         Some("Garrison"),  Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 3, gold: 1, sci: 0, cult: 0 }, "Stone keeps anchor defense."),
+            ("Windmill",       None,              Stat { food: 1, atk: 0, prod: 3, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 }, "Wind-driven millstones."),
+            ("Sewers",         None,              Stat { food: 2, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 0 }, "Channels remove city waste."),
+            ("Lighthouse",     Some("Carrack"),   Stat { food: 0, atk: 0, prod: 0, mov: 1, def: 0, gold: 3, sci: 0, cult: 0 }, "Beacons guide ships to port."),
+            ("Cathedral",      Some("Priest"),    Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 1, sci: 0, cult: 3 }, "Stone churches serve faith."),
+            ("Canal",          None,              Stat { food: 0, atk: 0, prod: 0, mov: 2, def: 0, gold: 4, sci: 0, cult: 0 }, "Waterways bypass terrain."),
+            ("Frigate",        Some("Frigate"),   Stat { food: 0, atk: 2, prod: 0, mov: 0, def: 0, gold: 4, sci: 0, cult: 0 }, "Broadside warship."),
+            ("Iron Bridge",    None,              Stat { food: 0, atk: 0, prod: 2, mov: 3, def: 0, gold: 0, sci: 0, cult: 0 }, "Cast iron spans rivers."),
+            ("Telegraph",      None,              Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 4, sci: 2, cult: 0 }, "Electrical signals transmit orders."),
+            ("Railroad",       Some("Ironclad"),  Stat { food: 0, atk: 0, prod: 4, mov: 5, def: 0, gold: 0, sci: 0, cult: 0 }, "Steam rail reshapes the map."),
         ]),
         track!(Track::Culture, [
-            ("Language",      None,             "+1 cult",           "Spoken symbols allow communication."),
-            ("Mythology",     None,             "+2 cult",           "Shared stories bind communities."),
-            ("Ritual",        Some("Shaman"),   "+2 cult +1 food",   "Ceremonies mark seasons."),
-            ("Painting",      None,             "+2 cult +1 gold",   "Pigment records life and belief."),
-            ("Writing",       Some("Scribe"),   "+3 cult +1 sci",    "Symbols store knowledge."),
-            ("Polytheism",    Some("Priest"),   "+3 cult +1 gold",   "Multiple deities govern life."),
-            ("Epic Poetry",   None,             "+3 cult +1 sci",    "Verse immortalizes heroes."),
-            ("Drama",         None,             "+3 cult +2 sci",    "Theater explores moral themes."),
-            ("Philosophy",    Some("Scholar"),  "+3 cult +3 sci",    "Systematic reasoning."),
-            ("Monotheism",    None,             "+4 cult +1 def",    "One god unifies communities."),
-            ("Chivalry",      Some("Paladin"),  "+3 cult +3 def",    "Knightly code and valor."),
-            ("Scholasticism", None,             "+4 cult +3 sci",    "Cathedral schools preserve texts."),
-            ("Renais. Art",   Some("Artist"),   "+5 cult +2 gold",   "Perspective transforms painting."),
-            ("Humanism",      None,             "+4 cult +3 sci",    "Human dignity and reason."),
-            ("Nation-State",  None,             "+5 cult +2 gold",   "Shared language defines nations."),
-            ("Journalism",    None,             "+5 cult +2 gold",   "Press shapes public opinion."),
-            ("Romanticism",   None,             "+6 cult",           "Emotion over reason."),
-            ("Pub. Schools",  Some("Teacher"),  "+5 cult +4 sci",    "Literacy programs educate all."),
-            ("Museums",       None,             "+7 cult +2 gold",   "Collections preserve heritage."),
-            ("Mass Media",    None,             "+8 cult +3 gold",   "Newspapers reach millions."),
+            ("Language",       None,            Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 1 }, "Spoken symbols allow communication."),
+            ("Mythology",      None,            Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 2 }, "Shared stories bind communities."),
+            ("Ritual",         Some("Shaman"),  Stat { food: 1, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 2 }, "Ceremonies mark seasons."),
+            ("Painting",       None,            Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 1, sci: 0, cult: 2 }, "Pigment records life and belief."),
+            ("Writing",        Some("Scribe"),  Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 1, cult: 3 }, "Symbols store knowledge."),
+            ("Polytheism",     Some("Priest"),  Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 1, sci: 0, cult: 3 }, "Multiple deities govern life."),
+            ("Epic Poetry",    None,            Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 1, cult: 3 }, "Verse immortalizes heroes."),
+            ("Drama",          None,            Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 2, cult: 3 }, "Theater explores moral themes."),
+            ("Philosophy",     Some("Scholar"), Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 3, cult: 3 }, "Systematic reasoning."),
+            ("Monotheism",     None,            Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 1, gold: 0, sci: 0, cult: 4 }, "One god unifies communities."),
+            ("Chivalry",       Some("Paladin"), Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 3, gold: 0, sci: 0, cult: 3 }, "Knightly code and valor."),
+            ("Scholasticism",  None,            Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 3, cult: 4 }, "Cathedral schools preserve texts."),
+            ("Renais. Art",    Some("Artist"),  Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 2, sci: 0, cult: 5 }, "Perspective transforms painting."),
+            ("Humanism",       None,            Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 3, cult: 4 }, "Human dignity and reason."),
+            ("Nation-State",   None,            Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 2, sci: 0, cult: 5 }, "Shared language defines nations."),
+            ("Journalism",     None,            Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 2, sci: 0, cult: 5 }, "Press shapes public opinion."),
+            ("Romanticism",    None,            Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 0, cult: 6 }, "Emotion over reason."),
+            ("Pub. Schools",   Some("Teacher"), Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 4, cult: 5 }, "Literacy programs educate all."),
+            ("Museums",        None,            Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 2, sci: 0, cult: 7 }, "Collections preserve heritage."),
+            ("Mass Media",     None,            Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 3, sci: 0, cult: 8 }, "Newspapers reach millions."),
         ]),
         track!(Track::Science, [
-            ("Observation",   None,               "+1 sci",            "Careful watching of nature."),
-            ("Mathematics",   None,               "+2 sci",            "Counting and early algebra."),
-            ("Astronomy",     Some("Explorer"),   "+2 sci +1 mov",     "Celestial tracking for nav."),
-            ("Medicine",      Some("Physician"),  "+2 sci +1 food",    "Herbal treatments."),
-            ("Geometry",      None,               "+3 sci +1 prod",    "Proofs underpin architecture."),
-            ("Alchemy",       None,               "+2 sci +2 prod",    "Proto-chemistry of materials."),
-            ("Optics",        None,               "+3 sci +1 atk",     "Lenses improve reconnaissance."),
-            ("Cartography",   Some("Explorer"),   "+3 sci +2 mov",     "Accurate maps guide exploration."),
-            ("Anatomy",       Some("Surgeon"),    "+3 sci +2 food",    "Study of the human body."),
-            ("Heliocentric",  None,               "+4 sci",            "Sun-centered model confirmed."),
-            ("Sci. Method",   None,               "+5 sci",            "Hypothesis and falsification."),
-            ("Printing Press",None,               "+4 sci +2 cult",    "Mass reproduction of texts."),
-            ("Calculus",      None,               "+5 sci +1 prod",    "Rates of change and physics."),
-            ("Electricity",   None,               "+5 sci +2 prod",    "Current electricity harnessed."),
-            ("Chemistry",     Some("Chemist"),    "+5 sci +3 prod",    "Periodic table drives industry."),
-            ("Thermodynamics",None,               "+5 sci +4 prod",    "Heat-work engine design."),
-            ("Evolution",     None,               "+5 sci +3 cult",    "Natural selection explained."),
-            ("Germ Theory",   Some("Field Medic"),"+5 sci +3 food",    "Microbes cause disease."),
-            ("Electronics",   None,               "+7 sci +2 prod",    "Vacuum tubes handle signals."),
-            ("Industrialism", None,               "+8 sci +5 prod",    "Machine production transforms all."),
+            ("Observation",   None,              Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 1, cult: 0 },            "Careful watching of nature."),
+            ("Mathematics",   None,              Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 2, cult: 0 },            "Counting and early algebra."),
+            ("Astronomy",     Some("Explorer"),  Stat { food: 0, atk: 0, prod: 0, mov: 1, def: 0, gold: 0, sci: 2, cult: 0 },     "Celestial tracking for nav."),
+            ("Medicine",      Some("Physician"), Stat { food: 1, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 2, cult: 0 },    "Herbal treatments."),
+            ("Geometry",      None,             Stat { food: 0, atk: 0, prod: 1, mov: 0, def: 0, gold: 0, sci: 3, cult: 0 },    "Proofs underpin architecture."),
+            ("Alchemy",       None,             Stat { food: 0, atk: 0, prod: 2, mov: 0, def: 0, gold: 0, sci: 2, cult: 0 },    "Proto-chemistry of materials."),
+            ("Optics",        None,             Stat { food: 0, atk: 1, prod: 0, mov: 0, def: 0, gold: 0, sci: 3, cult: 0 },     "Lenses improve reconnaissance."),
+            ("Cartography",   Some("Explorer"), Stat { food: 0, atk: 0, prod: 0, mov: 2, def: 0, gold: 0, sci: 3, cult: 0 },     "Accurate maps guide exploration."),
+            ("Anatomy",       Some("Surgeon"),  Stat { food: 2, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 3, cult: 0 },    "Study of the human body."),
+            ("Heliocentric",  None,             Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 4, cult: 0 },            "Sun-centered model confirmed."),
+            ("Sci. Method",   None,             Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 5, cult: 0 },            "Hypothesis and falsification."),
+            ("Printing Press",None,             Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 4, cult: 2 },    "Mass reproduction of texts."),
+            ("Calculus",      None,             Stat { food: 0, atk: 0, prod: 1, mov: 0, def: 0, gold: 0, sci: 5, cult: 0 },    "Rates of change and physics."),
+            ("Electricity",   None,             Stat { food: 0, atk: 0, prod: 2, mov: 0, def: 0, gold: 0, sci: 5, cult: 0 },    "Current electricity harnessed."),
+            ("Chemistry",     Some("Chemist"),  Stat { food: 0, atk: 0, prod: 3, mov: 0, def: 0, gold: 0, sci: 5, cult: 0 },    "Periodic table drives industry."),
+            ("Thermodynamics",None,             Stat { food: 0, atk: 0, prod: 4, mov: 0, def: 0, gold: 0, sci: 5, cult: 0 },    "Heat-work engine design."),
+            ("Evolution",     None,             Stat { food: 0, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 5, cult: 3 },    "Natural selection explained."),
+            ("Germ Theory",   Some("Field Medic"),Stat { food: 3, atk: 0, prod: 0, mov: 0, def: 0, gold: 0, sci: 5, cult: 0 },    "Microbes cause disease."),
+            ("Electronics",   None,              Stat { food: 0, atk: 0, prod: 2, mov: 0, def: 0, gold: 0, sci: 7, cult: 0 },    "Vacuum tubes handle signals."),
+            ("Industrialism", None,             Stat { food: 0, atk: 0, prod: 5, mov: 0, def: 0, gold: 0, sci: 8, cult: 0 },    "Machine production transforms all."),
         ]),
     ]
 }
@@ -456,7 +468,7 @@ impl App {
                     p.researched[row][col] = true;
                     p.research_progress = None;
                     let tech = self.techs[row].1[col].clone();
-                    apply_yields(tech.stats, p);
+                    apply_yields(&tech.stats, p);
                     if !p.is_ai { self.status = format!("Discovered: {}!", tech.name); }
                 } else {
                     p.research_progress = Some((col, row, left - 1));
@@ -640,12 +652,12 @@ impl App {
     }
 }
 
-fn apply_yields(stats: &str, p: &mut Player) {
-    if stats.contains("gold") { p.gold_inc += 2; }
-    if stats.contains("food") { p.food_inc += 2; }
-    if stats.contains("sci")  { p.sci_inc  += 2; }
-    if stats.contains("cult") { p.cult_inc += 2; }
-    if stats.contains("prod") { p.prod_inc += 2; }
+fn apply_yields(stats: &Stat, p: &mut Player) {
+    p.gold_inc += stats.gold;
+    p.food_inc += stats.food;
+    p.sci_inc  += stats.sci;
+    p.cult_inc += stats.cult;
+    p.prod_inc += stats.prod;
 }
 
 fn generate_map(seed: u32) -> Vec<Vec<Tile>> {
@@ -738,7 +750,7 @@ impl Widget for MapWidget<'_> {
                 let city = app.cities.iter().find(|c| c.x == mx && c.y == my);
 
                 if is_selected {
-                    buf.get_mut(bx, by).set_symbol("@").set_fg(Color::Yellow).set_bg(tile.bg()).set_style(Modifier::BOLD);
+                    buf.get_mut(bx, by).set_symbol("@").set_fg(Color::Green).set_bg(tile.bg()).set_style(Modifier::BOLD);
                 } else if let Some(u) = unit {
                     buf.get_mut(bx, by).set_symbol("@").set_fg(owner_color(u.owner)).set_bg(tile.bg());
                 } else if let Some(c) = city {
@@ -758,7 +770,7 @@ fn owner_color(owner: usize) -> Color {
         2 => Color::Magenta,
         3 => Color::Cyan,
         4 => Color::Green,
-        _ => Color::Yellow,
+        _ => Color::Black,
     }
 }
 
@@ -877,7 +889,11 @@ fn draw_tech(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(format!("[{}]  ", track.label()), Style::default().fg(Color::DarkGray)),
             Span::styled(state, Style::default().fg(Color::Yellow)),
         ]),
-        Line::from(Span::styled(format!("{}{}  —  {}", unit_str, tech.stats, tech.desc), Style::default().fg(Color::Gray))),
+        Line::from(Span::styled(format!(
+            "{} atk: {} cult: {} def: {} food: {} gold: {} mov: {} prod: {} sci: {} —  {}", 
+            unit_str, tech.stats.atk, tech.stats.cult, tech.stats.def, tech.stats.food, tech.stats.gold, tech.stats.mov, tech.stats.prod, tech.stats.sci, 
+            tech.desc
+        ), Style::default().fg(Color::Gray))),
         Line::from(Span::styled(" ↑↓←→ navigate    Enter = research    M = back to map", Style::default().fg(Color::DarkGray))),
     ]).block(Block::default().borders(Borders::TOP)), info_area);
 }
