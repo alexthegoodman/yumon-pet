@@ -247,26 +247,61 @@ fn all_techs() -> Vec<(Track, Vec<Tech>)> {
 }
 
 #[derive(PartialEq)]
-enum Screen { Map, Tech, Help }
+enum Screen { Map, Tech, Help, City(usize) }
 
-struct Unit { x: usize, y: usize, name: &'static str }
+struct Unit {
+    x: usize,
+    y: usize,
+    name: &'static str,
+    owner: usize,
+    health: i32,
+    moved: bool,
+}
 
-struct App {
-    screen: Screen,
-    map: Vec<Vec<Tile>>,
-    units: Vec<Unit>,
-    cam_x: usize,
-    cam_y: usize,
-    researched: Vec<Vec<bool>>,
-    tech_cursor: (usize, usize),
-    research_progress: Option<(usize, usize, u32)>,
-    techs: Vec<(Track, Vec<Tech>)>,
-    turn: u32,
+struct City {
+    x: usize,
+    y: usize,
+    name: String,
+    owner: usize,
+}
+
+struct Player {
+    name: String,
+    is_ai: bool,
     gold: i32,
     food: i32,
     science: i32,
     culture: i32,
     production: i32,
+    gold_inc: i32,
+    food_inc: i32,
+    sci_inc: i32,
+    cult_inc: i32,
+    prod_inc: i32,
+    researched: Vec<Vec<bool>>,
+    research_progress: Option<(usize, usize, u32)>,
+}
+
+struct UnitDef {
+    name: &'static str,
+    cost: i32,
+    atk: i32,
+    def: i32,
+}
+
+struct App {
+    screen: Screen,
+    map: Vec<Vec<Tile>>,
+    players: Vec<Player>,
+    current_player: usize,
+    cities: Vec<City>,
+    units: Vec<Unit>,
+    selected_unit: Option<usize>,
+    cam_x: usize,
+    cam_y: usize,
+    tech_cursor: (usize, usize),
+    techs: Vec<(Track, Vec<Tech>)>,
+    turn: u32,
     status: String,
 }
 
@@ -275,94 +310,252 @@ impl App {
         let seed = rand::thread_rng().r#gen::<u32>();
         let map = generate_map(seed);
         let (sx, sy) = find_start(&map);
-        App {
+
+        let p1 = Player {
+            name: "Player 1".into(),
+            is_ai: false,
+            gold: 50, food: 10, science: 0, culture: 0, production: 0,
+            gold_inc: 5, food_inc: 2, sci_inc: 1, cult_inc: 1, prod_inc: 2,
+            researched: vec![vec![false; TECH_COLS]; TECH_ROWS],
+            research_progress: None,
+        };
+
+        let p2 = Player {
+            name: "Yumon AI".into(),
+            is_ai: true,
+            gold: 50, food: 10, science: 0, culture: 0, production: 0,
+            gold_inc: 5, food_inc: 2, sci_inc: 1, cult_inc: 1, prod_inc: 2,
+            researched: vec![vec![false; TECH_COLS]; TECH_ROWS],
+            research_progress: None,
+        };
+
+        let mut app = App {
             screen: Screen::Map,
             map,
-            units: vec![Unit { x: sx, y: sy, name: "Settler" }],
+            players: vec![p1, p2],
+            current_player: 0,
+            cities: vec![City { x: sx, y: sy, name: "Capital".into(), owner: 0 }],
+            units: vec![Unit { x: sx, y: sy, name: "Warrior", owner: 0, health: 100, moved: false }],
+            selected_unit: Some(0),
             cam_x: sx.saturating_sub(30),
             cam_y: sy.saturating_sub(14),
-            researched: vec![vec![false; TECH_COLS]; TECH_ROWS],
             tech_cursor: (0, 0),
-            research_progress: None,
             techs: all_techs(),
             turn: 1,
-            gold: 0, food: 5, science: 1, culture: 1, production: 2,
-            status: String::from("Welcome! T=tech grid  Enter=end turn  H=help"),
-        }
+            status: String::from("Capital founded! T=tech grid  Tab=next unit  B=found city  Enter=end turn"),
+        };
+
+        // Spawn AI somewhere else
+        let (ax, ay) = (MAP_W - sx - 10, MAP_H - sy - 5);
+        app.cities.push(City { x: ax, y: ay, name: "AI Nest".into(), owner: 1 });
+        app.units.push(Unit { x: ax, y: ay, name: "Warrior", owner: 1, health: 100, moved: false });
+        
+        app
     }
 
     fn can_research(&self, col: usize, row: usize) -> bool {
-        if self.researched[row][col] { return false; }
-        if self.research_progress.is_some() { return false; }
+        let p = &self.players[self.current_player];
+        if p.researched[row][col] { return false; }
+        if p.research_progress.is_some() { return false; }
         if col == 0 { return true; }
-        if self.researched[row][col - 1] { return true; }
-        if row > 0 && self.researched[row - 1][col] { return true; }
-        if row < TECH_ROWS - 1 && self.researched[row + 1][col] { return true; }
+        if p.researched[row][col - 1] { return true; }
+        if row > 0 && p.researched[row - 1][col] { return true; }
+        if row < TECH_ROWS - 1 && p.researched[row + 1][col] { return true; }
         false
     }
 
     fn start_research(&mut self, col: usize, row: usize) {
         if self.can_research(col, row) {
             let cost = self.techs[row].1[col].cost;
-            self.research_progress = Some((col, row, cost));
+            let p = &mut self.players[self.current_player];
+            p.research_progress = Some((col, row, cost));
             let name = self.techs[row].1[col].name;
             self.status = format!("Researching {} ({} turns)...", name, cost);
-        } else if self.research_progress.is_some() {
-            self.status = "Already researching! Finish current tech first.".into();
-        } else if self.researched[row][col] {
-            self.status = "Already researched.".into();
         } else {
-            self.status = "Locked — research an adjacent tile first.".into();
+            let p = &self.players[self.current_player];
+            if p.research_progress.is_some() {
+                self.status = "Already researching!".into();
+            } else if p.researched[row][col] {
+                self.status = "Already researched.".into();
+            } else {
+                self.status = "Locked — research adjacent first.".into();
+            }
         }
     }
 
     fn end_turn(&mut self) {
-        self.turn += 1;
-        if let Some((col, row, left)) = self.research_progress {
-            if left <= 1 {
-                self.researched[row][col] = true;
-                self.research_progress = None;
-                let tech = &self.techs[row].1[col];
-                let stats = tech.stats;
-                let name = tech.name;
-                self.status = format!("Discovered: {}! ({})", name, stats);
-                apply_yields(stats, &mut self.gold, &mut self.food,
-                             &mut self.science, &mut self.culture, &mut self.production);
-            } else {
-                self.research_progress = Some((col, row, left - 1));
-                let name = self.techs[row].1[col].name;
-                self.status = format!("Researching {} ({} turns left)...", name, left - 1);
+        // 1. Process resources for CURRENT player
+        {
+            let p = &mut self.players[self.current_player];
+            p.gold += p.gold_inc;
+            p.food += p.food_inc;
+            p.science += p.sci_inc;
+            p.culture += p.cult_inc;
+            p.production += p.prod_inc;
+
+            if let Some((col, row, left)) = p.research_progress {
+                if left <= 1 {
+                    p.researched[row][col] = true;
+                    p.research_progress = None;
+                    let tech = self.techs[row].1[col].clone();
+                    apply_yields(tech.stats, p);
+                    if !p.is_ai { self.status = format!("Discovered: {}!", tech.name); }
+                } else {
+                    p.research_progress = Some((col, row, left - 1));
+                }
             }
+        }
+
+        // 2. Next player
+        self.current_player = (self.current_player + 1) % self.players.len();
+        
+        if self.current_player == 0 {
+            self.turn += 1;
+        }
+
+        // 3. Reset units
+        for u in &mut self.units {
+            if u.owner == self.current_player { u.moved = false; }
+        }
+
+        // 4. AI Logic
+        if self.players[self.current_player].is_ai {
+            self.do_ai_turn();
+            self.end_turn();
         } else {
-            self.status = format!("Turn {}. Press T to pick a tech to research.", self.turn);
+            self.next_unit();
+            if self.status.starts_with("Researching") || self.status.starts_with("Turn") || self.status.is_empty() {
+                self.status = format!("Turn {}: Your Move.", self.turn);
+            }
+        }
+    }
+
+    fn do_ai_turn(&mut self) {
+        let pid = self.current_player;
+        // AI Research
+        let mut best = None;
+        for r in 0..TECH_ROWS {
+            for c in 0..TECH_COLS {
+                if self.can_research(c, r) {
+                    best = Some((c, r));
+                    break;
+                }
+            }
+            if best.is_some() { break; }
+        }
+        if let Some((c, r)) = best {
+            let cost = self.techs[r].1[c].cost;
+            self.players[pid].research_progress = Some((c, r, cost));
+        }
+
+        // AI Units (random moves)
+        for i in 0..self.units.len() {
+            if self.units[i].owner == pid {
+                let dx = rand::thread_rng().gen_range(-1..=1);
+                let dy = rand::thread_rng().gen_range(-1..=1);
+                let nx = (self.units[i].x as i32 + dx).clamp(0, MAP_W as i32 - 1) as usize;
+                let ny = (self.units[i].y as i32 + dy).clamp(0, MAP_H as i32 - 1) as usize;
+                if self.map[ny][nx].passable() {
+                    self.units[i].x = nx;
+                    self.units[i].y = ny;
+                }
+            }
         }
     }
 
     fn move_unit(&mut self, dx: i32, dy: i32) {
-        if self.units.is_empty() { return; }
-        let u = &self.units[0];
-        let nx = (u.x as i32 + dx).clamp(0, MAP_W as i32 - 1) as usize;
-        let ny = (u.y as i32 + dy).clamp(0, MAP_H as i32 - 1) as usize;
+        let uidx = match self.selected_unit { Some(i) => i, None => return };
+        if self.units[uidx].moved { return; }
+
+        let nx = (self.units[uidx].x as i32 + dx).clamp(0, MAP_W as i32 - 1) as usize;
+        let ny = (self.units[uidx].y as i32 + dy).clamp(0, MAP_H as i32 - 1) as usize;
+
         if self.map[ny][nx].passable() {
-            self.units[0].x = nx;
-            self.units[0].y = ny;
+            self.units[uidx].x = nx;
+            self.units[uidx].y = ny;
+            self.units[uidx].moved = true;
+
             let vw = 70usize;
             let vh = 30usize;
-            if nx < self.cam_x + 6 { self.cam_x = nx.saturating_sub(6); }
-            if nx > self.cam_x + vw - 6 { self.cam_x = (nx + 6).saturating_sub(vw); }
-            if ny < self.cam_y + 4 { self.cam_y = ny.saturating_sub(4); }
-            if ny > self.cam_y + vh - 4 { self.cam_y = (ny + 4).saturating_sub(vh); }
+            if nx < self.cam_x + 10 { self.cam_x = nx.saturating_sub(10); }
+            if nx > self.cam_x + vw - 10 { self.cam_x = (nx + 10).saturating_sub(vw); }
+            if ny < self.cam_y + 6 { self.cam_y = ny.saturating_sub(6); }
+            if ny > self.cam_y + vh - 6 { self.cam_y = (ny + 6).saturating_sub(vh); }
+            
+            // Auto select next if this one moved
+            self.next_unit();
+        }
+    }
+
+    fn next_unit(&mut self) {
+        let start = self.selected_unit.map(|i| i + 1).unwrap_or(0);
+        for i in 0..self.units.len() {
+            let idx = (start + i) % self.units.len();
+            if self.units[idx].owner == self.current_player && !self.units[idx].moved {
+                self.selected_unit = Some(idx);
+                let u = &self.units[idx];
+                self.cam_x = u.x.saturating_sub(35);
+                self.cam_y = u.y.saturating_sub(15);
+                return;
+            }
+        }
+        self.selected_unit = None;
+    }
+
+    fn found_city(&mut self) {
+        let uidx = match self.selected_unit { Some(i) => i, None => return };
+        let (ux, uy, owner) = (self.units[uidx].x, self.units[uidx].y, self.units[uidx].owner);
+        if self.units[uidx].name == "Settler" {
+            self.cities.push(City { x: ux, y: uy, name: format!("City {}", self.cities.len()+1), owner });
+            self.units.remove(uidx);
+            self.next_unit();
+            self.status = "New city founded!".into();
+        } else {
+            self.status = "Only settlers can found cities!".into();
+        }
+    }
+
+    fn get_available_units(&self, p_idx: usize) -> Vec<(&'static str, i32)> {
+        let p = &self.players[p_idx];
+        let mut available = vec![("Warrior", 20), ("Settler", 80)];
+        for r in 0..TECH_ROWS {
+            for c in 0..TECH_COLS {
+                if p.researched[r][c] {
+                    if let Some(unit_name) = self.techs[r].1[c].unit {
+                        if unit_name != "Warrior" && unit_name != "Settler" {
+                            available.push((unit_name, 30 + (c as i32 * 10)));
+                        }
+                    }
+                }
+            }
+        }
+        available
+    }
+
+    fn purchase_unit(&mut self, city_idx: usize, unit_idx: usize) {
+        let available = self.get_available_units(self.current_player);
+        if unit_idx >= available.len() { return; }
+        let (name, cost) = available[unit_idx];
+        let p = &mut self.players[self.current_player];
+        if p.gold >= cost {
+            p.gold -= cost;
+            let (cx, cy) = (self.cities[city_idx].x, self.cities[city_idx].y);
+            self.units.push(Unit { x: cx, y: cy, name, owner: self.current_player, health: 100, moved: true });
+            self.status = format!("Purchased {}!", name);
+            self.screen = Screen::Map;
+            self.selected_unit = Some(self.units.len() - 1);
+        } else {
+            self.status = "Not enough gold!".into();
         }
     }
 }
 
-fn apply_yields(stats: &str, gold: &mut i32, food: &mut i32,
-                sci: &mut i32, cult: &mut i32, prod: &mut i32) {
-    if stats.contains("gold") { *gold  += 2; }
-    if stats.contains("food") { *food  += 2; }
-    if stats.contains("sci")  { *sci   += 2; }
-    if stats.contains("cult") { *cult  += 2; }
-    if stats.contains("prod") { *prod  += 2; }
+fn apply_yields(stats: &str, p: &mut Player) {
+    if stats.contains("gold") { p.gold_inc += 2; }
+    if stats.contains("food") { p.food_inc += 2; }
+    if stats.contains("sci")  { p.sci_inc  += 2; }
+    if stats.contains("cult") { p.cult_inc += 2; }
+    if stats.contains("prod") { p.prod_inc += 2; }
 }
 
 fn generate_map(seed: u32) -> Vec<Vec<Tile>> {
@@ -401,6 +594,7 @@ fn draw(f: &mut Frame, app: &App) {
         Screen::Map  => draw_map(f, app, area),
         Screen::Tech => draw_tech(f, app, area),
         Screen::Help => { draw_map(f, app, area); draw_help(f, area); }
+        Screen::City(idx) => draw_city(f, app, idx, area),
     }
 }
 
@@ -412,7 +606,8 @@ fn draw_map(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(MapWidget { app }, chunks[0]);
 
-    let prog = if let Some((col, row, left)) = app.research_progress {
+    let p = &app.players[app.current_player];
+    let prog = if let Some((col, row, left)) = p.research_progress {
         let name = app.techs[row].1[col].name;
         format!("  |  {} — {}t left", name, left)
     } else { String::new() };
@@ -420,7 +615,8 @@ fn draw_map(f: &mut Frame, app: &App, area: Rect) {
     let status = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(format!(" Tr:{:<3}", app.turn), Style::default().fg(Color::Yellow)),
-            Span::raw(format!("  G:{:<4} F:{:<4} Sc:{:<4} Cu:{:<4} Pr:{:<4}", app.gold, app.food, app.science, app.culture, app.production)),
+            Span::raw(format!("  G:{}(+{}) F:{}(+{}) Sc:{}(+{}) Cu:{}(+{}) Pr:{}(+{})", 
+                p.gold, p.gold_inc, p.food, p.food_inc, p.science, p.sci_inc, p.culture, p.cult_inc, p.production, p.prod_inc)),
             Span::styled(prog, Style::default().fg(Color::Cyan)),
         ]),
         Line::from(Span::styled(format!(" {}", app.status), Style::default().fg(Color::Gray))),
@@ -441,8 +637,19 @@ impl Widget for MapWidget<'_> {
                 let tile = app.map[my][mx];
                 let bx = area.x + sx as u16;
                 let by = area.y + sy as u16;
-                if app.units.iter().any(|u| u.x == mx && u.y == my) {
-                    buf.get_mut(bx, by).set_symbol("@").set_fg(Color::White).set_bg(tile.bg());
+
+                let is_selected = app.selected_unit.map(|i| app.units[i].x == mx && app.units[i].y == my).unwrap_or(false);
+                let unit = app.units.iter().find(|u| u.x == mx && u.y == my);
+                let city = app.cities.iter().find(|c| c.x == mx && c.y == my);
+
+                if is_selected {
+                    buf.get_mut(bx, by).set_symbol("@").set_fg(Color::Yellow).set_bg(tile.bg()).set_style(Modifier::BOLD);
+                } else if let Some(u) = unit {
+                    let fg = if u.owner == 0 { Color::White } else { Color::Red };
+                    buf.get_mut(bx, by).set_symbol("@").set_fg(fg).set_bg(tile.bg());
+                } else if let Some(c) = city {
+                    let fg = if c.owner == 0 { Color::Cyan } else { Color::Magenta };
+                    buf.get_mut(bx, by).set_symbol("H").set_fg(fg).set_bg(tile.bg()).set_style(Modifier::BOLD);
                 } else {
                     buf.get_mut(bx, by).set_symbol(tile.glyph()).set_fg(tile.fg()).set_bg(tile.bg());
                 }
@@ -451,7 +658,51 @@ impl Widget for MapWidget<'_> {
     }
 }
 
+fn draw_city(f: &mut Frame, app: &App, city_idx: usize, area: Rect) {
+    let city = &app.cities[city_idx];
+    let p = &app.players[app.current_player];
+    
+    let block = Block::default().borders(Borders::ALL).title(format!(" City: {} ", city.name))
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(2)])
+        .split(inner);
+
+    f.render_widget(Paragraph::new(format!("  Owner: {} | Gold: {} (+{})", p.name, p.gold, p.gold_inc)), chunks[0]);
+
+    let mut available = vec![("Warrior", 20), ("Settler", 80)];
+    for r in 0..TECH_ROWS {
+        for c in 0..TECH_COLS {
+            if p.researched[r][c] {
+                if let Some(unit_name) = app.techs[r].1[c].unit {
+                    if unit_name != "Warrior" && unit_name != "Settler" {
+                        available.push((unit_name, 30 + (c as i32 * 10)));
+                    }
+                }
+            }
+        }
+    }
+
+    let items: Vec<Line> = available.iter().enumerate().map(|(i, (name, cost))| {
+        let style = if p.gold >= *cost { Style::default().fg(Color::White) } else { Style::default().fg(Color::DarkGray) };
+        Line::from(vec![
+            Span::styled(format!("  [{}] {:<18} cost: {:<4} gold", i + 1, name, cost), style)
+        ])
+    }).collect();
+
+    f.render_widget(Paragraph::new(items).block(Block::default().title(" Purchase Units (Press number) ")), chunks[1]);
+    f.render_widget(Paragraph::new("  Press M or Esc to return to map").style(Style::default().fg(Color::DarkGray)), chunks[2]);
+}
+
 fn draw_tech(f: &mut Frame, app: &App, area: Rect) {
+    let current_player = app.current_player;
+    let current_player = app.players.get(current_player);
+    let current_player = current_player.as_ref().expect("Couldn't get player");
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(5)])
@@ -504,8 +755,8 @@ fn draw_tech(f: &mut Frame, app: &App, area: Rect) {
 
             let tech = &techs[col_idx];
             let is_cursor     = app.tech_cursor == (col_idx, row_idx);
-            let is_researched = app.researched[row_idx][col_idx];
-            let in_progress   = app.research_progress.map(|(c,r,_)| c==col_idx && r==row_idx).unwrap_or(false);
+            let is_researched = current_player.researched[row_idx][col_idx];
+            let in_progress   = current_player.research_progress.map(|(c,r,_)| c==col_idx && r==row_idx).unwrap_or(false);
             let available     = app.can_research(col_idx, row_idx);
 
             let (fg, bg, bfg) = if is_cursor {
@@ -550,8 +801,8 @@ fn draw_tech(f: &mut Frame, app: &App, area: Rect) {
     let (cc, cr) = app.tech_cursor;
     let tech  = &app.techs[cr].1[cc];
     let track = &app.techs[cr].0;
-    let state = if app.researched[cr][cc] { "Researched".to_string() }
-                else if app.research_progress.map(|(c,r,_)| c==cc&&r==cr).unwrap_or(false) { "In progress".to_string() }
+    let state = if current_player.researched[cr][cc] { "Researched".to_string() }
+                else if current_player.research_progress.map(|(c,r,_)| c==cc&&r==cr).unwrap_or(false) { "In progress".to_string() }
                 else if app.can_research(cc, cr) { format!("Available — {} turns", tech.cost) }
                 else { "Locked".to_string() };
     let unit_str = tech.unit.map(|u| format!("  Unit: {}  ", u)).unwrap_or_default();
@@ -587,19 +838,22 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Line::from(Span::styled("  Map:", Style::default().fg(Color::Cyan))),
         Line::from("    W A S D / arrows — move unit"),
         Line::from("    Enter            — end turn"),
+        Line::from("    Tab              — next unit"),
+        Line::from("    B                — found city"),
+        Line::from("    C                — city menu"),
         Line::from("    T                — tech grid"),
-        Line::from("    H                — this help"),
+        Line::from("    H                — help"),
         Line::from("    Q                — quit"),
         Line::from(""),
-        Line::from(Span::styled("  Tech grid:", Style::default().fg(Color::Cyan))),
-        Line::from("    Arrows  — navigate tiles"),
-        Line::from("    Enter   — start research"),
+        Line::from(Span::styled("  City menu:", Style::default().fg(Color::Cyan))),
+        Line::from("    1-9     — purchase unit"),
         Line::from("    M / Esc — back to map"),
         Line::from(""),
         Line::from(Span::styled("  Map legend:", Style::default().fg(Color::Cyan))),
         Line::from("    ≈ deep sea   ~ shallows  . sand"),
         Line::from("    , plains     f forest    n hills"),
-        Line::from("    ^ mountain   * snow      @ you"),
+        Line::from("    ^ mountain   * snow      @ you (yellow)"),
+        Line::from("    H city       @ unit      @ enemy (red)"),
         Line::from(""),
     ]).block(Block::default().borders(Borders::ALL).title(" Help — H to close ")
         .border_style(Style::default().fg(Color::Yellow)));
@@ -641,6 +895,18 @@ fn main() -> io::Result<()> {
                         KeyCode::Char('s') | KeyCode::Down  => app.move_unit(0,  1),
                         KeyCode::Char('a') | KeyCode::Left  => app.move_unit(-1, 0),
                         KeyCode::Char('d') | KeyCode::Right => app.move_unit(1,  0),
+                        KeyCode::Char('b') | KeyCode::Char('B') => app.found_city(),
+                        KeyCode::Char('c') | KeyCode::Char('C') => {
+                            if let Some(uidx) = app.selected_unit {
+                                let (ux, uy) = (app.units[uidx].x, app.units[uidx].y);
+                                if let Some(cidx) = app.cities.iter().position(|c| c.x == ux && c.y == uy && c.owner == app.current_player) {
+                                    app.screen = Screen::City(cidx);
+                                } else {
+                                    app.status = "No friendly city here!".into();
+                                }
+                            }
+                        }
+                        KeyCode::Tab => app.next_unit(),
                         KeyCode::Enter => app.end_turn(),
                         _ => {}
                     },
@@ -655,6 +921,17 @@ fn main() -> io::Result<()> {
                         KeyCode::Enter => { let (c,r) = app.tech_cursor; app.start_research(c, r); }
                         _ => {}
                     },
+                    Screen::City(cidx) => match key.code {
+                        KeyCode::Char('q') | KeyCode::Char('Q') => break,
+                        KeyCode::Char('m') | KeyCode::Char('M') | KeyCode::Esc => { app.screen = Screen::Map; }
+                        KeyCode::Char(c) if c.is_digit(10) => {
+                            let digit = c.to_digit(10).unwrap() as usize;
+                            if digit > 0 {
+                                app.purchase_unit(cidx, digit - 1);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
