@@ -22,6 +22,9 @@ const MAP_H: usize = 36;
 const TECH_COLS: usize = 20;
 const TECH_ROWS: usize = 5;
 
+/// Change this to spawn more or fewer AI opponents.
+const NUM_AI_PLAYERS: usize = 3;
+
 #[derive(Clone, Copy, PartialEq)]
 enum Tile { DeepWater, ShallowWater, Sand, Plains, Forest, Hills, Mountain, Snow }
 
@@ -263,6 +266,9 @@ struct City {
     y: usize,
     name: String,
     owner: usize,
+    /// None means no production order — blocks human end-turn
+    build_queue: Option<(&'static str, i32)>, // (unit name, gold cost)
+    build_progress: i32,
 }
 
 struct Player {
@@ -280,13 +286,6 @@ struct Player {
     prod_inc: i32,
     researched: Vec<Vec<bool>>,
     research_progress: Option<(usize, usize, u32)>,
-}
-
-struct UnitDef {
-    name: &'static str,
-    cost: i32,
-    atk: i32,
-    def: i32,
 }
 
 struct App {
@@ -309,52 +308,86 @@ impl App {
     fn new() -> Self {
         let seed = rand::thread_rng().r#gen::<u32>();
         let map = generate_map(seed);
+
+        // All passable land tiles for spawning
+        let land_tiles: Vec<(usize, usize)> = (0..MAP_H)
+            .flat_map(|y| (0..MAP_W).map(move |x| (x, y)))
+            .filter(|&(x, y)| map[y][x].passable())
+            .collect();
+
+        let mut rng = rand::thread_rng();
+
+        // Pick spawn far from all existing occupied positions
+        let pick_spawn = |occupied: &Vec<(usize, usize)>, rng: &mut rand::rngs::ThreadRng| -> (usize, usize) {
+            let mut best = land_tiles[rng.gen_range(0..land_tiles.len())];
+            let mut best_dist = 0usize;
+            for _ in 0..200 {
+                let cand = land_tiles[rng.gen_range(0..land_tiles.len())];
+                let min_d = occupied.iter().map(|&(ox, oy)| {
+                    let dx = (cand.0 as i32 - ox as i32).unsigned_abs() as usize;
+                    let dy = (cand.1 as i32 - oy as i32).unsigned_abs() as usize;
+                    dx + dy
+                }).min().unwrap_or(usize::MAX);
+                if min_d > best_dist { best_dist = min_d; best = cand; }
+            }
+            best
+        };
+
+        let mut occupied: Vec<(usize, usize)> = Vec::new();
         let (sx, sy) = find_start(&map);
+        occupied.push((sx, sy));
 
         let p1 = Player {
-            name: "Player 1".into(),
-            is_ai: false,
+            name: "Player 1".into(), is_ai: false,
             gold: 50, food: 10, science: 0, culture: 0, production: 0,
             gold_inc: 5, food_inc: 2, sci_inc: 1, cult_inc: 1, prod_inc: 2,
             researched: vec![vec![false; TECH_COLS]; TECH_ROWS],
             research_progress: None,
         };
 
-        let p2 = Player {
-            name: "Yumon AI".into(),
-            is_ai: true,
-            gold: 50, food: 10, science: 0, culture: 0, production: 0,
-            gold_inc: 5, food_inc: 2, sci_inc: 1, cult_inc: 1, prod_inc: 2,
-            researched: vec![vec![false; TECH_COLS]; TECH_ROWS],
-            research_progress: None,
-        };
+        let mut players = vec![p1];
+        let mut cities: Vec<City> = vec![City {
+            x: sx, y: sy, name: "Capital".into(), owner: 0,
+            build_queue: None, build_progress: 0,
+        }];
+        let mut units: Vec<Unit> = vec![
+            Unit { x: sx, y: sy, name: "Warrior", owner: 0, health: 100, moved: false }
+        ];
 
-        let mut app = App {
-            screen: Screen::Map,
-            map,
-            players: vec![p1, p2],
-            current_player: 0,
-            cities: vec![City { x: sx, y: sy, name: "Capital".into(), owner: 0 }],
-            units: vec![Unit { x: sx, y: sy, name: "Warrior", owner: 0, health: 100, moved: false }],
+        for i in 0..NUM_AI_PLAYERS {
+            let pid = i + 1;
+            let (ax, ay) = pick_spawn(&occupied, &mut rng);
+            occupied.push((ax, ay));
+            players.push(Player {
+                name: format!("AI {}", pid), is_ai: true,
+                gold: 50, food: 10, science: 0, culture: 0, production: 0,
+                gold_inc: 5, food_inc: 2, sci_inc: 1, cult_inc: 1, prod_inc: 2,
+                researched: vec![vec![false; TECH_COLS]; TECH_ROWS],
+                research_progress: None,
+            });
+            cities.push(City {
+                x: ax, y: ay, name: format!("AI Nest {}", pid), owner: pid,
+                build_queue: None, build_progress: 0,
+            });
+            units.push(Unit { x: ax, y: ay, name: "Warrior", owner: pid, health: 100, moved: false });
+        }
+
+        App {
+            screen: Screen::Map, map, players,
+            current_player: 0, cities, units,
             selected_unit: Some(0),
-            cam_x: sx.saturating_sub(30),
-            cam_y: sy.saturating_sub(14),
-            tech_cursor: (0, 0),
-            techs: all_techs(),
-            turn: 1,
-            status: String::from("Capital founded! T=tech grid  Tab=next unit  B=found city  Enter=end turn"),
-        };
-
-        // Spawn AI somewhere else
-        let (ax, ay) = (MAP_W - sx - 10, MAP_H - sy - 5);
-        app.cities.push(City { x: ax, y: ay, name: "AI Nest".into(), owner: 1 });
-        app.units.push(Unit { x: ax, y: ay, name: "Warrior", owner: 1, health: 100, moved: false });
-        
-        app
+            cam_x: sx.saturating_sub(30), cam_y: sy.saturating_sub(14),
+            tech_cursor: (0, 0), techs: all_techs(), turn: 1,
+            status: "Capital founded! Move all units, pick research (T), set city build (C) — then Enter".into(),
+        }
     }
 
     fn can_research(&self, col: usize, row: usize) -> bool {
-        let p = &self.players[self.current_player];
+        self.can_research_for(self.current_player, col, row)
+    }
+
+    fn can_research_for(&self, pid: usize, col: usize, row: usize) -> bool {
+        let p = &self.players[pid];
         if p.researched[row][col] { return false; }
         if p.research_progress.is_some() { return false; }
         if col == 0 { return true; }
@@ -367,31 +400,56 @@ impl App {
     fn start_research(&mut self, col: usize, row: usize) {
         if self.can_research(col, row) {
             let cost = self.techs[row].1[col].cost;
-            let p = &mut self.players[self.current_player];
-            p.research_progress = Some((col, row, cost));
+            self.players[self.current_player].research_progress = Some((col, row, cost));
             let name = self.techs[row].1[col].name;
-            self.status = format!("Researching {} ({} turns)...", name, cost);
+            self.status = format!("Researching {} ({} turns)…", name, cost);
         } else {
             let p = &self.players[self.current_player];
-            if p.research_progress.is_some() {
-                self.status = "Already researching!".into();
-            } else if p.researched[row][col] {
-                self.status = "Already researched.".into();
-            } else {
-                self.status = "Locked — research adjacent first.".into();
-            }
+            if p.research_progress.is_some() { self.status = "Already researching!".into(); }
+            else if p.researched[row][col]    { self.status = "Already researched.".into(); }
+            else                              { self.status = "Locked — research adjacent first.".into(); }
         }
     }
 
+    /// Human-facing blockers that must be cleared before end-turn.
+    fn end_turn_blockers(&self) -> Vec<String> {
+        let mut v = Vec::new();
+
+        let unmoved: Vec<_> = self.units.iter()
+            .filter(|u| u.owner == self.current_player && !u.moved)
+            .map(|u| u.name).collect();
+        if !unmoved.is_empty() {
+            v.push(format!("Move all units ({} remaining: {})", unmoved.len(), unmoved.join(", ")));
+        }
+
+        if self.players[self.current_player].research_progress.is_none() {
+            v.push("Choose a technology to research (T)".into());
+        }
+
+        let idle: Vec<_> = self.cities.iter()
+            .filter(|c| c.owner == self.current_player && c.build_queue.is_none())
+            .map(|c| c.name.clone()).collect();
+        if !idle.is_empty() {
+            v.push(format!("Set production in: {} (C)", idle.join(", ")));
+        }
+
+        v
+    }
+
     fn end_turn(&mut self) {
-        // 1. Process resources for CURRENT player
+        if !self.players[self.current_player].is_ai {
+            let blockers = self.end_turn_blockers();
+            if !blockers.is_empty() {
+                self.status = blockers.join("  |  ");
+                return;
+            }
+        }
+
+        // Resources & research
         {
             let p = &mut self.players[self.current_player];
-            p.gold += p.gold_inc;
-            p.food += p.food_inc;
-            p.science += p.sci_inc;
-            p.culture += p.cult_inc;
-            p.production += p.prod_inc;
+            p.gold += p.gold_inc; p.food += p.food_inc;
+            p.science += p.sci_inc; p.culture += p.cult_inc; p.production += p.prod_inc;
 
             if let Some((col, row, left)) = p.research_progress {
                 if left <= 1 {
@@ -406,66 +464,92 @@ impl App {
             }
         }
 
-        // 2. Next player
-        self.current_player = (self.current_player + 1) % self.players.len();
-        
-        if self.current_player == 0 {
-            self.turn += 1;
+        // City production: 1 gold/turn toward build cost
+        {
+            let pid = self.current_player;
+            let mut to_spawn: Vec<(usize, usize, &'static str)> = Vec::new();
+            for city in self.cities.iter_mut().filter(|c| c.owner == pid) {
+                if let Some((unit_name, cost)) = city.build_queue {
+                    city.build_progress += 1;
+                    if city.build_progress >= cost {
+                        to_spawn.push((city.x, city.y, unit_name));
+                        city.build_queue = None;
+                        city.build_progress = 0;
+                    }
+                }
+            }
+            let is_ai = self.players[pid].is_ai;
+            for (cx, cy, name) in to_spawn {
+                self.players[pid].gold -= 1;
+                self.units.push(Unit { x: cx, y: cy, name, owner: pid, health: 100, moved: true });
+                if !is_ai { self.status = format!("{} finished training!", name); }
+            }
         }
 
-        // 3. Reset units
+        // Advance player
+        self.current_player = (self.current_player + 1) % self.players.len();
+        if self.current_player == 0 { self.turn += 1; }
+
+        // Reset units for incoming player
         for u in &mut self.units {
             if u.owner == self.current_player { u.moved = false; }
         }
 
-        // 4. AI Logic
         if self.players[self.current_player].is_ai {
             self.do_ai_turn();
             self.end_turn();
         } else {
             self.next_unit();
-            if self.status.starts_with("Researching") || self.status.starts_with("Turn") || self.status.is_empty() {
-                self.status = format!("Turn {}: Your Move.", self.turn);
-            }
+            self.status = format!("Turn {}: Move all units, set research & city builds, then Enter.", self.turn);
         }
     }
 
     fn do_ai_turn(&mut self) {
         let pid = self.current_player;
-        // AI Research
-        let mut best = None;
-        for r in 0..TECH_ROWS {
-            for c in 0..TECH_COLS {
-                if self.can_research(c, r) {
-                    best = Some((c, r));
-                    break;
+
+        // Research
+        if self.players[pid].research_progress.is_none() {
+            'r: for r in 0..TECH_ROWS {
+                for c in 0..TECH_COLS {
+                    if self.can_research_for(pid, c, r) {
+                        let cost = self.techs[r].1[c].cost;
+                        self.players[pid].research_progress = Some((c, r, cost));
+                        break 'r;
+                    }
                 }
             }
-            if best.is_some() { break; }
-        }
-        if let Some((c, r)) = best {
-            let cost = self.techs[r].1[c].cost;
-            self.players[pid].research_progress = Some((c, r, cost));
         }
 
-        // AI Units (random moves)
+        // City builds
+        {
+            let available = self.get_available_units(pid);
+            if let Some(&(unit_name, cost)) = available.first() {
+                for city in self.cities.iter_mut().filter(|c| c.owner == pid && c.build_queue.is_none()) {
+                    city.build_queue = Some((unit_name, cost));
+                }
+            }
+        }
+
+        // Move units
+        let mut rng = rand::thread_rng();
         for i in 0..self.units.len() {
-            if self.units[i].owner == pid {
-                let dx = rand::thread_rng().gen_range(-1..=1);
-                let dy = rand::thread_rng().gen_range(-1..=1);
+            if self.units[i].owner == pid && !self.units[i].moved {
+                let dx = rng.gen_range(-1i32..=1);
+                let dy = rng.gen_range(-1i32..=1);
                 let nx = (self.units[i].x as i32 + dx).clamp(0, MAP_W as i32 - 1) as usize;
                 let ny = (self.units[i].y as i32 + dy).clamp(0, MAP_H as i32 - 1) as usize;
                 if self.map[ny][nx].passable() {
                     self.units[i].x = nx;
                     self.units[i].y = ny;
                 }
+                self.units[i].moved = true;
             }
         }
     }
 
     fn move_unit(&mut self, dx: i32, dy: i32) {
         let uidx = match self.selected_unit { Some(i) => i, None => return };
-        if self.units[uidx].moved { return; }
+        if self.units[uidx].moved { self.status = "Unit already moved this turn.".into(); return; }
 
         let nx = (self.units[uidx].x as i32 + dx).clamp(0, MAP_W as i32 - 1) as usize;
         let ny = (self.units[uidx].y as i32 + dy).clamp(0, MAP_H as i32 - 1) as usize;
@@ -475,15 +559,18 @@ impl App {
             self.units[uidx].y = ny;
             self.units[uidx].moved = true;
 
-            let vw = 70usize;
-            let vh = 30usize;
+            let vw = 70usize; let vh = 30usize;
             if nx < self.cam_x + 10 { self.cam_x = nx.saturating_sub(10); }
             if nx > self.cam_x + vw - 10 { self.cam_x = (nx + 10).saturating_sub(vw); }
             if ny < self.cam_y + 6 { self.cam_y = ny.saturating_sub(6); }
             if ny > self.cam_y + vh - 6 { self.cam_y = (ny + 6).saturating_sub(vh); }
-            
-            // Auto select next if this one moved
+
             self.next_unit();
+            let b = self.end_turn_blockers();
+            self.status = if b.is_empty() { "All actions complete — press Enter to end turn.".into() }
+                          else { b.join("  |  ") };
+        } else {
+            self.status = "Can't move there (impassable).".into();
         }
     }
 
@@ -499,25 +586,29 @@ impl App {
                 return;
             }
         }
-        self.selected_unit = None;
+        self.selected_unit = self.units.iter().position(|u| u.owner == self.current_player);
     }
 
     fn found_city(&mut self) {
         let uidx = match self.selected_unit { Some(i) => i, None => return };
         let (ux, uy, owner) = (self.units[uidx].x, self.units[uidx].y, self.units[uidx].owner);
         if self.units[uidx].name == "Settler" {
-            self.cities.push(City { x: ux, y: uy, name: format!("City {}", self.cities.len()+1), owner });
+            self.cities.push(City {
+                x: ux, y: uy, name: format!("City {}", self.cities.len() + 1),
+                owner, build_queue: None, build_progress: 0,
+            });
             self.units.remove(uidx);
+            self.selected_unit = None;
             self.next_unit();
-            self.status = "New city founded!".into();
+            self.status = "New city founded! Set its production order (C).".into();
         } else {
-            self.status = "Only settlers can found cities!".into();
+            self.status = "Only Settlers can found cities!".into();
         }
     }
 
     fn get_available_units(&self, p_idx: usize) -> Vec<(&'static str, i32)> {
         let p = &self.players[p_idx];
-        let mut available = vec![("Warrior", 20), ("Settler", 80)];
+        let mut available: Vec<(&'static str, i32)> = vec![("Warrior", 20), ("Settler", 80)];
         for r in 0..TECH_ROWS {
             for c in 0..TECH_COLS {
                 if p.researched[r][c] {
@@ -532,21 +623,20 @@ impl App {
         available
     }
 
-    fn purchase_unit(&mut self, city_idx: usize, unit_idx: usize) {
+    fn set_city_build(&mut self, city_idx: usize, unit_idx: usize) {
         let available = self.get_available_units(self.current_player);
         if unit_idx >= available.len() { return; }
         let (name, cost) = available[unit_idx];
-        let p = &mut self.players[self.current_player];
-        if p.gold >= cost {
-            p.gold -= cost;
-            let (cx, cy) = (self.cities[city_idx].x, self.cities[city_idx].y);
-            self.units.push(Unit { x: cx, y: cy, name, owner: self.current_player, health: 100, moved: true });
-            self.status = format!("Purchased {}!", name);
-            self.screen = Screen::Map;
-            self.selected_unit = Some(self.units.len() - 1);
+        let city = &mut self.cities[city_idx];
+        city.build_queue = Some((name, cost));
+        city.build_progress = 0;
+        self.screen = Screen::Map;
+        let b = self.end_turn_blockers();
+        self.status = if b.is_empty() {
+            format!("{} queued — all done! Press Enter to end turn.", name)
         } else {
-            self.status = "Not enough gold!".into();
-        }
+            format!("{} queued.  Still needed: {}", name, b.join("  |  "))
+        };
     }
 }
 
@@ -563,8 +653,7 @@ fn generate_map(seed: u32) -> Vec<Vec<Tile>> {
     let scale = 0.055;
     (0..MAP_H).map(|y| {
         (0..MAP_W).map(|x| {
-            let nx = x as f64 * scale;
-            let ny = y as f64 * scale;
+            let nx = x as f64 * scale; let ny = y as f64 * scale;
             let h = perlin.get([nx, ny])
                   + 0.5  * perlin.get([nx * 2.1, ny * 2.1])
                   + 0.25 * perlin.get([nx * 4.3, ny * 4.3]);
@@ -574,8 +663,7 @@ fn generate_map(seed: u32) -> Vec<Vec<Tile>> {
 }
 
 fn find_start(map: &[Vec<Tile>]) -> (usize, usize) {
-    let cx = MAP_W / 2;
-    let cy = MAP_H / 2;
+    let (cx, cy) = (MAP_W / 2, MAP_H / 2);
     for r in 0..30 {
         for dy in -(r as i32)..=(r as i32) {
             for dx in -(r as i32)..=(r as i32) {
@@ -608,16 +696,25 @@ fn draw_map(f: &mut Frame, app: &App, area: Rect) {
 
     let p = &app.players[app.current_player];
     let prog = if let Some((col, row, left)) = p.research_progress {
-        let name = app.techs[row].1[col].name;
-        format!("  |  {} — {}t left", name, left)
-    } else { String::new() };
+        format!("  |  {} — {}t left", app.techs[row].1[col].name, left)
+    } else {
+        "  |  [no research — press T!]".into()
+    };
+
+    let city_builds: Vec<String> = app.cities.iter()
+        .filter(|c| c.owner == app.current_player)
+        .map(|c| match c.build_queue {
+            Some((name, _)) => format!("{}: {}", c.name, name),
+            None => format!("{}: [IDLE!]", c.name),
+        }).collect();
 
     let status = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(format!(" Tr:{:<3}", app.turn), Style::default().fg(Color::Yellow)),
-            Span::raw(format!("  G:{}(+{}) F:{}(+{}) Sc:{}(+{}) Cu:{}(+{}) Pr:{}(+{})", 
+            Span::raw(format!("  G:{}(+{}) F:{}(+{}) Sc:{}(+{}) Cu:{}(+{}) Pr:{}(+{})",
                 p.gold, p.gold_inc, p.food, p.food_inc, p.science, p.sci_inc, p.culture, p.cult_inc, p.production, p.prod_inc)),
             Span::styled(prog, Style::default().fg(Color::Cyan)),
+            Span::styled(format!("  |  {}", city_builds.join("  ")), Style::default().fg(Color::DarkGray)),
         ]),
         Line::from(Span::styled(format!(" {}", app.status), Style::default().fg(Color::Gray))),
     ]).block(Block::default().borders(Borders::TOP));
@@ -631,12 +728,10 @@ impl Widget for MapWidget<'_> {
         let app = self.app;
         for sy in 0..(area.height as usize) {
             for sx in 0..(area.width as usize) {
-                let mx = app.cam_x + sx;
-                let my = app.cam_y + sy;
+                let mx = app.cam_x + sx; let my = app.cam_y + sy;
                 if mx >= MAP_W || my >= MAP_H { continue; }
                 let tile = app.map[my][mx];
-                let bx = area.x + sx as u16;
-                let by = area.y + sy as u16;
+                let bx = area.x + sx as u16; let by = area.y + sy as u16;
 
                 let is_selected = app.selected_unit.map(|i| app.units[i].x == mx && app.units[i].y == my).unwrap_or(false);
                 let unit = app.units.iter().find(|u| u.x == mx && u.y == my);
@@ -645,11 +740,9 @@ impl Widget for MapWidget<'_> {
                 if is_selected {
                     buf.get_mut(bx, by).set_symbol("@").set_fg(Color::Yellow).set_bg(tile.bg()).set_style(Modifier::BOLD);
                 } else if let Some(u) = unit {
-                    let fg = if u.owner == 0 { Color::White } else { Color::Red };
-                    buf.get_mut(bx, by).set_symbol("@").set_fg(fg).set_bg(tile.bg());
+                    buf.get_mut(bx, by).set_symbol("@").set_fg(owner_color(u.owner)).set_bg(tile.bg());
                 } else if let Some(c) = city {
-                    let fg = if c.owner == 0 { Color::Cyan } else { Color::Magenta };
-                    buf.get_mut(bx, by).set_symbol("H").set_fg(fg).set_bg(tile.bg()).set_style(Modifier::BOLD);
+                    buf.get_mut(bx, by).set_symbol("H").set_fg(owner_color(c.owner)).set_bg(tile.bg()).set_style(Modifier::BOLD);
                 } else {
                     buf.get_mut(bx, by).set_symbol(tile.glyph()).set_fg(tile.fg()).set_bg(tile.bg());
                 }
@@ -658,81 +751,73 @@ impl Widget for MapWidget<'_> {
     }
 }
 
+fn owner_color(owner: usize) -> Color {
+    match owner {
+        0 => Color::White,
+        1 => Color::Red,
+        2 => Color::Magenta,
+        3 => Color::Cyan,
+        4 => Color::Green,
+        _ => Color::Yellow,
+    }
+}
+
 fn draw_city(f: &mut Frame, app: &App, city_idx: usize, area: Rect) {
     let city = &app.cities[city_idx];
     let p = &app.players[app.current_player];
-    
+
     let block = Block::default().borders(Borders::ALL).title(format!(" City: {} ", city.name))
         .border_style(Style::default().fg(Color::Cyan));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(2)])
+    let chunks = Layout::default().direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(2)])
         .split(inner);
 
-    f.render_widget(Paragraph::new(format!("  Owner: {} | Gold: {} (+{})", p.name, p.gold, p.gold_inc)), chunks[0]);
+    let build_info = match city.build_queue {
+        Some((name, cost)) => format!("  Building: {} (cost {}g, {}g paid)", name, cost, city.build_progress),
+        None => "  [No production order — pick one below!]".into(),
+    };
+    f.render_widget(Paragraph::new(vec![
+        Line::from(format!("  Owner: {} | Gold: {} (+{})", p.name, p.gold, p.gold_inc)),
+        Line::from(Span::styled(build_info, Style::default().fg(Color::Cyan))),
+    ]), chunks[0]);
 
-    let mut available = vec![("Warrior", 20), ("Settler", 80)];
-    for r in 0..TECH_ROWS {
-        for c in 0..TECH_COLS {
-            if p.researched[r][c] {
-                if let Some(unit_name) = app.techs[r].1[c].unit {
-                    if unit_name != "Warrior" && unit_name != "Settler" {
-                        available.push((unit_name, 30 + (c as i32 * 10)));
-                    }
-                }
-            }
-        }
-    }
-
+    let available = app.get_available_units(app.current_player);
     let items: Vec<Line> = available.iter().enumerate().map(|(i, (name, cost))| {
-        let style = if p.gold >= *cost { Style::default().fg(Color::White) } else { Style::default().fg(Color::DarkGray) };
-        Line::from(vec![
-            Span::styled(format!("  [{}] {:<18} cost: {:<4} gold", i + 1, name, cost), style)
-        ])
+        let is_current = city.build_queue.map(|(n, _)| n == *name).unwrap_or(false);
+        let style = if is_current { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) }
+                    else if p.gold >= *cost { Style::default().fg(Color::White) }
+                    else { Style::default().fg(Color::DarkGray) };
+        let marker = if is_current { "►" } else { " " };
+        Line::from(Span::styled(format!("  {}[{}] {:<18} cost: {}g", marker, i+1, name, cost), style))
     }).collect();
 
-    f.render_widget(Paragraph::new(items).block(Block::default().title(" Purchase Units (Press number) ")), chunks[1]);
-    f.render_widget(Paragraph::new("  Press M or Esc to return to map").style(Style::default().fg(Color::DarkGray)), chunks[2]);
+    f.render_widget(Paragraph::new(items).block(Block::default().title(" Set Production (number key) ")), chunks[1]);
+    f.render_widget(Paragraph::new("  M / Esc — back to map").style(Style::default().fg(Color::DarkGray)), chunks[2]);
 }
 
 fn draw_tech(f: &mut Frame, app: &App, area: Rect) {
-    let current_player = app.current_player;
-    let current_player = app.players.get(current_player);
-    let current_player = current_player.as_ref().expect("Couldn't get player");
+    let cp = app.players.get(app.current_player).expect("player");
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(5)])
-        .split(area);
+    let chunks = Layout::default().direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(5)]).split(area);
+    let grid_area = chunks[0]; let info_area = chunks[1];
 
-    let grid_area = chunks[0];
-    let info_area = chunks[1];
-
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(10), Constraint::Min(1)])
-        .split(grid_area);
-
-    let label_col = cols[0];
-    let cells_col = cols[1];
+    let cols = Layout::default().direction(Direction::Horizontal)
+        .constraints([Constraint::Length(10), Constraint::Min(1)]).split(grid_area);
+    let label_col = cols[0]; let cells_col = cols[1];
     let cell_w = (cells_col.width / TECH_COLS as u16).max(3);
     let row_h   = ((grid_area.height.saturating_sub(2)) / TECH_ROWS as u16).max(3);
 
-    // Era header
     let era_names = ["Ancient", "Classical", "Medieval", "Renaissance", "Industrial"];
     for (i, era) in era_names.iter().enumerate() {
         let ex = cells_col.x + (i as u16 * 4) * cell_w;
         let ew = cell_w * 4;
         if ex < cells_col.x + cells_col.width {
             let r = Rect::new(ex, grid_area.y, ew.min(cells_col.width - (ex - cells_col.x)), 1);
-            f.render_widget(
-                Paragraph::new(center_pad(era, ew as usize))
-                    .style(Style::default().fg(Color::DarkGray)),
-                r,
-            );
+            f.render_widget(Paragraph::new(center_pad(era, ew as usize)).style(Style::default().fg(Color::DarkGray)), r);
         }
     }
 
@@ -740,124 +825,99 @@ fn draw_tech(f: &mut Frame, app: &App, area: Rect) {
         let ry = grid_area.y + 1 + row_idx as u16 * row_h;
         if ry + row_h > grid_area.y + grid_area.height { break; }
 
-        // Row label
-        let lrect = Rect::new(label_col.x, ry, label_col.width, row_h);
         f.render_widget(
-            Paragraph::new(track.label())
-                .style(Style::default().fg(track.color()).add_modifier(Modifier::BOLD)),
-            lrect,
+            Paragraph::new(track.label()).style(Style::default().fg(track.color()).add_modifier(Modifier::BOLD)),
+            Rect::new(label_col.x, ry, label_col.width, row_h),
         );
 
         for col_idx in 0..TECH_COLS {
             let cx = cells_col.x + col_idx as u16 * cell_w;
             if cx + cell_w > cells_col.x + cells_col.width { break; }
             let crect = Rect::new(cx, ry, cell_w, row_h);
-
             let tech = &techs[col_idx];
             let is_cursor     = app.tech_cursor == (col_idx, row_idx);
-            let is_researched = current_player.researched[row_idx][col_idx];
-            let in_progress   = current_player.research_progress.map(|(c,r,_)| c==col_idx && r==row_idx).unwrap_or(false);
+            let is_researched = cp.researched[row_idx][col_idx];
+            let in_progress   = cp.research_progress.map(|(c,r,_)| c==col_idx&&r==row_idx).unwrap_or(false);
             let available     = app.can_research(col_idx, row_idx);
 
-            let (fg, bg, bfg) = if is_cursor {
-                (Color::Black, track.color(), Color::White)
-            } else if in_progress {
-                (Color::Cyan, Color::Reset, Color::Cyan)
-            } else if is_researched {
-                (track.dim_color(), Color::Reset, track.dim_color())
-            } else if available {
-                (track.color(), Color::Reset, track.color())
-            } else {
-                (Color::DarkGray, Color::Reset, Color::DarkGray)
-            };
+            let (fg, bg, bfg) = if is_cursor { (Color::Black, track.color(), Color::White) }
+                else if in_progress   { (Color::Cyan,        Color::Reset, Color::Cyan) }
+                else if is_researched { (track.dim_color(),  Color::Reset, track.dim_color()) }
+                else if available     { (track.color(),      Color::Reset, track.color()) }
+                else                  { (Color::DarkGray,    Color::Reset, Color::DarkGray) };
 
             let name = truncate(tech.name, cell_w.saturating_sub(2) as usize);
-            let cost = if is_researched { "ok".into() }
-                       else if in_progress { "..".into() }
-                       else { format!("{}t", tech.cost) };
+            let cost = if is_researched { "ok".into() } else if in_progress { "..".into() } else { format!("{}t", tech.cost) };
 
-            let block = Block::default().borders(Borders::ALL)
-                .border_style(Style::default().fg(bfg));
+            let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(bfg));
             let inner = block.inner(crect);
             f.render_widget(block, crect);
-
             if inner.height >= 1 {
-                f.render_widget(
-                    Paragraph::new(name).style(Style::default().fg(fg).bg(bg)),
-                    Rect::new(inner.x, inner.y, inner.width, 1),
-                );
+                f.render_widget(Paragraph::new(name).style(Style::default().fg(fg).bg(bg)), Rect::new(inner.x, inner.y, inner.width, 1));
             }
             if inner.height >= 2 {
                 let cost_fg = if is_researched { Color::Green } else { Color::DarkGray };
-                f.render_widget(
-                    Paragraph::new(cost).style(Style::default().fg(cost_fg)),
-                    Rect::new(inner.x, inner.y + 1, inner.width, 1),
-                );
+                f.render_widget(Paragraph::new(cost).style(Style::default().fg(cost_fg)), Rect::new(inner.x, inner.y+1, inner.width, 1));
             }
         }
     }
 
-    // Info panel
     let (cc, cr) = app.tech_cursor;
     let tech  = &app.techs[cr].1[cc];
     let track = &app.techs[cr].0;
-    let state = if current_player.researched[cr][cc] { "Researched".to_string() }
-                else if current_player.research_progress.map(|(c,r,_)| c==cc&&r==cr).unwrap_or(false) { "In progress".to_string() }
+    let state = if cp.researched[cr][cc] { "Researched".into() }
+                else if cp.research_progress.map(|(c,r,_)| c==cc&&r==cr).unwrap_or(false) { "In progress".into() }
                 else if app.can_research(cc, cr) { format!("Available — {} turns", tech.cost) }
-                else { "Locked".to_string() };
+                else { "Locked".into() };
     let unit_str = tech.unit.map(|u| format!("  Unit: {}  ", u)).unwrap_or_default();
 
-    let info = Paragraph::new(vec![
+    f.render_widget(Paragraph::new(vec![
         Line::from(vec![
             Span::styled(format!(" {} ", tech.name), Style::default().fg(track.color()).add_modifier(Modifier::BOLD)),
             Span::styled(format!("[{}]  ", track.label()), Style::default().fg(Color::DarkGray)),
             Span::styled(state, Style::default().fg(Color::Yellow)),
         ]),
-        Line::from(Span::styled(
-            format!("{}{}  —  {}", unit_str, tech.stats, tech.desc),
-            Style::default().fg(Color::Gray),
-        )),
-        Line::from(Span::styled(
-            " ↑↓←→ navigate    Enter research    M back to map    Enter(map) end turn",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ]).block(Block::default().borders(Borders::TOP));
-    f.render_widget(info, info_area);
+        Line::from(Span::styled(format!("{}{}  —  {}", unit_str, tech.stats, tech.desc), Style::default().fg(Color::Gray))),
+        Line::from(Span::styled(" ↑↓←→ navigate    Enter = research    M = back to map", Style::default().fg(Color::DarkGray))),
+    ]).block(Block::default().borders(Borders::TOP)), info_area);
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
-    let w = 46u16; let h = 20u16;
+    let w = 52u16; let h = 28u16;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let popup = Rect::new(x, y, w, h);
     f.render_widget(Clear, popup);
-    let help = Paragraph::new(vec![
+    f.render_widget(Paragraph::new(vec![
         Line::from(""),
         Line::from(Span::styled("  Controls", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from(Span::styled("  Map:", Style::default().fg(Color::Cyan))),
-        Line::from("    W A S D / arrows — move unit"),
-        Line::from("    Enter            — end turn"),
-        Line::from("    Tab              — next unit"),
-        Line::from("    B                — found city"),
-        Line::from("    C                — city menu"),
-        Line::from("    T                — tech grid"),
-        Line::from("    H                — help"),
+        Line::from("    W A S D / arrows — move selected unit"),
+        Line::from("    Tab              — cycle to next unmoved unit"),
+        Line::from("    B                — found city (Settler only)"),
+        Line::from("    C                — open city production menu"),
+        Line::from("    T                — open tech grid"),
+        Line::from("    H                — toggle help"),
+        Line::from("    Enter            — end turn (when all done)"),
         Line::from("    Q                — quit"),
         Line::from(""),
+        Line::from(Span::styled("  To end your turn you MUST:", Style::default().fg(Color::Yellow))),
+        Line::from("    • Move every single unit"),
+        Line::from("    • Have an active research (T → Enter on a tech)"),
+        Line::from("    • Have a production order in every city (C → number)"),
+        Line::from(""),
         Line::from(Span::styled("  City menu:", Style::default().fg(Color::Cyan))),
-        Line::from("    1-9     — purchase unit"),
-        Line::from("    M / Esc — back to map"),
+        Line::from("    1-9     — set production order for this city"),
+        Line::from("    M / Esc — return to map"),
         Line::from(""),
         Line::from(Span::styled("  Map legend:", Style::default().fg(Color::Cyan))),
-        Line::from("    ≈ deep sea   ~ shallows  . sand"),
-        Line::from("    , plains     f forest    n hills"),
-        Line::from("    ^ mountain   * snow      @ you (yellow)"),
-        Line::from("    H city       @ unit      @ enemy (red)"),
+        Line::from("    ≈ deep  ~ shallow  . sand  , plains"),
+        Line::from("    f forest  n hills  ^ mountain  * snow"),
+        Line::from("    @ unit  H city  (white=you, red/magenta/cyan=AI)"),
         Line::from(""),
     ]).block(Block::default().borders(Borders::ALL).title(" Help — H to close ")
-        .border_style(Style::default().fg(Color::Yellow)));
-    f.render_widget(help, popup);
+        .border_style(Style::default().fg(Color::Yellow))), popup);
 }
 
 fn center_pad(s: &str, width: usize) -> String {
@@ -877,7 +937,6 @@ fn main() -> io::Result<()> {
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
     let mut app = App::new();
 
     loop {
@@ -897,16 +956,17 @@ fn main() -> io::Result<()> {
                         KeyCode::Char('d') | KeyCode::Right => app.move_unit(1,  0),
                         KeyCode::Char('b') | KeyCode::Char('B') => app.found_city(),
                         KeyCode::Char('c') | KeyCode::Char('C') => {
-                            if let Some(uidx) = app.selected_unit {
+                            let city_idx = app.selected_unit.and_then(|uidx| {
                                 let (ux, uy) = (app.units[uidx].x, app.units[uidx].y);
-                                if let Some(cidx) = app.cities.iter().position(|c| c.x == ux && c.y == uy && c.owner == app.current_player) {
-                                    app.screen = Screen::City(cidx);
-                                } else {
-                                    app.status = "No friendly city here!".into();
-                                }
+                                app.cities.iter().position(|c| c.x == ux && c.y == uy && c.owner == app.current_player)
+                            }).or_else(|| app.cities.iter().position(|c| c.owner == app.current_player));
+                            if let Some(cidx) = city_idx {
+                                app.screen = Screen::City(cidx);
+                            } else {
+                                app.status = "No friendly city found!".into();
                             }
                         }
-                        KeyCode::Tab => app.next_unit(),
+                        KeyCode::Tab   => app.next_unit(),
                         KeyCode::Enter => app.end_turn(),
                         _ => {}
                     },
@@ -924,11 +984,9 @@ fn main() -> io::Result<()> {
                     Screen::City(cidx) => match key.code {
                         KeyCode::Char('q') | KeyCode::Char('Q') => break,
                         KeyCode::Char('m') | KeyCode::Char('M') | KeyCode::Esc => { app.screen = Screen::Map; }
-                        KeyCode::Char(c) if c.is_digit(10) => {
+                        KeyCode::Char(c) if c.is_ascii_digit() => {
                             let digit = c.to_digit(10).unwrap() as usize;
-                            if digit > 0 {
-                                app.purchase_unit(cidx, digit - 1);
-                            }
+                            if digit > 0 { app.set_city_build(cidx, digit - 1); }
                         }
                         _ => {}
                     }
