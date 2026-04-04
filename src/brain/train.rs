@@ -434,6 +434,23 @@ pub fn run(
                         (stage_cfg.first_lr * (1.0 - t) + stage_cfg.last_lr * t)
                     };
 
+                    // // cosine annealing
+                    // let current_lr = {
+                    //     let total_steps = stage_cfg.epochs * num_batches;
+                    //     let step = epoch * num_batches + batch_num;
+                    //     let progress = step as f64 / total_steps as f64;
+                    //     let cosine = (std::f64::consts::PI * progress).cos();
+                    //     (last_lr + 0.5 * (first_lr - last_lr) * (1.0 + cosine)) as f64
+                    // };
+
+                    // // exp decay
+                    // let current_lr = {
+                    //     let total_steps = stage_cfg.epochs * num_batches;
+                    //     let step = epoch * num_batches + batch_num;
+                    //     let t = step as f64 / total_steps as f64;
+                    //     (first_lr as f64 * (last_lr as f64 / first_lr as f64).powf(t))
+                    // };
+
                     let batch_start = batch_num * stage_cfg.batch_size;
                     let batch_end = (batch_start + stage_cfg.batch_size).min(training_samples.len());
                     let batch_idx = &idx[batch_start..batch_end];
