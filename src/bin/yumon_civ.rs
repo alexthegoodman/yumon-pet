@@ -22,6 +22,12 @@ const MAP_H: usize = 36;
 const TECH_COLS: usize = 20;
 const TECH_ROWS: usize = 5;
 
+/// Base movement points every unit gets per turn.
+const BASE_MOVES: i32 = 1;
+
+/// Chebyshev radius a city claims as its territory.
+const CITY_TERRITORY_RADIUS: i32 = 3;
+
 /// Change this to spawn more or fewer AI opponents.
 const NUM_AI_PLAYERS: usize = 24;
 
@@ -79,6 +85,24 @@ impl Tile {
     }
     fn passable(self) -> bool {
         !matches!(self, Tile::DeepWater | Tile::ShallowWater | Tile::Mountain | Tile::Snow)
+    }
+}
+
+/// Blend a territory tint into a tile's background colour.
+/// `strength` should be 0.0–1.0 (1.0 = fully tinted).
+fn tint_bg(base: Color, tint: Color, strength: f32) -> Color {
+    let (br, bg, bb) = rgb(base);
+    let (tr, tg, tb) = rgb(tint);
+    let mix = |b: u8, t: u8| -> u8 {
+        ((b as f32) * (1.0 - strength) + (t as f32) * strength) as u8
+    };
+    Color::Rgb(mix(br, tr), mix(bg, tg), mix(bb, tb))
+}
+
+fn rgb(c: Color) -> (u8, u8, u8) {
+    match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (128, 128, 128),
     }
 }
 
@@ -270,7 +294,8 @@ struct Unit {
     name: &'static str,
     owner: usize,
     health: i32,
-    moved: bool,
+    /// Remaining movement points this turn (starts at max_moves each turn).
+    moves_left: i32,
 }
 
 struct City {
@@ -281,6 +306,12 @@ struct City {
     /// None means no production order — blocks human end-turn
     build_queue: Option<(&'static str, i32)>, // (unit name, gold cost)
     build_progress: i32,
+    /// City hit-points. Reaches 0 → captured.
+    hp: i32,
+}
+
+impl City {
+    const MAX_HP: i32 = 50;
 }
 
 struct Player {
@@ -296,6 +327,12 @@ struct Player {
     sci_inc: i32,
     cult_inc: i32,
     prod_inc: i32,
+    /// Cumulative movement bonus from Infrastructure techs (Roads, Paved Roads, Railroad, etc.)
+    road_bonus: i32,
+    /// Cumulative attack bonus from Military techs
+    atk_bonus: i32,
+    /// Cumulative defense bonus from Military + Culture techs
+    def_bonus: i32,
     researched: Vec<Vec<bool>>,
     research_progress: Option<(usize, usize, u32)>,
 }
@@ -321,7 +358,6 @@ impl App {
         let seed = rand::thread_rng().r#gen::<u32>();
         let map = generate_map(seed);
 
-        // All passable land tiles for spawning
         let land_tiles: Vec<(usize, usize)> = (0..MAP_H)
             .flat_map(|y| (0..MAP_W).map(move |x| (x, y)))
             .filter(|&(x, y)| map[y][x].passable())
@@ -329,7 +365,6 @@ impl App {
 
         let mut rng = rand::thread_rng();
 
-        // Pick spawn far from all existing occupied positions
         let pick_spawn = |occupied: &Vec<(usize, usize)>, rng: &mut rand::rngs::ThreadRng| -> (usize, usize) {
             let mut best = land_tiles[rng.gen_range(0..land_tiles.len())];
             let mut best_dist = 0usize;
@@ -349,39 +384,35 @@ impl App {
         let (sx, sy) = find_start(&map);
         occupied.push((sx, sy));
 
-        let p1 = Player {
-            name: "Player 1".into(), is_ai: false,
+        let make_player = |name: String, is_ai: bool| Player {
+            name, is_ai,
             gold: 50, food: 10, science: 0, culture: 0, production: 0,
             gold_inc: 5, food_inc: 2, sci_inc: 1, cult_inc: 1, prod_inc: 2,
+            road_bonus: 0, atk_bonus: 0, def_bonus: 0,
             researched: vec![vec![false; TECH_COLS]; TECH_ROWS],
             research_progress: None,
         };
 
+        let p1 = make_player("Player 1".into(), false);
         let mut players = vec![p1];
         let mut cities: Vec<City> = vec![City {
             x: sx, y: sy, name: "Capital".into(), owner: 0,
-            build_queue: None, build_progress: 0,
+            build_queue: None, build_progress: 0, hp: City::MAX_HP,
         }];
         let mut units: Vec<Unit> = vec![
-            Unit { x: sx, y: sy, name: "Warrior", owner: 0, health: 100, moved: false }
+            Unit { x: sx, y: sy, name: "Warrior", owner: 0, health: 100, moves_left: BASE_MOVES }
         ];
 
         for i in 0..NUM_AI_PLAYERS {
             let pid = i + 1;
             let (ax, ay) = pick_spawn(&occupied, &mut rng);
             occupied.push((ax, ay));
-            players.push(Player {
-                name: format!("AI {}", pid), is_ai: true,
-                gold: 50, food: 10, science: 0, culture: 0, production: 0,
-                gold_inc: 5, food_inc: 2, sci_inc: 1, cult_inc: 1, prod_inc: 2,
-                researched: vec![vec![false; TECH_COLS]; TECH_ROWS],
-                research_progress: None,
-            });
+            players.push(make_player(format!("AI {}", pid), true));
             cities.push(City {
                 x: ax, y: ay, name: format!("AI Nest {}", pid), owner: pid,
-                build_queue: None, build_progress: 0,
+                build_queue: None, build_progress: 0, hp: City::MAX_HP,
             });
-            units.push(Unit { x: ax, y: ay, name: "Warrior", owner: pid, health: 100, moved: false });
+            units.push(Unit { x: ax, y: ay, name: "Warrior", owner: pid, health: 100, moves_left: 0 });
         }
 
         App {
@@ -393,6 +424,125 @@ impl App {
             status: "Capital founded! Move all units, pick research (T), set city build (C) — then Enter".into(),
         }
     }
+
+    // ── Movement ────────────────────────────────────────────────────────────
+
+    /// How many tiles a unit owned by `pid` may move per turn.
+    fn max_moves(&self, pid: usize) -> i32 {
+        BASE_MOVES + self.players[pid].road_bonus
+    }
+
+    // ── Combat ──────────────────────────────────────────────────────────────
+
+    /// Net attack power for the current player.
+    fn player_atk(&self, pid: usize) -> i32 {
+        10 + self.players[pid].atk_bonus          // base 10
+    }
+
+    /// Net defense power for `pid`.
+    fn player_def(&self, pid: usize) -> i32 {
+        5 + self.players[pid].def_bonus           // base 5
+    }
+
+    /// City defense: base + owner's def bonus.
+    fn city_def(&self, city_idx: usize) -> i32 {
+        let owner = self.cities[city_idx].owner;
+        8 + self.players[owner].def_bonus         // cities are tougher than units
+    }
+
+    /// Attack an adjacent enemy unit.  Attacker expends all moves.
+    /// Returns a message describing the outcome.
+    fn attack_unit(&mut self, attacker_idx: usize, target_idx: usize) -> String {
+        let atk_pid  = self.units[attacker_idx].owner;
+        let def_pid  = self.units[target_idx].owner;
+        let atk_val  = self.player_atk(atk_pid);
+        let def_val  = self.player_def(def_pid);
+
+        // Damage = attacker ATK - half defender DEF (minimum 1)
+        let dmg_to_def  = (atk_val - def_val / 2).max(1);
+        let dmg_to_atk  = (def_val - atk_val / 2).max(1);
+
+        self.units[target_idx].health  -= dmg_to_def;
+        self.units[attacker_idx].health -= dmg_to_atk;
+        self.units[attacker_idx].moves_left = 0;  // attack costs all moves
+
+        let target_name = self.units[target_idx].name;
+        let target_hp   = self.units[target_idx].health;
+        let atk_hp      = self.units[attacker_idx].health;
+
+        // Remove dead units (high indices first to keep indices valid)
+        let mut to_remove = Vec::new();
+        if target_hp  <= 0 { to_remove.push(target_idx);  }
+        if atk_hp     <= 0 { to_remove.push(attacker_idx); }
+        to_remove.sort_unstable_by(|a, b| b.cmp(a));
+        for idx in &to_remove {
+            self.units.remove(*idx);
+        }
+        // Fix selected_unit after removal
+        if let Some(sel) = self.selected_unit {
+            if to_remove.contains(&sel) {
+                self.selected_unit = None;
+            } else {
+                // Shift index down for each removed unit with lower index
+                let shift = to_remove.iter().filter(|&&r| r < sel).count();
+                self.selected_unit = Some(sel - shift);
+            }
+        }
+
+        if to_remove.contains(&target_idx) {
+            format!("Defeated {}! (took {} dmg)", target_name, dmg_to_atk)
+        } else if to_remove.contains(&attacker_idx) {
+            format!("Lost our unit attacking {}!", target_name)
+        } else {
+            format!("Hit {} for {} dmg (we took {})", target_name, dmg_to_def, dmg_to_atk)
+        }
+    }
+
+    /// Attack an adjacent enemy city.  Expends all attacker moves.
+    fn attack_city(&mut self, attacker_idx: usize, city_idx: usize) -> String {
+        let atk_pid = self.units[attacker_idx].owner;
+        let atk_val = self.player_atk(atk_pid);
+        let def_val = self.city_def(city_idx);
+
+        let dmg_to_city = (atk_val - def_val / 2).max(1);
+        let dmg_to_unit = (def_val / 3).max(1);
+
+        self.cities[city_idx].hp              -= dmg_to_city;
+        self.units[attacker_idx].health       -= dmg_to_unit;
+        self.units[attacker_idx].moves_left    = 0;
+
+        let city_hp   = self.cities[city_idx].hp;
+        let city_name = self.cities[city_idx].name.clone();
+        let unit_hp   = self.units[attacker_idx].health;
+
+        if city_hp <= 0 {
+            // Capture: change city owner, restore HP.
+            let new_owner = self.units[attacker_idx].owner;
+            self.cities[city_idx].owner = new_owner;
+            self.cities[city_idx].hp    = City::MAX_HP / 2;
+            self.cities[city_idx].build_queue = None;
+            // Remove attacker if it died too
+            if unit_hp <= 0 {
+                if let Some(sel) = self.selected_unit {
+                    if sel == attacker_idx { self.selected_unit = None; }
+                    else if attacker_idx < sel { self.selected_unit = Some(sel - 1); }
+                }
+                self.units.remove(attacker_idx);
+            }
+            format!("CAPTURED {}!", city_name)
+        } else if unit_hp <= 0 {
+            if let Some(sel) = self.selected_unit {
+                if sel == attacker_idx { self.selected_unit = None; }
+                else if attacker_idx < sel { self.selected_unit = Some(sel - 1); }
+            }
+            self.units.remove(attacker_idx);
+            format!("Lost our unit assaulting {} (HP: {})", city_name, city_hp)
+        } else {
+            format!("Assaulted {} — HP {}/{} (we took {} dmg)", city_name, city_hp, City::MAX_HP, dmg_to_unit)
+        }
+    }
+
+    // ── Tech / Research ─────────────────────────────────────────────────────
 
     fn can_research(&self, col: usize, row: usize) -> bool {
         self.can_research_for(self.current_player, col, row)
@@ -423,12 +573,13 @@ impl App {
         }
     }
 
-    /// Human-facing blockers that must be cleared before end-turn.
+    // ── End-turn blockers ───────────────────────────────────────────────────
+
     fn end_turn_blockers(&self) -> Vec<String> {
         let mut v = Vec::new();
 
         let unmoved: Vec<_> = self.units.iter()
-            .filter(|u| u.owner == self.current_player && !u.moved)
+            .filter(|u| u.owner == self.current_player && u.moves_left > 0)
             .map(|u| u.name).collect();
         if !unmoved.is_empty() {
             v.push(format!("Move all units ({} remaining: {})", unmoved.len(), unmoved.join(", ")));
@@ -447,6 +598,8 @@ impl App {
 
         v
     }
+
+    // ── End turn ────────────────────────────────────────────────────────────
 
     fn end_turn(&mut self) {
         if !self.players[self.current_player].is_ai {
@@ -476,7 +629,7 @@ impl App {
             }
         }
 
-        // City production: 1 gold/turn toward build cost
+        // City production
         {
             let pid = self.current_player;
             let mut to_spawn: Vec<(usize, usize, &'static str)> = Vec::new();
@@ -493,7 +646,7 @@ impl App {
             let is_ai = self.players[pid].is_ai;
             for (cx, cy, name) in to_spawn {
                 self.players[pid].gold -= 1;
-                self.units.push(Unit { x: cx, y: cy, name, owner: pid, health: 100, moved: true });
+                self.units.push(Unit { x: cx, y: cy, name, owner: pid, health: 100, moves_left: 0 });
                 if !is_ai { self.status = format!("{} finished training!", name); }
             }
         }
@@ -502,9 +655,10 @@ impl App {
         self.current_player = (self.current_player + 1) % self.players.len();
         if self.current_player == 0 { self.turn += 1; }
 
-        // Reset units for incoming player
+        // Reset movement for incoming player's units
+        let mm = self.max_moves(self.current_player);
         for u in &mut self.units {
-            if u.owner == self.current_player { u.moved = false; }
+            if u.owner == self.current_player { u.moves_left = mm; }
         }
 
         if self.players[self.current_player].is_ai {
@@ -512,9 +666,11 @@ impl App {
             self.end_turn();
         } else {
             self.next_unit();
-            self.status = format!("Turn {}: Move all units, set research & city builds, then Enter.", self.turn);
+            self.status = format!("Turn {}: Move units (X to attack), set research & builds, then Enter.", self.turn);
         }
     }
+
+    // ── AI turn ─────────────────────────────────────────────────────────────
 
     fn do_ai_turn(&mut self) {
         let pid = self.current_player;
@@ -542,10 +698,44 @@ impl App {
             }
         }
 
-        // Move units
+        // Move units (random walk, attack adjacent enemies)
         let mut rng = rand::thread_rng();
+        let mm = self.max_moves(pid);
         for i in 0..self.units.len() {
-            if self.units[i].owner == pid && !self.units[i].moved {
+            if self.units[i].owner != pid || self.units[i].moves_left == 0 { continue; }
+
+            // Scan neighbours for enemy units/cities to attack
+            let ux = self.units[i].x as i32;
+            let uy = self.units[i].y as i32;
+            let mut attacked = false;
+            'scan: for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if dx == 0 && dy == 0 { continue; }
+                    let nx = (ux + dx) as usize; let ny = (uy + dy) as usize;
+                    // Check enemy unit
+                    let enemy_unit = self.units.iter().position(|u| u.x == nx && u.y == ny && u.owner != pid);
+                    if let Some(eidx) = enemy_unit {
+                        let msg = self.attack_unit(i, eidx);
+                        let _ = msg;
+                        attacked = true;
+                        break 'scan;
+                    }
+                    // Check enemy city
+                    let enemy_city = self.cities.iter().position(|c| c.x == nx && c.y == ny && c.owner != pid);
+                    if let Some(cidx) = enemy_city {
+                        let msg = self.attack_city(i, cidx);
+                        let _ = msg;
+                        attacked = true;
+                        break 'scan;
+                    }
+                }
+            }
+            if attacked { continue; }
+
+            // Random walk using remaining moves
+            let steps = mm;
+            for _ in 0..steps {
+                if i >= self.units.len() || self.units[i].owner != pid { break; }
                 let dx = rng.gen_range(-1i32..=1);
                 let dy = rng.gen_range(-1i32..=1);
                 let nx = (self.units[i].x as i32 + dx).clamp(0, MAP_W as i32 - 1) as usize;
@@ -554,22 +744,46 @@ impl App {
                     self.units[i].x = nx;
                     self.units[i].y = ny;
                 }
-                self.units[i].moved = true;
             }
+            if i < self.units.len() { self.units[i].moves_left = 0; }
         }
     }
 
+    // ── Player movement / combat ─────────────────────────────────────────────
+
+    /// Called when the player presses a movement key.
+    /// If the destination has an enemy: attacks instead of moving.
     fn move_unit(&mut self, dx: i32, dy: i32) {
         let uidx = match self.selected_unit { Some(i) => i, None => return };
-        if self.units[uidx].moved { self.status = "Unit already moved this turn.".into(); return; }
+        if self.units[uidx].moves_left == 0 { self.status = "Unit has no moves left.".into(); return; }
+        if self.units[uidx].owner != self.current_player { return; }
 
         let nx = (self.units[uidx].x as i32 + dx).clamp(0, MAP_W as i32 - 1) as usize;
         let ny = (self.units[uidx].y as i32 + dy).clamp(0, MAP_H as i32 - 1) as usize;
 
+        // Check for enemy unit on target tile
+        let enemy_unit = self.units.iter().position(|u| u.x == nx && u.y == ny && u.owner != self.current_player);
+        if let Some(eidx) = enemy_unit {
+            let msg = self.attack_unit(uidx, eidx);
+            self.status = msg;
+            self.maybe_next_unit();
+            return;
+        }
+
+        // Check for enemy city on target tile
+        let enemy_city = self.cities.iter().position(|c| c.x == nx && c.y == ny && c.owner != self.current_player);
+        if let Some(cidx) = enemy_city {
+            let msg = self.attack_city(uidx, cidx);
+            self.status = msg;
+            self.maybe_next_unit();
+            return;
+        }
+
+        // Normal movement
         if self.map[ny][nx].passable() {
             self.units[uidx].x = nx;
             self.units[uidx].y = ny;
-            self.units[uidx].moved = true;
+            self.units[uidx].moves_left -= 1;
 
             let vw = 70usize; let vh = 30usize;
             if nx < self.cam_x + 10 { self.cam_x = nx.saturating_sub(10); }
@@ -577,7 +791,9 @@ impl App {
             if ny < self.cam_y + 6 { self.cam_y = ny.saturating_sub(6); }
             if ny > self.cam_y + vh - 6 { self.cam_y = (ny + 6).saturating_sub(vh); }
 
-            self.next_unit();
+            if self.units[uidx].moves_left == 0 {
+                self.maybe_next_unit();
+            }
             let b = self.end_turn_blockers();
             self.status = if b.is_empty() { "All actions complete — press Enter to end turn.".into() }
                           else { b.join("  |  ") };
@@ -586,11 +802,17 @@ impl App {
         }
     }
 
+    fn maybe_next_unit(&mut self) {
+        if self.selected_unit.map(|i| i < self.units.len() && self.units[i].moves_left == 0).unwrap_or(true) {
+            self.next_unit();
+        }
+    }
+
     fn next_unit(&mut self) {
         let start = self.selected_unit.map(|i| i + 1).unwrap_or(0);
         for i in 0..self.units.len() {
             let idx = (start + i) % self.units.len();
-            if self.units[idx].owner == self.current_player && !self.units[idx].moved {
+            if self.units[idx].owner == self.current_player && self.units[idx].moves_left > 0 {
                 self.selected_unit = Some(idx);
                 let u = &self.units[idx];
                 self.cam_x = u.x.saturating_sub(35);
@@ -607,7 +829,7 @@ impl App {
         if self.units[uidx].name == "Settler" {
             self.cities.push(City {
                 x: ux, y: uy, name: format!("City {}", self.cities.len() + 1),
-                owner, build_queue: None, build_progress: 0,
+                owner, build_queue: None, build_progress: 0, hp: City::MAX_HP,
             });
             self.units.remove(uidx);
             self.selected_unit = None;
@@ -650,6 +872,21 @@ impl App {
             format!("{} queued.  Still needed: {}", name, b.join("  |  "))
         };
     }
+
+    // ── Territory helpers ────────────────────────────────────────────────────
+
+    /// Returns the owner of the city that claims tile (tx, ty), if any.
+    fn territory_owner(&self, tx: usize, ty: usize) -> Option<usize> {
+        for city in &self.cities {
+            let dx = (city.x as i32 - tx as i32).abs();
+            let dy = (city.y as i32 - ty as i32).abs();
+            // Chebyshev distance
+            if dx <= CITY_TERRITORY_RADIUS && dy <= CITY_TERRITORY_RADIUS {
+                return Some(city.owner);
+            }
+        }
+        None
+    }
 }
 
 fn apply_yields(stats: &Stat, p: &mut Player) {
@@ -658,6 +895,11 @@ fn apply_yields(stats: &Stat, p: &mut Player) {
     p.sci_inc  += stats.sci;
     p.cult_inc += stats.cult;
     p.prod_inc += stats.prod;
+    // Movement bonus (Infrastructure track — Roads, Paved Roads, Canal, Railroad, etc.)
+    p.road_bonus += stats.mov;
+    // Combat bonuses
+    p.atk_bonus  += stats.atk;
+    p.def_bonus  += stats.def;
 }
 
 fn generate_map(seed: u32) -> Vec<Vec<Tile>> {
@@ -688,6 +930,8 @@ fn find_start(map: &[Vec<Tile>]) -> (usize, usize) {
     (cx, cy)
 }
 
+// ── Drawing ──────────────────────────────────────────────────────────────────
+
 fn draw(f: &mut Frame, app: &App) {
     let area = f.size();
     match app.screen {
@@ -707,6 +951,16 @@ fn draw_map(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(MapWidget { app }, chunks[0]);
 
     let p = &app.players[app.current_player];
+
+    // Show selected unit's moves remaining
+    let unit_info = if let Some(uidx) = app.selected_unit {
+        if uidx < app.units.len() {
+            let u = &app.units[uidx];
+            let mm = app.max_moves(app.current_player);
+            format!("  |  {} HP:{} Moves:{}/{}", u.name, u.health, u.moves_left, mm)
+        } else { String::new() }
+    } else { String::new() };
+
     let prog = if let Some((col, row, left)) = p.research_progress {
         format!("  |  {} — {}t left", app.techs[row].1[col].name, left)
     } else {
@@ -720,11 +974,17 @@ fn draw_map(f: &mut Frame, app: &App, area: Rect) {
             None => format!("{}: [IDLE!]", c.name),
         }).collect();
 
+    let atk = app.player_atk(app.current_player);
+    let def = app.player_def(app.current_player);
+
     let status = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(format!(" Tr:{:<3}", app.turn), Style::default().fg(Color::Yellow)),
             Span::raw(format!("  G:{}(+{}) F:{}(+{}) Sc:{}(+{}) Cu:{}(+{}) Pr:{}(+{})",
-                p.gold, p.gold_inc, p.food, p.food_inc, p.science, p.sci_inc, p.culture, p.cult_inc, p.production, p.prod_inc)),
+                p.gold, p.gold_inc, p.food, p.food_inc, p.science, p.sci_inc,
+                p.culture, p.cult_inc, p.production, p.prod_inc)),
+            Span::styled(format!("  ATK:{} DEF:{}", atk, def), Style::default().fg(Color::Red)),
+            Span::styled(unit_info, Style::default().fg(Color::Green)),
             Span::styled(prog, Style::default().fg(Color::Cyan)),
             Span::styled(format!("  |  {}", city_builds.join("  ")), Style::default().fg(Color::DarkGray)),
         ]),
@@ -733,7 +993,25 @@ fn draw_map(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(status, chunks[1]);
 }
 
+// ── Map widget with territory tinting ────────────────────────────────────────
+
 struct MapWidget<'a> { app: &'a App }
+
+/// Dim RGB colour for a player index (used for territory tints).
+fn territory_tint(owner: usize) -> Color {
+    match owner {
+        0 => Color::Rgb(100, 100, 200),   // player — blue-ish
+        1 => Color::Rgb(200, 60,  60),    // red
+        2 => Color::Rgb(180, 60,  180),   // magenta
+        3 => Color::Rgb(60,  200, 200),   // cyan
+        4 => Color::Rgb(60,  200, 60),    // green
+        5 => Color::Rgb(220, 160, 40),    // orange
+        6 => Color::Rgb(160, 40,  220),   // purple
+        7 => Color::Rgb(40,  160, 160),   // teal
+        8 => Color::Rgb(200, 200, 60),    // yellow
+        _ => Color::Rgb(130, 130, 130),   // grey fallback
+    }
+}
 
 impl Widget for MapWidget<'_> {
     fn render(self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
@@ -745,18 +1023,32 @@ impl Widget for MapWidget<'_> {
                 let tile = app.map[my][mx];
                 let bx = area.x + sx as u16; let by = area.y + sy as u16;
 
-                let is_selected = app.selected_unit.map(|i| app.units[i].x == mx && app.units[i].y == my).unwrap_or(false);
+                // Territory tinting: blend owner colour into background.
+                let bg = if let Some(owner) = app.territory_owner(mx, my) {
+                    let tint = territory_tint(owner);
+                    // Stronger tint at city centre, lighter at edge.
+                    // Use a fixed moderate strength so borders are always visible.
+                    tint_bg(tile.bg(), tint, 0.28)
+                } else {
+                    tile.bg()
+                };
+
+                let is_selected = app.selected_unit.map(|i| i < app.units.len() && app.units[i].x == mx && app.units[i].y == my).unwrap_or(false);
                 let unit = app.units.iter().find(|u| u.x == mx && u.y == my);
                 let city = app.cities.iter().find(|c| c.x == mx && c.y == my);
 
                 if is_selected {
-                    buf.get_mut(bx, by).set_symbol("@").set_fg(Color::Green).set_bg(tile.bg()).set_style(Modifier::BOLD);
+                    buf.get_mut(bx, by).set_symbol("@").set_fg(Color::Green).set_bg(bg).set_style(Modifier::BOLD);
                 } else if let Some(u) = unit {
-                    buf.get_mut(bx, by).set_symbol("@").set_fg(owner_color(u.owner)).set_bg(tile.bg());
+                    // Show health bar in symbol for damaged units
+                    let sym = if u.health < 30 { "!" } else { "@" };
+                    buf.get_mut(bx, by).set_symbol(sym).set_fg(owner_color(u.owner)).set_bg(bg);
                 } else if let Some(c) = city {
-                    buf.get_mut(bx, by).set_symbol("H").set_fg(owner_color(c.owner)).set_bg(tile.bg()).set_style(Modifier::BOLD);
+                    // Show damaged city with different symbol
+                    let sym = if c.hp < City::MAX_HP / 2 { "h" } else { "H" };
+                    buf.get_mut(bx, by).set_symbol(sym).set_fg(owner_color(c.owner)).set_bg(bg).set_style(Modifier::BOLD);
                 } else {
-                    buf.get_mut(bx, by).set_symbol(tile.glyph()).set_fg(tile.fg()).set_bg(tile.bg());
+                    buf.get_mut(bx, by).set_symbol(tile.glyph()).set_fg(tile.fg()).set_bg(bg);
                 }
             }
         }
@@ -770,7 +1062,9 @@ fn owner_color(owner: usize) -> Color {
         2 => Color::Magenta,
         3 => Color::Cyan,
         4 => Color::Green,
-        _ => Color::Black,
+        5 => Color::Rgb(255, 165, 0),
+        6 => Color::Rgb(180, 80, 255),
+        _ => Color::Yellow,
     }
 }
 
@@ -784,15 +1078,19 @@ fn draw_city(f: &mut Frame, app: &App, city_idx: usize, area: Rect) {
     f.render_widget(block, area);
 
     let chunks = Layout::default().direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(2)])
+        .constraints([Constraint::Length(4), Constraint::Min(1), Constraint::Length(2)])
         .split(inner);
 
+    let hp_bar = hp_bar_str(city.hp, City::MAX_HP, 20);
     let build_info = match city.build_queue {
         Some((name, cost)) => format!("  Building: {} (cost {}g, {}g paid)", name, cost, city.build_progress),
         None => "  [No production order — pick one below!]".into(),
     };
     f.render_widget(Paragraph::new(vec![
-        Line::from(format!("  Owner: {} | Gold: {} (+{})", p.name, p.gold, p.gold_inc)),
+        Line::from(format!("  Owner: {} | Gold: {} (+{}) | ATK: {} DEF: {}",
+            p.name, p.gold, p.gold_inc,
+            app.player_atk(app.current_player), app.player_def(app.current_player))),
+        Line::from(format!("  City HP: {} {}", city.hp, hp_bar)),
         Line::from(Span::styled(build_info, Style::default().fg(Color::Cyan))),
     ]), chunks[0]);
 
@@ -808,6 +1106,12 @@ fn draw_city(f: &mut Frame, app: &App, city_idx: usize, area: Rect) {
 
     f.render_widget(Paragraph::new(items).block(Block::default().title(" Set Production (number key) ")), chunks[1]);
     f.render_widget(Paragraph::new("  M / Esc — back to map").style(Style::default().fg(Color::DarkGray)), chunks[2]);
+}
+
+fn hp_bar_str(hp: i32, max: i32, width: usize) -> String {
+    let filled = ((hp.max(0) as f32 / max as f32) * width as f32) as usize;
+    let empty = width.saturating_sub(filled);
+    format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
 }
 
 fn draw_tech(f: &mut Frame, app: &App, area: Rect) {
@@ -890,8 +1194,9 @@ fn draw_tech(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(state, Style::default().fg(Color::Yellow)),
         ]),
         Line::from(Span::styled(format!(
-            "{} atk: {} cult: {} def: {} food: {} gold: {} mov: {} prod: {} sci: {} —  {}", 
-            unit_str, tech.stats.atk, tech.stats.cult, tech.stats.def, tech.stats.food, tech.stats.gold, tech.stats.mov, tech.stats.prod, tech.stats.sci, 
+            "{} atk: {} cult: {} def: {} food: {} gold: {} mov: {} prod: {} sci: {} —  {}",
+            unit_str, tech.stats.atk, tech.stats.cult, tech.stats.def, tech.stats.food,
+            tech.stats.gold, tech.stats.mov, tech.stats.prod, tech.stats.sci,
             tech.desc
         ), Style::default().fg(Color::Gray))),
         Line::from(Span::styled(" ↑↓←→ navigate    Enter = research    M = back to map", Style::default().fg(Color::DarkGray))),
@@ -899,7 +1204,7 @@ fn draw_tech(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_help(f: &mut Frame, area: Rect) {
-    let w = 52u16; let h = 28u16;
+    let w = 58u16; let h = 34u16;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let popup = Rect::new(x, y, w, h);
@@ -909,7 +1214,8 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Line::from(Span::styled("  Controls", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from(Span::styled("  Map:", Style::default().fg(Color::Cyan))),
-        Line::from("    W A S D / arrows — move selected unit"),
+        Line::from("    W A S D / arrows — move selected unit (uses 1 move)"),
+        Line::from("    Moving onto enemy  — ATTACKS automatically"),
         Line::from("    Tab              — cycle to next unmoved unit"),
         Line::from("    B                — found city (Settler only)"),
         Line::from("    C                — open city production menu"),
@@ -918,19 +1224,28 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Line::from("    Enter            — end turn (when all done)"),
         Line::from("    Q                — quit"),
         Line::from(""),
-        Line::from(Span::styled("  To end your turn you MUST:", Style::default().fg(Color::Yellow))),
-        Line::from("    • Move every single unit"),
-        Line::from("    • Have an active research (T → Enter on a tech)"),
-        Line::from("    • Have a production order in every city (C → number)"),
+        Line::from(Span::styled("  Combat:", Style::default().fg(Color::Red))),
+        Line::from("    Move onto enemy unit or city to attack"),
+        Line::from("    Damage = ATK − ½ DEF  (min 1 each way)"),
+        Line::from("    Units at 0 HP are destroyed"),
+        Line::from("    Cities at 0 HP are captured"),
+        Line::from("    Attacking costs ALL remaining moves"),
         Line::from(""),
-        Line::from(Span::styled("  City menu:", Style::default().fg(Color::Cyan))),
-        Line::from("    1-9     — set production order for this city"),
-        Line::from("    M / Esc — return to map"),
+        Line::from(Span::styled("  Movement:", Style::default().fg(Color::Green))),
+        Line::from("    Base: 1 tile/turn"),
+        Line::from("    +Roads, Paved Roads, Canal, Railroad, etc."),
+        Line::from("    ATK/DEF shown in status bar — grow with techs"),
+        Line::from(""),
+        Line::from(Span::styled("  To end your turn you MUST:", Style::default().fg(Color::Yellow))),
+        Line::from("    • Move every single unit (use all moves)"),
+        Line::from("    • Have an active research (T → Enter)"),
+        Line::from("    • Have a production order in every city (C)"),
         Line::from(""),
         Line::from(Span::styled("  Map legend:", Style::default().fg(Color::Cyan))),
         Line::from("    ≈ deep  ~ shallow  . sand  , plains"),
         Line::from("    f forest  n hills  ^ mountain  * snow"),
-        Line::from("    @ unit  H city  (white=you, red/magenta/cyan=AI)"),
+        Line::from("    @ unit  ! unit (low HP)  H city  h city (damaged)"),
+        Line::from("    Coloured background = city territory"),
         Line::from(""),
     ]).block(Block::default().borders(Borders::ALL).title(" Help — H to close ")
         .border_style(Style::default().fg(Color::Yellow))), popup);
@@ -973,6 +1288,7 @@ fn main() -> io::Result<()> {
                         KeyCode::Char('b') | KeyCode::Char('B') => app.found_city(),
                         KeyCode::Char('c') | KeyCode::Char('C') => {
                             let city_idx = app.selected_unit.and_then(|uidx| {
+                                if uidx >= app.units.len() { return None; }
                                 let (ux, uy) = (app.units[uidx].x, app.units[uidx].y);
                                 app.cities.iter().position(|c| c.x == ux && c.y == uy && c.owner == app.current_player)
                             }).or_else(|| app.cities.iter().position(|c| c.owner == app.current_player));
