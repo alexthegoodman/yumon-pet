@@ -165,22 +165,22 @@ pub fn main() {
         }
     }
 
-    // let mut chats2 = load_handcrafted_chats("archive/ov_chats.txt");
-    // let chats2 = chats2.as_ref().expect("Couldn't get ov chats");
+    let mut chats2 = load_handcrafted_chats("archive/ov_chats.txt");
+    let chats2 = chats2.as_ref().expect("Couldn't get ov chats");
 
-    // let mut chats_combined2 = Vec::new();
+    let mut chats_combined2 = Vec::new();
 
-    // for (i, block) in chats2.blocks.iter().enumerate() {
-    //     for (x, memory) in block.memories.iter().enumerate() {
-    //         chats_combined2.push(&memory.human);
-    //         chats_combined2.push(&memory.bot);
+    for (i, block) in chats2.blocks.iter().enumerate() {
+        for (x, memory) in block.memories.iter().enumerate() {
+            chats_combined2.push(&memory.human);
+            chats_combined2.push(&memory.bot);
 
-    //         if (i < 12) {
-    //             println!("qa human: {:?}", memory.human);
-    //             println!("qa bot: {:?}", memory.bot);
-    //         }
-    //     }
-    // }
+            if (i < 12) {
+                println!("qa human: {:?}", memory.human);
+                println!("qa bot: {:?}", memory.bot);
+            }
+        }
+    }
 
     // let mut chats3 = load_arena_chats("data/chatbot_arena_conversations.json");
     // let chats3 = chats3.as_ref().expect("Couldn't get arena chats");
@@ -214,7 +214,7 @@ pub fn main() {
     // sentences.extend(ebooks);
     sentences.extend(chats_combined);
     // sentences.extend(dict_sentences);
-    // sentences.extend(chats_combined2);
+    sentences.extend(chats_combined2);
     // sentences.extend(chats_combined3);
     // sentences.extend(wiki_sentences);
         
@@ -241,6 +241,7 @@ pub fn main() {
     let training_stage = TrainingStage::Language;
  
     let training_samples = DataLoader::new(training_stage)
+        .add("archive/ov_chats.txt", FileKind::Chats, None)
         .add("archive/handcrafted_pairs.txt",   FileKind::Chats, None)
         // .add("archive/ov_chats.txt",   FileKind::Chats, None)
         // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
@@ -262,6 +263,7 @@ pub fn main() {
     let training_stage = TrainingStage::Structured;
  
     let training_samples = DataLoader::new(training_stage)
+        .add("archive/ov_chats.txt", FileKind::Chats, None)
         .add("archive/handcrafted_pairs.txt",   FileKind::Chats, None)
         // .add("archive/ov_chats.txt",   FileKind::Chats, None)
         // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)

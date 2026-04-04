@@ -592,7 +592,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
         Ok(())
     }
 
-    pub fn load(directory: &str, device: &B::Device) -> Result<(Self, TokenizerKind)> {
+    pub fn load(directory: &str, device: &B::Device) -> Result<(Self, TokenizerKind, YumonBrainConfig)> {
         let dir = std::path::Path::new(directory);
 
         let meta_json = std::fs::read_to_string(dir.join("metadata.json"))?;
@@ -617,7 +617,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
 
         let model = config.init::<B>(device).load_record(record);
 
-        Ok((model, tokenizer))
+        Ok((model, tokenizer, config))
     }
 }
 

@@ -170,10 +170,12 @@ fn load_stage_data(
     match stage {
         TrainingStage::Language => {
             loader = loader
-                .add("archive/handcrafted.txt", FileKind::Handcrafted, None);
+                // .add("archive/ov_chats.txt", FileKind::Chats, None)
+                .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
         }
         TrainingStage::Structured => {
             loader = loader
+                // .add("archive/ov_chats.txt", FileKind::Chats, None)
                 .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
         }
     }
@@ -200,103 +202,131 @@ pub fn run(
 
         // ── Baseline: small & fast ──────────────────────────────────────────
         RunConfig {
-            name: "tiny_shallow_fast".to_string(),
-            embed_dim: 128, hidden_units: 128, n_layers: 2, attn_heads: 2, ff_dim: 512, max_seq_len: 256,
+            name: "128h_2l_2a_200len".to_string(),
+            embed_dim: 128, hidden_units: 128, n_layers: 2, attn_heads: 2, ff_dim: 512, max_seq_len: 200,
             stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.15, epochs: 5,  batch_size, first_lr: 1e-3, last_lr: 1e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.10, epochs: 5,  batch_size, first_lr: 1e-3, last_lr: 1e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10,  batch_size, first_lr: 1e-3, last_lr: 1e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10,  batch_size, first_lr: 1e-3, last_lr: 1e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
             ],
         },
 
         // ── Small model, moderate training ─────────────────────────────────
-        RunConfig {
-            name: "small_shallow_balanced".to_string(),
-            embed_dim: 256, hidden_units: 256, n_layers: 2, attn_heads: 4, ff_dim: 1024, max_seq_len: 320,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.10, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.05, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-            ],
-        },
-
-        // ── Small model, deep — tests whether more layers help at small width ─
-        RunConfig {
-            name: "small_deep_balanced".to_string(),
-            embed_dim: 256, hidden_units: 256, n_layers: 6, attn_heads: 4, ff_dim: 1024, max_seq_len: 320,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.10, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.05, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-            ],
-        },
-
-        // ── Medium model, moderate training ────────────────────────────────
-        RunConfig {
-            name: "medium_balanced".to_string(),
-            embed_dim: 384, hidden_units: 384, n_layers: 4, attn_heads: 6, ff_dim: 1536, max_seq_len: 320,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.08, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.04, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-            ],
-        },
-
-        // ── Medium model, high weight decay — tests regularisation ──────────
-        RunConfig {
-            name: "medium_high_wd".to_string(),
-            embed_dim: 384, hidden_units: 384, n_layers: 4, attn_heads: 6, ff_dim: 1536, max_seq_len: 320,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.08, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.1,  epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.04, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.1,  epsilon: 1e-7, smoothing: 0.1 },
-            ],
-        },
-
-        // ── Medium model, label smoothing sweep — tests soft targets ────────
-        RunConfig {
-            name: "medium_smooth02".to_string(),
-            embed_dim: 384, hidden_units: 384, n_layers: 4, attn_heads: 6, ff_dim: 1536, max_seq_len: 320,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.08, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.2 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.04, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.2 },
-            ],
-        },
-
-        // ── Large model, moderate training ─────────────────────────────────
-        RunConfig {
-            name: "large_balanced".to_string(),
-            embed_dim: 512, hidden_units: 512, n_layers: 4, attn_heads: 8, ff_dim: 2048, max_seq_len: 320,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.08, epochs: 15, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.04, epochs: 15, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-            ],
-        },
-
-        // ── Large model, deep — high capacity ceiling ───────────────────────
-        RunConfig {
-            name: "large_deep".to_string(),
-            embed_dim: 512, hidden_units: 512, n_layers: 8, attn_heads: 8, ff_dim: 2048, max_seq_len: 320,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.06, epochs: 15, batch_size, first_lr: 3e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.03, epochs: 15, batch_size, first_lr: 3e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-            ],
-        },
-
-        // ── Long context — tests seq-len sensitivity at medium size ─────────
         // RunConfig {
-        //     name: "medium_long_ctx".to_string(),
-        //     embed_dim: 384, hidden_units: 384, n_layers: 4, attn_heads: 6, ff_dim: 1536, max_seq_len: 512,
+        //     name: "small_shallow_balanced".to_string(),
+        //     embed_dim: 256, hidden_units: 256, n_layers: 2, attn_heads: 4, ff_dim: 1024, max_seq_len: 320,
         //     stages: vec![
-        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.08, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.04, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
         //     ],
         // },
 
-        // ── Careful/slow: small model, long training, low lr ───────────────
+        // // ── Small model, moderate training ─────────────────────────────────
         RunConfig {
-            name: "small_deep_careful".to_string(),
-            embed_dim: 256, hidden_units: 256, n_layers: 4, attn_heads: 4, ff_dim: 1024, max_seq_len: 256,
+            name: "256h_2l_4a_180len".to_string(),
+            embed_dim: 256, hidden_units: 256, n_layers: 2, attn_heads: 4, ff_dim: 1024, max_seq_len: 180,
             stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 20, batch_size, first_lr: 1e-5, last_lr: 1e-8, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.02, epochs: 20, batch_size, first_lr: 1e-5, last_lr: 1e-8, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
             ],
         },
+
+        RunConfig {
+            name: "384h_4l_6a_160len".to_string(),
+            embed_dim: 384, hidden_units: 384, n_layers: 4, attn_heads: 6, ff_dim: 1536, max_seq_len: 160,
+            stages: vec![
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+            ],
+        },
+
+        RunConfig {
+            name: "512h_4l_8a_140len".to_string(),
+            embed_dim: 512, hidden_units: 512, n_layers: 4, attn_heads: 8, ff_dim: 2048, max_seq_len: 140,
+            stages: vec![
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+            ],
+        },
+
+        // // ── Small model, deep — tests whether more layers help at small width ─
+        // RunConfig {
+        //     name: "small_deep_balanced".to_string(),
+        //     embed_dim: 256, hidden_units: 256, n_layers: 6, attn_heads: 4, ff_dim: 1024, max_seq_len: 320,
+        //     stages: vec![
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
+
+        // // ── Medium model, moderate training ────────────────────────────────
+        // RunConfig {
+        //     name: "medium_balanced".to_string(),
+        //     embed_dim: 384, hidden_units: 384, n_layers: 4, attn_heads: 6, ff_dim: 1536, max_seq_len: 320,
+        //     stages: vec![
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
+
+        // // ── Medium model, high weight decay — tests regularisation ──────────
+        // RunConfig {
+        //     name: "medium_high_wd".to_string(),
+        //     embed_dim: 384, hidden_units: 384, n_layers: 4, attn_heads: 6, ff_dim: 1536, max_seq_len: 320,
+        //     stages: vec![
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.1,  epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.1,  epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
+
+        // // ── Medium model, label smoothing sweep — tests soft targets ────────
+        // RunConfig {
+        //     name: "medium_smooth02".to_string(),
+        //     embed_dim: 384, hidden_units: 384, n_layers: 4, attn_heads: 6, ff_dim: 1536, max_seq_len: 320,
+        //     stages: vec![
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.2 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.2 },
+        //     ],
+        // },
+
+        // // ── Large model, moderate training ─────────────────────────────────
+        // RunConfig {
+        //     name: "large_balanced".to_string(),
+        //     embed_dim: 512, hidden_units: 512, n_layers: 4, attn_heads: 8, ff_dim: 2048, max_seq_len: 320,
+        //     stages: vec![
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
+
+        // // ── Large model, deep — high capacity ceiling ───────────────────────
+        // RunConfig {
+        //     name: "large_deep".to_string(),
+        //     embed_dim: 512, hidden_units: 512, n_layers: 8, attn_heads: 8, ff_dim: 2048, max_seq_len: 320,
+        //     stages: vec![
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 3e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 3e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
+
+        // // ── Long context — tests seq-len sensitivity at medium size ─────────
+        // // RunConfig {
+        // //     name: "medium_long_ctx".to_string(),
+        // //     embed_dim: 384, hidden_units: 384, n_layers: 4, attn_heads: 6, ff_dim: 1536, max_seq_len: 512,
+        // //     stages: vec![
+        // //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.08, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        // //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.04, epochs: 12, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        // //     ],
+        // // },
+
+        // // ── Careful/slow: small model, long training, low lr ───────────────
+        // RunConfig {
+        //     name: "small_deep_careful".to_string(),
+        //     embed_dim: 256, hidden_units: 256, n_layers: 4, attn_heads: 4, ff_dim: 1024, max_seq_len: 256,
+        //     stages: vec![
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 20, batch_size, first_lr: 1e-5, last_lr: 1e-8, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 20, batch_size, first_lr: 1e-5, last_lr: 1e-8, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
     ];
 
     for run_cfg in runs {
@@ -308,7 +338,7 @@ pub fn run(
 
         let (mut model, mut epochs_already_done) = if std::path::Path::new(run_dir_str).join("model.bin").exists() {
             match YumonBrain::<TrainBackend>::load(run_dir_str, &device) {
-                Ok((m, _tok)) => {
+                Ok((m, _tok, _config)) => {
                     let meta_json = std::fs::read_to_string(std::path::Path::new(run_dir_str).join("metadata.json"))?;
                     let meta: BrainMetadata = serde_json::from_str(&meta_json)?;
                     println!("▶️  Resuming run {} from checkpoint ({} epochs done, loss={:.4})", 

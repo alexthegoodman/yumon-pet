@@ -460,7 +460,7 @@ fn main() {
         let tx = tx_result;
         std::thread::spawn(move || {
             let device: burn::prelude::Device<Wgpu> = Default::default();
-            let (brain, tokenizer) =
+            let (brain, tokenizer, config) =
                 match YumonBrain::<Wgpu>::load("checkpoints/brain", &device) {
                     Ok(m) => m,
                     Err(e) => { eprintln!("[brain] load failed: {e}"); return; }
@@ -481,7 +481,7 @@ fn main() {
             while let Ok(p) = rx_prompt.recv() {
                 let result = brain.generate_unmasked_parsed(
                     &tokenizer,
-                    &p.prompt, MAX_SEQ_LEN, &device,
+                    &p.prompt, config.max_seq_len, &device,
                 );
                 let _ = tx.send((p.yumon_id, result));
             }

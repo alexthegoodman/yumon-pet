@@ -154,7 +154,7 @@ fn run_chat(
     println!("✅ Vision model loaded from {vision_cp}");
 
     // 2. Load brain model + tokenizer
-    let (brain_model, tokenizer) = brain::model::YumonBrain::<B>::load(brain_cp, &device)?;
+    let (brain_model, tokenizer, config) = brain::model::YumonBrain::<B>::load(brain_cp, &device)?;
     println!("✅ Brain model loaded from {brain_cp}");
 
     // Quantize weights for faster CPU inference

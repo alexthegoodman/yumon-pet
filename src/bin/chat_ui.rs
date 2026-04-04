@@ -112,7 +112,8 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let brain_cp = "checkpoints/brain".to_string();
+    let brain_cp = "checkpoints/brain/384h_4l_6a_160len".to_string();
+    // let brain_cp = "checkpoints/brain/128h_2l_2a_200len".to_string();
     let mut app = AppState::new(brain_cp.clone());
 
     // let (tx_user, rx_user) = mpsc::channel::<(String, usize, WorldContext)>();
@@ -122,7 +123,7 @@ fn main() -> Result<()> {
     let device = app.device.clone();
     thread::spawn(move || {
         let res = YumonBrain::<Wgpu>::load(&brain_cp, &device);
-        let (brain_model, tokenizer) = match res {
+        let (brain_model, tokenizer, config) = match res {
             Ok(m) => {
                 tx_model.send(Message::System("Models loaded!".into())).unwrap();
                 m
@@ -186,7 +187,7 @@ fn main() -> Result<()> {
             let result = brain_model.generate_unmasked_parsed(
                 &tokenizer,
                 &prompt,
-                MAX_SEQ_LEN,
+                config.max_seq_len,
                 &device,
             );
 

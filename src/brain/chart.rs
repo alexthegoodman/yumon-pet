@@ -42,7 +42,7 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
         state.current_loss,
         state.avg_loss,
         state.entropy,
-        state.last_reply
+        state.last_reply,
     );
     let para = Paragraph::new(stats)
         .block(Block::default().borders(Borders::ALL).title("Training"));
@@ -53,6 +53,13 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
         .map(|&(_, l)| l)
         .fold(0.0_f64, f64::max)
         .max(0.01);
+
+    let lr_ds = Dataset::default()
+        .name("lr")
+        .marker(symbols::Marker::Braille)
+        .graph_type(GraphType::Line)
+        .style(Style::default().fg(Color::Green))
+        .data(&state.lr_history);
 
     let entropy_ds = Dataset::default()
         .name("entropy")
@@ -76,7 +83,7 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
         .data(&state.avg_loss_history);
 
     let n = state.global_step.max(1) as f64;
-    let chart = Chart::new(vec![loss_ds, avg_ds, entropy_ds])
+    let chart = Chart::new(vec![loss_ds, avg_ds, entropy_ds, lr_ds])
         .block(Block::default().title("Loss").borders(Borders::ALL))
         .x_axis(
             Axis::default()
