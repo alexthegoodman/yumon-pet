@@ -2,12 +2,15 @@
 
 use anyhow::Result;
 use burn::{backend::Wgpu, prelude::*};
+#[cfg(target_os = "windows")]
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use cubecl::wgpu::WgpuDevice;
+
+#[cfg(target_os = "windows")]
 use ratatui::{
     Terminal, backend::CrosstermBackend, layout::{Constraint, Direction, Layout}, style::{Color, Modifier, Style}, text::{Line, Span, Text}, widgets::{Block, Borders, List, ListItem, Paragraph}
 };
@@ -104,12 +107,19 @@ fn dir_arrow(dir: &str) -> &'static str {
         _       => "· none",
     }
 }
-
 fn main() -> Result<()> {
+    
+#[cfg(target_os = "windows")]
     enable_raw_mode()?;
     let mut stdout = io::stdout();
+    
+#[cfg(target_os = "windows")]
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    
+#[cfg(target_os = "windows")]
     let backend = CrosstermBackend::new(stdout);
+    
+#[cfg(target_os = "windows")]
     let mut terminal = Terminal::new(backend)?;
 
     let brain_cp = "checkpoints/brain/384h_4l_6a_160len".to_string();
@@ -142,13 +152,13 @@ fn main() -> Result<()> {
                 return;
             }
         };
-        let index = match YumonBrain::<Wgpu>::build_outlines_index(bpe, YUMON_SCHEMA) {
-            Ok(idx) => idx,
-            Err(e) => {
-                tx_model.send(Message::System(format!("Index build failed: {e}"))).unwrap();
-                return;
-            }
-        };
+        // let index = match YumonBrain::<Wgpu>::build_outlines_index(bpe, YUMON_SCHEMA) {
+        //     Ok(idx) => idx,
+        //     Err(e) => {
+        //         tx_model.send(Message::System(format!("Index build failed: {e}"))).unwrap();
+        //         return;
+        //     }
+        // };
 
         // let class_probs = vec![1.0 / CIFAR_CLASSES as f32; CIFAR_CLASSES];
         // let emote_probs = vec![1.0 / EMOTE_CLASSES as f32; EMOTE_CLASSES];
@@ -184,20 +194,23 @@ fn main() -> Result<()> {
                 .unwrap() 
             };
 
-            let result = brain_model.generate_unmasked_parsed(
-                &tokenizer,
-                &prompt,
-                config.max_seq_len,
-                &device,
-            );
+            // readd after wasm ready
+            // let result = brain_model.generate_unmasked_parsed(
+            //     &tokenizer,
+            //     &prompt,
+            //     config.max_seq_len,
+            //     &device,
+            // );
 
-            tx_model.send(Message::Yumon(result)).unwrap();
+            // tx_model.send(Message::Yumon(result)).unwrap();
         }
     });
 
     let mut last_tick = Instant::now();
     let tick_rate = Duration::from_millis(100);
 
+    
+    #[cfg(target_os = "windows")]
     loop {
         terminal.draw(|f| ui(f, &app))?;
 
@@ -292,17 +305,24 @@ fn main() -> Result<()> {
         }
     }
 
+    
+#[cfg(target_os = "windows")]
     disable_raw_mode()?;
+    
+#[cfg(target_os = "windows")]
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture
     )?;
+    
+#[cfg(target_os = "windows")]
     terminal.show_cursor()?;
 
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
 fn ui(f: &mut ratatui::Frame, app: &AppState) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -402,6 +422,7 @@ fn ui(f: &mut ratatui::Frame, app: &AppState) {
     f.render_widget(input, outer[1]);
 }
 
+#[cfg(target_os = "windows")]
 fn wrap_str(s: &str, width: usize) -> String {
     s.chars()
         .collect::<Vec<_>>()

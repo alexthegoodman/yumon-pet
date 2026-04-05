@@ -75,8 +75,10 @@ use anyhow::Result;
 //     Ok(sentences)
 // }
 
+#[cfg(target_os = "windows")]
 use rand::Rng; // Add this for random range generation
 
+#[cfg(target_os = "windows")]
 pub fn load_pdfs(paths: Vec<String>) -> Vec<String> {
     let mut all_samples = Vec::new();
 
@@ -90,6 +92,7 @@ pub fn load_pdfs(paths: Vec<String>) -> Vec<String> {
     all_samples
 }
 
+#[cfg(target_os = "windows")]
 pub fn load_pdf_ebook_sentences(pdf_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading ebook PDF: {pdf_path}");
 

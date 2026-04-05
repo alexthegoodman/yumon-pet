@@ -1,4 +1,8 @@
-use yumon_pet::{brain::{PAD_TOKEN, bpe::{self, BpeTokenizer, TokenizerKind}, loader::{DataLoader, FileKind}, mdx::{load_arena_chats, load_csv_bible, load_csv_qna, load_csv_quotes, load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences, load_qa_pairs, load_specific_dict_sentences, load_txt_sentences}, pdf::load_pdf_ebook_sentences, samples::TrainingStage, train::{build_keyword_index, build_label_keywords}, wiki::load_wiki_sentences}, vision::CIFAR_CLASSES};
+use yumon_pet::{brain::{PAD_TOKEN, bpe::{self, BpeTokenizer, TokenizerKind}, loader::{DataLoader, FileKind}, mdx::{load_arena_chats, load_dictionary_sentences, load_handcrafted_chats, load_qa_pairs, load_specific_dict_sentences, load_txt_sentences}, samples::TrainingStage, train::{build_keyword_index, build_label_keywords}}, vision::CIFAR_CLASSES};
+
+
+#[cfg(target_os = "windows")]
+use yumon_pet::{brain::{mdx::{load_arena_chats, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences}}};
 
 pub fn main() {
     // let all_words = load_csv_words("archive/word_counts.csv");

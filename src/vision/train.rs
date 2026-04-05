@@ -17,8 +17,11 @@ use burn::{
     tensor::{backend::AutodiffBackend, Int, TensorData},
     module::AutodiffModule,
 };
+#[cfg(target_os = "windows")]
 use rand::seq::SliceRandom;
+#[cfg(target_os = "windows")]
 use rand::thread_rng;
+#[cfg(target_os = "windows")]
 use indicatif::{ProgressBar, ProgressStyle};
 
 use super::{
@@ -31,6 +34,7 @@ use super::{
 pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 // pub type TrainBackend = burn::backend::Autodiff<burn::backend::NdArray<f32>>;
 
+#[cfg(target_os = "windows")]
 pub fn run(
     cifar_dir:  &str,
     fer_dir:    &str,
@@ -160,6 +164,7 @@ pub fn run(
 
 // ─── Evaluation ───────────────────────────────────────────────────────────────
 
+#[cfg(target_os = "windows")]
 fn eval_emote_acc<B: AutodiffBackend>(
     model:      &VisionModel<B>,
     dataset:    &FerDataset,

@@ -1,10 +1,15 @@
 // Procedurally generate questions to answer, save qa pairs to file
 
+
+#[cfg(target_os = "windows")]
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+
+
+#[cfg(target_os = "windows")]
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -525,6 +530,8 @@ impl App {
 
 // ── UI ────────────────────────────────────────────────────────────────────────
 
+
+#[cfg(target_os = "windows")]
 fn ui(f: &mut Frame, app: &App) {
     let area = f.size();
 
@@ -609,7 +616,10 @@ fn ui(f: &mut Frame, app: &App) {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 fn main() -> io::Result<()> {
-    // Setup terminal
+    
+#[cfg(target_os = "windows")]
+    {
+        // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -664,6 +674,7 @@ fn main() -> io::Result<()> {
         DisableMouseCapture
     )?;
     terminal.show_cursor()?;
+}
 
     println!("Journal saved to qa_journal.jsonl");
     Ok(())

@@ -1,16 +1,18 @@
 use burn::{
-    nn::{
+    backend::Wgpu, module::Ignored, nn::{
         Dropout, DropoutConfig, Embedding, EmbeddingConfig, Initializer, Linear, LinearConfig, RotaryEncoding, RotaryEncodingConfig
-    },
-    module::Ignored,
-    prelude::*,
-    record::{BinFileRecorder, FullPrecisionSettings, Recorder},
-    tensor::activation::sigmoid,
+    }, prelude::*, record::{BinFileRecorder, FullPrecisionSettings, Recorder}, tensor::activation::sigmoid
 };
 use anyhow::Result;
-use cubecl::wgpu::WgpuDevice;
+use cubecl::wgpu::{AutoGraphicsApi, GraphicsApi, WebGpu, WgpuDevice, init_setup_async};
+use log::Level;
+use log::info;
+
+#[cfg(target_os = "windows")]
 use outlines_core::{index::Index, prelude::Vocabulary};
+
 use serde::{Serialize, Deserialize};
+use burn::record::{BinBytesRecorder};
 
 use super::tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN};
 use crate::{
@@ -331,7 +333,7 @@ impl YumonBrainConfig {
 
 impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
     // ── Encoder ──────────────────────────────────────────────────────────────
-    pub fn encode(
+    pub async fn encode(
         &self,
         enc_tokens:  Tensor<B, 2, Int>,
     ) -> Tensor<B, 3> {
@@ -346,14 +348,14 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
         );
 
         for block in &self.enc_blocks {
-            x = block.forward(x, &self.rope, Some(pad_mask.clone()));
+            x = block.forward(x, &self.rope, Some(pad_mask.clone())).await;
         }
 
         self.enc_norm.forward(x)
     }
 
     // ── Decoder ──────────────────────────────────────────────────────────────
-    pub fn decode(
+    pub async fn decode(
         &self,
         dec_tokens:  Tensor<B, 2, Int>,
         memory:      Tensor<B, 3>,
@@ -379,7 +381,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
                 cmask.clone(),
                 Some(dec_pad_mask.clone()),
                 enc_pad_mask.clone(),
-            );
+            ).await;
         }
 
         let x = self.dec_norm.forward(x);
@@ -390,42 +392,168 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
     }
 
     // ── Forward ───────────────────────────────────────────────────────────────
-    pub fn forward(
+    pub async fn forward(
         &self,
         enc_tokens:  Tensor<B, 2, Int>,
         dec_tokens:  Tensor<B, 2, Int>,
     ) -> Tensor<B, 3> {
         let enc_tokens_cl = enc_tokens.clone();
         let enc_pad_mask = enc_tokens.equal_elem(PAD_TOKEN as u32);
-        let memory = self.encode(enc_tokens_cl);
-        self.decode(dec_tokens, memory, Some(enc_pad_mask))
+        let memory = self.encode(enc_tokens_cl).await;
+        self.decode(dec_tokens, memory, Some(enc_pad_mask)).await
     }
 
-    // ── Startup: build outlines Vocabulary from BPE tokenizer ─────────────────
+    // pub fn generate_unmasked_parsed(
+    //     &self,
+    //     tokenizer:      &TokenizerKind,
+    //     seed_text:      &str,
+    //     max_tokens:     usize,
+    //     device:         &B::Device,
+    // ) -> GenerationResult {
+    //     // ── Encode input once ──────────────────────────────────────────────────
+    //     let enc_ids: Vec<i32> = {
+    //         let mut ids = vec![BOS_TOKEN as i32];
+    //         if !seed_text.is_empty() {
+    //             ids.extend(tokenizer.encode(seed_text).iter().map(|&t| t as i32));
+    //         }
+    //         ids.resize(self.config.max_seq_len, PAD_TOKEN as i32);
+    //         ids
+    //     };
 
-    pub fn build_outlines_vocabulary(tokenizer: &BpeTokenizer) -> Vocabulary {
-        let hf_vocab = tokenizer.inner.get_vocab(true);  // String → u32
-        let mut vocab = Vocabulary::new(EOS_ID);
-        for (token_str, &token_id) in &hf_vocab {
-            vocab.try_insert(token_str.as_str(), token_id).ok();
-        }
-        vocab
-    }
+    //     let enc_tokens_t = Tensor::<B, 2, Int>::from_ints(
+    //         TensorData::new(enc_ids, [1, self.config.max_seq_len]),
+    //         device,
+    //     );
 
-    pub fn build_outlines_index(
-        tokenizer: &BpeTokenizer,
-        schema: &str,
-    ) -> anyhow::Result<Index> {
-        let regex = outlines_core::json_schema::regex_from_str(schema, None, None)
-            .map_err(|e| anyhow::anyhow!("schema → regex: {e}"))?;
-        let vocab = Self::build_outlines_vocabulary(tokenizer);
-        let index = Index::new(&regex, &vocab)
-            .map_err(|e| anyhow::anyhow!("Index::new: {e}"))?;
+    //     let enc_tokens_t_cl = enc_tokens_t.clone();
 
-        Ok(index)
-    }
+    //     let enc_pad_mask = enc_tokens_t.equal_elem(PAD_TOKEN as u32);
 
-    pub fn generate_unmasked_parsed(
+    //     let memory = self.encode(enc_tokens_t_cl);  // run once
+
+    //     // ── Decode autoregressively — no FSM masking ───────────────────────────
+    //     let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
+    //     let mut rng = rand::thread_rng();
+    //     let mut last_emote_logits: Option<Vec<f32>> = None;
+
+    //     for _ in 0..max_tokens {
+    //         let clamped_len = dec_ids.len().min(self.config.max_seq_len);
+    //         let mut padded = dec_ids[dec_ids.len() - clamped_len..].to_vec();
+    //         padded.resize(self.config.max_seq_len, PAD_TOKEN);
+
+    //         let dec_tokens_t = Tensor::<B, 2, Int>::from_ints(
+    //             TensorData::new(
+    //                 padded.iter().map(|&t| t as i32).collect::<Vec<_>>(),
+    //                 [1, self.config.max_seq_len],
+    //             ),
+    //             device,
+    //         );
+
+    //         let token_logits = self.decode(dec_tokens_t, memory.clone(), Some(enc_pad_mask.clone()));
+
+    //         let vocab_size  = tokenizer.vocab_size();
+    //         let last_logits = token_logits
+    //             .slice([0..1, clamped_len - 1..clamped_len, 0..vocab_size])
+    //             .reshape([vocab_size]);
+
+    //         // no masking — pure model output
+    //         let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
+    //         let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
+
+    //         if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
+    //         dec_ids.push(next_token);
+    //     }
+
+    //     // ── Decode tokens → string (skip BOS) ─────────────────────────────────
+    //     let raw_output = tokenizer.decode(&dec_ids[1..]);
+
+    //     let fixed = fix_json_syntax(&raw_output).fixed;
+
+    //     let extract = |key: &str| -> String {
+    //         fancy_regex::Regex::new(&format!(r#"(?<=\s*"{key}"\s*:\s*)"([^"]*)""#))
+    //             .ok()
+    //             .and_then(|re| re.captures(&fixed).ok().flatten())
+    //             .and_then(|caps| caps.get(1))
+    //             .map(|m| m.as_str().to_string())
+    //             .unwrap_or_default()
+    //     };
+
+    //     let mut parsed_action     = extract("action");
+    //     let mut parsed_motion_dir = extract("motion_dir");
+    //     let mut parsed_reply  = extract("reply");
+
+    //     if parsed_action.is_empty() || parsed_action.len() < 3 {
+    //         parsed_action     = extract(" action");
+    //         parsed_motion_dir = extract(" motion_dir");
+    //         parsed_reply  = extract(" reply");
+    //     }
+
+    //     if parsed_reply.is_empty() || parsed_reply.len() < 4 {
+    //         let parsed: serde_json::Value = serde_json::from_str(&fixed)
+    //             .unwrap_or_else(|_| {
+    //                 let extract = |key: &str| -> String {
+    //                     regex::Regex::new(&format!(r#""{key}"\s*:\s*"([^"]*)"#))
+    //                         .ok()
+    //                         .and_then(|re| re.captures(&fixed))
+    //                         .and_then(|caps| caps.get(1))
+    //                         .map(|m| m.as_str().to_string())
+    //                         .unwrap_or_default()
+    //                 };
+
+    //                 serde_json::json!({
+    //                     "action":     extract("action"),
+    //                     "motion_dir": extract("motion_dir"),
+    //                     "reply":      extract("reply"),
+    //                 })
+    //             });
+
+    //         parsed_action = parsed["action"].to_string().trim().to_string();
+    //         parsed_motion_dir = parsed["motion_dir"].to_string().trim().to_string();
+    //         parsed_reply = parsed["reply"].to_string().trim().to_string();
+    //     }
+
+    //     parsed_action = parsed_action.replace("\"", "").trim().to_string();
+    //     parsed_motion_dir = parsed_motion_dir.replace("\"", "").trim().to_string();
+    //     parsed_reply = parsed_reply.replace("\"", "").trim().to_string();
+
+    //     let action = match parsed_action.as_str() {
+    //         "speak"  => Action::Speak,
+    //         "build"  => Action::Build,
+    //         "travel" => Action::Travel,
+    //         "use"    => Action::Use,
+    //         _        => Action::Idle,
+    //     };
+
+    //     let motion_dir = match parsed_motion_dir.as_str() {
+    //         "north" => CardinalDir::North,
+    //         "south" => CardinalDir::South,
+    //         "east"  => CardinalDir::East,
+    //         "west"  => CardinalDir::West,
+    //         _       => CardinalDir::None,
+    //     };
+
+    //     let reply = parsed_reply
+    //         .as_str()
+    //         .to_string();
+
+    //     let yumon_emote_idx = last_emote_logits
+    //         .as_deref()
+    //         .map(argmax)
+    //         .unwrap_or(4);
+
+    //     GenerationResult {
+    //         reply,
+    //         action,
+    //         motion_dir,
+    //         yumon_emote_idx,
+    //         raw_output,
+    //         fsm_state: 0,
+    //         allowed_count: None,
+    //     }
+    // }
+
+
+    pub async fn generate_unmasked_parsed_async(
         &self,
         tokenizer:      &TokenizerKind,
         seed_text:      &str,
@@ -451,7 +579,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
 
         let enc_pad_mask = enc_tokens_t.equal_elem(PAD_TOKEN as u32);
 
-        let memory = self.encode(enc_tokens_t_cl);  // run once
+        let memory = self.encode(enc_tokens_t_cl).await;  // run once
 
         // ── Decode autoregressively — no FSM masking ───────────────────────────
         let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
@@ -474,12 +602,12 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
             let token_logits = self.decode(dec_tokens_t, memory.clone(), Some(enc_pad_mask.clone()));
 
             let vocab_size  = tokenizer.vocab_size();
-            let last_logits = token_logits
+            let last_logits = token_logits.await
                 .slice([0..1, clamped_len - 1..clamped_len, 0..vocab_size])
                 .reshape([vocab_size]);
 
             // no masking — pure model output
-            let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
+            let logits_vec: Vec<f32> = last_logits.to_data_async().await.expect("Need logits").to_vec().unwrap();
             let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
 
             if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
@@ -616,6 +744,59 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
         };
 
         let model = config.init::<B>(device).load_record(record);
+
+        Ok((model, tokenizer, config))
+    }
+
+    // We change the signature to take byte slices instead of a path
+    pub async fn load_from_bytes(
+        model_bytes: &[u8],
+        metadata_json: &str,
+        tokenizer_bytes: &[u8],
+        device: &B::Device,
+    ) -> Result<(Self, TokenizerKind, YumonBrainConfig)> {
+
+        info!("load_from_bytes 1!");
+
+        // // init_setup_async::<AutoGraphicsApi>(&WgpuDevice::default(), Default::default()).await;
+        init_setup_async::<WebGpu>(&WgpuDevice::default(), Default::default()).await;
+        
+        // 1. Parse metadata from the string (instead of fs::read_to_string)
+        let metadata: BrainMetadata = serde_json::from_str(metadata_json)?;
+
+        info!("load_from_bytes 2!");
+
+        // 2. Load the Tokenizer 
+        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load_from_bytes(tokenizer_bytes)?);
+
+        info!("load_from_bytes 3!");
+
+        // 3. Use BinBytesRecorder instead of BinFileRecorder
+        // let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+        // let record = recorder.load(model_bytes.to_vec(), device)
+        //     .map_err(|e| anyhow::anyhow!("load_record: {e:?}"))?;
+        // let model: YumonBrain<Backend> = YumonBrain::new(&Default::default());
+        let record = BinBytesRecorder::<FullPrecisionSettings, &'static [u8]>::default()
+            .load(model_bytes, &Default::default())
+            .expect("Failed to decode state");
+
+        info!("load_from_bytes 4!");
+        
+        let config = YumonBrainConfig {
+            vocab_size: metadata.vocab_size,
+            embed_dim: metadata.embed_dim,
+            hidden_units: metadata.hidden_units,
+            n_layers: metadata.n_layers,
+            attn_heads: metadata.attn_heads,
+            ff_dim: metadata.ff_dim,
+            max_seq_len: metadata.max_seq_len,
+            dropout_rate: 0.05,
+        };
+
+        let model = config.init::<B>(device).load_record(record);
+        // let model = model.load_record(record);
+
+        info!("load_from_bytes 5!");
 
         Ok((model, tokenizer, config))
     }

@@ -4,7 +4,10 @@ use rand::{seq::SliceRandom, SeedableRng};
 use rand::rngs::StdRng;
 
 use crate::brain::bpe::TokenizerKind;
+
+#[cfg(target_os = "windows")]
 use crate::brain::mdx::{load_arena_chats, load_csv_bible, load_csv_words, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_specific_dict_sentences, load_txt_sentences};
+
 use crate::brain::samples::{Sample, TrainingStage, prepare_paired_samples_chats, prepare_paired_samples_split, prepare_paired_samples_split_sep};
 
 // ── File-source descriptor ────────────────────────────────────────────────────
@@ -99,6 +102,7 @@ impl DataLoader {
             }
 
             // 2. Prepare training samples
+            #[cfg(target_os = "windows")]
             let mut samples = match entry.kind {
                 FileKind::QaPairs => {
                     let pairs = load_qa_pairs_raw(&entry.path)?;
@@ -118,6 +122,16 @@ impl DataLoader {
                         chats, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
                     )
                 },
+                _ => {
+                    prepare_paired_samples_split(
+                        sentences, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
+                    )
+                }
+            };
+
+            // no need to train in wasm
+            #[cfg(target_arch = "wasm32")]
+            let mut samples = match entry.kind {
                 _ => {
                     prepare_paired_samples_split(
                         sentences, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
@@ -154,6 +168,7 @@ impl DataLoader {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Dispatch to the appropriate sentence-loader based on FileKind.
+#[cfg(target_os = "windows")]
 fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
     match kind {
         FileKind::Mdx         => load_mdx_sentences(path),
@@ -176,7 +191,23 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
+    match kind {
+        FileKind::Mdx         => Ok(Vec::new()),
+        FileKind::BibleCsv    => Ok(Vec::new()),
+        FileKind::Handcrafted => Ok(Vec::new()),
+        FileKind::Txt         => Ok(Vec::new()),
+        FileKind::SpecificDict => Ok(Vec::new()),
+        // QA pairs are handled separately — return empty here
+        FileKind::QaPairs     => Ok(Vec::new()),
+        FileKind::Chats       => Ok(Vec::new()),
+        FileKind::JsonChats       => Ok(Vec::new())
+    }
+}
+
 /// Thin wrapper so the QA path stays unified in `load()`.
+#[cfg(target_os = "windows")]
 fn load_qa_pairs_raw(path: &str) -> anyhow::Result<Vec<(String, String)>> {
     load_qa_pairs(path)
 }

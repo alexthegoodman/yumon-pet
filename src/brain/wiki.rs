@@ -13,7 +13,9 @@
 
 use anyhow::Result;
 use burn::prelude::ToElement;
+#[cfg(target_os = "windows")]
 use quick_xml::Reader;
+#[cfg(target_os = "windows")]
 use quick_xml::events::Event;
 use std::collections::HashSet;
 use std::io::BufRead;
@@ -24,6 +26,7 @@ use crate::brain::train::{MAX_SEQ_LEN, MAX_SEQ_LEN_CHARS};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
+#[cfg(target_os = "windows")]
 pub fn save_sentence_pairs_to_file(training_samples: Vec<Sample>, output_path: &str) -> Result<()> {
     // println!("💾 Saving {} pairs to: {}", pairs.len(), output_path);
 
@@ -66,6 +69,7 @@ pub fn save_sentence_pairs_to_file(training_samples: Vec<Sample>, output_path: &
 }
 
 /// Returns a vector of clean sentences, up to `max_articles` articles processed.
+#[cfg(target_os = "windows")]
 pub fn load_wiki_sentences(xml_path: &str, max_articles: usize, split_count: usize) -> Result<Vec<String>> {
     println!("📖 Parsing SimpleWiki XML: {xml_path}");
 
@@ -167,6 +171,7 @@ pub fn load_wiki_sentences(xml_path: &str, max_articles: usize, split_count: usi
 }
 
 /// Very lightweight wiki markup stripper (handles most common patterns).
+#[cfg(target_os = "windows")]
 fn strip_wiki_markup(text: &str) -> String {
     let mut out     = String::with_capacity(text.len());
     let mut chars   = text.chars().peekable();
@@ -244,6 +249,7 @@ fn strip_wiki_markup(text: &str) -> String {
 }
 
 /// Split text into sentences on `. `, `! `, `? ` boundaries.
+#[cfg(target_os = "windows")]
 fn split_sentences(text: &str) -> Vec<String> {
     let mut sentences = Vec::new();
     let mut current   = String::new();

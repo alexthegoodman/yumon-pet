@@ -18,6 +18,7 @@
 /// and normalize with μ=0.5, σ=0.5.
 
 use anyhow::{Result, Context};
+#[cfg(target_os = "windows")]
 use image::{imageops::FilterType, DynamicImage};
 use std::path::{Path, PathBuf};
 
@@ -34,6 +35,7 @@ pub struct FerDataset {
     pub records: Vec<FerRecord>,
 }
 
+#[cfg(target_os = "windows")]
 impl FerDataset {
     /// Load a split directory (e.g. "data/fer2013-archive/train").
     pub fn load(split_dir: &str) -> Result<Self> {
@@ -76,6 +78,7 @@ fn is_image(path: &Path) -> bool {
     )
 }
 
+#[cfg(target_os = "windows")]
 fn load_fer_image(path: &Path) -> Result<Vec<f32>> {
     let img = image::open(path)
         .with_context(|| format!("open {:?}", path))?;

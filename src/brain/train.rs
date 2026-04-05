@@ -4,18 +4,31 @@ use anyhow::Result;
 use burn::{
     grad_clipping::GradientClippingConfig, module::AutodiffModule, nn::loss::CrossEntropyLossConfig, optim::{AdamConfig, AdamWConfig, GradientsParams, Optimizer}, prelude::*, tensor::{Int, TensorData, backend::AutodiffBackend}
 };
+#[cfg(target_os = "windows")]
 use rand::{Rng, rngs::StdRng, seq::SliceRandom, thread_rng};
+#[cfg(target_os = "windows")]
 use indicatif::{ProgressBar, ProgressStyle};
+#[cfg(target_os = "windows")]
 use ratatui::{Terminal, TerminalOptions, Viewport, prelude::CrosstermBackend};
 use std::collections::HashMap;
+#[cfg(target_os = "windows")]
 use rand::SeedableRng;
 
-use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, CL_ID, CR_ID, TokenizerKind}, chart::{TrainingState, render}, loader::{DataLoader, FileKind}, mdx::{load_csv_bible, load_csv_qna, load_csv_quotes, load_dictionary_sentences, load_handcrafted_sentences, load_mdx_sentences, load_notion_sentences, load_qa_pairs, load_qa_singles, load_txt_sentences}, pdf::{load_pdf_ebook_sentences, load_pdfs}, samples::{TrainingStage, WorldContext, prepare_paired_samples_split, prepare_paired_samples_split_sep}, wiki::{save_sentence_pairs_to_file}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
+use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, CL_ID, CR_ID, TokenizerKind}, chart::{TrainingState}, loader::{DataLoader, FileKind}, samples::{TrainingStage, WorldContext, prepare_paired_samples_split, prepare_paired_samples_split_sep}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
+
+#[cfg(target_os = "windows")]
+use crate::brain::chart::render;
+#[cfg(target_os = "windows")]
+use crate::brain::mdx::{load_dictionary_sentences, load_handcrafted_sentences, load_qa_pairs, load_qa_singles, load_txt_sentences};
+#[cfg(target_os = "windows")]
+use crate::brain::pdf::{load_pdf_ebook_sentences, load_pdfs};
+#[cfg(target_os = "windows")]
+use crate::brain::wiki::{save_sentence_pairs_to_file};
+
 use crate::brain::{
     // CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
     model::{YumonBrain, YumonBrainConfig, BrainMetadata, GenerationResult},
-    wiki::load_wiki_sentences,
 };
 
 pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
@@ -182,6 +195,7 @@ fn load_stage_data(
     loader.total_limit(4096).seed(4815162342).load(tokenizer, keyword_index, max_seq_len)
 }
 
+#[cfg(target_os = "windows")]
 pub fn run(
     wiki_xml:          &str,
     _vision_checkpoint: &str,  // reserved for future real-image fine-tuning
@@ -596,7 +610,7 @@ pub fn keyword_emote_label(text: &str) -> usize {
 }
 
 // ─── Progress bar ─────────────────────────────────────────────────────────────
-
+#[cfg(target_os = "windows")]
 pub fn make_progress(total: usize, epoch: usize, epochs: usize) -> ProgressBar {
     let pb = ProgressBar::new(total as u64);
     pb.set_style(

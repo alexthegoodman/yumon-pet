@@ -195,6 +195,16 @@ impl BpeTokenizer {
         Ok(Self { inner, vocab_size })
     }
 
+    pub fn load_from_bytes(json_content: &[u8]) -> Result<Self> {
+        // Tokenizer::from_str is the standard way to load the JSON config from memory
+        let inner = Tokenizer::from_bytes(json_content)
+            .map_err(|e| anyhow::anyhow!("loading tokenizer from string: {}", e))?;
+        
+        let vocab_size = inner.get_vocab_size(true);
+        
+        Ok(Self { inner, vocab_size })
+    }
+
     /// Quick sanity check: print a round-trip example.
     pub fn demo(&self, text: &str) -> Result<()> {
         let ids   = self.encode(text)?;

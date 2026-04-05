@@ -1,12 +1,15 @@
 // Playground and training ground for Yumon
 
+#[cfg(target_os = "windows")]
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+#[cfg(target_os = "windows")]
 use noise::{NoiseFn, Perlin};
 use rand::Rng;
+#[cfg(target_os = "windows")]
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -34,6 +37,7 @@ const NUM_AI_PLAYERS: usize = 24;
 #[derive(Clone, Copy, PartialEq)]
 enum Tile { DeepWater, ShallowWater, Sand, Plains, Forest, Hills, Mountain, Snow }
 
+#[cfg(target_os = "windows")]
 impl Tile {
     fn from_height(h: f64) -> Self {
         match h {
@@ -89,7 +93,8 @@ impl Tile {
 }
 
 /// Blend a territory tint into a tile's background colour.
-/// `strength` should be 0.0–1.0 (1.0 = fully tinted).
+/// `strength` should be 0.0–1.0 (1.0 = fully tinted).#[cfg(target_os = "windows")]
+#[cfg(target_os = "windows")]
 fn tint_bg(base: Color, tint: Color, strength: f32) -> Color {
     let (br, bg, bb) = rgb(base);
     let (tr, tg, tb) = rgb(tint);
@@ -98,7 +103,7 @@ fn tint_bg(base: Color, tint: Color, strength: f32) -> Color {
     };
     Color::Rgb(mix(br, tr), mix(bg, tg), mix(bb, tb))
 }
-
+#[cfg(target_os = "windows")]
 fn rgb(c: Color) -> (u8, u8, u8) {
     match c {
         Color::Rgb(r, g, b) => (r, g, b),
@@ -130,6 +135,7 @@ struct Tech {
 #[derive(Clone, Copy, PartialEq)]
 enum Track { Military, Economy, Infrastructure, Culture, Science }
 
+#[cfg(target_os = "windows")]
 impl Track {
     fn label(self) -> &'static str {
         match self {
@@ -159,7 +165,7 @@ impl Track {
         }
     }
 }
-
+#[cfg(target_os = "windows")]
 fn all_techs() -> Vec<(Track, Vec<Tech>)> {
     let costs: [u32; 20] = [3,3,3,7,8,9,9,9,12,15,18,22,26,30,32,36,38,42,45,52];
     macro_rules! track {
@@ -353,6 +359,7 @@ struct App {
     status: String,
 }
 
+#[cfg(target_os = "windows")]
 impl App {
     fn new() -> Self {
         let seed = rand::thread_rng().r#gen::<u32>();
@@ -888,7 +895,7 @@ impl App {
         None
     }
 }
-
+#[cfg(target_os = "windows")]
 fn apply_yields(stats: &Stat, p: &mut Player) {
     p.gold_inc += stats.gold;
     p.food_inc += stats.food;
@@ -901,7 +908,7 @@ fn apply_yields(stats: &Stat, p: &mut Player) {
     p.atk_bonus  += stats.atk;
     p.def_bonus  += stats.def;
 }
-
+#[cfg(target_os = "windows")]
 fn generate_map(seed: u32) -> Vec<Vec<Tile>> {
     let perlin = Perlin::new(seed);
     let scale = 0.055;
@@ -915,7 +922,7 @@ fn generate_map(seed: u32) -> Vec<Vec<Tile>> {
         }).collect()
     }).collect()
 }
-
+#[cfg(target_os = "windows")]
 fn find_start(map: &[Vec<Tile>]) -> (usize, usize) {
     let (cx, cy) = (MAP_W / 2, MAP_H / 2);
     for r in 0..30 {
@@ -931,7 +938,7 @@ fn find_start(map: &[Vec<Tile>]) -> (usize, usize) {
 }
 
 // ── Drawing ──────────────────────────────────────────────────────────────────
-
+#[cfg(target_os = "windows")]
 fn draw(f: &mut Frame, app: &App) {
     let area = f.size();
     match app.screen {
@@ -941,7 +948,7 @@ fn draw(f: &mut Frame, app: &App) {
         Screen::City(idx) => draw_city(f, app, idx, area),
     }
 }
-
+#[cfg(target_os = "windows")]
 fn draw_map(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -997,7 +1004,8 @@ fn draw_map(f: &mut Frame, app: &App, area: Rect) {
 
 struct MapWidget<'a> { app: &'a App }
 
-/// Dim RGB colour for a player index (used for territory tints).
+/// Dim RGB colour for a player index (used for territory tints).#[cfg(target_os = "windows")]
+#[cfg(target_os = "windows")]
 fn territory_tint(owner: usize) -> Color {
     match owner {
         0 => Color::Rgb(100, 100, 200),   // player — blue-ish
@@ -1013,6 +1021,7 @@ fn territory_tint(owner: usize) -> Color {
     }
 }
 
+#[cfg(target_os = "windows")]
 impl Widget for MapWidget<'_> {
     fn render(self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
         let app = self.app;
@@ -1054,7 +1063,7 @@ impl Widget for MapWidget<'_> {
         }
     }
 }
-
+#[cfg(target_os = "windows")]
 fn owner_color(owner: usize) -> Color {
     match owner {
         0 => Color::White,
@@ -1067,7 +1076,7 @@ fn owner_color(owner: usize) -> Color {
         _ => Color::Yellow,
     }
 }
-
+#[cfg(target_os = "windows")]
 fn draw_city(f: &mut Frame, app: &App, city_idx: usize, area: Rect) {
     let city = &app.cities[city_idx];
     let p = &app.players[app.current_player];
@@ -1108,12 +1117,14 @@ fn draw_city(f: &mut Frame, app: &App, city_idx: usize, area: Rect) {
     f.render_widget(Paragraph::new("  M / Esc — back to map").style(Style::default().fg(Color::DarkGray)), chunks[2]);
 }
 
+#[cfg(target_os = "windows")]
 fn hp_bar_str(hp: i32, max: i32, width: usize) -> String {
     let filled = ((hp.max(0) as f32 / max as f32) * width as f32) as usize;
     let empty = width.saturating_sub(filled);
     format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
 }
 
+#[cfg(target_os = "windows")]
 fn draw_tech(f: &mut Frame, app: &App, area: Rect) {
     let cp = app.players.get(app.current_player).expect("player");
 
@@ -1203,6 +1214,7 @@ fn draw_tech(f: &mut Frame, app: &App, area: Rect) {
     ]).block(Block::default().borders(Borders::TOP)), info_area);
 }
 
+#[cfg(target_os = "windows")]
 fn draw_help(f: &mut Frame, area: Rect) {
     let w = 58u16; let h = 34u16;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
@@ -1250,20 +1262,22 @@ fn draw_help(f: &mut Frame, area: Rect) {
     ]).block(Block::default().borders(Borders::ALL).title(" Help — H to close ")
         .border_style(Style::default().fg(Color::Yellow))), popup);
 }
-
+#[cfg(target_os = "windows")]
 fn center_pad(s: &str, width: usize) -> String {
     if s.len() >= width { return s.to_string(); }
     let pad = (width - s.len()) / 2;
     format!("{}{}", " ".repeat(pad), s)
 }
-
+#[cfg(target_os = "windows")]
 fn truncate(s: &str, max: usize) -> String {
     if max == 0 { return String::new(); }
     if s.len() <= max { s.to_string() } else { s[..max].to_string() }
 }
 
 fn main() -> io::Result<()> {
-    enable_raw_mode()?;
+    #[cfg(target_os = "windows")]
+    {
+        enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
@@ -1330,5 +1344,6 @@ fn main() -> io::Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
+}
     Ok(())
 }

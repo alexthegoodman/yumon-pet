@@ -28,7 +28,52 @@ use crate::brain::{flash_attn::bridge_ops::{launch_forward, read_f32}, model::{M
 //
 // Unmasked path: full CubeCL tiled kernel — no N×N matrix, O(N) memory.
 
-fn flash_attn_from_tensors<B: Backend<Device = WgpuDevice>>(
+// fn flash_attn_from_tensors<B: Backend<Device = WgpuDevice>>(
+//     q:       Tensor<B, 4>,
+//     k:       Tensor<B, 4>,
+//     v:       Tensor<B, 4>,
+//     mask:    Option<Tensor<B, 4>>,
+//     device:  &B::Device, 
+//     block_q: usize,
+//     block_k: usize,
+// ) -> Tensor<B, 4> {
+//     let q_device = q.device();
+//     let [batch, heads, seq_q, d_k] = q.dims();
+//     let [_, _, seq_k, d_v]         = v.dims();
+
+//     if let Some(m) = mask {
+//         // Masked path — standard Burn ops, correct -inf handling
+//         let scale  = (d_k as f64).sqrt().recip();
+//         let scores = q.matmul(k.transpose()) * scale + m;
+//         let w      = burn::tensor::activation::softmax(scores, 3);
+//         return w.matmul(v);
+//     }
+
+//     // Unmasked path — CubeCL FlashAttention kernel
+//     let bh = batch * heads;
+
+//     let q_r: Tensor<B, 3> = q.reshape([bh, seq_q, d_k]);
+//     let k_r: Tensor<B, 3> = k.reshape([bh, seq_k, d_k]);
+//     let v_r: Tensor<B, 3> = v.reshape([bh, seq_k, d_v]);
+
+//     let q_data: Vec<f32> = q_r.into_data().to_vec().unwrap();
+//     let k_data: Vec<f32> = k_r.into_data().to_vec().unwrap();
+//     let v_data: Vec<f32> = v_r.into_data().to_vec().unwrap();
+
+//     let result = launch_forward::<WgpuRuntime>(
+//         device,
+//         &q_data, &k_data, &v_data,
+//         bh, seq_q, seq_k, d_k, d_v,
+//         block_q, block_k,
+//     );
+
+//     let out_data = read_f32::<WgpuRuntime>(device, result.out, bh * seq_q * d_v);
+
+//     Tensor::<B, 4>::from_floats(out_data.as_slice(), &q_device)
+//         .reshape([batch, heads, seq_q, d_v])
+// }
+
+async fn flash_attn_from_tensors_async<B: Backend<Device = WgpuDevice>>(
     q:       Tensor<B, 4>,
     k:       Tensor<B, 4>,
     v:       Tensor<B, 4>,
@@ -56,9 +101,9 @@ fn flash_attn_from_tensors<B: Backend<Device = WgpuDevice>>(
     let k_r: Tensor<B, 3> = k.reshape([bh, seq_k, d_k]);
     let v_r: Tensor<B, 3> = v.reshape([bh, seq_k, d_v]);
 
-    let q_data: Vec<f32> = q_r.into_data().to_vec().unwrap();
-    let k_data: Vec<f32> = k_r.into_data().to_vec().unwrap();
-    let v_data: Vec<f32> = v_r.into_data().to_vec().unwrap();
+    let q_data: Vec<f32> = q_r.into_data_async().await.expect("Couldn't get data").to_vec().unwrap();
+    let k_data: Vec<f32> = k_r.into_data_async().await.expect("Couldn't get data").to_vec().unwrap();
+    let v_data: Vec<f32> = v_r.into_data_async().await.expect("Couldn't get data").to_vec().unwrap();
 
     let result = launch_forward::<WgpuRuntime>(
         device,
@@ -67,7 +112,7 @@ fn flash_attn_from_tensors<B: Backend<Device = WgpuDevice>>(
         block_q, block_k,
     );
 
-    let out_data = read_f32::<WgpuRuntime>(device, result.out, bh * seq_q * d_v);
+    let out_data = read_f32::<WgpuRuntime>(device, result.out, bh * seq_q * d_v).await;
 
     Tensor::<B, 4>::from_floats(out_data.as_slice(), &q_device)
         .reshape([batch, heads, seq_q, d_v])
@@ -162,7 +207,7 @@ pub struct SelfAttention<B: Backend> {
 }
 
 impl<B: Backend<Device = WgpuDevice>> SelfAttention<B> {
-    pub fn forward(
+    pub async fn forward(
         &self,
         x:           Tensor<B, 3>,
         rope:        &RotaryEncoding<B>,
@@ -184,7 +229,7 @@ impl<B: Backend<Device = WgpuDevice>> SelfAttention<B> {
 
         let mask = build_mask(causal_mask, pad_mask, seq, seq);
 
-        let out = flash_attn_from_tensors(q, k, v, mask, device, self.block_q, self.block_k);
+        let out = flash_attn_from_tensors_async(q, k, v, mask, device, self.block_q, self.block_k).await;
 
         self.o.forward(out.swap_dims(1, 2).flatten(2, 3))
     }
@@ -236,7 +281,7 @@ pub struct CrossAttentionBlock<B: Backend> {
 }
 
 impl<B: Backend<Device = WgpuDevice>> CrossAttentionBlock<B> {
-    pub fn forward(
+    pub async fn forward(
         &self,
         x:            Tensor<B, 3>,
         memory:       Tensor<B, 3>,
@@ -264,7 +309,7 @@ impl<B: Backend<Device = WgpuDevice>> CrossAttentionBlock<B> {
         // No causal mask on cross-attention, only optional encoder padding
         let mask = build_mask(None, enc_pad_mask, dec_len, enc_len);
 
-        let out = flash_attn_from_tensors(q, k, v, mask, device, self.block_q, self.block_k);
+        let out = flash_attn_from_tensors_async(q, k, v, mask, device, self.block_q, self.block_k).await;
 
         self.o.forward(out.swap_dims(1, 2).flatten(2, 3))
     }
@@ -306,7 +351,7 @@ pub struct EncoderBlock<B: Backend<Device = WgpuDevice>> {
 }
 
 impl<B: Backend<Device = WgpuDevice>> EncoderBlock<B> {
-    pub fn forward(
+    pub async fn forward(
         &self,
         x:        Tensor<B, 3>,
         rope:     &RotaryEncoding<B>,
@@ -317,7 +362,7 @@ impl<B: Backend<Device = WgpuDevice>> EncoderBlock<B> {
         let x = x.clone()
             + self.attn.forward(
                 self.attn_norm.forward(x), rope, None, pad_mask, &x_device,
-            );
+            ).await;
         x.clone() + self.mlp.forward(self.mlp_norm.forward(x))
     }
 }
@@ -365,7 +410,7 @@ pub struct DecoderBlock<B: Backend<Device = WgpuDevice>> {
 }
 
 impl<B: Backend<Device = WgpuDevice>> DecoderBlock<B> {
-    pub fn forward(
+    pub async fn forward(
         &self,
         x:            Tensor<B, 3>,
         memory:       Tensor<B, 3>,
@@ -383,7 +428,7 @@ impl<B: Backend<Device = WgpuDevice>> DecoderBlock<B> {
                 Some(causal_mask),
                 dec_pad_mask,
                 &x_device,
-            );
+            ).await;
         let x = x.clone()
             + self.cross_attn.forward(
                 self.cross_attn_norm.forward(x.clone()),
@@ -391,7 +436,7 @@ impl<B: Backend<Device = WgpuDevice>> DecoderBlock<B> {
                 rope,
                 enc_pad_mask,
                 &x_device,
-            );
+            ).await;
         x.clone() + self.mlp.forward(self.mlp_norm.forward(x))
     }
 }

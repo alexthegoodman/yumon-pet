@@ -3,11 +3,13 @@
 
 use anyhow::Result;
 use burn::{prelude::*, tensor::TensorData};
+#[cfg(target_os = "windows")]
 use image::imageops::FilterType;
 
 use crate::vision::IMG_SIZE;
 
 /// Load a user-provided image file and return a [1, 3, IMG_SIZE, IMG_SIZE] tensor.
+#[cfg(target_os = "windows")]
 pub fn load_image_tensor<B: Backend>(path: &str, device: &B::Device) -> Result<Tensor<B, 4>> {
     let img = image::open(path)?
         .resize_exact(IMG_SIZE as u32, IMG_SIZE as u32, FilterType::Lanczos3)

@@ -220,9 +220,9 @@ pub fn launch_backward<R: Runtime>(
 // Synchronously reads a handle back to a Vec<f32>.
 // Use only for testing / debugging — not in the training hot path.
 
-pub fn read_f32<R: Runtime>(device: &R::Device, handle: Handle, n: usize) -> Vec<f32> {
+pub async fn read_f32<R: Runtime>(device: &R::Device, handle: Handle, n: usize) -> Vec<f32> {
     let client = R::client(device);
-    let bytes  = client.read_one(handle);
+    let bytes  = client.read_async(vec![handle]).await.expect("Couldn't get bytes read_f32").remove(0);
     f32::from_bytes(&bytes)[..n].to_vec()
 }
 

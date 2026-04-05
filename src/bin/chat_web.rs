@@ -9,9 +9,14 @@ use ratzilla::ratatui::{
     Terminal,
 };
 use textwrap::wrap;
-use std::{io, sync::{mpsc, Arc, Mutex}, time::{Duration, Instant}};
+use std::{fmt::Debug, io, sync::{Arc, Mutex, mpsc}, time::{Duration, Instant}};
 use rand::Rng;
 use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
+use log::Level;
+use log::info;
+use futures::StreamExt;
+use futures::SinkExt;
 
 use yumon_pet::{
     brain::{
@@ -43,8 +48,8 @@ struct AppState {
     loading:             bool,
     brain_cp:            String,
     device:              WgpuDevice,
-    last_yumon_speak:    Instant,
-    next_speak_interval: Duration,
+    // last_yumon_speak:    Instant,
+    // next_speak_interval: Duration,
     agent:               AgentState,
     recent_memories:     Vec<(String, String)>,
 }
@@ -58,8 +63,8 @@ impl AppState {
             loading:             true,
             brain_cp,
             device:              Default::default(),
-            last_yumon_speak:    Instant::now(),
-            next_speak_interval: Duration::from_secs(rng.gen_range(30..120)),
+            // last_yumon_speak:    Instant::now(),
+            // next_speak_interval: Duration::from_secs(rng.gen_range(30..120)),
             agent:               AgentState::default(),
             recent_memories: Vec::new(),
         }
@@ -86,15 +91,20 @@ fn dir_arrow(dir: &str) -> &'static str {
     }
 }
 
-fn main() -> Result<()> {
+// #[wasm_bindgen(start)]
+fn main() -> Result<(), JsValue> {
+    console_error_panic_hook::set_once();
+    let _ = console_log::init();
+
     // Ratzilla setup
-    let backend = DomBackend::new().map_err(|e| anyhow::anyhow!("Backend: {e:?}"))?;
-    let terminal = Terminal::new(backend).map_err(|e| anyhow::anyhow!("Terminal: {e:?}"))?;
+    let backend = DomBackend::new().map_err(|e| anyhow::anyhow!("Backend: {e:?}")).expect("Couldn't get DOM backend");
+    let terminal = Terminal::new(backend).map_err(|e| anyhow::anyhow!("Terminal: {e:?}")).expect("Couldn't get TUI backend");
 
     let brain_cp = "checkpoints/brain/384h_4l_6a_160len".to_string();
     let app = Arc::new(Mutex::new(AppState::new(brain_cp.clone())));
 
-    let (tx_user, rx_user) = mpsc::channel::<(String, usize, WorldContext, Vec<(String, String)>)>();
+    // let (tx_user, rx_user) = mpsc::channel::<(String, usize, WorldContext, Vec<(String, String)>)>();
+    let (tx_user, mut rx_user) = futures::channel::mpsc::unbounded::<(String, usize, WorldContext, Vec<(String, String)>)>();
     let (tx_model, rx_model) = mpsc::channel::<Message>();
 
     // WASM "model thread" (using spawn_local)
@@ -108,21 +118,101 @@ fn main() -> Result<()> {
         // to show where the loading should happen.
         // real implementation would use: fetch_model_bytes().await
         
-        tx_model_cl.send(Message::System("Web model loading requires fetch(). Adapting load() to web...".into())).unwrap();
+        tx_model_cl.send(Message::System("Loading model...".into())).unwrap();
         
-        // Let's at least simulate it for now if we don't have a web-ready load()
-        /*
-        let res = YumonBrain::<Wgpu>::load(&brain_cp_cl, &device);
-        ...
-        */
+        // Static assets included at compile time
         
-        // Wait, for now we'll just stay in loading mode or show error
-        tx_model_cl.send(Message::System("Note: Model files must be available via fetch for full web functionality.".into())).unwrap();
+        // static MODEL_DATA: &[u8] = include_bytes!("../../checkpoints/brain/128h_2l_2a_200len/model.bin");
+        static MODEL_DATA: &[u8] = include_bytes!("../../checkpoints/brain/256h_2l_4a_180len/model.bin");
+        // static META_DATA: &str = include_str!("../../checkpoints/brain/128h_2l_2a_200len/metadata.json");
+        static META_DATA: &str = include_str!("../../checkpoints/brain/256h_2l_4a_180len/metadata.json");
+        static TOKENIZER_BYTES: &[u8] = include_bytes!("../../yumon_bpe/tokenizer.json");
+
+        // Inside your async block:
+        let res = YumonBrain::<Wgpu>::load_from_bytes(
+            MODEL_DATA, 
+            META_DATA, 
+            TOKENIZER_BYTES,
+            &device
+        ).await;
+                
+        let (brain_model, tokenizer, config) = match res {
+            Ok(m) => {
+                tx_model_cl.send(Message::System("Models loaded!".into())).unwrap();
+                m
+            }
+            Err(e) => {
+                tx_model_cl.send(Message::System(format!("Error loading models: {e}"))).unwrap();
+                return;
+            }
+        };
+
+        // Build outlines index once — cheap at 4096 vocab
+        // let bpe = match &tokenizer {
+        //     yumon_pet::brain::bpe::TokenizerKind::Bpe(b) => b,
+        //     _ => {
+        //         tx_model_cl.send(Message::System("BPE tokenizer required".into())).unwrap();
+        //         return;
+        //     }
+        // };
+        // let index = match YumonBrain::<Wgpu>::build_outlines_index(bpe, YUMON_SCHEMA) {
+        //     Ok(idx) => idx,
+        //     Err(e) => {
+        //         tx_model.send(Message::System(format!("Index build failed: {e}"))).unwrap();
+        //         return;
+        //     }
+        // };
+
+        // let class_probs = vec![1.0 / CIFAR_CLASSES as f32; CIFAR_CLASSES];
+        // let emote_probs = vec![1.0 / EMOTE_CLASSES as f32; EMOTE_CLASSES];
+
+        // while let Ok((prompt_text, user_emote_idx, world, memories)) = rx_user.recv() {
+        while let Some((prompt_text, user_emote_idx, world, memories)) = rx_user.next().await {
+
+            // let prompt = serde_json::to_string_pretty(&serde_json::json!({
+            //     "obstacle_dir": "none",
+            //     "building_dir": "none",
+            //     "resource_dir": "none",
+            //     "message":      prompt_text,
+            // }))
+            // .unwrap();
+
+            let memories_json: Vec<serde_json::Value> = memories
+                .iter()
+                .map(|(h, b)| serde_json::json!({ "human": h, "bot": b }))
+                .collect();
+
+            // let training_stage = TrainingStage::Language;
+            let training_stage = TrainingStage::Structured;
+
+            let prompt = if training_stage == TrainingStage::Language {
+                prompt_text
+            } else { 
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "obstacle_dir": "none",
+                    "building_dir": "none",
+                    "resource_dir": "none",
+                    "memories":     memories_json,
+                    "message":      prompt_text,
+                }))
+                .unwrap() 
+            };
+
+            let result = brain_model.generate_unmasked_parsed_async(
+                &tokenizer,
+                &prompt,
+                config.max_seq_len,
+                &device,
+            ).await;
+
+            tx_model_cl.send(Message::Yumon(result)).unwrap();
+        }
+    
     });
 
     // Handle key events
     let app_cl = app.clone();
-    let tx_user_cl = tx_user.clone();
+    let mut tx_user_cl = tx_user.clone();
     terminal.on_key_event(move |key| {
         let mut app = app_cl.lock().unwrap();
         match key.code {
@@ -131,7 +221,7 @@ fn main() -> Result<()> {
                     let input = std::mem::take(&mut app.input);
                     app.messages.push(Message::User(input.clone()));
                     app.loading = true;
-                    tx_user_cl.send((input, 4, WorldContext::default(), app.recent_memories.clone())).ok();
+                    tx_user_cl.unbounded_send((input, 4, WorldContext::default(), app.recent_memories.clone())).ok();
                 }
             }
             KeyCode::Char(c) => app.input.push(c),
@@ -183,7 +273,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn ui(f: &mut ratatui::Frame, app: &AppState) {
+fn ui(f: &mut ratzilla::ratatui::Frame, app: &AppState) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

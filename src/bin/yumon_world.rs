@@ -15,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "windows")]
 use three_d::{egui::{CollapsingHeader, Color32, RichText, SidePanel}, *};
 
 use yumon_pet::{
@@ -24,6 +25,8 @@ use yumon_pet::{
     },
     vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES},
 };
+
+#[cfg(target_os = "windows")]
 use three_d::renderer::geometry::Mesh;
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
@@ -94,6 +97,7 @@ const MODEL_PATHS: [&str; YUMON_COUNT] = [
     "data/models/animal-parrot.glb",
 ];
 
+#[cfg(target_os = "windows")]
 const TINTS: [Srgba; YUMON_COUNT] = [
     Srgba { r: 220, g: 110, b: 110, a: 255 },
     Srgba { r: 110, g: 170, b: 220, a: 255 },
@@ -153,9 +157,11 @@ const YUMON_NAMES: [&str; YUMON_COUNT] = ["Ember", "Ripple", "Fern", "Sol","Embe
 // ─── World objects ────────────────────────────────────────────────────────────
 
 /// A static building at the world centre.
+#[cfg(target_os = "windows")]
 const BUILDING_POS: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
 
 /// Fixed resource nodes scattered around the arena.
+#[cfg(target_os = "windows")]
 const RESOURCE_POSITIONS: [Vec3; 3] = [
     Vec3 { x: -4.0, y: 0.0, z: -2.5 },
     Vec3 { x:  4.5, y: 0.0, z:  1.0 },
@@ -163,6 +169,7 @@ const RESOURCE_POSITIONS: [Vec3; 3] = [
 ];
 
 /// Fixed obstacles (boulders / logs) in the arena.
+#[cfg(target_os = "windows")]
 const OBSTACLE_POSITIONS: [Vec3; 3] = [
     Vec3 { x: -2.0, y: 0.0, z:  2.5 },
     Vec3 { x:  2.5, y: 0.0, z: -3.0 },
@@ -173,6 +180,7 @@ const OBSTACLE_POSITIONS: [Vec3; 3] = [
 
 /// Return the cardinal direction from `from` toward `to`, or None if they are
 /// essentially at the same spot.
+#[cfg(target_os = "windows")]
 fn relative_cardinal(from: Vec3, to: Vec3) -> CardinalDir {
     let dx = to.x - from.x;
     let dz = to.z - from.z;
@@ -189,6 +197,7 @@ fn relative_cardinal(from: Vec3, to: Vec3) -> CardinalDir {
 }
 
 /// Among a slice of positions, return the direction toward the *closest* one.
+#[cfg(target_os = "windows")]
 fn nearest_cardinal(from: Vec3, positions: &[Vec3]) -> CardinalDir {
     positions
         .iter()
@@ -201,6 +210,7 @@ fn nearest_cardinal(from: Vec3, positions: &[Vec3]) -> CardinalDir {
         .unwrap_or(CardinalDir::None)
 }
 
+#[cfg(target_os = "windows")]
 fn cardinal_dir_name(d: CardinalDir) -> &'static str {
     match d {
         CardinalDir::North => "north",
@@ -225,6 +235,7 @@ pub struct WorldPrompt {
 #[derive(Debug, Clone, PartialEq)]
 enum AnimState { Idle, Walking, Building }
 
+#[cfg(target_os = "windows")]
 struct Yumon {
     id:                usize,
     pos:               Vec3,
@@ -241,6 +252,7 @@ struct Yumon {
     pending_announcement: Option<String>,
 }
 
+#[cfg(target_os = "windows")]
 impl Yumon {
     fn new(id: usize, pos: Vec3) -> Self {
         let stagger = Duration::from_secs(5 + id as u64);
@@ -392,6 +404,7 @@ impl Yumon {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+#[cfg(target_os = "windows")]
 fn cardinal_vec(d: CardinalDir) -> Vec3 {
     match d {
         CardinalDir::North => Vec3::new( 0.0, 0.0, -1.0),
@@ -424,6 +437,7 @@ fn action_icon(a: Action) -> &'static str {
 
 // ─── GLB loader helper ────────────────────────────────────────────────────────
 
+#[cfg(target_os = "windows")]
 fn try_load_glb(context: &Context, path: &str) -> Option<Model<PhysicalMaterial>> {
     let p = std::path::Path::new(path);
     let filename = p.file_name().unwrap().to_str().unwrap();
@@ -441,6 +455,7 @@ fn try_load_glb(context: &Context, path: &str) -> Option<Model<PhysicalMaterial>
     Some(model)
 }
 
+#[cfg(target_os = "windows")]
 struct Building {
     gm: Gm<Mesh, PhysicalMaterial>,
     pos: Vec3,
@@ -450,6 +465,8 @@ struct Building {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 fn main() {
+    #[cfg(target_os = "windows")]
+{    
     // ── Channels ─────────────────────────────────────────────────────────────
     let (tx_prompt, rx_prompt) = mpsc::channel::<WorldPrompt>();
     let (tx_result, rx_result) = mpsc::channel::<(usize, GenerationResult)>();
@@ -875,4 +892,5 @@ fn main() {
 
         FrameOutput::default()
     });
+}
 }

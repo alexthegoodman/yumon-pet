@@ -2,9 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 use rand::{Rng, rngs::StdRng};
+#[cfg(target_os = "windows")]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use crate::brain::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, bpe::TokenizerKind, keywords::extract_keywords, mdx::HandcraftedChats, train::{MAX_SEQ_LEN, keyword_emote_label, matched_classes}};
+use crate::brain::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, bpe::TokenizerKind, mdx::HandcraftedChats, train::{MAX_SEQ_LEN, keyword_emote_label, matched_classes}};
 use rand::SeedableRng;
 use rand::prelude::SliceRandom;
 
