@@ -1,3 +1,29 @@
+<!-- <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yumon Chat</title>
+    <link data-trunk rel="rust" href="Cargo.toml" data-bin="chat_web" />
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: black;
+        }
+    </style>
+</head>
+<body>
+    <script type="module">
+        import init from "./pkg/yumon_pet.js";
+        init();
+    </script>
+</body>
+</html> -->
+
 <!doctype html>
 <html lang="en">
   <head>
@@ -10,18 +36,7 @@
       rel="stylesheet"
       href="https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/fira_code.min.css"
     />
-    
-<script type="module">
-import init, * as bindings from 'https://pbd11pvl9gfr63ve.public.blob.vercel-storage.com/chat_web-v1.js';
-const wasm = await init({ module_or_path: 'https://pbd11pvl9gfr63ve.public.blob.vercel-storage.com/chat_web-v1_bg.wasm' });
-
-
-window.wasmBindings = bindings;
-
-
-dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
-
-</script>
+    <link data-trunk rel="rust" href="Cargo.toml" data-bin="chat_web" />
     <title>Yumon Ratzilla</title>
     <style>
       body {
@@ -41,7 +56,7 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
         margin: 0px;
       }
     </style>
-  <link rel="modulepreload" href="https://pbd11pvl9gfr63ve.public.blob.vercel-storage.com/chat_web-v1.js" crossorigin="anonymous" integrity="sha384-ESIi9zWQRnLZLPpaG4LCAJHEwbOuc733IPeOivfKZymUx6bnumgMC2/w916bwzo7"><link rel="preload" href="https://pbd11pvl9gfr63ve.public.blob.vercel-storage.com/chat_web-v1_bg.wasm" crossorigin="anonymous" integrity="sha384-dXPrWKkA4KWH1fFjNXRdRyZymV4hPz80u0h5OFC8GTWnzyN3Koc7uZz6p1dVUsD7" as="fetch" type="application/wasm"></head>
+  </head>
   <body>
     <!-- (optional) subscribe to the application started event -->
     <script type="module">

@@ -39,9 +39,20 @@ pub const YUMON_SCHEMA_INPUT: &str = r#"{
         "obstacle_dir": { "type": "string", "enum": ["north","south","east","west","none"] },
         "building_dir": { "type": "string", "enum": ["north","south","east","west","none"] },
         "resource_dir": { "type": "string", "enum": ["north","south","east","west","none"] },
-        "message":        { "type": "string" }
+        "message":      { "type": "string" },
+        "memories": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "yumon":   { "type": "string" },
+                    "human": { "type": "string" }
+                },
+                "required": ["yumon", "human"]
+            }
+        }
     },
-    "required": ["obstacle_dir", "building_dir", "resource_dir", "message"]
+    "required": ["obstacle_dir", "building_dir", "resource_dir", "message", "memories"]
 }"#;
 
 pub const YUMON_SCHEMA: &str = r#"{

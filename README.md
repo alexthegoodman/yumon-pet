@@ -32,11 +32,15 @@ pub const MAX_SEQ_LEN:  usize = 320;
 
 ## Get Started
 
+You may need clang for chat_web.
+
 - `cargo run --release --bin yumon-pet -- train-brain` to start training on the provided (or your own) dataset
 - `cargo run --release --bin chat_ui` to get started chatting
 - `cargo run --release --bin yumon_world` to start a Yumon World simulation
 - `cargo run --release --bin endless_data` TUI to answer endless questions in order to generate some data
 - `cargo run --release --bin train_bpe` train your tokenizer on your data
+
+- `trunk serve --release` for chat web (or `trunk build --release` for deployment)
 
 ### Datasets
 

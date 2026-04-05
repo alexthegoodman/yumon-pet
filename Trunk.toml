@@ -1,5 +1,5 @@
 [build]
-target = "index.html"
+target = "target.html"
 
 [[bin]]
 name = "chat_web"
