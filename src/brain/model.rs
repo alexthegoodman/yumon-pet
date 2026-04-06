@@ -344,7 +344,7 @@ impl YumonBrainConfig {
 
 impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
     // ── Encoder ──────────────────────────────────────────────────────────────
-    pub async fn encode(
+    pub fn encode(
         &self,
         enc_tokens:  Tensor<B, 2, Int>,
     ) -> Tensor<B, 3> {
@@ -359,14 +359,14 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
         );
 
         for block in &self.enc_blocks {
-            x = block.forward(x, &self.rope, Some(pad_mask.clone())).await;
+            x = block.forward(x, &self.rope, Some(pad_mask.clone()));
         }
 
         self.enc_norm.forward(x)
     }
 
     // ── Decoder ──────────────────────────────────────────────────────────────
-    pub async fn decode(
+    pub fn decode(
         &self,
         dec_tokens:  Tensor<B, 2, Int>,
         memory:      Tensor<B, 3>,
@@ -392,6 +392,77 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
                 cmask.clone(),
                 Some(dec_pad_mask.clone()),
                 enc_pad_mask.clone(),
+            );
+        }
+
+        let x = self.dec_norm.forward(x);
+
+        let token_logits = self.token_head.forward(x.clone());
+
+        token_logits
+    }
+
+    // ── Forward ───────────────────────────────────────────────────────────────
+    pub fn forward(
+        &self,
+        enc_tokens:  Tensor<B, 2, Int>,
+        dec_tokens:  Tensor<B, 2, Int>,
+    ) -> Tensor<B, 3> {
+        let enc_tokens_cl = enc_tokens.clone();
+        let enc_pad_mask = enc_tokens.equal_elem(PAD_TOKEN as u32);
+        let memory = self.encode(enc_tokens_cl);
+        self.decode(dec_tokens, memory, Some(enc_pad_mask))
+    }
+
+    // ── Encoder ──────────────────────────────────────────────────────────────
+    pub async fn encode_async(
+        &self,
+        enc_tokens:  Tensor<B, 2, Int>,
+    ) -> Tensor<B, 3> {
+        let enc_tokens_cl = enc_tokens.clone();
+        
+        let [batch, enc_len] = enc_tokens.dims();
+
+        let pad_mask = enc_tokens.equal_elem(PAD_TOKEN as u32); // [batch, enc_len]
+
+        let mut x = self.dropout.forward(
+            self.enc_embedding.forward(enc_tokens_cl)
+        );
+
+        for block in &self.enc_blocks {
+            x = block.forward_async(x, &self.rope, Some(pad_mask.clone())).await;
+        }
+
+        self.enc_norm.forward(x)
+    }
+
+    // ── Decoder ──────────────────────────────────────────────────────────────
+    pub async fn decode_async(
+        &self,
+        dec_tokens:  Tensor<B, 2, Int>,
+        memory:      Tensor<B, 3>,
+        enc_pad_mask: Option<Tensor<B, 2, Bool>>,
+    ) -> Tensor<B, 3> {
+        let dec_tokens_cl = dec_tokens.clone();
+
+        let [batch, dec_len] = dec_tokens.dims();
+
+        let dec_pad_mask = dec_tokens.equal_elem(PAD_TOKEN as u32);
+
+        let mut x = self.dropout.forward(
+            self.dec_embedding.forward(dec_tokens_cl)
+        );
+
+        let cmask = causal_mask::<B>(dec_len, &x.device());
+
+        for block in &self.dec_blocks {
+            x = block.forward_async(
+                x,
+                memory.clone(),
+                &self.rope,
+                cmask.clone(),
+                Some(dec_pad_mask.clone()),
+                enc_pad_mask.clone(),
             ).await;
         }
 
@@ -403,166 +474,165 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
     }
 
     // ── Forward ───────────────────────────────────────────────────────────────
-    pub async fn forward(
+    pub async fn forward_async(
         &self,
         enc_tokens:  Tensor<B, 2, Int>,
         dec_tokens:  Tensor<B, 2, Int>,
     ) -> Tensor<B, 3> {
         let enc_tokens_cl = enc_tokens.clone();
         let enc_pad_mask = enc_tokens.equal_elem(PAD_TOKEN as u32);
-        let memory = self.encode(enc_tokens_cl).await;
-        self.decode(dec_tokens, memory, Some(enc_pad_mask)).await
+        let memory = self.encode_async(enc_tokens_cl).await;
+        self.decode_async(dec_tokens, memory, Some(enc_pad_mask)).await
     }
 
-    // pub fn generate_unmasked_parsed(
-    //     &self,
-    //     tokenizer:      &TokenizerKind,
-    //     seed_text:      &str,
-    //     max_tokens:     usize,
-    //     device:         &B::Device,
-    // ) -> GenerationResult {
-    //     // ── Encode input once ──────────────────────────────────────────────────
-    //     let enc_ids: Vec<i32> = {
-    //         let mut ids = vec![BOS_TOKEN as i32];
-    //         if !seed_text.is_empty() {
-    //             ids.extend(tokenizer.encode(seed_text).iter().map(|&t| t as i32));
-    //         }
-    //         ids.resize(self.config.max_seq_len, PAD_TOKEN as i32);
-    //         ids
-    //     };
+    pub fn generate_unmasked_parsed(
+        &self,
+        tokenizer:      &TokenizerKind,
+        seed_text:      &str,
+        max_tokens:     usize,
+        device:         &B::Device,
+    ) -> GenerationResult {
+        // ── Encode input once ──────────────────────────────────────────────────
+        let enc_ids: Vec<i32> = {
+            let mut ids = vec![BOS_TOKEN as i32];
+            if !seed_text.is_empty() {
+                ids.extend(tokenizer.encode(seed_text).iter().map(|&t| t as i32));
+            }
+            ids.resize(self.config.max_seq_len, PAD_TOKEN as i32);
+            ids
+        };
 
-    //     let enc_tokens_t = Tensor::<B, 2, Int>::from_ints(
-    //         TensorData::new(enc_ids, [1, self.config.max_seq_len]),
-    //         device,
-    //     );
+        let enc_tokens_t = Tensor::<B, 2, Int>::from_ints(
+            TensorData::new(enc_ids, [1, self.config.max_seq_len]),
+            device,
+        );
 
-    //     let enc_tokens_t_cl = enc_tokens_t.clone();
+        let enc_tokens_t_cl = enc_tokens_t.clone();
 
-    //     let enc_pad_mask = enc_tokens_t.equal_elem(PAD_TOKEN as u32);
+        let enc_pad_mask = enc_tokens_t.equal_elem(PAD_TOKEN as u32);
 
-    //     let memory = self.encode(enc_tokens_t_cl);  // run once
+        let memory = self.encode(enc_tokens_t_cl);  // run once
 
-    //     // ── Decode autoregressively — no FSM masking ───────────────────────────
-    //     let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
-    //     let mut rng = rand::thread_rng();
-    //     let mut last_emote_logits: Option<Vec<f32>> = None;
+        // ── Decode autoregressively — no FSM masking ───────────────────────────
+        let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
+        let mut rng = rand::thread_rng();
+        let mut last_emote_logits: Option<Vec<f32>> = None;
 
-    //     for _ in 0..max_tokens {
-    //         let clamped_len = dec_ids.len().min(self.config.max_seq_len);
-    //         let mut padded = dec_ids[dec_ids.len() - clamped_len..].to_vec();
-    //         padded.resize(self.config.max_seq_len, PAD_TOKEN);
+        for _ in 0..max_tokens {
+            let clamped_len = dec_ids.len().min(self.config.max_seq_len);
+            let mut padded = dec_ids[dec_ids.len() - clamped_len..].to_vec();
+            padded.resize(self.config.max_seq_len, PAD_TOKEN);
 
-    //         let dec_tokens_t = Tensor::<B, 2, Int>::from_ints(
-    //             TensorData::new(
-    //                 padded.iter().map(|&t| t as i32).collect::<Vec<_>>(),
-    //                 [1, self.config.max_seq_len],
-    //             ),
-    //             device,
-    //         );
+            let dec_tokens_t = Tensor::<B, 2, Int>::from_ints(
+                TensorData::new(
+                    padded.iter().map(|&t| t as i32).collect::<Vec<_>>(),
+                    [1, self.config.max_seq_len],
+                ),
+                device,
+            );
 
-    //         let token_logits = self.decode(dec_tokens_t, memory.clone(), Some(enc_pad_mask.clone()));
+            let token_logits = self.decode(dec_tokens_t, memory.clone(), Some(enc_pad_mask.clone()));
 
-    //         let vocab_size  = tokenizer.vocab_size();
-    //         let last_logits = token_logits
-    //             .slice([0..1, clamped_len - 1..clamped_len, 0..vocab_size])
-    //             .reshape([vocab_size]);
+            let vocab_size  = tokenizer.vocab_size();
+            let last_logits = token_logits
+                .slice([0..1, clamped_len - 1..clamped_len, 0..vocab_size])
+                .reshape([vocab_size]);
 
-    //         // no masking — pure model output
-    //         let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
-    //         let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
+            // no masking — pure model output
+            let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
+            let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
 
-    //         if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
-    //         dec_ids.push(next_token);
-    //     }
+            if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
+            dec_ids.push(next_token);
+        }
 
-    //     // ── Decode tokens → string (skip BOS) ─────────────────────────────────
-    //     let raw_output = tokenizer.decode(&dec_ids[1..]);
+        // ── Decode tokens → string (skip BOS) ─────────────────────────────────
+        let raw_output = tokenizer.decode(&dec_ids[1..]);
 
-    //     let fixed = fix_json_syntax(&raw_output).fixed;
+        let fixed = fix_json_syntax(&raw_output).fixed;
 
-    //     let extract = |key: &str| -> String {
-    //         fancy_regex::Regex::new(&format!(r#"(?<=\s*"{key}"\s*:\s*)"([^"]*)""#))
-    //             .ok()
-    //             .and_then(|re| re.captures(&fixed).ok().flatten())
-    //             .and_then(|caps| caps.get(1))
-    //             .map(|m| m.as_str().to_string())
-    //             .unwrap_or_default()
-    //     };
+        let extract = |key: &str| -> String {
+            fancy_regex::Regex::new(&format!(r#"(?<=\s*"{key}"\s*:\s*)"([^"]*)""#))
+                .ok()
+                .and_then(|re| re.captures(&fixed).ok().flatten())
+                .and_then(|caps| caps.get(1))
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default()
+        };
 
-    //     let mut parsed_action     = extract("action");
-    //     let mut parsed_motion_dir = extract("motion_dir");
-    //     let mut parsed_reply  = extract("reply");
+        let mut parsed_action     = extract("action");
+        let mut parsed_motion_dir = extract("motion_dir");
+        let mut parsed_reply  = extract("reply");
 
-    //     if parsed_action.is_empty() || parsed_action.len() < 3 {
-    //         parsed_action     = extract(" action");
-    //         parsed_motion_dir = extract(" motion_dir");
-    //         parsed_reply  = extract(" reply");
-    //     }
+        if parsed_action.is_empty() || parsed_action.len() < 3 {
+            parsed_action     = extract(" action");
+            parsed_motion_dir = extract(" motion_dir");
+            parsed_reply  = extract(" reply");
+        }
 
-    //     if parsed_reply.is_empty() || parsed_reply.len() < 4 {
-    //         let parsed: serde_json::Value = serde_json::from_str(&fixed)
-    //             .unwrap_or_else(|_| {
-    //                 let extract = |key: &str| -> String {
-    //                     regex::Regex::new(&format!(r#""{key}"\s*:\s*"([^"]*)"#))
-    //                         .ok()
-    //                         .and_then(|re| re.captures(&fixed))
-    //                         .and_then(|caps| caps.get(1))
-    //                         .map(|m| m.as_str().to_string())
-    //                         .unwrap_or_default()
-    //                 };
+        if parsed_reply.is_empty() || parsed_reply.len() < 4 {
+            let parsed: serde_json::Value = serde_json::from_str(&fixed)
+                .unwrap_or_else(|_| {
+                    let extract = |key: &str| -> String {
+                        regex::Regex::new(&format!(r#""{key}"\s*:\s*"([^"]*)"#))
+                            .ok()
+                            .and_then(|re| re.captures(&fixed))
+                            .and_then(|caps| caps.get(1))
+                            .map(|m| m.as_str().to_string())
+                            .unwrap_or_default()
+                    };
 
-    //                 serde_json::json!({
-    //                     "action":     extract("action"),
-    //                     "motion_dir": extract("motion_dir"),
-    //                     "reply":      extract("reply"),
-    //                 })
-    //             });
+                    serde_json::json!({
+                        "action":     extract("action"),
+                        "motion_dir": extract("motion_dir"),
+                        "reply":      extract("reply"),
+                    })
+                });
 
-    //         parsed_action = parsed["action"].to_string().trim().to_string();
-    //         parsed_motion_dir = parsed["motion_dir"].to_string().trim().to_string();
-    //         parsed_reply = parsed["reply"].to_string().trim().to_string();
-    //     }
+            parsed_action = parsed["action"].to_string().trim().to_string();
+            parsed_motion_dir = parsed["motion_dir"].to_string().trim().to_string();
+            parsed_reply = parsed["reply"].to_string().trim().to_string();
+        }
 
-    //     parsed_action = parsed_action.replace("\"", "").trim().to_string();
-    //     parsed_motion_dir = parsed_motion_dir.replace("\"", "").trim().to_string();
-    //     parsed_reply = parsed_reply.replace("\"", "").trim().to_string();
+        parsed_action = parsed_action.replace("\"", "").trim().to_string();
+        parsed_motion_dir = parsed_motion_dir.replace("\"", "").trim().to_string();
+        parsed_reply = parsed_reply.replace("\"", "").trim().to_string();
 
-    //     let action = match parsed_action.as_str() {
-    //         "speak"  => Action::Speak,
-    //         "build"  => Action::Build,
-    //         "travel" => Action::Travel,
-    //         "use"    => Action::Use,
-    //         _        => Action::Idle,
-    //     };
+        let action = match parsed_action.as_str() {
+            "speak"  => Action::Speak,
+            "build"  => Action::Build,
+            "travel" => Action::Travel,
+            "use"    => Action::Use,
+            _        => Action::Idle,
+        };
 
-    //     let motion_dir = match parsed_motion_dir.as_str() {
-    //         "north" => CardinalDir::North,
-    //         "south" => CardinalDir::South,
-    //         "east"  => CardinalDir::East,
-    //         "west"  => CardinalDir::West,
-    //         _       => CardinalDir::None,
-    //     };
+        let motion_dir = match parsed_motion_dir.as_str() {
+            "north" => CardinalDir::North,
+            "south" => CardinalDir::South,
+            "east"  => CardinalDir::East,
+            "west"  => CardinalDir::West,
+            _       => CardinalDir::None,
+        };
 
-    //     let reply = parsed_reply
-    //         .as_str()
-    //         .to_string();
+        let reply = parsed_reply
+            .as_str()
+            .to_string();
 
-    //     let yumon_emote_idx = last_emote_logits
-    //         .as_deref()
-    //         .map(argmax)
-    //         .unwrap_or(4);
+        let yumon_emote_idx = last_emote_logits
+            .as_deref()
+            .map(argmax)
+            .unwrap_or(4);
 
-    //     GenerationResult {
-    //         reply,
-    //         action,
-    //         motion_dir,
-    //         yumon_emote_idx,
-    //         raw_output,
-    //         fsm_state: 0,
-    //         allowed_count: None,
-    //     }
-    // }
-
+        GenerationResult {
+            reply,
+            action,
+            motion_dir,
+            yumon_emote_idx,
+            raw_output,
+            fsm_state: 0,
+            allowed_count: None,
+        }
+    }
 
     pub async fn generate_unmasked_parsed_async(
         &self,
@@ -590,7 +660,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
 
         let enc_pad_mask = enc_tokens_t.equal_elem(PAD_TOKEN as u32);
 
-        let memory = self.encode(enc_tokens_t_cl).await;  // run once
+        let memory = self.encode_async(enc_tokens_t_cl).await;  // run once
 
         // ── Decode autoregressively — no FSM masking ───────────────────────────
         let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
@@ -610,7 +680,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
                 device,
             );
 
-            let token_logits = self.decode(dec_tokens_t, memory.clone(), Some(enc_pad_mask.clone()));
+            let token_logits = self.decode_async(dec_tokens_t, memory.clone(), Some(enc_pad_mask.clone()));
 
             let vocab_size  = tokenizer.vocab_size();
             let last_logits = token_logits.await

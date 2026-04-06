@@ -26,7 +26,7 @@ const TECH_COLS: usize = 20;
 const TECH_ROWS: usize = 5;
 
 /// Base movement points every unit gets per turn.
-const BASE_MOVES: i32 = 1;
+const BASE_MOVES: i32 = 3;
 
 /// Chebyshev radius a city claims as its territory.
 const CITY_TERRITORY_RADIUS: i32 = 3;
