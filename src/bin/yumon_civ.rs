@@ -687,74 +687,135 @@ impl App {
     fn do_ai_turn(&mut self) {
         let pid = self.current_player;
 
-        // Research
+        // 1. Better Research: Pick a random available tech to vary AI paths
         if self.players[pid].research_progress.is_none() {
-            'r: for r in 0..TECH_ROWS {
+            let mut available = Vec::new();
+            for r in 0..TECH_ROWS {
                 for c in 0..TECH_COLS {
                     if self.can_research_for(pid, c, r) {
-                        let cost = self.techs[r].1[c].cost;
-                        self.players[pid].research_progress = Some((c, r, cost));
-                        break 'r;
+                        available.push((c, r));
                     }
                 }
             }
+            if !available.is_empty() {
+                let (c, r) = available[rand::thread_rng().gen_range(0..available.len())];
+                let cost = self.techs[r].1[c].cost;
+                self.players[pid].research_progress = Some((c, r, cost));
+            }
         }
 
-        // City builds
+        // 2. Strategic City builds
         {
+            let my_cities_count = self.cities.iter().filter(|c| c.owner == pid).count();
+            let my_units_count = self.units.iter().filter(|u| u.owner == pid).count();
             let available = self.get_available_units(pid);
-            if let Some(&(unit_name, cost)) = available.first() {
-                for city in self.cities.iter_mut().filter(|c| c.owner == pid && c.build_queue.is_none()) {
+            
+            for city in self.cities.iter_mut().filter(|c| c.owner == pid && c.build_queue.is_none()) {
+                // If few cities, prioritize Settlers
+                let choice = if my_cities_count < 3 && my_units_count >= my_cities_count {
+                    available.iter().find(|(name, _)| *name == "Settler").or(available.first())
+                } else {
+                    // Otherwise pick a random military unit (not Settler)
+                    let mil: Vec<_> = available.iter().filter(|(n, _)| *n != "Settler").collect();
+                    if mil.is_empty() { available.first() } else { Some(mil[rand::thread_rng().gen_range(0..mil.len())]) }
+                };
+                if let Some(&(unit_name, cost)) = choice {
                     city.build_queue = Some((unit_name, cost));
                 }
             }
         }
 
-        // Move units (random walk, attack adjacent enemies)
-        let mut rng = rand::thread_rng();
+        // 3. Targeted movement
         let mm = self.max_moves(pid);
+        let enemy_cities: Vec<(usize, usize)> = self.cities.iter()
+            .filter(|c| c.owner != pid)
+            .map(|c| (c.x, c.y)).collect();
+        let my_cities: Vec<(usize, usize)> = self.cities.iter()
+            .filter(|c| c.owner == pid)
+            .map(|c| (c.x, c.y)).collect();
+
         for i in 0..self.units.len() {
             if self.units[i].owner != pid || self.units[i].moves_left == 0 { continue; }
 
-            // Scan neighbours for enemy units/cities to attack
-            let ux = self.units[i].x as i32;
-            let uy = self.units[i].y as i32;
-            let mut attacked = false;
-            'scan: for dy in -1i32..=1 {
-                for dx in -1i32..=1 {
-                    if dx == 0 && dy == 0 { continue; }
-                    let nx = (ux + dx) as usize; let ny = (uy + dy) as usize;
-                    // Check enemy unit
-                    let enemy_unit = self.units.iter().position(|u| u.x == nx && u.y == ny && u.owner != pid);
-                    if let Some(eidx) = enemy_unit {
-                        let msg = self.attack_unit(i, eidx);
-                        let _ = msg;
-                        attacked = true;
-                        break 'scan;
-                    }
-                    // Check enemy city
-                    let enemy_city = self.cities.iter().position(|c| c.x == nx && c.y == ny && c.owner != pid);
-                    if let Some(cidx) = enemy_city {
-                        let msg = self.attack_city(i, cidx);
-                        let _ = msg;
-                        attacked = true;
-                        break 'scan;
+            for _ in 0..mm {
+                if i >= self.units.len() || self.units[i].owner != pid { break; }
+                
+                let (ux, uy) = (self.units[i].x, self.units[i].y);
+
+                // Scan neighbours for immediate attack
+                let mut attacked = false;
+                'scan: for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        if dx == 0 && dy == 0 { continue; }
+                        let nx = (ux as i32 + dx) as usize; let ny = (uy as i32 + dy) as usize;
+                        if nx >= MAP_W || ny >= MAP_H { continue; }
+
+                        if self.units.iter().any(|u| u.x == nx && u.y == ny && u.owner != pid) {
+                            let eidx = self.units.iter().position(|u| u.x == nx && u.y == ny).unwrap();
+                            self.attack_unit(i, eidx);
+                            attacked = true; break 'scan;
+                        }
+                        if self.cities.iter().any(|c| c.x == nx && c.y == ny && c.owner != pid) {
+                            let cidx = self.cities.iter().position(|c| c.x == nx && c.y == ny).unwrap();
+                            self.attack_city(i, cidx);
+                            attacked = true; break 'scan;
+                        }
                     }
                 }
-            }
-            if attacked { continue; }
+                if attacked { break; }
 
-            // Random walk using remaining moves
-            let steps = mm;
-            for _ in 0..steps {
-                if i >= self.units.len() || self.units[i].owner != pid { break; }
-                let dx = rng.gen_range(-1i32..=1);
-                let dy = rng.gen_range(-1i32..=1);
-                let nx = (self.units[i].x as i32 + dx).clamp(0, MAP_W as i32 - 1) as usize;
-                let ny = (self.units[i].y as i32 + dy).clamp(0, MAP_H as i32 - 1) as usize;
-                if self.map[ny][nx].passable() {
+                // Targeted movement logic
+                let (tx, ty) = if self.units[i].name == "Settler" {
+                    // Settlers look for land far from their own cities
+                    let mut best_spot = (ux, uy);
+                    let mut max_min_dist = 0;
+                    for _ in 0..15 {
+                        let rx = rand::thread_rng().gen_range(0..MAP_W);
+                        let ry = rand::thread_rng().gen_range(0..MAP_H);
+                        if !self.map[ry][rx].passable() { continue; }
+                        let min_dist = my_cities.iter().map(|&(cx, cy)| 
+                            (rx as i32 - cx as i32).abs() + (ry as i32 - cy as i32).abs()
+                        ).min().unwrap_or(100);
+                        if min_dist > max_min_dist && min_dist < 40 {
+                            max_min_dist = min_dist;
+                            best_spot = (rx, ry);
+                        }
+                    }
+                    if max_min_dist > 8 {
+                        best_spot
+                    } else if max_min_dist < 5 && my_cities.len() > 0 {
+                        // Found a spot
+                        self.selected_unit = Some(i);
+                        self.found_city();
+                        break;
+                    } else {
+                        (ux, uy)
+                    }
+                } else {
+                    // Military targets nearest enemy city
+                    enemy_cities.iter().min_by_key(|&&(cx, cy)| 
+                        (ux as i32 - cx as i32).abs() + (uy as i32 - cy as i32).abs()
+                    ).cloned().unwrap_or((ux, uy))
+                };
+
+                let dx = (tx as i32 - ux as i32).signum();
+                let dy = (ty as i32 - uy as i32).signum();
+                let nx = (ux as i32 + dx) as usize;
+                let ny = (uy as i32 + dy) as usize;
+
+                if (dx != 0 || dy != 0) && nx < MAP_W && ny < MAP_H && self.map[ny][nx].passable() {
                     self.units[i].x = nx;
                     self.units[i].y = ny;
+                } else {
+                    // Random wiggle if blocked
+                    let rx = rand::thread_rng().gen_range(-1..=1);
+                    let ry = rand::thread_rng().gen_range(-1..=1);
+                    let nx = (ux as i32 + rx).clamp(0, MAP_W as i32 - 1) as usize;
+                    let ny = (uy as i32 + ry).clamp(0, MAP_H as i32 - 1) as usize;
+                    if self.map[ny][nx].passable() {
+                        self.units[i].x = nx;
+                        self.units[i].y = ny;
+                    }
                 }
             }
             if i < self.units.len() { self.units[i].moves_left = 0; }
