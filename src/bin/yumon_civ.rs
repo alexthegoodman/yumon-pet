@@ -351,6 +351,7 @@ struct App {
     cities: Vec<City>,
     units: Vec<Unit>,
     selected_unit: Option<usize>,
+    selected_city: Option<usize>,
     cam_x: usize,
     cam_y: usize,
     tech_cursor: (usize, usize),
@@ -426,6 +427,7 @@ impl App {
             screen: Screen::Map, map, players,
             current_player: 0, cities, units,
             selected_unit: Some(0),
+            selected_city: Some(0),
             cam_x: sx.saturating_sub(30), cam_y: sy.saturating_sub(14),
             tech_cursor: (0, 0), techs: all_techs(), turn: 1,
             status: "Capital founded! Move all units, pick research (T), set city build (C) — then Enter".into(),
@@ -528,6 +530,9 @@ impl App {
             self.cities[city_idx].owner = new_owner;
             self.cities[city_idx].hp    = City::MAX_HP / 2;
             self.cities[city_idx].build_queue = None;
+            if new_owner == self.current_player && !self.players[new_owner].is_ai {
+                self.selected_city = Some(city_idx);
+            }
             // Remove attacker if it died too
             if unit_hp <= 0 {
                 if let Some(sel) = self.selected_unit {
@@ -830,16 +835,33 @@ impl App {
         self.selected_unit = self.units.iter().position(|u| u.owner == self.current_player);
     }
 
+    fn cycle_city(&mut self) {
+        let start = self.selected_city.map(|i| i + 1).unwrap_or(0);
+        for i in 0..self.cities.len() {
+            let idx = (start + i) % self.cities.len();
+            if self.cities[idx].owner == self.current_player {
+                self.selected_city = Some(idx);
+                self.screen = Screen::City(idx);
+                self.cam_x = self.cities[idx].x.saturating_sub(35);
+                self.cam_y = self.cities[idx].y.saturating_sub(15);
+                return;
+            }
+        }
+        self.status = "No friendly city found!".into();
+    }
+
     fn found_city(&mut self) {
         let uidx = match self.selected_unit { Some(i) => i, None => return };
         let (ux, uy, owner) = (self.units[uidx].x, self.units[uidx].y, self.units[uidx].owner);
         if self.units[uidx].name == "Settler" {
+            let new_city_idx = self.cities.len();
             self.cities.push(City {
                 x: ux, y: uy, name: format!("City {}", self.cities.len() + 1),
                 owner, build_queue: None, build_progress: 0, hp: City::MAX_HP,
             });
             self.units.remove(uidx);
             self.selected_unit = None;
+            self.selected_city = Some(new_city_idx);
             self.next_unit();
             self.status = "New city founded! Set its production order (C).".into();
         } else {
@@ -1114,7 +1136,7 @@ fn draw_city(f: &mut Frame, app: &App, city_idx: usize, area: Rect) {
     }).collect();
 
     f.render_widget(Paragraph::new(items).block(Block::default().title(" Set Production (number key) ")), chunks[1]);
-    f.render_widget(Paragraph::new("  M / Esc — back to map").style(Style::default().fg(Color::DarkGray)), chunks[2]);
+    f.render_widget(Paragraph::new("  M / Esc — back to map (C - Cycle between cities)").style(Style::default().fg(Color::DarkGray)), chunks[2]);
 }
 
 #[cfg(target_os = "windows")]
@@ -1230,7 +1252,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Line::from("    Moving onto enemy  — ATTACKS automatically"),
         Line::from("    Tab              — cycle to next unmoved unit"),
         Line::from("    B                — found city (Settler only)"),
-        Line::from("    C                — open city production menu"),
+        Line::from("    C                — cycle cities / production menu"),
         Line::from("    T                — open tech grid"),
         Line::from("    H                — toggle help"),
         Line::from("    Enter            — end turn (when all done)"),
@@ -1301,15 +1323,16 @@ fn main() -> io::Result<()> {
                         KeyCode::Char('d') | KeyCode::Right => app.move_unit(1,  0),
                         KeyCode::Char('b') | KeyCode::Char('B') => app.found_city(),
                         KeyCode::Char('c') | KeyCode::Char('C') => {
-                            let city_idx = app.selected_unit.and_then(|uidx| {
+                            let unit_city = app.selected_unit.and_then(|uidx| {
                                 if uidx >= app.units.len() { return None; }
                                 let (ux, uy) = (app.units[uidx].x, app.units[uidx].y);
                                 app.cities.iter().position(|c| c.x == ux && c.y == uy && c.owner == app.current_player)
-                            }).or_else(|| app.cities.iter().position(|c| c.owner == app.current_player));
-                            if let Some(cidx) = city_idx {
+                            });
+                            if let Some(cidx) = unit_city {
+                                app.selected_city = Some(cidx);
                                 app.screen = Screen::City(cidx);
                             } else {
-                                app.status = "No friendly city found!".into();
+                                app.cycle_city();
                             }
                         }
                         KeyCode::Tab   => app.next_unit(),
@@ -1330,6 +1353,7 @@ fn main() -> io::Result<()> {
                     Screen::City(cidx) => match key.code {
                         KeyCode::Char('q') | KeyCode::Char('Q') => break,
                         KeyCode::Char('m') | KeyCode::Char('M') | KeyCode::Esc => { app.screen = Screen::Map; }
+                        KeyCode::Char('c') | KeyCode::Char('C') => app.cycle_city(),
                         KeyCode::Char(c) if c.is_ascii_digit() => {
                             let digit = c.to_digit(10).unwrap() as usize;
                             if digit > 0 { app.set_city_build(cidx, digit - 1); }
