@@ -487,10 +487,6 @@ fn main() {
                 TokenizerKind::Bpe(b) => b,
                 _ => { eprintln!("[brain] BPE tokenizer required"); return; }
             };
-            let index = match YumonBrain::<Wgpu>::build_outlines_index(bpe, YUMON_SCHEMA) {
-                Ok(i) => i,
-                Err(e) => { eprintln!("[brain] index failed: {e}"); return; }
-            };
 
             // let class_probs = vec![1.0 / CIFAR_CLASSES as f32; CIFAR_CLASSES];
             // let emote_probs = vec![1.0 / EMOTE_CLASSES as f32; EMOTE_CLASSES];

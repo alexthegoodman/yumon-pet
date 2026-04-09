@@ -3,7 +3,9 @@
 use anyhow::Result;
 use burn::{backend::Wgpu, prelude::*};
 use cubecl::wgpu::WgpuDevice;
+#[cfg(target_arch = "wasm32")]
 use ratzilla::{DomBackend, event::{KeyCode, KeyEvent}, WebRenderer};
+#[cfg(target_arch = "wasm32")]
 use ratzilla::ratatui::{
     layout::{Constraint, Direction, Layout}, style::{Color, Modifier, Style}, text::{Line, Span, Text}, widgets::{Block, Borders, List, ListItem, Paragraph},
     Terminal,
@@ -11,7 +13,9 @@ use ratzilla::ratatui::{
 use textwrap::wrap;
 use std::{fmt::Debug, io, sync::{Arc, Mutex, mpsc}, time::{Duration, Instant}};
 use rand::Rng;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::spawn_local;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
 use log::Level;
 use log::info;
@@ -92,8 +96,11 @@ fn dir_arrow(dir: &str) -> &'static str {
 }
 
 // #[wasm_bindgen(start)]
-fn main() -> Result<(), JsValue> {
-    console_error_panic_hook::set_once();
+// fn main() -> Result<(), JsValue> {
+fn main() -> Result<()> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        console_error_panic_hook::set_once();
     let _ = console_log::init();
 
     // Ratzilla setup
@@ -269,10 +276,12 @@ fn main() -> Result<(), JsValue> {
 
         ui(f, &app);
     });
+}
 
     Ok(())
 }
 
+#[cfg(target_arch = "wasm32")]
 fn ui(f: &mut ratzilla::ratatui::Frame, app: &AppState) {
     let outer = Layout::default()
         .direction(Direction::Vertical)

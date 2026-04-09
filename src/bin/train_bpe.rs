@@ -2,7 +2,7 @@ use yumon_pet::{brain::{PAD_TOKEN, bpe::{self, BpeTokenizer, TokenizerKind}, loa
 
 
 #[cfg(target_os = "windows")]
-use yumon_pet::{brain::{mdx::{load_arena_chats, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences}}};
+use yumon_pet::{brain::{mdx::{load_handcrafted_sentences, load_mdx_sentences}}};
 
 pub fn main() {
     // let all_words = load_csv_words("archive/word_counts.csv");
@@ -16,7 +16,7 @@ pub fn main() {
     // let sentences = load_wiki_sentences(wiki_xml, 25_000);
 
     // ── Load + tokenize wiki corpus ───────────────────────────────────────────
-    let mut sentences = Vec::new();
+    // let mut sentences = Vec::new();
 
     // let wiki_sentences: Result<Vec<String>, anyhow::Error> = load_wiki_sentences(wiki_xml, 50_000, 1);
     // let wiki_sentences = wiki_sentences.as_ref().expect("Couldn't get wiki_sentences");
@@ -152,39 +152,39 @@ pub fn main() {
     //     }
     // }
 
-    let mut chats = load_handcrafted_chats("archive/handcrafted_pairs.txt");
-    let chats = chats.as_ref().expect("Couldn't get handcrafted");
+    // let mut chats = load_handcrafted_chats("archive/handcrafted_pairs.txt");
+    // let chats = chats.as_ref().expect("Couldn't get handcrafted");
 
-    let mut chats_combined = Vec::new();
+    // let mut chats_combined = Vec::new();
 
-    for (i, block) in chats.blocks.iter().enumerate() {
-        for (x, memory) in block.memories.iter().enumerate() {
-            chats_combined.push(&memory.human);
-            chats_combined.push(&memory.bot);
+    // for (i, block) in chats.blocks.iter().enumerate() {
+    //     for (x, memory) in block.memories.iter().enumerate() {
+    //         chats_combined.push(&memory.human);
+    //         chats_combined.push(&memory.bot);
 
-            if (i < 12) {
-                println!("qa human: {:?}", memory.human);
-                println!("qa bot: {:?}", memory.bot);
-            }
-        }
-    }
+    //         if (i < 12) {
+    //             println!("qa human: {:?}", memory.human);
+    //             println!("qa bot: {:?}", memory.bot);
+    //         }
+    //     }
+    // }
 
-    let mut chats2 = load_handcrafted_chats("archive/ov_chats.txt");
-    let chats2 = chats2.as_ref().expect("Couldn't get ov chats");
+    // let mut chats2 = load_handcrafted_chats("archive/ov_chats.txt");
+    // let chats2 = chats2.as_ref().expect("Couldn't get ov chats");
 
-    let mut chats_combined2 = Vec::new();
+    // let mut chats_combined2 = Vec::new();
 
-    for (i, block) in chats2.blocks.iter().enumerate() {
-        for (x, memory) in block.memories.iter().enumerate() {
-            chats_combined2.push(&memory.human);
-            chats_combined2.push(&memory.bot);
+    // for (i, block) in chats2.blocks.iter().enumerate() {
+    //     for (x, memory) in block.memories.iter().enumerate() {
+    //         chats_combined2.push(&memory.human);
+    //         chats_combined2.push(&memory.bot);
 
-            if (i < 12) {
-                println!("qa human: {:?}", memory.human);
-                println!("qa bot: {:?}", memory.bot);
-            }
-        }
-    }
+    //         if (i < 12) {
+    //             println!("qa human: {:?}", memory.human);
+    //             println!("qa bot: {:?}", memory.bot);
+    //         }
+    //     }
+    // }
 
     // let mut chats3 = load_arena_chats("data/chatbot_arena_conversations.json");
     // let chats3 = chats3.as_ref().expect("Couldn't get arena chats");
@@ -202,6 +202,51 @@ pub fn main() {
     //         }
     //     }
     // }
+
+    let mut loader = DataLoader::new(TrainingStage::Language);
+    // match stage {
+    //     TrainingStage::Language => {
+    //         loader = loader
+    //             .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
+    //     }
+    //     TrainingStage::Structured => {
+    //         loader = loader
+    //             .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
+    //     }
+    // }
+
+    loader = loader
+        .add("archive/ov_chats.txt", FileKind::Chats, None)
+        // .add("data/creative_stories.txt", FileKind::Txt, None)
+        // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
+        .add("data/arena_extract.txt",   FileKind::Chats, Some(2_500))
+        .add("archive/you_chats.txt", FileKind::Chats, None)
+        .add("archive/clean_chats.txt", FileKind::Chats, None);
+
+        // .add("archive/ov_chats.txt", FileKind::Chats, None)
+        // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
+        // .add("data/wiki_extract.txt",   FileKind::Txt, None)
+        // .add("data/creative_stories.txt", FileKind::Txt, None)
+        // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
+        // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None)
+        // .add(vec![
+        //         "data/ebooks/faa-h-8083-25c.pdf".to_string(),
+        //         "data/ebooks/algor_intro.pdf".to_string(),
+        //         "data/ebooks/intro_engineer.pdf".to_string(),
+        //         "data/ebooks/meap.pdf".to_string(),
+        //         "data/ebooks/missiles.pdf".to_string(),
+        //         "data/ebooks/os_concepts.pdf".to_string(),
+        //         "data/ebooks/real-time-embedded.pdf".to_string(),
+        //         "data/ebooks/riscv.pdf".to_string(),
+        //         "data/ebooks/rtos.pdf".to_string(),
+        //         "data/ebooks/stephen_hawking_a_brief_history_of_time.pdf".to_string(),
+        //     ].join(", "), 
+        //     FileKind::PDF, 
+        //     None
+        // );
+
+    let sentences: Vec<String> = loader.total_limit(25_000).seed(4815162342).load_sentences().expect("Couldn't get sentences");
+    let sentences: Vec<&String> = sentences.iter().collect();
     
     // sentences.extend(wiki_sentences);
     // sentences.extend(mdx_sentences);
@@ -216,9 +261,9 @@ pub fn main() {
     // // sentences.extend(ebooks);
     // sentences.extend(txt);
     // sentences.extend(ebooks);
-    sentences.extend(chats_combined);
-    // sentences.extend(dict_sentences);
-    sentences.extend(chats_combined2);
+    // sentences.extend(chats_combined);
+    // // sentences.extend(dict_sentences);
+    // sentences.extend(chats_combined2);
     // sentences.extend(chats_combined3);
     // sentences.extend(wiki_sentences);
         
@@ -232,57 +277,57 @@ pub fn main() {
 
     bpe.save("yumon_bpe").as_ref().expect("Couldn't save bpe");
 
-    // ----------------------
-    // ── Check samples sizes ─────────────────────────────────────────────
-    // ----------------------
-    let label_keywords   = build_label_keywords();
-    let keyword_index    = build_keyword_index(&label_keywords);
-    println!("🏷  CIFAR-100 keyword index: {} unique keywords across {} classes",
-             keyword_index.len(), CIFAR_CLASSES);
+    // // ----------------------
+    // // ── Check samples sizes ─────────────────────────────────────────────
+    // // ----------------------
+    // let label_keywords   = build_label_keywords();
+    // let keyword_index    = build_keyword_index(&label_keywords);
+    // println!("🏷  CIFAR-100 keyword index: {} unique keywords across {} classes",
+    //          keyword_index.len(), CIFAR_CLASSES);
 
-    let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe").expect("Couldn't get bpe"));
+    // let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe").expect("Couldn't get bpe"));
 
-    let training_stage = TrainingStage::Language;
+    // let training_stage = TrainingStage::Language;
  
-    let training_samples = DataLoader::new(training_stage)
-        .add("archive/ov_chats.txt", FileKind::Chats, None)
-        .add("archive/handcrafted_pairs.txt",   FileKind::Chats, None)
-        // .add("archive/ov_chats.txt",   FileKind::Chats, None)
-        // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
-        // .add("data/wiki_extract.txt",   FileKind::Txt, Some(200_000))
-        // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
-        .total_limit(4096)
-        .seed(4815162342)
-        .load(&tokenizer, &keyword_index, 320).expect("Couldn't get samples");
+    // let training_samples = DataLoader::new(training_stage)
+    //     .add("archive/ov_chats.txt", FileKind::Chats, None)
+    //     .add("archive/handcrafted_pairs.txt",   FileKind::Chats, None)
+    //     // .add("archive/ov_chats.txt",   FileKind::Chats, None)
+    //     // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
+    //     // .add("data/wiki_extract.txt",   FileKind::Txt, Some(200_000))
+    //     // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
+    //     .total_limit(4096)
+    //     .seed(4815162342)
+    //     .load(&tokenizer, &keyword_index, 320).expect("Couldn't get samples");
     
-    println!("language training samples: {}", training_samples.len());
+    // println!("language training samples: {}", training_samples.len());
     
-    // debug print — first samples
-    for (i, sample) in training_samples.iter().enumerate() {
-        if i >= 50 { break; }
-        println!("language input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
-        println!("language target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
-    }
+    // // debug print — first samples
+    // for (i, sample) in training_samples.iter().enumerate() {
+    //     if i >= 50 { break; }
+    //     println!("language input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
+    //     println!("language target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
+    // }
 
-    let training_stage = TrainingStage::Structured;
+    // let training_stage = TrainingStage::Structured;
  
-    let training_samples = DataLoader::new(training_stage)
-        .add("archive/ov_chats.txt", FileKind::Chats, None)
-        .add("archive/handcrafted_pairs.txt",   FileKind::Chats, None)
-        // .add("archive/ov_chats.txt",   FileKind::Chats, None)
-        // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
-        // .add("data/wiki_extract.txt",   FileKind::Txt, Some(200_000))
-        // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
-        .total_limit(4096)
-        .seed(4815162342)
-        .load(&tokenizer, &keyword_index, 320).expect("Couldn't get samples");
+    // let training_samples = DataLoader::new(training_stage)
+    //     .add("archive/ov_chats.txt", FileKind::Chats, None)
+    //     .add("archive/handcrafted_pairs.txt",   FileKind::Chats, None)
+    //     // .add("archive/ov_chats.txt",   FileKind::Chats, None)
+    //     // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
+    //     // .add("data/wiki_extract.txt",   FileKind::Txt, Some(200_000))
+    //     // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
+    //     .total_limit(4096)
+    //     .seed(4815162342)
+    //     .load(&tokenizer, &keyword_index, 320).expect("Couldn't get samples");
     
-    println!("structured training samples: {}", training_samples.len());
+    // println!("structured training samples: {}", training_samples.len());
     
-    // debug print — first samples
-    for (i, sample) in training_samples.iter().enumerate() {
-        if i >= 50 { break; }
-        println!("structured input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
-        println!("structured target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
-    }
+    // // debug print — first samples
+    // for (i, sample) in training_samples.iter().enumerate() {
+    //     if i >= 50 { break; }
+    //     println!("structured input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
+    //     println!("structured target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
+    // }
 }

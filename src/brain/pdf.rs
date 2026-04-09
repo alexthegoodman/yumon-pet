@@ -30,6 +30,8 @@
 //     Ok(sentences)
 // }
 
+#[cfg(target_os = "windows")]
+use crate::brain::train::MAX_SEQ_LEN_CHARS;
 use crate::brain::{train::MAX_SEQ_LEN, wiki::is_good_sentence};
 use anyhow::Result;
 
@@ -79,7 +81,7 @@ use anyhow::Result;
 use rand::Rng; // Add this for random range generation
 
 #[cfg(target_os = "windows")]
-pub fn load_pdfs(paths: Vec<String>) -> Vec<String> {
+pub fn load_pdfs(paths: Vec<&str>) -> Vec<String> {
     let mut all_samples = Vec::new();
 
     for path in paths {
@@ -150,8 +152,8 @@ pub fn load_pdf_ebook_sentences(pdf_path: &str) -> Result<Vec<String>> {
     let mut final_sentences = Vec::new();
     let mut i = 0;
 
-    let bottom_range = MAX_SEQ_LEN * 1;
-    let top_range = MAX_SEQ_LEN * 3;
+    let bottom_range = MAX_SEQ_LEN_CHARS * 1;
+    let top_range = MAX_SEQ_LEN_CHARS * 3;
 
     while i < raw_sentences.len() {
         let mut combined = String::new();

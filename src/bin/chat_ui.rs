@@ -122,7 +122,10 @@ fn main() -> Result<()> {
 #[cfg(target_os = "windows")]
     let mut terminal = Terminal::new(backend)?;
 
-    let brain_cp = "checkpoints/brain/384h_4l_6a_160len".to_string();
+    // let brain_cp = "checkpoints/brain/1024h_8l_16a_180len".to_string();
+    let brain_cp = "checkpoints/brain/512h_3l_8a_180len".to_string();
+    // let brain_cp = "checkpoints/brain/384h_4l_6a_160len".to_string();
+    // let brain_cp = "checkpoints/brain/256h_2l_4a_180len".to_string();
     // let brain_cp = "checkpoints/brain/128h_2l_2a_200len".to_string();
     let mut app = AppState::new(brain_cp.clone());
 
@@ -179,7 +182,7 @@ fn main() -> Result<()> {
                 .collect();
 
             // let training_stage = TrainingStage::Language;
-            let training_stage = TrainingStage::Structured;
+            let training_stage = config.training_stage;
 
             let prompt = if training_stage == TrainingStage::Language {
                 prompt_text
@@ -194,15 +197,14 @@ fn main() -> Result<()> {
                 .unwrap() 
             };
 
-            // readd after wasm ready
-            // let result = brain_model.generate_unmasked_parsed(
-            //     &tokenizer,
-            //     &prompt,
-            //     config.max_seq_len,
-            //     &device,
-            // );
+            let result = brain_model.generate_unmasked_parsed(
+                &tokenizer,
+                &prompt,
+                config.max_seq_len,
+                &device,
+            );
 
-            // tx_model.send(Message::Yumon(result)).unwrap();
+            tx_model.send(Message::Yumon(result)).unwrap();
         }
     });
 

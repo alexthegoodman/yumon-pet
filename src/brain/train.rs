@@ -40,8 +40,8 @@ pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 // pub const MAX_SEQ_LEN:  usize = 512;
 // pub const MAX_SEQ_LEN:  usize = 1024;
 // pub const MAX_SEQ_LEN:  usize = 256;
-pub const MAX_SEQ_LEN:  usize = 320;
-pub const MAX_SEQ_LEN_CHARS:  usize = 180;
+pub const MAX_SEQ_LEN:  usize = 200;
+pub const MAX_SEQ_LEN_CHARS:  usize = 200;
 // pub const MAX_SEQ_LEN:  usize = 180;
 // pub const MAX_SEQ_LEN:  usize = 90;
 // pub const MAX_SEQ_LEN:  usize = 100;
@@ -180,19 +180,48 @@ fn load_stage_data(
     max_seq_len: usize,
 ) -> Result<Vec<crate::brain::samples::Sample>> {
     let mut loader = DataLoader::new(stage);
-    match stage {
-        TrainingStage::Language => {
-            loader = loader
-                // .add("archive/ov_chats.txt", FileKind::Chats, None)
-                .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
-        }
-        TrainingStage::Structured => {
-            loader = loader
-                // .add("archive/ov_chats.txt", FileKind::Chats, None)
-                .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
-        }
-    }
-    loader.total_limit(4096).seed(4815162342).load(tokenizer, keyword_index, max_seq_len)
+    // match stage {
+    //     TrainingStage::Language => {
+    //         loader = loader
+    //             .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
+    //     }
+    //     TrainingStage::Structured => {
+    //         loader = loader
+    //             .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
+    //     }
+    // }
+
+    loader = loader
+        .add("archive/ov_chats.txt", FileKind::Chats, None)
+        // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
+        .add("data/arena_extract.txt",   FileKind::Chats, Some(2_500))
+        // // .add("data/wiki_extract.txt",   FileKind::Txt, None)
+        // .add("data/creative_stories.txt", FileKind::Txt, None)
+        // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
+        // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
+        .add("archive/you_chats.txt", FileKind::Chats, None)
+        .add("archive/clean_chats.txt", FileKind::Chats, None);
+        // .add(vec![
+        //         "data/ebooks/faa-h-8083-25c.pdf".to_string(),
+        //         "data/ebooks/algor_intro.pdf".to_string(),
+        //         "data/ebooks/intro_engineer.pdf".to_string(),
+        //         "data/ebooks/meap.pdf".to_string(),
+        //         "data/ebooks/missiles.pdf".to_string(),
+        //         "data/ebooks/os_concepts.pdf".to_string(),
+        //         "data/ebooks/real-time-embedded.pdf".to_string(),
+        //         "data/ebooks/riscv.pdf".to_string(),
+        //         "data/ebooks/rtos.pdf".to_string(),
+        //         "data/ebooks/stephen_hawking_a_brief_history_of_time.pdf".to_string(),
+        //     ].join(", "), 
+        //     FileKind::PDF, 
+        //     None
+        // );
+
+    loader
+        // .total_limit(2_000_000)
+        .total_limit(25_000)
+        .seed(4815162342)
+        .load(tokenizer, keyword_index, max_seq_len)
 }
 
 #[cfg(target_os = "windows")]
@@ -214,53 +243,127 @@ pub fn run(
     // and training aggressiveness (fast→careful). Names reflect the dominant characteristic.
     let runs = vec![
 
-        // ── Baseline: small & fast ──────────────────────────────────────────
-        RunConfig {
-            name: "128h_2l_2a_200len".to_string(),
-            embed_dim: 128, hidden_units: 128, n_layers: 2, attn_heads: 2, ff_dim: 512, max_seq_len: 200,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10,  batch_size, first_lr: 1e-3, last_lr: 1e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10,  batch_size, first_lr: 1e-3, last_lr: 1e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-            ],
-        },
-
-        // ── Small model, moderate training ─────────────────────────────────
+        // does not learn
         // RunConfig {
-        //     name: "small_shallow_balanced".to_string(),
-        //     embed_dim: 256, hidden_units: 256, n_layers: 2, attn_heads: 4, ff_dim: 1024, max_seq_len: 320,
+        //     name: "64h_2l_2a_180len".to_string(),
+        //     embed_dim: 64, 
+        //     hidden_units: 64, 
+        //     n_layers: 2, 
+        //     attn_heads: 2, 
+        //     ff_dim: 256, 
+        //     max_seq_len: 180,
         //     stages: vec![
-        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 3e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 3e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
+        
+        // memorizes extremely well. outputs memorized sentences regardless of input prompt though, not usually relevant to input prompt
+        // RunConfig {
+        //     name: "128h_2l_2a_200len".to_string(),
+        //     embed_dim: 128, 
+        //     hidden_units: 128, 
+        //     n_layers: 2, 
+        //     attn_heads: 2, 
+        //     ff_dim: 512, 
+        //     // max_seq_len: 200,
+        //     max_seq_len: 600,
+        //     stages: vec![
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 2,  batch_size, first_lr: 1e-3, last_lr: 1e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 2,  batch_size, first_lr: 1e-3, last_lr: 1e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
         //     ],
         // },
 
-        // // ── Small model, moderate training ─────────────────────────────────
+        // memorizes little, outputs odd, slightly garbled responses that are somewhat relevant to the input prompt
+        // RunConfig {
+        //     name: "256h_2l_4a_180len".to_string(),
+        //     embed_dim: 256, 
+        //     hidden_units: 256, 
+        //     n_layers: 2, 
+        //     attn_heads: 4, 
+        //     ff_dim: 1024,
+        //     max_seq_len: 180,
+        //     // max_seq_len: 600,
+        //     stages: vec![
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 12, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 12, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
+
+        // trying with better data now for generalization and relevancy
         RunConfig {
-            name: "256h_2l_4a_180len".to_string(),
-            embed_dim: 256, hidden_units: 256, n_layers: 2, attn_heads: 4, ff_dim: 1024, max_seq_len: 180,
+            name: "512h_3l_8a_180len".to_string(),
+            embed_dim: 512, 
+            hidden_units: 512, 
+            n_layers: 3, 
+            attn_heads: 8, 
+            // ff_dim: 1024,
+            ff_dim: 2048, 
+            max_seq_len: 180,
+            // max_seq_len: 600,
             stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 12, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                // StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 12, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
             ],
         },
 
-        RunConfig {
-            name: "384h_4l_6a_160len".to_string(),
-            embed_dim: 384, hidden_units: 384, n_layers: 4, attn_heads: 6, ff_dim: 1536, max_seq_len: 160,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-            ],
-        },
+        // deeper for complexity, wider doesnt help
+        // RunConfig {
+        //     name: "256h_12l_4a_180len".to_string(),
+        //     embed_dim: 256, 
+        //     hidden_units: 256, 
+        //     n_layers: 12,
+        //     attn_heads: 4, 
+        //     ff_dim: 1024,
+        //     max_seq_len: 180,
+        //     stages: vec![
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 12, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 12, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
 
-        RunConfig {
-            name: "512h_4l_8a_140len".to_string(),
-            embed_dim: 512, hidden_units: 512, n_layers: 4, attn_heads: 8, ff_dim: 2048, max_seq_len: 140,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-            ],
-        },
+        // memorizes little, very similar to 256, maybe slightly more relevant, but overall about the same
+        // RunConfig {
+        //     name: "1024h_8l_16a_180len".to_string(),
+        //     embed_dim: 1024, 
+        //     hidden_units: 1024, 
+        //     n_layers: 8, 
+        //     attn_heads: 16, 
+        //     ff_dim: 2048, 
+        //     max_seq_len: 180,
+        //     stages: vec![
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 3e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 3e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
+
+        // RunConfig {
+        //     name: "384h_4l_6a_160len".to_string(),
+        //     embed_dim: 384, 
+        //     hidden_units: 384, 
+        //     n_layers: 4, 
+        //     attn_heads: 6, 
+        //     ff_dim: 1536, 
+        //     max_seq_len: 160,
+        //     stages: vec![
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 2, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 2, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
+
+        // RunConfig {
+        //     name: "512h_4l_8a_140len".to_string(),
+        //     embed_dim: 512, 
+        //     hidden_units: 512, 
+        //     n_layers: 4, 
+        //     attn_heads: 8, 
+        //     ff_dim: 2048, 
+        //     max_seq_len: 140,
+        //     stages: vec![
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 2, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 2, batch_size, first_lr: 5e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
 
         // // ── Small model, deep — tests whether more layers help at small width ─
         // RunConfig {
@@ -368,6 +471,7 @@ pub fn run(
                         attn_heads: run_cfg.attn_heads,
                         ff_dim: run_cfg.ff_dim,
                         max_seq_len: run_cfg.max_seq_len,
+                        training_stage: run_cfg.stages.get(0).expect("Couldn't get stage").stage,
                         dropout_rate: 0.05,
                     };
                     (config.init(&device), 0)
@@ -383,6 +487,7 @@ pub fn run(
                 attn_heads: run_cfg.attn_heads,
                 ff_dim: run_cfg.ff_dim,
                 max_seq_len: run_cfg.max_seq_len,
+                training_stage: run_cfg.stages.get(0).expect("Couldn't get stage").stage,
                 dropout_rate: 0.05,
             };
             (config.init(&device), 0)
@@ -393,6 +498,19 @@ pub fn run(
             
             let training_samples = load_stage_data(stage_cfg.stage.clone(), &tokenizer, &keyword_index, run_cfg.max_seq_len)?;
             println!("Training samples: {}", training_samples.len());
+
+            // debug print — first 12 samples
+            for (i, sample) in training_samples.iter().enumerate() {
+                if i >= 12 { break; }
+                println!("INPUT:  {:?}", tokenizer.decode(&sample.input_ids));
+                println!("TARGET: {:?}", tokenizer.decode(
+                    &sample.target_labels.iter()
+                        .map(|&t| if t == PAD_TOKEN { PAD_TOKEN } else { t })
+                        .collect::<Vec<_>>()
+                ));
+                println!("input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
+                println!("target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
+            }
 
             let mut optimizer = AdamWConfig::new()
                 .with_epsilon(stage_cfg.epsilon)

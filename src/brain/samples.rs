@@ -368,7 +368,7 @@ pub fn prepare_paired_samples_split(
         if enc_input.len() > max_seq_len { continue; }
 
         if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
-        if enc_input.len() + target_encoded.len() < max_seq_len / 6 { continue; }
+        if enc_input.len() + target_encoded.len() < max_seq_len / 4 { continue; }
 
         let pad = |mut v: Vec<usize>| -> Vec<usize> {
             v.resize(max_seq_len, PAD_TOKEN);
@@ -493,7 +493,7 @@ pub fn prepare_paired_samples_split_sep(
         if enc_input.len() > max_seq_len { continue; }
 
         if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
-        if enc_input.len() + target_encoded.len() < max_seq_len / 6 { continue; }
+        if enc_input.len() + target_encoded.len() < max_seq_len / 4 { continue; }
 
         let pad = |mut v: Vec<usize>| -> Vec<usize> {
             v.resize(max_seq_len, PAD_TOKEN);
@@ -626,6 +626,7 @@ pub fn prepare_paired_samples_chats(
 
             if enc_input.len() > max_seq_len { continue; }
             if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
+            // if enc_input.len() + target_encoded.len() < max_seq_len / 4 { continue; } // on Language stage, you want the short ones
 
             let pad = |mut v: Vec<usize>| -> Vec<usize> {
                 v.resize(max_seq_len, PAD_TOKEN);

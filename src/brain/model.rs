@@ -310,6 +310,7 @@ pub struct YumonBrainConfig {
     pub ff_dim:       usize,
     #[config(default = 320)]
     pub max_seq_len:  usize,
+    pub training_stage: TrainingStage
 }
 
 impl YumonBrainConfig {
@@ -821,6 +822,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
             attn_heads: metadata.attn_heads,
             ff_dim: metadata.ff_dim,
             max_seq_len: metadata.max_seq_len,
+            training_stage: metadata.training_stage,
             dropout_rate: 0.05, // default or stored in metadata
         };
 
@@ -871,6 +873,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
             attn_heads: metadata.attn_heads,
             ff_dim: metadata.ff_dim,
             max_seq_len: metadata.max_seq_len,
+            training_stage: metadata.training_stage,
             dropout_rate: 0.05,
         };
 

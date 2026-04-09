@@ -6,8 +6,10 @@ use rand::rngs::StdRng;
 use crate::brain::bpe::TokenizerKind;
 
 #[cfg(target_os = "windows")]
-use crate::brain::mdx::{load_arena_chats, load_csv_bible, load_csv_words, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_specific_dict_sentences, load_txt_sentences};
+use crate::brain::mdx::{load_arena_chats, load_csv_bible, load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_specific_dict_sentences, load_txt_sentences};
 
+#[cfg(target_os = "windows")]
+use crate::brain::pdf::load_pdfs;
 use crate::brain::samples::{Sample, TrainingStage, prepare_paired_samples_chats, prepare_paired_samples_split, prepare_paired_samples_split_sep};
 
 // ── File-source descriptor ────────────────────────────────────────────────────
@@ -29,7 +31,8 @@ pub enum FileKind {
     Chats,
     JsonChats,
     Txt,
-    SpecificDict
+    SpecificDict,
+    PDF
     // extend with WikiXml, Txt, Pdf, … as needed
 }
 
@@ -76,6 +79,93 @@ impl DataLoader {
         self
     }
 
+    pub fn load_sentences(self) -> anyhow::Result<Vec<String>> {
+        let mut rng = StdRng::seed_from_u64(self.seed);
+        let mut all: Vec<String> = Vec::new();
+
+        for entry in &self.entries {
+            // 1. Raw sentences from disk
+
+            // // Per-file limit before sample prep to reduce load
+            // if let Some(n) = entry.limit {
+            //     sentences.shuffle(&mut rng);
+            //     sentences.truncate(n);
+            // }
+
+            let mut sentences = match entry.kind {
+                FileKind::QaPairs => {
+                    let mut pairs = load_qa_pairs_raw(&entry.path)?;
+                    
+                    // Per-file limit before sample prep to reduce load
+                    if let Some(n) = entry.limit {
+                        pairs.shuffle(&mut rng);
+                        pairs.truncate(n);
+                    }
+
+                    let mut sents = Vec::new();
+                    for pair in pairs {
+                        sents.push(pair.0);
+                        sents.push(pair.1);
+                    }
+
+                    sents
+                }
+                FileKind::Chats => {
+                    let mut chats = load_handcrafted_chats(&entry.path)?;
+
+                    // Per-file limit before sample prep to reduce load
+                    if let Some(n) = entry.limit {
+                        chats.blocks.shuffle(&mut rng);
+                        chats.blocks.truncate(n);
+                    }
+
+                    let mut sents = Vec::new();
+                    for chat in chats.blocks {
+                        for mem in chat.memories {
+                            sents.push(mem.bot);
+                            sents.push(mem.human);
+                        }
+                    }
+
+                    sents
+                }
+                FileKind::JsonChats => {
+                    let mut chats = load_arena_chats(&entry.path)?;
+
+                    // Per-file limit before sample prep to reduce load
+                    if let Some(n) = entry.limit {
+                        chats.blocks.shuffle(&mut rng);
+                        chats.blocks.truncate(n);
+                    }
+
+                    let mut sents = Vec::new();
+                    for chat in chats.blocks {
+                        for mem in chat.memories {
+                            sents.push(mem.bot);
+                            sents.push(mem.human);
+                        }
+                    }
+
+                    sents
+                },
+                _ => {
+                    load_sentences(&entry.path, &entry.kind)?
+                }
+            };
+
+            all.extend(sentences);
+        }
+        
+        // 4. Global shuffle then total cap
+        all.shuffle(&mut rng);
+        if let Some(n) = self.total_limit {
+            all.truncate(n);
+        }
+
+        println!("[DataLoader] total sentences returned: {}", all.len());
+        Ok(all)
+    }
+ 
     /// Load, prepare, merge, shuffle, and cap all samples.
     pub fn load(
         self,
@@ -105,19 +195,40 @@ impl DataLoader {
             #[cfg(target_os = "windows")]
             let mut samples = match entry.kind {
                 FileKind::QaPairs => {
-                    let pairs = load_qa_pairs_raw(&entry.path)?;
+                    let mut pairs = load_qa_pairs_raw(&entry.path)?;
+
+                    // Per-file limit before sample prep to reduce load
+                    if let Some(n) = entry.limit {
+                        pairs.shuffle(&mut rng);
+                        pairs.truncate(n);
+                    }
+
                     prepare_paired_samples_split_sep(
                         pairs, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
                     )
                 }
                 FileKind::Chats => {
-                    let chats = load_handcrafted_chats(&entry.path)?;
+                    let mut chats = load_handcrafted_chats(&entry.path)?;
+
+                    // Per-file limit before sample prep to reduce load
+                    if let Some(n) = entry.limit {
+                        chats.blocks.shuffle(&mut rng);
+                        chats.blocks.truncate(n);
+                    }
+
                     prepare_paired_samples_chats(
                         chats, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
                     )
                 }
                 FileKind::JsonChats => {
-                    let chats = load_arena_chats(&entry.path)?;
+                    let mut chats = load_arena_chats(&entry.path)?;
+
+                    // Per-file limit before sample prep to reduce load
+                    if let Some(n) = entry.limit {
+                        chats.blocks.shuffle(&mut rng);
+                        chats.blocks.truncate(n);
+                    }
+
                     prepare_paired_samples_chats(
                         chats, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
                     )
@@ -175,12 +286,16 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
         FileKind::BibleCsv    => load_csv_bible(path),
         FileKind::Handcrafted => load_handcrafted_sentences(path),
         FileKind::Txt         => load_txt_sentences(path),
+        FileKind::PDF       => {
+            let paths: Vec<&str> = path.split(", ").collect();
+            Ok(load_pdfs(paths))
+        },
         FileKind::SpecificDict => {
-            let all_words = load_csv_words("archive/word_counts.csv");
-            let all_words =  all_words.as_ref().expect("Couldn't get words");
+            // let all_words = load_csv_words("archive/word_counts.csv");
+            // let all_words =  all_words.as_ref().expect("Couldn't get words");
             
-            let dict_sentences = load_specific_dict_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt", all_words);
-            // let dict_sentences = dict_sentences.as_ref().expect("Couldn't get dict_sentences");
+            // let dict_sentences = load_specific_dict_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt", all_words);
+            let dict_sentences = load_dictionary_sentences("data/Dictionary/Oxford/Oxford_English_Dictionary.txt");
 
             dict_sentences
         },
