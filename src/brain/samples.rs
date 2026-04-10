@@ -5,7 +5,7 @@ use rand::{Rng, rngs::StdRng};
 #[cfg(target_os = "windows")]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use crate::brain::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, bpe::TokenizerKind, mdx::HandcraftedChats, train::{MAX_SEQ_LEN, keyword_emote_label, matched_classes}};
+use crate::brain::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, bpe::TokenizerKind, mdx::HandcraftedChats, sentiment::EmotionAnalyzer, train::{MAX_SEQ_LEN, keyword_emote_label, matched_classes}};
 use rand::SeedableRng;
 use rand::prelude::SliceRandom;
 
@@ -531,6 +531,8 @@ pub fn prepare_paired_samples_chats(
     let mut rng_local = rand::thread_rng();
     let mut samples = Vec::new();
 
+    let analyzer = EmotionAnalyzer::new();
+
     for block in &chats.blocks {
         for (i, memory) in block.memories.iter().enumerate() {
             let sent = &memory.human;
@@ -542,6 +544,9 @@ pub fn prepare_paired_samples_chats(
 
             let world = WorldContext::random(&mut rng_local);
             let (action, motion_dir) = derive_action(&world);
+
+            let sentiment = sentiment::analyze(sent.to_string());
+            let emotion = analyzer.analyze(sent, &sentiment);
 
             let mut obstacle_dir = if let Some(obst) = world.obstacle {
                 obst.dir
@@ -602,6 +607,7 @@ pub fn prepare_paired_samples_chats(
                     let json = serde_json::to_string_pretty(&serde_json::json!({
                         "action":     action.as_str(),
                         "motion_dir": format!("{:?}", motion_dir).to_lowercase(),
+                        "emotion":    emotion,
                         "reply":      memory.bot,
                     })).unwrap();
                     let encoded = match tokenizer {

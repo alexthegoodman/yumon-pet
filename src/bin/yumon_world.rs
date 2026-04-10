@@ -34,13 +34,18 @@ use three_d::renderer::geometry::Mesh;
 // const YUMON_COUNT: usize = 4;
 // const SPAWN_RADIUS: f32 = 3.5;
 // const ARENA: f32 = 6.0;
-const YUMON_COUNT: usize = 40;
-const SPAWN_RADIUS: f32 = 30.5;
-const ARENA: f32 = 60.0;
+// const YUMON_COUNT: usize = 40;
+// const SPAWN_RADIUS: f32 = 30.5;
+// const ARENA: f32 = 60.0;
+const YUMON_COUNT: usize = 10;
+const SPAWN_RADIUS: f32 = 10.0;
+const ARENA: f32 = 25.0;
 const WALL_H: f32 = 1.2;
 const WALL_T: f32 = 0.35;
-const MOVE_SPEED: f32 = 1.8;
-const TRAVEL_DIST: f32 = 2.5;
+// const MOVE_SPEED: f32 = 1.8;
+// const TRAVEL_DIST: f32 = 2.5;
+const MOVE_SPEED: f32 = 2.4;
+const TRAVEL_DIST: f32 = 4.5;
 const BUBBLE_TTL: f32 = 7.0;
 const ACTION_INTERVAL_SECS: u64 = 10;
 
@@ -58,43 +63,43 @@ const MODEL_PATHS: [&str; YUMON_COUNT] = [
 
     "data/models/animal-fish.glb",
     "data/models/animal-giraffe.glb",
-    "data/models/animal-lion.glb",
-    "data/models/animal-parrot.glb",
+    // "data/models/animal-lion.glb",
+    // "data/models/animal-parrot.glb",
 
-    "data/models/animal-fish.glb",
-    "data/models/animal-giraffe.glb",
-    "data/models/animal-lion.glb",
-    "data/models/animal-parrot.glb",
+    // "data/models/animal-fish.glb",
+    // "data/models/animal-giraffe.glb",
+    // "data/models/animal-lion.glb",
+    // "data/models/animal-parrot.glb",
 
-    "data/models/animal-fish.glb",
-    "data/models/animal-giraffe.glb",
-    "data/models/animal-lion.glb",
-    "data/models/animal-parrot.glb",
+    // "data/models/animal-fish.glb",
+    // "data/models/animal-giraffe.glb",
+    // "data/models/animal-lion.glb",
+    // "data/models/animal-parrot.glb",
 
-    "data/models/animal-fish.glb",
-    "data/models/animal-giraffe.glb",
-    "data/models/animal-lion.glb",
-    "data/models/animal-parrot.glb",
+    // "data/models/animal-fish.glb",
+    // "data/models/animal-giraffe.glb",
+    // "data/models/animal-lion.glb",
+    // "data/models/animal-parrot.glb",
 
-    "data/models/animal-fish.glb",
-    "data/models/animal-giraffe.glb",
-    "data/models/animal-lion.glb",
-    "data/models/animal-parrot.glb",
+    // "data/models/animal-fish.glb",
+    // "data/models/animal-giraffe.glb",
+    // "data/models/animal-lion.glb",
+    // "data/models/animal-parrot.glb",
 
-    "data/models/animal-fish.glb",
-    "data/models/animal-giraffe.glb",
-    "data/models/animal-lion.glb",
-    "data/models/animal-parrot.glb",
+    // "data/models/animal-fish.glb",
+    // "data/models/animal-giraffe.glb",
+    // "data/models/animal-lion.glb",
+    // "data/models/animal-parrot.glb",
 
-    "data/models/animal-fish.glb",
-    "data/models/animal-giraffe.glb",
-    "data/models/animal-lion.glb",
-    "data/models/animal-parrot.glb",
+    // "data/models/animal-fish.glb",
+    // "data/models/animal-giraffe.glb",
+    // "data/models/animal-lion.glb",
+    // "data/models/animal-parrot.glb",
 
-    "data/models/animal-fish.glb",
-    "data/models/animal-giraffe.glb",
-    "data/models/animal-lion.glb",
-    "data/models/animal-parrot.glb",
+    // "data/models/animal-fish.glb",
+    // "data/models/animal-giraffe.glb",
+    // "data/models/animal-lion.glb",
+    // "data/models/animal-parrot.glb",
 ];
 
 #[cfg(target_os = "windows")]
@@ -111,48 +116,50 @@ const TINTS: [Srgba; YUMON_COUNT] = [
 
      Srgba { r: 220, g: 110, b: 110, a: 255 },
     Srgba { r: 110, g: 170, b: 220, a: 255 },
-    Srgba { r: 130, g: 210, b: 140, a: 255 },
-    Srgba { r: 215, g: 185, b:  90, a: 255 },
+    // Srgba { r: 130, g: 210, b: 140, a: 255 },
+    // Srgba { r: 215, g: 185, b:  90, a: 255 },
 
-     Srgba { r: 220, g: 110, b: 110, a: 255 },
-    Srgba { r: 110, g: 170, b: 220, a: 255 },
-    Srgba { r: 130, g: 210, b: 140, a: 255 },
-    Srgba { r: 215, g: 185, b:  90, a: 255 },
+    //  Srgba { r: 220, g: 110, b: 110, a: 255 },
+    // Srgba { r: 110, g: 170, b: 220, a: 255 },
+    // Srgba { r: 130, g: 210, b: 140, a: 255 },
+    // Srgba { r: 215, g: 185, b:  90, a: 255 },
     
-     Srgba { r: 220, g: 110, b: 110, a: 255 },
-    Srgba { r: 110, g: 170, b: 220, a: 255 },
-    Srgba { r: 130, g: 210, b: 140, a: 255 },
-    Srgba { r: 215, g: 185, b:  90, a: 255 },
+    //  Srgba { r: 220, g: 110, b: 110, a: 255 },
+    // Srgba { r: 110, g: 170, b: 220, a: 255 },
+    // Srgba { r: 130, g: 210, b: 140, a: 255 },
+    // Srgba { r: 215, g: 185, b:  90, a: 255 },
 
-     Srgba { r: 220, g: 110, b: 110, a: 255 },
-    Srgba { r: 110, g: 170, b: 220, a: 255 },
-    Srgba { r: 130, g: 210, b: 140, a: 255 },
-    Srgba { r: 215, g: 185, b:  90, a: 255 },
+    //  Srgba { r: 220, g: 110, b: 110, a: 255 },
+    // Srgba { r: 110, g: 170, b: 220, a: 255 },
+    // Srgba { r: 130, g: 210, b: 140, a: 255 },
+    // Srgba { r: 215, g: 185, b:  90, a: 255 },
 
-     Srgba { r: 220, g: 110, b: 110, a: 255 },
-    Srgba { r: 110, g: 170, b: 220, a: 255 },
-    Srgba { r: 130, g: 210, b: 140, a: 255 },
-    Srgba { r: 215, g: 185, b:  90, a: 255 },
+    //  Srgba { r: 220, g: 110, b: 110, a: 255 },
+    // Srgba { r: 110, g: 170, b: 220, a: 255 },
+    // Srgba { r: 130, g: 210, b: 140, a: 255 },
+    // Srgba { r: 215, g: 185, b:  90, a: 255 },
 
-     Srgba { r: 220, g: 110, b: 110, a: 255 },
-    Srgba { r: 110, g: 170, b: 220, a: 255 },
-    Srgba { r: 130, g: 210, b: 140, a: 255 },
-    Srgba { r: 215, g: 185, b:  90, a: 255 },
+    //  Srgba { r: 220, g: 110, b: 110, a: 255 },
+    // Srgba { r: 110, g: 170, b: 220, a: 255 },
+    // Srgba { r: 130, g: 210, b: 140, a: 255 },
+    // Srgba { r: 215, g: 185, b:  90, a: 255 },
 
-     Srgba { r: 220, g: 110, b: 110, a: 255 },
-    Srgba { r: 110, g: 170, b: 220, a: 255 },
-    Srgba { r: 130, g: 210, b: 140, a: 255 },
-    Srgba { r: 215, g: 185, b:  90, a: 255 },
+    //  Srgba { r: 220, g: 110, b: 110, a: 255 },
+    // Srgba { r: 110, g: 170, b: 220, a: 255 },
+    // Srgba { r: 130, g: 210, b: 140, a: 255 },
+    // Srgba { r: 215, g: 185, b:  90, a: 255 },
 
-     Srgba { r: 220, g: 110, b: 110, a: 255 },
-    Srgba { r: 110, g: 170, b: 220, a: 255 },
-    Srgba { r: 130, g: 210, b: 140, a: 255 },
-    Srgba { r: 215, g: 185, b:  90, a: 255 },
+    //  Srgba { r: 220, g: 110, b: 110, a: 255 },
+    // Srgba { r: 110, g: 170, b: 220, a: 255 },
+    // Srgba { r: 130, g: 210, b: 140, a: 255 },
+    // Srgba { r: 215, g: 185, b:  90, a: 255 },
 ];
 
-const YUMON_NAMES: [&str; YUMON_COUNT] = ["Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol",
-                                            "Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol",
-                                            "Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol"];
+const YUMON_NAMES: [&str; YUMON_COUNT] = ["Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", 
+                                            // "Fern", "Sol","Ember", "Ripple", "Fern", "Sol",
+                                            // "Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol",
+                                            // "Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol"
+                                        ];
 
 // ─── World objects ────────────────────────────────────────────────────────────
 
@@ -226,7 +233,7 @@ fn cardinal_dir_name(d: CardinalDir) -> &'static str {
 pub struct WorldPrompt {
     pub yumon_id:  usize,
     pub prompt:    String,
-    pub emote_idx: usize,
+    // pub emote_idx: usize,
     pub world_ctx: WorldContext,
 }
 
@@ -247,7 +254,7 @@ struct Yumon {
     speech_timer:      f32,
     next_action_at:    Instant,
     waiting_for_brain: bool,
-    emote_idx:         usize,
+    parsed_emotion:         String,
     log:               Vec<String>,
     pending_announcement: Option<String>,
 }
@@ -267,7 +274,7 @@ impl Yumon {
             speech_timer: 0.0,
             next_action_at: Instant::now() + stagger,
             waiting_for_brain: false,
-            emote_idx: 0,
+            parsed_emotion: "neutral".to_string(),
             log: Vec::new(),
             pending_announcement: None
         }
@@ -282,10 +289,8 @@ impl Yumon {
 
     fn apply_result(&mut self, r: GenerationResult) {
         self.action    = r.action;
-        self.emote_idx = r.yumon_emote_idx;
+        self.parsed_emotion = r.parsed_emotion.clone();
         self.waiting_for_brain = false;
-
-        let emote = EMOTE_NAMES.get(r.yumon_emote_idx).copied().unwrap_or("?");
 
         self.push_log(format!("[RAW]: {:?}", r.raw_output));
         self.push_log(format!("[ACTION]: {:?}", r.action));
@@ -294,6 +299,7 @@ impl Yumon {
             self.set_speech(r.reply.clone());
             self.push_log(format!("💬 {}", r.reply));
         } else {
+            let emote = r.parsed_emotion;
             self.push_log(format!("({emote})"));
         }
         
@@ -366,7 +372,8 @@ impl Yumon {
     }
 
     fn world_transform(&self, t: f64) -> Mat4 {
-        let y = 0.45 + self.bob(t);
+        // let y = 0.45 + self.bob(t);
+        let y = 0.45;
         let squash = if self.anim == AnimState::Building {
             Mat4::from_nonuniform_scale(1.15, 0.78, 1.15)
         } else {
@@ -478,7 +485,7 @@ fn main() {
         std::thread::spawn(move || {
             let device: burn::prelude::Device<Wgpu> = Default::default();
             let (brain, tokenizer, config) =
-                match YumonBrain::<Wgpu>::load("checkpoints/brain", &device) {
+                match YumonBrain::<Wgpu>::load("checkpoints/brain/512h_3l_8a_180len", &device) {
                     Ok(m) => m,
                     Err(e) => { eprintln!("[brain] load failed: {e}"); return; }
                 };
@@ -487,9 +494,6 @@ fn main() {
                 TokenizerKind::Bpe(b) => b,
                 _ => { eprintln!("[brain] BPE tokenizer required"); return; }
             };
-
-            // let class_probs = vec![1.0 / CIFAR_CLASSES as f32; CIFAR_CLASSES];
-            // let emote_probs = vec![1.0 / EMOTE_CLASSES as f32; EMOTE_CLASSES];
 
             while let Ok(p) = rx_prompt.recv() {
                 let result = brain.generate_unmasked_parsed(
@@ -736,7 +740,7 @@ fn main() {
                 let _ = tx_prompt.send(WorldPrompt {
                     yumon_id:  y.id,
                     prompt,
-                    emote_idx: y.emote_idx,
+                    // emote_idx: y.emote_idx,
                     world_ctx: WorldContext::default(),
                 });
             }
@@ -777,12 +781,12 @@ fn main() {
 
                         for y in &mut yumons {
                             let waiting_str = if y.waiting_for_brain { "  ⏳" } else { "" };
-                            let emote = EMOTE_NAMES.get(y.emote_idx).copied().unwrap_or("");
+                            // let emote = EMOTE_NAMES.get(y.emote_idx).copied().unwrap_or("");
                             let header = format!(
-                                "{} {}  {}{}",
+                                "{} {}  {}",
                                 action_icon(y.action),
                                 YUMON_NAMES[y.id],
-                                emote,
+                                // emote,
                                 waiting_str,
                             );
 

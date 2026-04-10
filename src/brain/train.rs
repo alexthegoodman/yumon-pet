@@ -194,7 +194,7 @@ fn load_stage_data(
     loader = loader
         .add("archive/ov_chats.txt", FileKind::Chats, None)
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
-        .add("data/arena_extract.txt",   FileKind::Chats, Some(2_500))
+        .add("data/arena_extract.txt",   FileKind::Chats, Some(10_000))
         // // .add("data/wiki_extract.txt",   FileKind::Txt, None)
         // .add("data/creative_stories.txt", FileKind::Txt, None)
         // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
@@ -302,8 +302,8 @@ pub fn run(
             max_seq_len: 180,
             // max_seq_len: 600,
             stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 12, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                // StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 12, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 3, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
             ],
         },
 

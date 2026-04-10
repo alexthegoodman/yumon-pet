@@ -564,11 +564,13 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
         let mut parsed_action     = extract("action");
         let mut parsed_motion_dir = extract("motion_dir");
         let mut parsed_reply  = extract("reply");
+        let mut parsed_emotion  = extract("emotion");
 
         if parsed_action.is_empty() || parsed_action.len() < 3 {
             parsed_action     = extract(" action");
             parsed_motion_dir = extract(" motion_dir");
             parsed_reply  = extract(" reply");
+            parsed_emotion  = extract(" emotion");
         }
 
         if parsed_reply.is_empty() || parsed_reply.len() < 4 {
@@ -586,6 +588,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
                     serde_json::json!({
                         "action":     extract("action"),
                         "motion_dir": extract("motion_dir"),
+                        "emotion":      extract("emotion"),
                         "reply":      extract("reply"),
                     })
                 });
@@ -593,11 +596,13 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
             parsed_action = parsed["action"].to_string().trim().to_string();
             parsed_motion_dir = parsed["motion_dir"].to_string().trim().to_string();
             parsed_reply = parsed["reply"].to_string().trim().to_string();
+            parsed_emotion = parsed["emotion"].to_string().trim().to_string();
         }
 
         parsed_action = parsed_action.replace("\"", "").trim().to_string();
         parsed_motion_dir = parsed_motion_dir.replace("\"", "").trim().to_string();
         parsed_reply = parsed_reply.replace("\"", "").trim().to_string();
+        parsed_emotion = parsed_emotion.replace("\"", "").trim().to_string();
 
         let action = match parsed_action.as_str() {
             "speak"  => Action::Speak,
@@ -619,16 +624,11 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
             .as_str()
             .to_string();
 
-        let yumon_emote_idx = last_emote_logits
-            .as_deref()
-            .map(argmax)
-            .unwrap_or(4);
-
         GenerationResult {
             reply,
             action,
             motion_dir,
-            yumon_emote_idx,
+            parsed_emotion,
             raw_output,
             fsm_state: 0,
             allowed_count: None,
@@ -713,11 +713,13 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
         let mut parsed_action     = extract("action");
         let mut parsed_motion_dir = extract("motion_dir");
         let mut parsed_reply  = extract("reply");
+        let mut parsed_emotion  = extract("emotion");
 
         if parsed_action.is_empty() || parsed_action.len() < 3 {
             parsed_action     = extract(" action");
             parsed_motion_dir = extract(" motion_dir");
             parsed_reply  = extract(" reply");
+            parsed_emotion  = extract(" emotion");
         }
 
         if parsed_reply.is_empty() || parsed_reply.len() < 4 {
@@ -735,6 +737,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
                     serde_json::json!({
                         "action":     extract("action"),
                         "motion_dir": extract("motion_dir"),
+                        "emotion":      extract("emotion"),
                         "reply":      extract("reply"),
                     })
                 });
@@ -742,11 +745,13 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
             parsed_action = parsed["action"].to_string().trim().to_string();
             parsed_motion_dir = parsed["motion_dir"].to_string().trim().to_string();
             parsed_reply = parsed["reply"].to_string().trim().to_string();
+            parsed_emotion = parsed["emotion"].to_string().trim().to_string();
         }
 
         parsed_action = parsed_action.replace("\"", "").trim().to_string();
         parsed_motion_dir = parsed_motion_dir.replace("\"", "").trim().to_string();
         parsed_reply = parsed_reply.replace("\"", "").trim().to_string();
+        parsed_emotion = parsed_emotion.replace("\"", "").trim().to_string();
 
         let action = match parsed_action.as_str() {
             "speak"  => Action::Speak,
@@ -768,16 +773,13 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
             .as_str()
             .to_string();
 
-        let yumon_emote_idx = last_emote_logits
-            .as_deref()
-            .map(argmax)
-            .unwrap_or(4);
+        
 
         GenerationResult {
             reply,
             action,
             motion_dir,
-            yumon_emote_idx,
+            parsed_emotion,
             raw_output,
             fsm_state: 0,
             allowed_count: None,
@@ -907,7 +909,7 @@ pub struct GenerationResult {
     pub reply:           String,
     pub action:          Action,
     pub motion_dir:      CardinalDir,
-    pub yumon_emote_idx: usize,
+    pub parsed_emotion: String,
     pub raw_output: String,
     pub fsm_state:       u32,      // ← final FSM state
     pub allowed_count:   Option<usize>, // ← None if masking never fired

@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=200, initial-scale=1"/>
+<style>
+  /* ── Reset & base ─────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        rgba(10, 10, 14, 0.82);
+    --border:    rgba(120, 230, 180, 0.22);
+    --accent:    #78e6b4;
+    --accent2:   #e678c8;
+    --text:      #d8f0e8;
+    --dim:       rgba(216, 240, 232, 0.38);
+    --face-bg:   rgba(20, 28, 22, 0.90);
+    --radius:    12px;
+    --font:      'Courier New', monospace;
+  }
+
+  html, body {
+    width: 200px;
+    height: 200px;
+    overflow: hidden;
+    background: transparent;
+    font-family: var(--font);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+
+  /* ── Outer shell ──────────────────────────────────────────── */
+  #shell {
+    width: 200px;
+    height: 200px;
+    /*background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);*/
+    background: transparent;
+    border: none;
+    border-radius: var(--radius);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* subtle scanline texture */
+  /*#shell::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 3px,
+      rgba(120,230,180,0.025) 3px,
+      rgba(120,230,180,0.025) 4px
+    );
+    pointer-events: none;
+    border-radius: var(--radius);
+    z-index: 10;
+  }*/
+
+  /* ── Face canvas area ─────────────────────────────────────── */
+  #face-wrap {
+    flex: 0 0 auto;
+    margin-top: 10px;
+    width: 90px;
+    height: 90px;
+    background: var(--face-bg);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    box-shadow: 0 0 18px rgba(120,230,180,0.12), inset 0 0 10px rgba(0,0,0,0.5);
+    overflow: hidden;
+  }
+
+  /* breathing glow ring */
+  #face-wrap::after {
+    content: '';
+    position: absolute;
+    inset: -3px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    background: linear-gradient(135deg, var(--accent), var(--accent2)) border-box;
+    -webkit-mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: destination-out;
+    mask-composite: exclude;
+    animation: glow-ring 3s ease-in-out infinite;
+    opacity: 0.55;
+  }
+  @keyframes glow-ring {
+    0%, 100% { opacity: 0.3; transform: scale(1); }
+    50%       { opacity: 0.75; transform: scale(1.04); }
+  }
+
+  canvas#face {
+    width: 72px;
+    height: 72px;
+    image-rendering: pixelated;
+  }
+
+  /* ── Reply bubble ─────────────────────────────────────────── */
+  #bubble {
+    flex: 0 0 auto;
+    width: 176px;
+    min-height: 28px;
+    max-height: 52px;
+    overflow: hidden;
+    background: rgba(120,230,180,0.87);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-top: 6px;
+    padding: 4px 8px;
+    font-size: 9.5px;
+    line-height: 1.45;
+    color: black;
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity 0.3s, transform 0.3s;
+  }
+  #bubble.show {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  #bubble .thinking {
+    color: var(--dim);
+    font-style: italic;
+    animation: blink 1s step-start infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ── Input row ───────────────────────────────────────────── */
+  #input-row {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    width: 176px;
+    margin-top: 5px;
+    margin-bottom: 6px;
+  }
+
+  #msg-input {
+    flex: 1;
+    background: rgba(255,255,255,0.85);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 7px;
+    font-family: var(--font);
+    font-size: 9px;
+    color: black;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  #msg-input::placeholder { color: var(--dim); }
+  #msg-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(120,230,180,0.12);
+  }
+
+  #send-btn {
+    width: 22px;
+    height: 22px;
+    border-radius: 5px;
+    background: rgba(120,230,180,0.85);
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-size: 11px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, transform 0.1s;
+    line-height: 1;
+  }
+  #send-btn:hover { background: rgba(120,230,180,0.78); }
+  #send-btn:active { transform: scale(0.92); }
+
+  /* ── Name tag ────────────────────────────────────────────── */
+  #nametag {
+    position: absolute;
+    top: 6px;
+    left: 10px;
+    font-size: 8px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+</style>
+</head>
+<body>
+<div id="shell">
+  <span id="nametag">yumon</span>
+  <div id="face-wrap">
+    <canvas id="face" width="36" height="36"></canvas>
+  </div>
+  <div id="bubble"><span class="thinking">...</span></div>
+  <div id="input-row">
+    <input id="msg-input" type="text" placeholder="say something…" autocomplete="off" spellcheck="false"/>
+    <button id="send-btn" title="send">▶</button>
+  </div>
+</div>
+
+<script>
+// ── Pixel face renderer ────────────────────────────────────────────────────
+const canvas = document.getElementById('face');
+const ctx    = canvas.getContext('2d');
+const W = 36, H = 36, PX = 1; // canvas px, drawn at 1:1, CSS scales up 2×
+
+// Emote definitions: [ leftEye, rightEye, mouth, eyebrow ] each described
+// as draw instructions for a 36×36 grid
+// leftEye / rightEye: { x, y, shape: 'dot'|'arc'|'line', ... }
+// mouth: { x, y, shape: 'smile'|'flat'|'frown'|'open'|'beam', w, h }
+
+const EMOTES = {
+  neutral:   { brow: 0,  eyes: 'dot',   mouth: 'flat',  pupils: 'center', blinkRate: 160 },
+  happy:     { brow: 1,  eyes: 'dot',   mouth: 'smile', pupils: 'up',     blinkRate: 200 },
+  excited:   { brow: 2,  eyes: 'wide',  mouth: 'open',  pupils: 'up',     blinkRate: 400 },
+  sad:       { brow: -1, eyes: 'dot',   mouth: 'frown', pupils: 'down',   blinkRate: 100 },
+  angry:     { brow: -2, eyes: 'squint',mouth: 'flat',  pupils: 'center', blinkRate: 80  },
+  surprised: { brow: 3,  eyes: 'wide',  mouth: 'open',  pupils: 'up',     blinkRate: 300 },
+  thinking:  { brow: 1,  eyes: 'dot',   mouth: 'flat',  pupils: 'right',  blinkRate: 120 },
+};
+
+let currentEmote = 'neutral';
+let targetEmote  = 'neutral';
+let blinkT   = 0;
+let blinkLen = 0;
+let blinkCooldown = 180;
+let frame    = 0;
+let pupilX   = 0, pupilY = 0; // offset
+let mouthPhase = 0; // for talking anim
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+const C_BG    = '#0a0e0c';
+const C_SKIN  = '#aee8c8';
+const C_DARK  = '#0d1e14';
+const C_WHITE = '#e8f8f0';
+const C_GLOW  = '#78e6b4';
+const C_ACC   = '#e678c8';
+
+function drawFace(emote, blink, px, py, mouthOpen) {
+  ctx.clearRect(0, 0, W, H);
+
+  // face circle
+  ctx.beginPath();
+  ctx.arc(18, 17, 14, 0, Math.PI * 2);
+  ctx.fillStyle = C_SKIN;
+  ctx.fill();
+
+  // subtle cheek blush for happy/excited
+  if (emote === 'happy' || emote === 'excited') {
+    ctx.beginPath();
+    ctx.ellipse(10, 21, 3.5, 2, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(230,120,200,0.28)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(26, 21, 3.5, 2, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(230,120,200,0.28)';
+    ctx.fill();
+  }
+
+  const cfg = EMOTES[emote] || EMOTES.neutral;
+
+  // eyebrows
+  const browY = 10;
+  const browLift = cfg.brow;
+  ctx.strokeStyle = C_DARK;
+  ctx.lineWidth = 1.5;
+  ctx.lineCap = 'round';
+  // left brow
+  ctx.beginPath();
+  ctx.moveTo(10, browY - browLift);
+  ctx.lineTo(15, browY - browLift - (cfg.brow > 0 ? 1 : 0));
+  ctx.stroke();
+  // right brow
+  ctx.beginPath();
+  ctx.moveTo(21, browY - browLift - (cfg.brow > 0 ? 1 : 0));
+  ctx.lineTo(26, browY - browLift);
+  ctx.stroke();
+
+  // eyes
+  const eyeY = 16;
+  const eyeH = blink ? 1 : (cfg.eyes === 'wide' ? 5 : cfg.eyes === 'squint' ? 2 : 4);
+
+  function drawEye(ex) {
+    ctx.fillStyle = C_WHITE;
+    ctx.beginPath();
+    if (blink) {
+      ctx.fillRect(ex - 3, eyeY - 0.5, 6, 1);
+    } else {
+      ctx.ellipse(ex, eyeY, 3, eyeH / 2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // pupil
+      ctx.fillStyle = C_DARK;
+      ctx.beginPath();
+      ctx.ellipse(ex + px * 1.5, eyeY + py * 1.2, 1.5, 1.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // shine
+      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.beginPath();
+      ctx.arc(ex + px * 1.5 + 0.5, eyeY + py * 1.2 - 0.7, 0.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  drawEye(12);
+  drawEye(24);
+
+  // mouth
+  const mouthY = 24;
+  ctx.strokeStyle = C_DARK;
+  ctx.lineWidth = 1.8;
+  ctx.lineCap = 'round';
+  const mShape = cfg.mouth;
+
+  if (mShape === 'smile') {
+    ctx.beginPath();
+    ctx.arc(18, mouthY - 1, 4, 0.2, Math.PI - 0.2);
+    ctx.stroke();
+  } else if (mShape === 'frown') {
+    ctx.beginPath();
+    ctx.arc(18, mouthY + 2, 4, Math.PI + 0.2, -0.2);
+    ctx.stroke();
+  } else if (mShape === 'open') {
+    // excited / surprised
+    const h = mouthOpen ? 4 : 3;
+    ctx.fillStyle = C_DARK;
+    ctx.beginPath();
+    ctx.ellipse(18, mouthY, 4, h / 2 + 0.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // teeth
+    ctx.fillStyle = C_WHITE;
+    ctx.fillRect(15, mouthY - 1, 6, 1);
+  } else if (mShape === 'flat') {
+    ctx.beginPath();
+    ctx.moveTo(14, mouthY);
+    ctx.lineTo(22, mouthY);
+    ctx.stroke();
+  }
+}
+
+// Pupil target positions per emote
+const PUPIL_TARGETS = {
+  center: [0, 0],
+  up:     [0, -0.5],
+  down:   [0,  0.8],
+  right:  [0.8, 0],
+  left:   [-0.8, 0],
+};
+
+let pxTarget = 0, pyTarget = 0;
+let pxCur = 0, pyCur = 0;
+
+function tick() {
+  frame++;
+  const cfg = EMOTES[currentEmote] || EMOTES.neutral;
+
+  // blink logic
+  blinkCooldown--;
+  if (blinkLen > 0) {
+    blinkLen--;
+  } else if (blinkCooldown <= 0) {
+    blinkLen = 5;
+    blinkCooldown = cfg.blinkRate + Math.random() * 60 | 0;
+  }
+
+  // pupil drift
+  const [tx, ty] = PUPIL_TARGETS[cfg.pupils] || [0,0];
+  if (frame % 80 === 0) {
+    // tiny random jitter
+    pxTarget = tx + (Math.random() - 0.5) * 0.4;
+    pyTarget = ty + (Math.random() - 0.5) * 0.4;
+  }
+  pxCur = lerp(pxCur, pxTarget, 0.08);
+  pyCur = lerp(pyCur, pyTarget, 0.08);
+
+  // mouth talking anim (driven externally via isTalking flag)
+  if (window._yumonTalking) mouthPhase = (mouthPhase + 0.4) % (Math.PI * 2);
+
+  const blink = blinkLen > 0;
+  const mouthOpen = window._yumonTalking && Math.sin(mouthPhase) > 0.2;
+  drawFace(currentEmote, blink, pxCur, pyCur, mouthOpen);
+
+  // smooth emote transition (just switch instantly for pixel style)
+  if (currentEmote !== targetEmote) currentEmote = targetEmote;
+
+  requestAnimationFrame(tick);
+}
+tick();
+
+// ── UI logic ───────────────────────────────────────────────────────────────
+const bubble   = document.getElementById('bubble');
+const input    = document.getElementById('msg-input');
+const sendBtn  = document.getElementById('send-btn');
+
+let talkTimer = null;
+
+function setEmote(name) {
+  targetEmote = EMOTES[name] ? name : 'neutral';
+}
+
+function showBubble(text, isThinking) {
+  if (isThinking) {
+    bubble.innerHTML = '<span class="thinking">...</span>';
+  } else {
+    bubble.textContent = text;
+  }
+  bubble.classList.add('show');
+}
+
+function hideBubble() {
+  bubble.classList.remove('show');
+}
+
+function startTalking(durationMs) {
+  window._yumonTalking = true;
+  clearTimeout(talkTimer);
+  talkTimer = setTimeout(() => { window._yumonTalking = false; }, durationMs);
+}
+
+// Called from Rust via webview.evaluate_script / IPC:
+// window.__yumon_reply({ reply: "...", emote: "happy" })
+window.__yumon_reply = function(data) {
+  const { reply, emote } = data;
+  setEmote(emote || 'neutral');
+  showBubble(reply || '...', false);
+  startTalking(Math.min(reply.length * 60, 4000));
+};
+
+window.__yumon_thinking = function() {
+  setEmote('thinking');
+  showBubble('', true);
+};
+
+function send() {
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  showBubble('', true);
+  setEmote('thinking');
+  // Post to Rust via IPC handler (yumon://send?msg=...)
+  if (window.ipc) {
+    window.ipc.postMessage(JSON.stringify({ type: 'send', msg: text }));
+  } else if (window.__yumon_send) {
+    // fallback for standalone preview
+    window.__yumon_send(text);
+  }
+}
+
+sendBtn.addEventListener('click', send);
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter') send();
+});
+
+// ── Preview / demo mode (when loaded outside Rust) ────────────────────────
+/**
+if (!window.ipc) {
+  const demoReplies = [
+    { reply: "hey! what's up?",       emote: 'happy'     },
+    { reply: "hmm, let me think...",  emote: 'thinking'  },
+    { reply: "oh! i see now.",        emote: 'excited'   },
+    { reply: "that makes me sad :(",  emote: 'sad'       },
+    { reply: "grr...",                emote: 'angry'     },
+    { reply: "WOW really??",          emote: 'surprised' },
+    { reply: "ok.",                   emote: 'neutral'   },
+  ];
+  let demoIdx = 0;
+  window.__yumon_send = function(text) {
+    setTimeout(() => {
+      const r = demoReplies[demoIdx++ % demoReplies.length];
+      window.__yumon_reply(r);
+    }, 900 + Math.random() * 600);
+  };
+  // show idle bubble after a moment
+  setTimeout(() => showBubble("hi! i'm yumon ✦", false), 800);
+  setTimeout(() => setEmote('happy'), 850);
+}
+**/
+</script>
+</body>
+</html>

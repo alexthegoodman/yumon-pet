@@ -155,33 +155,14 @@ fn main() -> Result<()> {
                 return;
             }
         };
-        // let index = match YumonBrain::<Wgpu>::build_outlines_index(bpe, YUMON_SCHEMA) {
-        //     Ok(idx) => idx,
-        //     Err(e) => {
-        //         tx_model.send(Message::System(format!("Index build failed: {e}"))).unwrap();
-        //         return;
-        //     }
-        // };
-
-        // let class_probs = vec![1.0 / CIFAR_CLASSES as f32; CIFAR_CLASSES];
-        // let emote_probs = vec![1.0 / EMOTE_CLASSES as f32; EMOTE_CLASSES];
 
         while let Ok((prompt_text, user_emote_idx, world, memories)) = rx_user.recv() {
-
-            // let prompt = serde_json::to_string_pretty(&serde_json::json!({
-            //     "obstacle_dir": "none",
-            //     "building_dir": "none",
-            //     "resource_dir": "none",
-            //     "message":      prompt_text,
-            // }))
-            // .unwrap();
 
             let memories_json: Vec<serde_json::Value> = memories
                 .iter()
                 .map(|(h, b)| serde_json::json!({ "human": h, "bot": b }))
                 .collect();
 
-            // let training_stage = TrainingStage::Language;
             let training_stage = config.training_stage;
 
             let prompt = if training_stage == TrainingStage::Language {
@@ -267,7 +248,7 @@ fn main() -> Result<()> {
                     app.loading = false;
                     app.agent.action     = format!("{:?}", r.action).to_lowercase();
                     app.agent.motion_dir = format!("{:?}", r.motion_dir).to_lowercase();
-                    app.agent.emote      = EMOTE_NAMES[r.yumon_emote_idx].to_string();
+                    app.agent.emote      = format!("{:?}", r.parsed_emotion).to_string();
                     app.agent.raw_output = format!("{:?}", r.raw_output).to_lowercase();
                     app.agent.fsm_state  = r.fsm_state;
                     app.agent.allowed_count = r.allowed_count;

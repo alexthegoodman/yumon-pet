@@ -27,6 +27,8 @@ console_error_panic_hook = "0.1.7"
 console_log = "1.0.0"
 log = "0.4.29"
 futures = "0.3.30"
+tao = "0.35.0"
+wry = { version = "0.55.0", features = ["transparent"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 three-d = { version = "0.17", features = ["egui-gui"] }
@@ -59,7 +61,8 @@ rayon = "1.11.0"
 stop-words = "0.8.0"
 # json-repair = "0.4.0" # requires nightly?
 # json-fix = "0.1.1" # bad logs
-winit = "0.30.13"
+# winit = "0.30.13"
+sentiment = "0.1.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { version = "0.3", features = ["Window", "Navigator", "Location"] }

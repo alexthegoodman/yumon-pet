@@ -219,7 +219,7 @@ pub fn main() {
         .add("archive/ov_chats.txt", FileKind::Chats, None)
         // .add("data/creative_stories.txt", FileKind::Txt, None)
         // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
-        .add("data/arena_extract.txt",   FileKind::Chats, Some(2_500))
+        .add("data/arena_extract.txt",   FileKind::Chats, Some(10_000))
         .add("archive/you_chats.txt", FileKind::Chats, None)
         .add("archive/clean_chats.txt", FileKind::Chats, None);
 
