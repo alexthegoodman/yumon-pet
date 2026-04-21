@@ -267,17 +267,17 @@ pub fn run(
         
         // memorizes extremely well. outputs memorized sentences regardless of input prompt though, not usually relevant to input prompt
         // RunConfig {
-        //     name: "128h_2l_2a_200len".to_string(),
+        //     name: "128h_2l_2a_180len".to_string(),
         //     embed_dim: 128, 
         //     hidden_units: 128, 
         //     n_layers: 2, 
         //     attn_heads: 2, 
         //     ff_dim: 512, 
         //     // max_seq_len: 200,
-        //     max_seq_len: 600,
+        //     max_seq_len: 180,
         //     stages: vec![
-        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 2,  batch_size, first_lr: 1e-3, last_lr: 1e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 2,  batch_size, first_lr: 1e-3, last_lr: 1e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
         //     ],
         // },
 
@@ -302,16 +302,13 @@ pub fn run(
             name: "512h_1l_8a_180len".to_string(),
             embed_dim: 512, 
             hidden_units: 512, 
-            // n_layers: 3,
-            n_layers: 1, 
+            n_layers: 3,
             attn_heads: 8, 
-            // ff_dim: 1024,
             ff_dim: 2048, 
             max_seq_len: 180,
-            // max_seq_len: 600,
             stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-6, last_lr: 1e-8, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 3, batch_size, first_lr: 1e-6, last_lr: 1e-8, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
             ],
         },
 
@@ -654,6 +651,36 @@ pub fn run(
                     state.lr_history.push((state.global_step as f64, current_lr));
 
                     terminal.draw(|frame| render(frame, &state))?;
+
+                    // Periodic save and inference every 500 batches
+                    if (batch_num + 1) % 500 == 0 {
+                        let current_final_loss = epoch_loss / (batch_num + 1) as f32;
+                        let meta = BrainMetadata {
+                            vocab_size:     tokenizer.vocab_size(),
+                            epochs_trained: epochs_already_done + epoch, // Partial epoch progress
+                            final_loss:     current_final_loss,
+                            batch_size:     stage_cfg.batch_size,
+                            training_stage: stage_cfg.stage.clone(),
+                            embed_dim:      run_cfg.embed_dim,
+                            hidden_units:   run_cfg.hidden_units,
+                            n_layers:       run_cfg.n_layers,
+                            attn_heads:     run_cfg.attn_heads,
+                            ff_dim:         run_cfg.ff_dim,
+                            max_seq_len:    run_cfg.max_seq_len,
+                        };
+                        model.save(run_dir_str, &tokenizer, &meta)?;
+
+                        // Periodic inference
+                        let inference_model = model.valid();
+                        let prompt_text = "What is the universe?".to_string();
+                        let prompt = if stage_cfg.stage == TrainingStage::Structured { 
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "obstacle_dir": "none", "building_dir": "none", "resource_dir": "none", "message": prompt_text,
+                            })).unwrap() 
+                        } else { prompt_text };
+                        let result = inference_model.generate_unmasked_parsed(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+                        state.last_reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+                    }
 
                     // Loss Threshold Exit
                     if state.avg_loss < stage_cfg.loss_threshold {

@@ -126,7 +126,7 @@ fn main() -> Result<()> {
     let brain_cp = "checkpoints/brain/512h_3l_8a_180len".to_string();
     // let brain_cp = "checkpoints/brain/384h_4l_6a_160len".to_string();
     // let brain_cp = "checkpoints/brain/256h_2l_4a_180len".to_string();
-    // let brain_cp = "checkpoints/brain/128h_2l_2a_200len".to_string();
+    // let brain_cp = "checkpoints/brain/128h_2l_2a_180len".to_string();
     let mut app = AppState::new(brain_cp.clone());
 
     // let (tx_user, rx_user) = mpsc::channel::<(String, usize, WorldContext)>();
