@@ -217,9 +217,10 @@ pub fn main() {
 
     loader = loader
         .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // .add("data/creative_stories.txt", FileKind::Txt, None)
-        // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
         .add("data/arena_extract.txt",   FileKind::Chats, Some(10_000))
+        .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(50_000))
+        .add("archive/you_chats.txt", FileKind::Chats, None)
+        .add("archive/you_chats.txt", FileKind::Chats, None)
         .add("archive/you_chats.txt", FileKind::Chats, None)
         .add("archive/clean_chats.txt", FileKind::Chats, None);
 
@@ -245,7 +246,7 @@ pub fn main() {
         //     None
         // );
 
-    let sentences: Vec<String> = loader.total_limit(25_000).seed(4815162342).load_sentences().expect("Couldn't get sentences");
+    let sentences: Vec<String> = loader.total_limit(100_000).seed(4815162342).load_sentences().expect("Couldn't get sentences");
     let sentences: Vec<&String> = sentences.iter().collect();
     
     // sentences.extend(wiki_sentences);

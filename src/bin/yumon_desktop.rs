@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use anyhow::Result;
 use burn::{backend::Wgpu, prelude::*};
 use cubecl::wgpu::WgpuDevice;
@@ -224,7 +226,9 @@ pub fn run(brain_cp: String, device: WgpuDevice) -> Result<()> {
                     result.reply.clone()
                 };
 
-                let emote_key = emotion_to_js_key(&format!("{:?}", result.parsed_emotion));
+                let emote_key = emotion_to_js_key(&format!("{}", result.parsed_emotion));
+
+                println!("emote_key {:?} {:?}", result.parsed_emotion, emote_key);
 
                 // Escape the reply for JS string injection
                 let reply_escaped = reply

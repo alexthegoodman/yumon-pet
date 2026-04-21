@@ -46,3 +46,14 @@ You may need clang for chat_web.
 
 - Custom / Bespoke
 - https://www.kaggle.com/datasets/lmsysorg/chatbot-arena-conversations
+- https://www.kaggle.com/datasets/thedevastator/distillchat-v1-mixture-of-conversations-dataset
+
+## Evaluation
+
+Yumon characteristics
+- Loyalty
+- Connection
+- Entertainment
+- Organizational
+- Conversational 
+- Capacity

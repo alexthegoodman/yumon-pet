@@ -15,6 +15,7 @@ pub mod loader;
 pub mod flash_attn;
 pub mod classic_attn;
 pub mod sentiment;
+pub mod chats;
 
 // Re-export tokenizer for convenience
 pub use tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, UNK_TOKEN};

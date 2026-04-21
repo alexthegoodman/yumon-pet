@@ -192,14 +192,21 @@ fn load_stage_data(
     // }
 
     loader = loader
-        .add("archive/ov_chats.txt", FileKind::Chats, None)
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
         .add("data/arena_extract.txt",   FileKind::Chats, Some(10_000))
+        .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(50_000))
         // // .add("data/wiki_extract.txt",   FileKind::Txt, None)
         // .add("data/creative_stories.txt", FileKind::Txt, None)
         // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
         // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
+        .add("archive/ov_chats.txt", FileKind::Chats, None)
+        .add("archive/ov_chats.txt", FileKind::Chats, None)
+        .add("archive/ov_chats.txt", FileKind::Chats, None)
         .add("archive/you_chats.txt", FileKind::Chats, None)
+        .add("archive/you_chats.txt", FileKind::Chats, None)
+        .add("archive/you_chats.txt", FileKind::Chats, None)
+        .add("archive/clean_chats.txt", FileKind::Chats, None)
+        .add("archive/clean_chats.txt", FileKind::Chats, None)
         .add("archive/clean_chats.txt", FileKind::Chats, None);
         // .add(vec![
         //         "data/ebooks/faa-h-8083-25c.pdf".to_string(),
@@ -219,7 +226,7 @@ fn load_stage_data(
 
     loader
         // .total_limit(2_000_000)
-        .total_limit(25_000)
+        .total_limit(100_000)
         .seed(4815162342)
         .load(tokenizer, keyword_index, max_seq_len)
 }
@@ -292,18 +299,19 @@ pub fn run(
 
         // trying with better data now for generalization and relevancy
         RunConfig {
-            name: "512h_3l_8a_180len".to_string(),
+            name: "512h_1l_8a_180len".to_string(),
             embed_dim: 512, 
             hidden_units: 512, 
-            n_layers: 3, 
+            // n_layers: 3,
+            n_layers: 1, 
             attn_heads: 8, 
             // ff_dim: 1024,
             ff_dim: 2048, 
             max_seq_len: 180,
             // max_seq_len: 600,
             stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 3, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-6, last_lr: 1e-8, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 3, batch_size, first_lr: 1e-6, last_lr: 1e-8, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
             ],
         },
 
