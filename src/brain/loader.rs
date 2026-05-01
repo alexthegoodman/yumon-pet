@@ -6,6 +6,7 @@ use rand::rngs::StdRng;
 use crate::brain::bpe::TokenizerKind;
 
 use crate::brain::chats::load_distilled_chats;
+use crate::brain::mdx::{load_chats_from_csv, load_chats_from_friends_csv};
 #[cfg(target_os = "windows")]
 use crate::brain::mdx::{load_arena_chats, load_csv_bible, load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_specific_dict_sentences, load_txt_sentences};
 
@@ -34,7 +35,9 @@ pub enum FileKind {
     Txt,
     SpecificDict,
     PDF,
-    DistillChat
+    DistillChat,
+    DialogueCsv,
+    FriendsCsv
     // extend with WikiXml, Txt, Pdf, … as needed
 }
 
@@ -114,6 +117,44 @@ impl DataLoader {
                 }
                 FileKind::Chats => {
                     let mut chats = load_handcrafted_chats(&entry.path)?;
+
+                    // Per-file limit before sample prep to reduce load
+                    if let Some(n) = entry.limit {
+                        chats.blocks.shuffle(&mut rng);
+                        chats.blocks.truncate(n);
+                    }
+
+                    let mut sents = Vec::new();
+                    for chat in chats.blocks {
+                        for mem in chat.memories {
+                            sents.push(mem.bot);
+                            sents.push(mem.human);
+                        }
+                    }
+
+                    sents
+                }
+                FileKind::DialogueCsv => {
+                    let mut chats = load_chats_from_csv(&entry.path)?;
+
+                    // Per-file limit before sample prep to reduce load
+                    if let Some(n) = entry.limit {
+                        chats.blocks.shuffle(&mut rng);
+                        chats.blocks.truncate(n);
+                    }
+
+                    let mut sents = Vec::new();
+                    for chat in chats.blocks {
+                        for mem in chat.memories {
+                            sents.push(mem.bot);
+                            sents.push(mem.human);
+                        }
+                    }
+
+                    sents
+                }
+                FileKind::FriendsCsv => {
+                    let mut chats = load_chats_from_friends_csv(&entry.path)?;
 
                     // Per-file limit before sample prep to reduce load
                     if let Some(n) = entry.limit {
@@ -254,6 +295,34 @@ impl DataLoader {
                         chats, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
                     )
                 }
+                FileKind::DialogueCsv => {
+                    let mut chats = load_chats_from_csv(&entry.path)?;
+                    
+                    // Per-file limit before sample prep to reduce load
+                    if let Some(n) = entry.limit {
+                        chats.blocks.shuffle(&mut rng);
+                        chats.blocks.truncate(n);
+                    }
+
+                    prepare_paired_samples_chats(
+                        chats, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
+                    )
+                }
+                FileKind::FriendsCsv => {
+                    use crate::brain::mdx::load_chats_from_friends_csv;
+
+                    let mut chats = load_chats_from_friends_csv(&entry.path)?;
+                    
+                    // Per-file limit before sample prep to reduce load
+                    if let Some(n) = entry.limit {
+                        chats.blocks.shuffle(&mut rng);
+                        chats.blocks.truncate(n);
+                    }
+
+                    prepare_paired_samples_chats(
+                        chats, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
+                    )
+                }
                 FileKind::JsonChats => {
                     let mut chats = load_arena_chats(&entry.path)?;
 
@@ -337,7 +406,9 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
         FileKind::QaPairs     => Ok(Vec::new()),
         FileKind::Chats       => Ok(Vec::new()),
         FileKind::JsonChats       => Ok(Vec::new()),
-        FileKind::DistillChat   => Ok(Vec::new())
+        FileKind::DistillChat   => Ok(Vec::new()),
+        FileKind::DialogueCsv   => Ok(Vec::new()),
+        FileKind::FriendsCsv    => Ok(Vec::new()),
     }
 }
 

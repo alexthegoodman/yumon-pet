@@ -464,7 +464,8 @@ fn try_load_glb(context: &Context, path: &str) -> Option<Model<PhysicalMaterial>
 
 #[cfg(target_os = "windows")]
 struct Building {
-    gm: Gm<Mesh, PhysicalMaterial>,
+    // gm: Gm<Mesh, PhysicalMaterial>,
+    gms: Vec<Gm<Mesh, PhysicalMaterial>>,  // one mesh per level
     pos: Vec3,
     level: u32, // Track how many are stacked
 }
@@ -485,7 +486,7 @@ fn main() {
         std::thread::spawn(move || {
             let device: burn::prelude::Device<Wgpu> = Default::default();
             let (brain, tokenizer, config) =
-                match YumonBrain::<Wgpu>::load("checkpoints/brain/512h_3l_8a_180len", &device) {
+                match YumonBrain::<Wgpu>::load("checkpoints/brain/128h_2l_2a_180len_6e", &device) {
                     Ok(m) => m,
                     Err(e) => { eprintln!("[brain] load failed: {e}"); return; }
                 };
@@ -706,13 +707,33 @@ fn main() {
                 let existing = dynamic_buildings.iter_mut()
                     .find(|b| (b.pos - build_pos).magnitude() < 0.8);
 
+                // if let Some(b) = existing {
+                //     // Stack: Increase level and move the mesh up
+                //     b.level += 1;
+                //     let new_y = 0.8 + (b.level as f32 * 0.4); // 0.8 is base height
+                //     b.gm.set_transformation(Mat4::from_translation(Vec3::new(b.pos.x, new_y, b.pos.z)) 
+                //         * Mat4::from_nonuniform_scale(0.6, 0.2, 0.6)); // Make it a "slab"
+                // } 
                 if let Some(b) = existing {
-                    // Stack: Increase level and move the mesh up
                     b.level += 1;
-                    let new_y = 0.8 + (b.level as f32 * 0.4); // 0.8 is base height
-                    b.gm.set_transformation(Mat4::from_translation(Vec3::new(b.pos.x, new_y, b.pos.z)) 
-                        * Mat4::from_nonuniform_scale(0.6, 0.2, 0.6)); // Make it a "slab"
-                } else {
+                    let new_y = 0.4 + (b.level as f32 * 0.4); // each slab's centre
+                    let mat = CpuMaterial {
+                        albedo: Srgba::new(190, 70, 30, 255),
+                        roughness: 0.70,
+                        metallic: 0.05,
+                        ..Default::default()
+                    };
+                    let mut gm = Gm::new(
+                        Mesh::new(&context, &building_cpu),
+                        PhysicalMaterial::new_opaque(&context, &mat),
+                    );
+                    gm.set_transformation(
+                        Mat4::from_translation(Vec3::new(b.pos.x, new_y, b.pos.z))
+                            * Mat4::from_nonuniform_scale(0.5, 0.2, 0.5),
+                    );
+                    b.gms.push(gm); // add a new slab on top; old ones stay
+                }
+                else {
                     let mat = CpuMaterial {
                         albedo: Srgba::new(190, 70, 30, 255),
                         roughness: 0.70,
@@ -727,7 +748,8 @@ fn main() {
                     gm.set_transformation(Mat4::from_translation(Vec3::new(build_pos.x, 0.4, build_pos.z)) 
                         * Mat4::from_nonuniform_scale(0.5, 0.4, 0.5));
                     
-                    dynamic_buildings.push(Building { gm, pos: build_pos, level: 0 });
+                    // dynamic_buildings.push(Building { gm, pos: build_pos, level: 0 });
+                    dynamic_buildings.push(Building { gms: vec![gm], pos: build_pos, level: 0 });
                 }
             }
         }
@@ -858,8 +880,14 @@ fn main() {
         // Central building
         screen.render(&camera, [&central_building as &dyn Object], &lights);
 
+        // for b in &dynamic_buildings {
+        //     screen.render(&camera, [&b.gm as &dyn Object], &lights);
+        // }
+
         for b in &dynamic_buildings {
-            screen.render(&camera, [&b.gm as &dyn Object], &lights);
+            for gm in &b.gms {
+                screen.render(&camera, [gm as &dyn Object], &lights);
+            }
         }
 
         // Resource nodes

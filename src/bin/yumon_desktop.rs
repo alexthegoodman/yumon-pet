@@ -260,7 +260,7 @@ pub fn run(brain_cp: String, device: WgpuDevice) -> Result<()> {
 }
 
 fn main() {
-    let brain_cp = "checkpoints/brain/512h_3l_8a_180len".to_string();
+    let brain_cp = "checkpoints/brain/128h_2l_2a_180len_6e".to_string();
 
     let _ = run(brain_cp, Default::default());
 }

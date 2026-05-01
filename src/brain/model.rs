@@ -569,6 +569,15 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
         if parsed_action.is_empty() || parsed_action.len() < 3 {
             parsed_action     = extract(" action");
             parsed_motion_dir = extract(" motion_dir");
+
+            if parsed_motion_dir.is_empty() {
+                parsed_motion_dir = extract("motiondir");
+            }
+
+            if parsed_motion_dir.is_empty() {
+                parsed_motion_dir = extract(" motiondir");
+            }
+
             parsed_reply  = extract(" reply");
             parsed_emotion  = extract(" emotion");
         }
@@ -585,9 +594,15 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
                             .unwrap_or_default()
                     };
 
+                    let mut motion_dir = extract("motion_dir");
+
+                    if motion_dir.is_empty() {
+                        motion_dir = extract("motiondir");
+                    }
+
                     serde_json::json!({
                         "action":     extract("action"),
-                        "motion_dir": extract("motion_dir"),
+                        "motion_dir": motion_dir,
                         "emotion":      extract("emotion"),
                         "reply":      extract("reply"),
                     })

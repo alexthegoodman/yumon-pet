@@ -216,12 +216,20 @@ pub fn main() {
     // }
 
     loader = loader
+        // .add("archive/ov_chats.txt", FileKind::Chats, None)
+        // .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
+        .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
+        .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(50_000))
+        .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(50_000))
+        // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(50_000))
+        // .add("archive/ov_chats.txt", FileKind::Chats, None)
+        // .add("archive/ov_chats.txt", FileKind::Chats, None)
         .add("archive/ov_chats.txt", FileKind::Chats, None)
-        .add("data/arena_extract.txt",   FileKind::Chats, Some(10_000))
-        .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(50_000))
+        // .add("archive/you_chats.txt", FileKind::Chats, None)
+        // .add("archive/you_chats.txt", FileKind::Chats, None)
         .add("archive/you_chats.txt", FileKind::Chats, None)
-        .add("archive/you_chats.txt", FileKind::Chats, None)
-        .add("archive/you_chats.txt", FileKind::Chats, None)
+        // .add("archive/clean_chats.txt", FileKind::Chats, None)
+        // .add("archive/clean_chats.txt", FileKind::Chats, None)
         .add("archive/clean_chats.txt", FileKind::Chats, None);
 
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
@@ -248,6 +256,15 @@ pub fn main() {
 
     let sentences: Vec<String> = loader.total_limit(100_000).seed(4815162342).load_sentences().expect("Couldn't get sentences");
     let sentences: Vec<&String> = sentences.iter().collect();
+
+    let mut x = 0;
+    for sent in &sentences {
+        println!("Sentence: {:?}", sent);
+        x = x + 1;
+        if x > 25 {
+            break;
+        }
+    }
     
     // sentences.extend(wiki_sentences);
     // sentences.extend(mdx_sentences);

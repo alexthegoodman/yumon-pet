@@ -114,8 +114,11 @@
     flex: 0 0 auto;
     width: 176px;
     min-height: 28px;
-    max-height: 52px;
-    overflow: hidden;
+    max-height: 48px;
+    overflow-x: hidden;
+    overflow-y: scroll;
+    scrollbar-width: thin;
+    scrollbar-face-color: transparent;
     background: rgba(120,230,180,0.87);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -174,7 +177,7 @@
     border-radius: 5px;
     background: rgba(120,230,180,0.85);
     border: 1px solid var(--accent);
-    color: var(--accent);
+    color: var(--font);
     font-size: 11px;
     cursor: pointer;
     display: flex;

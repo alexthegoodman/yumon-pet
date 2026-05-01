@@ -62,10 +62,10 @@ enum Command {
         epochs: usize,
 
         // #[arg(long, default_value_t = 1)] // requires lr adjustments, little gain?
-        #[arg(long, default_value_t = 2)] 
+        // #[arg(long, default_value_t = 2)] 
         // #[arg(long, default_value_t = 4)]
         // #[arg(long, default_value_t = 8)] // best for loss
-        // #[arg(long, default_value_t = 32)]
+        #[arg(long, default_value_t = 32)]
         // #[arg(long, default_value_t = 16)]
         // #[arg(long, default_value_t = 256)] // too large even with 128 hidden state on iGPU
         // #[arg(long, default_value_t = 128)]

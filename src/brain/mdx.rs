@@ -401,6 +401,185 @@ pub fn load_handcrafted_chats(dict_path: &str) -> Result<HandcraftedChats> {
     Ok(HandcraftedChats { blocks })
 }
 
+use anyhow::{Context};
+use csv::ReaderBuilder;
+use std::collections::HashMap;
+
+pub fn load_chats_from_csv(csv_path: &str) -> Result<HandcraftedChats> {
+    println!("📖 Loading CSV chats: {csv_path}");
+
+    let mut rdr = ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(csv_path)
+        .with_context(|| format!("Failed to open {csv_path}"))?;
+
+    let headers = rdr.headers()?.clone();
+    let col = |name: &str| -> Result<usize> {
+        headers
+            .iter()
+            .position(|h| h.trim() == name)
+            .with_context(|| format!("Missing column: {name}"))
+    };
+
+    let (ci_season, ci_episode, ci_scene, ci_line) =
+        (col("season")?, col("episode")?, col("scene")?, col("line")?);
+
+    let mut scene_order: Vec<(u32, u32, u32)> = Vec::new();
+    let mut scene_lines: HashMap<(u32, u32, u32), Vec<String>> = HashMap::new();
+
+    for result in rdr.records() {
+        let record = result.context("Failed to parse CSV record")?;
+
+        let season: u32 = record[ci_season].trim().parse().unwrap_or(0);
+        let episode: u32 = record[ci_episode].trim().parse().unwrap_or(0);
+        let scene: u32 = record[ci_scene].trim().parse().unwrap_or(0);
+        let line = record[ci_line].trim().to_string();
+
+        if line.is_empty() {
+            continue;
+        }
+
+        let key = (season, episode, scene);
+        if !scene_lines.contains_key(&key) {
+            scene_order.push(key);
+        }
+        scene_lines.entry(key).or_default().push(line);
+    }
+
+    let blocks: Vec<ChatBlock> = scene_order
+        .iter()
+        .map(|key| {
+            let lines = &scene_lines[key];
+            let memories = lines
+                .chunks(2)
+                .filter_map(|pair| {
+                    if pair.len() == 2 {
+                        Some(Memory {
+                            human: pair[0].clone(),
+                            bot: pair[1].clone(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            ChatBlock { memories }
+        })
+        .collect();
+
+    println!(
+        "✅ Loaded {} blocks ({} memories total)",
+        blocks.len(),
+        blocks.iter().map(|b| b.memories.len()).sum::<usize>()
+    );
+
+    Ok(HandcraftedChats { blocks })
+}
+
+pub fn load_chats_from_friends_csv(csv_path: &str) -> Result<HandcraftedChats> {
+    println!("📖 Loading CSV chats: {csv_path}");
+
+    let mut rdr = ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(csv_path)
+        .with_context(|| format!("Failed to open {csv_path}"))?;
+
+    let headers = rdr.headers()?.clone();
+    let col = |name: &str| -> Result<usize> {
+        headers
+            .iter()
+            .position(|h| h.trim() == name)
+            .with_context(|| format!("Missing column: {name}"))
+    };
+
+    let ci_type     = col("type")?;
+    let ci_speaker  = col("speaker")?;
+    let ci_dialogue = col("dialogue_clean")?;
+    let ci_season   = col("season")?;
+    let ci_episode  = col("episode")?;
+
+    // Each entry is (season, episode, scene_index, lines)
+    let mut scene_order: Vec<(u32, u32, u32)> = Vec::new();
+    let mut scene_lines: HashMap<(u32, u32, u32), Vec<String>> = HashMap::new();
+
+    let mut scene_index: u32 = 0;
+    let mut current_key: Option<(u32, u32, u32)> = None;
+
+    for result in rdr.records() {
+        let record = result.context("Failed to parse CSV record")?;
+
+        let row_type = record[ci_type].trim();
+        let season: u32 = record[ci_season].trim().parse().unwrap_or(0);
+        let episode: u32 = record[ci_episode].trim().parse().unwrap_or(0);
+
+        match row_type {
+            "scene_note" | "scene_direction" => {
+                // Start a new scene block
+                scene_index += 1;
+                let key = (season, episode, scene_index);
+                scene_order.push(key);
+                current_key = Some(key);
+            }
+            "dialogue" => {
+                let speaker = record[ci_speaker].trim();
+                let line = record[ci_dialogue].trim();
+
+                if line.is_empty() {
+                    continue;
+                }
+
+                // If no scene has started yet, open an implicit scene 0
+                let key = current_key.get_or_insert_with(|| {
+                    let k = (season, episode, 0);
+                    scene_order.push(k);
+                    k
+                });
+
+                // let formatted = if speaker.is_empty() {
+                //     line.to_string()
+                // } else {
+                //     format!("{speaker}: {line}")
+                // };
+
+                let formatted = line.to_string();
+
+                scene_lines.entry(*key).or_default().push(formatted);
+            }
+            // stage_direction and anything else: skip
+            _ => {}
+        }
+    }
+
+    let blocks: Vec<ChatBlock> = scene_order
+        .iter()
+        .map(|key| {
+            let lines = scene_lines.get(key).map(Vec::as_slice).unwrap_or(&[]);
+            let memories = lines
+                .chunks(2)
+                .filter_map(|pair| {
+                    if pair.len() == 2 {
+                        Some(Memory {
+                            human: pair[0].clone(),
+                            bot: pair[1].clone(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            ChatBlock { memories }
+        })
+        .collect();
+
+    println!(
+        "✅ Loaded {} blocks ({} memories total)",
+        blocks.len(),
+        blocks.iter().map(|b| b.memories.len()).sum::<usize>()
+    );
+
+    Ok(HandcraftedChats { blocks })
+}
+
 use serde::Deserialize;
 
 #[derive(Deserialize)]

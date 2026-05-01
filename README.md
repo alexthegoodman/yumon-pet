@@ -50,10 +50,20 @@ You may need clang for chat_web.
 
 ## Evaluation
 
-Yumon characteristics
-- Loyalty
-- Connection
-- Entertainment
+### Yumon characteristics
+
+Primary:
+- Teachable (do this, go there, get that + reward signals and lesson cache)
+- Conversational (what do you think about... + memory strength)
+- Smart (model parameters + data)
+
+Secondary:
+- Loyal
+- Connective
+- Entertaining
 - Organizational
-- Conversational 
-- Capacity
+- Affordable
+
+## TODO
+
+- Training UI (train tokenizer, organize data, run structured and unstructured training sessions, etc)
