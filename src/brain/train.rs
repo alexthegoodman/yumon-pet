@@ -196,19 +196,22 @@ fn load_stage_data(
         // .add("data/arena_extract.txt",   FileKind::Chats, Some(10_000))
         // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(10_000))
         // // .add("data/wiki_extract.txt",   FileKind::Txt, None)
-        // .add("data/creative_stories.txt", FileKind::Txt, None)
-        .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
+        .add("data/creative_stories.txt", FileKind::Txt, Some(50_000))
+        // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
         // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
         .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(50_000))
         .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(50_000))
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
         .add("archive/ov_chats.txt", FileKind::Chats, None)
+        .add("archive/ov_chats.txt", FileKind::Chats, None)
         // .add("archive/you_chats.txt", FileKind::Chats, None)
         // .add("archive/you_chats.txt", FileKind::Chats, None)
         .add("archive/you_chats.txt", FileKind::Chats, None)
+        .add("archive/you_chats.txt", FileKind::Chats, None)
         // .add("archive/clean_chats.txt", FileKind::Chats, None)
         // .add("archive/clean_chats.txt", FileKind::Chats, None)
+        .add("archive/clean_chats.txt", FileKind::Chats, None)
         .add("archive/clean_chats.txt", FileKind::Chats, None);
         // .add(vec![
         //         "data/ebooks/faa-h-8083-25c.pdf".to_string(),
@@ -228,7 +231,7 @@ fn load_stage_data(
 
     loader
         // .total_limit(2_000_000)
-        .total_limit(100_000)
+        .total_limit(200_000)
         .seed(4815162342)
         .load(tokenizer, keyword_index, max_seq_len)
 }
@@ -268,16 +271,16 @@ pub fn run(
         
         // memorizes extremely well. outputs memorized sentences regardless of input prompt though, not usually relevant to input prompt
         RunConfig {
-            name: "128h_2l_2a_180len_6e".to_string(),
+            name: "128h_2l_2a_220len_6e".to_string(),
             embed_dim: 128, 
             hidden_units: 128, 
             n_layers: 2, 
             attn_heads: 2, 
             ff_dim: 512, 
-            max_seq_len: 180,
+            max_seq_len: 220,
             stages: vec![
-                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 6, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 6, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 4, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 1, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
             ],
         },
 
@@ -551,9 +554,20 @@ pub fn run(
                         let inference_model = model.valid();
                         let prompt_text = "What is the universe?".to_string();
                         let prompt = if stage_cfg.stage == TrainingStage::Structured { 
+                            // serde_json::to_string_pretty(&serde_json::json!({
+                            //     "obstacle_dir": "none", "building_dir": "none", "resource_dir": "none", "message": prompt_text,
+                            // })).unwrap() 
+
+                            let mut dirs: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+
                             serde_json::to_string_pretty(&serde_json::json!({
-                                "obstacle_dir": "none", "building_dir": "none", "resource_dir": "none", "message": prompt_text,
-                            })).unwrap() 
+                                "nearby_objects": Vec::<String>::new(),
+                                "memories":       Vec::<String>::new(),
+                                "command":        "".to_string(),
+                                "message":        prompt_text,
+                                "directions":    dirs,
+                            })).unwrap()
+
                         } else { prompt_text };
                         let result = inference_model.generate_unmasked_parsed(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
                         state.last_reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
@@ -589,9 +603,20 @@ pub fn run(
                     let inference_model = model.valid();
                     let prompt_text = "What is the universe?".to_string();
                     let prompt = if stage_cfg.stage == TrainingStage::Structured { 
+                        // serde_json::to_string_pretty(&serde_json::json!({
+                        //     "obstacle_dir": "none", "building_dir": "none", "resource_dir": "none", "message": prompt_text,
+                        // })).unwrap() 
+
+                        let mut dirs: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+
                         serde_json::to_string_pretty(&serde_json::json!({
-                            "obstacle_dir": "none", "building_dir": "none", "resource_dir": "none", "message": prompt_text,
-                        })).unwrap() 
+                            "nearby_objects": Vec::<String>::new(),
+                            "memories":       Vec::<String>::new(),
+                            "command":        "".to_string(),
+                            "message":        prompt_text,
+                            "directions":    dirs,
+                        })).unwrap()
+
                     } else { prompt_text };
                     let result = inference_model.generate_unmasked_parsed(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
                     state.last_reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };

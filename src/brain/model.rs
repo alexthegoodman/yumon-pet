@@ -4,6 +4,7 @@ use burn::{
     }, prelude::*, record::{BinFileRecorder, FullPrecisionSettings, Recorder}, tensor::activation::sigmoid
 };
 use anyhow::Result;
+use crossterm::style::Stylize;
 use cubecl::wgpu::{AutoGraphicsApi, GraphicsApi, WebGpu, WgpuDevice, init_setup_async};
 use log::Level;
 use log::info;
@@ -562,21 +563,21 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
         };
 
         let mut parsed_action     = extract("action");
-        let mut parsed_motion_dir = extract("motion_dir");
+        // let mut parsed_motion_dir = extract("motion_dir");
         let mut parsed_reply  = extract("reply");
         let mut parsed_emotion  = extract("emotion");
 
         if parsed_action.is_empty() || parsed_action.len() < 3 {
             parsed_action     = extract(" action");
-            parsed_motion_dir = extract(" motion_dir");
+            // parsed_motion_dir = extract(" motion_dir");
 
-            if parsed_motion_dir.is_empty() {
-                parsed_motion_dir = extract("motiondir");
-            }
+            // if parsed_motion_dir.is_empty() {
+            //     parsed_motion_dir = extract("motiondir");
+            // }
 
-            if parsed_motion_dir.is_empty() {
-                parsed_motion_dir = extract(" motiondir");
-            }
+            // if parsed_motion_dir.is_empty() {
+            //     parsed_motion_dir = extract(" motiondir");
+            // }
 
             parsed_reply  = extract(" reply");
             parsed_emotion  = extract(" emotion");
@@ -594,46 +595,49 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
                             .unwrap_or_default()
                     };
 
-                    let mut motion_dir = extract("motion_dir");
+                    // let mut motion_dir = extract("motion_dir");
 
-                    if motion_dir.is_empty() {
-                        motion_dir = extract("motiondir");
-                    }
+                    // if motion_dir.is_empty() {
+                    //     motion_dir = extract("motiondir");
+                    // }
 
                     serde_json::json!({
                         "action":     extract("action"),
-                        "motion_dir": motion_dir,
+                        // "motion_dir": motion_dir,
                         "emotion":      extract("emotion"),
                         "reply":      extract("reply"),
                     })
                 });
 
             parsed_action = parsed["action"].to_string().trim().to_string();
-            parsed_motion_dir = parsed["motion_dir"].to_string().trim().to_string();
+            // parsed_motion_dir = parsed["motion_dir"].to_string().trim().to_string();
             parsed_reply = parsed["reply"].to_string().trim().to_string();
             parsed_emotion = parsed["emotion"].to_string().trim().to_string();
         }
 
         parsed_action = parsed_action.replace("\"", "").trim().to_string();
-        parsed_motion_dir = parsed_motion_dir.replace("\"", "").trim().to_string();
+        // parsed_motion_dir = parsed_motion_dir.replace("\"", "").trim().to_string();
         parsed_reply = parsed_reply.replace("\"", "").trim().to_string();
         parsed_emotion = parsed_emotion.replace("\"", "").trim().to_string();
 
-        let action = match parsed_action.as_str() {
-            "speak"  => Action::Speak,
-            "build"  => Action::Build,
-            "travel" => Action::Travel,
-            "use"    => Action::Use,
-            _        => Action::Idle,
-        };
+        let action = match parsed_action.as_str().trim() {
+            "go to destination"     => Action::GoToDestination,
+            "go home"               => Action::GoHome         ,
+            "follow"                => Action::Follow,
+            "get help"              => Action::GetHelp,
+            "survey area"           => Action::Survey,
+            "collect items"         => Action::Collect,
+            "stack items"           => Action::Stack ,
+            _                       => Action::Sit  ,
+        };  
 
-        let motion_dir = match parsed_motion_dir.as_str() {
-            "north" => CardinalDir::North,
-            "south" => CardinalDir::South,
-            "east"  => CardinalDir::East,
-            "west"  => CardinalDir::West,
-            _       => CardinalDir::None,
-        };
+        // let motion_dir = match parsed_motion_dir.as_str() {
+        //     "north" => CardinalDir::North,
+        //     "south" => CardinalDir::South,
+        //     "east"  => CardinalDir::East,
+        //     "west"  => CardinalDir::West,
+        //     _       => CardinalDir::None,
+        // };
 
         let reply = parsed_reply
             .as_str()
@@ -642,7 +646,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
         GenerationResult {
             reply,
             action,
-            motion_dir,
+            motion_dir: CardinalDir::None,
             parsed_emotion,
             raw_output,
             fsm_state: 0,
@@ -726,13 +730,11 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
         };
 
         let mut parsed_action     = extract("action");
-        let mut parsed_motion_dir = extract("motion_dir");
         let mut parsed_reply  = extract("reply");
         let mut parsed_emotion  = extract("emotion");
 
         if parsed_action.is_empty() || parsed_action.len() < 3 {
             parsed_action     = extract(" action");
-            parsed_motion_dir = extract(" motion_dir");
             parsed_reply  = extract(" reply");
             parsed_emotion  = extract(" emotion");
         }
@@ -751,38 +753,38 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
 
                     serde_json::json!({
                         "action":     extract("action"),
-                        "motion_dir": extract("motion_dir"),
                         "emotion":      extract("emotion"),
                         "reply":      extract("reply"),
                     })
                 });
 
             parsed_action = parsed["action"].to_string().trim().to_string();
-            parsed_motion_dir = parsed["motion_dir"].to_string().trim().to_string();
             parsed_reply = parsed["reply"].to_string().trim().to_string();
             parsed_emotion = parsed["emotion"].to_string().trim().to_string();
         }
 
         parsed_action = parsed_action.replace("\"", "").trim().to_string();
-        parsed_motion_dir = parsed_motion_dir.replace("\"", "").trim().to_string();
         parsed_reply = parsed_reply.replace("\"", "").trim().to_string();
         parsed_emotion = parsed_emotion.replace("\"", "").trim().to_string();
 
-        let action = match parsed_action.as_str() {
-            "speak"  => Action::Speak,
-            "build"  => Action::Build,
-            "travel" => Action::Travel,
-            "use"    => Action::Use,
-            _        => Action::Idle,
-        };
+        let action = match parsed_action.as_str().trim() {
+            "go to destination"     => Action::GoToDestination,
+            "go home"               => Action::GoHome         ,
+            "follow"                => Action::Follow,
+            "get help"              => Action::GetHelp,
+            "survey area"           => Action::Survey,
+            "collect items"         => Action::Collect,
+            "stack items"           => Action::Stack ,
+            _                       => Action::Sit  ,
+        };  
 
-        let motion_dir = match parsed_motion_dir.as_str() {
-            "north" => CardinalDir::North,
-            "south" => CardinalDir::South,
-            "east"  => CardinalDir::East,
-            "west"  => CardinalDir::West,
-            _       => CardinalDir::None,
-        };
+        // let motion_dir = match parsed_motion_dir.as_str() {
+        //     "north" => CardinalDir::North,
+        //     "south" => CardinalDir::South,
+        //     "east"  => CardinalDir::East,
+        //     "west"  => CardinalDir::West,
+        //     _       => CardinalDir::None,
+        // };
 
         let reply = parsed_reply
             .as_str()
@@ -793,7 +795,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonBrain<B> {
         GenerationResult {
             reply,
             action,
-            motion_dir,
+            motion_dir: CardinalDir::None,
             parsed_emotion,
             raw_output,
             fsm_state: 0,

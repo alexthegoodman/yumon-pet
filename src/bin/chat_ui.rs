@@ -88,14 +88,8 @@ impl AppState {
 }
 
 // Action → display string with a simple symbol prefix
-fn action_display(action: &str) -> &'static str {
-    match action {
-        "speak"  => "[ speak  ]",
-        "build"  => "[ build  ]",
-        "travel" => "[ travel ]",
-        "use"    => "[ use    ]",
-        _        => "[ idle   ]",
-    }
+fn action_display(action: &str) -> String {
+    action.to_string()
 }
 
 fn dir_arrow(dir: &str) -> &'static str {
@@ -123,7 +117,7 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // let brain_cp = "checkpoints/brain/1024h_8l_16a_180len".to_string();
-    let brain_cp = "checkpoints/brain/128h_2l_2a_180len_6e".to_string();
+    let brain_cp = "checkpoints/brain/128h_2l_2a_220len_6e".to_string();
     // let brain_cp = "checkpoints/brain/384h_4l_6a_160len".to_string();
     // let brain_cp = "checkpoints/brain/256h_2l_4a_180len".to_string();
     // let brain_cp = "checkpoints/brain/128h_2l_2a_180len".to_string();
@@ -168,14 +162,24 @@ fn main() -> Result<()> {
             let prompt = if training_stage == TrainingStage::Language {
                 prompt_text
             } else { 
+                // serde_json::to_string_pretty(&serde_json::json!({
+                //     "obstacle_dir": "none",
+                //     "building_dir": "none",
+                //     "resource_dir": "none",
+                //     "memories":     memories_json,
+                //     "message":      prompt_text,
+                // }))
+                // .unwrap() 
+
+                // let mut dirs: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "obstacle_dir": "none",
-                    "building_dir": "none",
-                    "resource_dir": "none",
-                    "memories":     memories_json,
-                    "message":      prompt_text,
-                }))
-                .unwrap() 
+                    // "nearby_objects": Vec::<String>::new(),
+                    "memories":       memories_json,
+                    "command":        "".to_string(),
+                    "message":        prompt_text,
+                    // "directions":    dirs, // TODO: add objects to dirs!
+                })).unwrap()
             };
 
             let result = brain_model.generate_unmasked_parsed(

@@ -102,14 +102,23 @@ pub fn run(brain_cp: String, device: WgpuDevice) -> Result<()> {
                 let prompt = if training_stage == TrainingStage::Language {
                     prompt_text
                 } else {
+                    // serde_json::to_string_pretty(&serde_json::json!({
+                    //     "obstacle_dir": "none",
+                    //     "building_dir": "none",
+                    //     "resource_dir": "none",
+                    //     "memories":     memories_json,
+                    //     "message":      prompt_text,
+                    // }))
+                    // .unwrap()
+                    let mut dirs: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "obstacle_dir": "none",
-                        "building_dir": "none",
-                        "resource_dir": "none",
-                        "memories":     memories_json,
-                        "message":      prompt_text,
-                    }))
-                    .unwrap()
+                        "nearby_objects": Vec::<String>::new(),
+                        "memories":       memories_json,
+                        "command":        "".to_string(),
+                        "message":        prompt_text,
+                        "directions":    dirs, // TODO: add objects to dirs!
+                    })).unwrap()
                 };
 
                 let result = brain_model.generate_unmasked_parsed(
@@ -260,7 +269,7 @@ pub fn run(brain_cp: String, device: WgpuDevice) -> Result<()> {
 }
 
 fn main() {
-    let brain_cp = "checkpoints/brain/128h_2l_2a_180len_6e".to_string();
+    let brain_cp = "checkpoints/brain/128h_2l_2a_220len_6e".to_string();
 
     let _ = run(brain_cp, Default::default());
 }

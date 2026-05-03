@@ -2,28 +2,34 @@
 
 //! src/bin/yumon_world.rs
 //!
-//! Standalone Yumon World viewer — separate binary from the TUI chat.
+//! Yumon World — single Yumon + player, command-driven actions.
 //! Run with: `cargo run --bin yumon_world`
 //!
 //! ── Controls ────────────────────────────────────────────────────────────────
-//!   Left-drag   — orbit camera
-//!   Scroll      — zoom
-//!   Right-drag  — pan
+//!   Left-drag          — orbit camera
+//!   Scroll             — zoom
+//!   Right-drag         — pan
+//!   Left-click (ground)— move player OR set destination (see panel toggle)
 
 use std::{
+    f32::consts::{PI, TAU},
     sync::mpsc,
     time::{Duration, Instant},
 };
 
 #[cfg(target_os = "windows")]
-use three_d::{egui::{CollapsingHeader, Color32, RichText, SidePanel}, *};
+use three_d::{
+    egui::{CollapsingHeader, Color32, RichText, SidePanel},
+    *,
+};
 
-use yumon_pet::{
-    brain::{
-        bpe::TokenizerKind,
-        model::{GenerationResult, YUMON_SCHEMA, YumonBrain}, samples::{Action, CardinalDir, WorldContext}, train::MAX_SEQ_LEN,
-    },
-    vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES},
+use three_d_asset::PixelPoint;
+
+use yumon_pet::brain::{
+    bpe::TokenizerKind,
+    model::{GenerationResult, YumonBrain},
+    samples::{Action, CardinalDir},
+    train::MAX_SEQ_LEN,
 };
 
 #[cfg(target_os = "windows")]
@@ -31,220 +37,104 @@ use three_d::renderer::geometry::Mesh;
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
-// const YUMON_COUNT: usize = 4;
-// const SPAWN_RADIUS: f32 = 3.5;
-// const ARENA: f32 = 6.0;
-// const YUMON_COUNT: usize = 40;
-// const SPAWN_RADIUS: f32 = 30.5;
-// const ARENA: f32 = 60.0;
-const YUMON_COUNT: usize = 10;
-const SPAWN_RADIUS: f32 = 10.0;
-const ARENA: f32 = 25.0;
-const WALL_H: f32 = 1.2;
-const WALL_T: f32 = 0.35;
-// const MOVE_SPEED: f32 = 1.8;
-// const TRAVEL_DIST: f32 = 2.5;
-const MOVE_SPEED: f32 = 2.4;
-const TRAVEL_DIST: f32 = 4.5;
-const BUBBLE_TTL: f32 = 7.0;
-const ACTION_INTERVAL_SECS: u64 = 10;
+const ARENA: f32          = 20.0;
+const WALL_H: f32         = 1.2;
+const WALL_T: f32         = 0.35;
+const MOVE_SPEED: f32     = 3.0;
+const BUBBLE_TTL: f32     = 7.0;
+const ACTION_INTERVAL_SECS: f32 = 10.0;
 
-/// Fill these in with your Kenney GLB paths.
-const MODEL_PATHS: [&str; YUMON_COUNT] = [
-    "data/models/animal-fish.glb",
-    "data/models/animal-giraffe.glb",
-    "data/models/animal-lion.glb",
-    "data/models/animal-parrot.glb",
+/// How close to a target counts as "arrived".
+const ARRIVE_THRESH: f32  = 0.6;
 
-    "data/models/animal-fish.glb",
-    "data/models/animal-giraffe.glb",
-    "data/models/animal-lion.glb",
-    "data/models/animal-parrot.glb",
+/// Home position — back-left corner.
+const HOME_POS: Vec3      = Vec3 { x: -ARENA + 2.0, y: 0.0, z: -ARENA + 2.0 };
 
-    "data/models/animal-fish.glb",
-    "data/models/animal-giraffe.glb",
-    // "data/models/animal-lion.glb",
-    // "data/models/animal-parrot.glb",
+/// Initial destination marker position.
+const DEST_INIT: Vec3     = Vec3 { x: 5.0, y: 0.0, z: 5.0 };
 
-    // "data/models/animal-fish.glb",
-    // "data/models/animal-giraffe.glb",
-    // "data/models/animal-lion.glb",
-    // "data/models/animal-parrot.glb",
+/// Player start position.
+const PLAYER_INIT: Vec3   = Vec3 { x: 3.0, y: 0.0, z: -3.0 };
 
-    // "data/models/animal-fish.glb",
-    // "data/models/animal-giraffe.glb",
-    // "data/models/animal-lion.glb",
-    // "data/models/animal-parrot.glb",
+/// Player movement speed (click-to-move).
+const PLAYER_SPEED: f32   = 4.5;
 
-    // "data/models/animal-fish.glb",
-    // "data/models/animal-giraffe.glb",
-    // "data/models/animal-lion.glb",
-    // "data/models/animal-parrot.glb",
+const MODEL_PATH: &str    = "data/models/animal-parrot.glb";
 
-    // "data/models/animal-fish.glb",
-    // "data/models/animal-giraffe.glb",
-    // "data/models/animal-lion.glb",
-    // "data/models/animal-parrot.glb",
+// ─── Click mode ───────────────────────────────────────────────────────────────
 
-    // "data/models/animal-fish.glb",
-    // "data/models/animal-giraffe.glb",
-    // "data/models/animal-lion.glb",
-    // "data/models/animal-parrot.glb",
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ClickMode { MovePlayer, SetDestination }
 
-    // "data/models/animal-fish.glb",
-    // "data/models/animal-giraffe.glb",
-    // "data/models/animal-lion.glb",
-    // "data/models/animal-parrot.glb",
+// ─── Anim state ───────────────────────────────────────────────────────────────
 
-    // "data/models/animal-fish.glb",
-    // "data/models/animal-giraffe.glb",
-    // "data/models/animal-lion.glb",
-    // "data/models/animal-parrot.glb",
-];
+#[derive(Debug, Clone, PartialEq)]
+enum AnimState { Idle, Walking, Building }
 
-#[cfg(target_os = "windows")]
-const TINTS: [Srgba; YUMON_COUNT] = [
-    Srgba { r: 220, g: 110, b: 110, a: 255 },
-    Srgba { r: 110, g: 170, b: 220, a: 255 },
-    Srgba { r: 130, g: 210, b: 140, a: 255 },
-    Srgba { r: 215, g: 185, b:  90, a: 255 },
+// ─── GetHelp orbit state ──────────────────────────────────────────────────────
 
-     Srgba { r: 220, g: 110, b: 110, a: 255 },
-    Srgba { r: 110, g: 170, b: 220, a: 255 },
-    Srgba { r: 130, g: 210, b: 140, a: 255 },
-    Srgba { r: 215, g: 185, b:  90, a: 255 },
-
-     Srgba { r: 220, g: 110, b: 110, a: 255 },
-    Srgba { r: 110, g: 170, b: 220, a: 255 },
-    // Srgba { r: 130, g: 210, b: 140, a: 255 },
-    // Srgba { r: 215, g: 185, b:  90, a: 255 },
-
-    //  Srgba { r: 220, g: 110, b: 110, a: 255 },
-    // Srgba { r: 110, g: 170, b: 220, a: 255 },
-    // Srgba { r: 130, g: 210, b: 140, a: 255 },
-    // Srgba { r: 215, g: 185, b:  90, a: 255 },
-    
-    //  Srgba { r: 220, g: 110, b: 110, a: 255 },
-    // Srgba { r: 110, g: 170, b: 220, a: 255 },
-    // Srgba { r: 130, g: 210, b: 140, a: 255 },
-    // Srgba { r: 215, g: 185, b:  90, a: 255 },
-
-    //  Srgba { r: 220, g: 110, b: 110, a: 255 },
-    // Srgba { r: 110, g: 170, b: 220, a: 255 },
-    // Srgba { r: 130, g: 210, b: 140, a: 255 },
-    // Srgba { r: 215, g: 185, b:  90, a: 255 },
-
-    //  Srgba { r: 220, g: 110, b: 110, a: 255 },
-    // Srgba { r: 110, g: 170, b: 220, a: 255 },
-    // Srgba { r: 130, g: 210, b: 140, a: 255 },
-    // Srgba { r: 215, g: 185, b:  90, a: 255 },
-
-    //  Srgba { r: 220, g: 110, b: 110, a: 255 },
-    // Srgba { r: 110, g: 170, b: 220, a: 255 },
-    // Srgba { r: 130, g: 210, b: 140, a: 255 },
-    // Srgba { r: 215, g: 185, b:  90, a: 255 },
-
-    //  Srgba { r: 220, g: 110, b: 110, a: 255 },
-    // Srgba { r: 110, g: 170, b: 220, a: 255 },
-    // Srgba { r: 130, g: 210, b: 140, a: 255 },
-    // Srgba { r: 215, g: 185, b:  90, a: 255 },
-
-    //  Srgba { r: 220, g: 110, b: 110, a: 255 },
-    // Srgba { r: 110, g: 170, b: 220, a: 255 },
-    // Srgba { r: 130, g: 210, b: 140, a: 255 },
-    // Srgba { r: 215, g: 185, b:  90, a: 255 },
-];
-
-const YUMON_NAMES: [&str; YUMON_COUNT] = ["Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", 
-                                            // "Fern", "Sol","Ember", "Ripple", "Fern", "Sol",
-                                            // "Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol",
-                                            // "Ember", "Ripple", "Fern", "Sol","Ember", "Ripple", "Fern", "Sol"
-                                        ];
-
-// ─── World objects ────────────────────────────────────────────────────────────
-
-/// A static building at the world centre.
-#[cfg(target_os = "windows")]
-const BUILDING_POS: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
-
-/// Fixed resource nodes scattered around the arena.
-#[cfg(target_os = "windows")]
-const RESOURCE_POSITIONS: [Vec3; 3] = [
-    Vec3 { x: -4.0, y: 0.0, z: -2.5 },
-    Vec3 { x:  4.5, y: 0.0, z:  1.0 },
-    Vec3 { x:  0.5, y: 0.0, z:  4.5 },
-];
-
-/// Fixed obstacles (boulders / logs) in the arena.
-#[cfg(target_os = "windows")]
-const OBSTACLE_POSITIONS: [Vec3; 3] = [
-    Vec3 { x: -2.0, y: 0.0, z:  2.5 },
-    Vec3 { x:  2.5, y: 0.0, z: -3.0 },
-    Vec3 { x: -4.5, y: 0.0, z: -4.0 },
-];
-
-// ─── Direction helpers ────────────────────────────────────────────────────────
-
-/// Return the cardinal direction from `from` toward `to`, or None if they are
-/// essentially at the same spot.
-#[cfg(target_os = "windows")]
-fn relative_cardinal(from: Vec3, to: Vec3) -> CardinalDir {
-    let dx = to.x - from.x;
-    let dz = to.z - from.z;
-    // "None" zone: object is within ~0.5 units (practically on top of us)
-    if dx.abs() < 0.5 && dz.abs() < 0.5 {
-        return CardinalDir::None;
-    }
-    // Pick whichever axis dominates
-    if dx.abs() >= dz.abs() {
-        if dx > 0.0 { CardinalDir::East } else { CardinalDir::West }
-    } else {
-        if dz < 0.0 { CardinalDir::North } else { CardinalDir::South }
-    }
+/// Tracks progress around the arena perimeter for the GetHelp action.
+struct OrbitState {
+    /// Current angle around the arena (radians).
+    angle: f32,
 }
 
-/// Among a slice of positions, return the direction toward the *closest* one.
-#[cfg(target_os = "windows")]
-fn nearest_cardinal(from: Vec3, positions: &[Vec3]) -> CardinalDir {
-    positions
-        .iter()
-        .min_by(|a, b| {
-            let da = ((**a) - from).magnitude2();
-            let db = ((**b) - from).magnitude2();
-            da.partial_cmp(&db).unwrap()
-        })
-        .map(|&p| relative_cardinal(from, p))
-        .unwrap_or(CardinalDir::None)
-}
+impl OrbitState {
+    fn new(start_pos: Vec3) -> Self {
+        // Initialise from the Yumon's current position so it doesn't snap.
+        let angle = start_pos.z.atan2(start_pos.x);
+        Self { angle }
+    }
 
-#[cfg(target_os = "windows")]
-fn cardinal_dir_name(d: CardinalDir) -> &'static str {
-    match d {
-        CardinalDir::North => "north",
-        CardinalDir::South => "south",
-        CardinalDir::East  => "east",
-        CardinalDir::West  => "west",
-        CardinalDir::None  => "none",
+    /// Advance one step and return the next waypoint.
+    fn next_waypoint(&mut self) -> Vec3 {
+        // Advance ~45° each interval so a full orbit takes ~8 intervals.
+        self.angle = (self.angle + TAU / 8.0) % TAU;
+        let r = ARENA - 1.5;
+        Vec3::new(r * self.angle.cos(), 0.0, r * self.angle.sin())
     }
 }
 
 // ─── Brain ↔ world message ────────────────────────────────────────────────────
 
 pub struct WorldPrompt {
-    pub yumon_id:  usize,
-    pub prompt:    String,
-    // pub emote_idx: usize,
-    pub world_ctx: WorldContext,
+    pub prompt: String,
 }
 
-// ─── Per-Yumon state ──────────────────────────────────────────────────────────
+// ─── Player ───────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq)]
-enum AnimState { Idle, Walking, Building }
+#[cfg(target_os = "windows")]
+struct Player {
+    pos:    Vec3,
+    target: Vec3,
+}
+
+#[cfg(target_os = "windows")]
+impl Player {
+    fn new() -> Self {
+        Self { pos: PLAYER_INIT, target: PLAYER_INIT }
+    }
+
+    fn tick(&mut self, dt: f32) {
+        let diff = self.target - self.pos;
+        let dist = diff.magnitude();
+        if dist > 0.02 {
+            self.pos += diff.normalize() * (PLAYER_SPEED * dt).min(dist);
+        }
+    }
+
+    fn clamp_arena(mut p: Vec3) -> Vec3 {
+        let lim = ARENA - 0.6;
+        p.x = p.x.clamp(-lim, lim);
+        p.z = p.z.clamp(-lim, lim);
+        p
+    }
+}
+
+// ─── Yumon ───────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
 struct Yumon {
-    id:                usize,
     pos:               Vec3,
     target:            Vec3,
     facing:            f32,
@@ -252,31 +142,40 @@ struct Yumon {
     anim:              AnimState,
     speech:            String,
     speech_timer:      f32,
-    next_action_at:    Instant,
+    /// Counts down to next brain call (reset after each result).
+    interval_timer:    f32,
     waiting_for_brain: bool,
-    parsed_emotion:         String,
+    parsed_emotion:    String,
     log:               Vec<String>,
-    pending_announcement: Option<String>,
+    /// Persists across intervals until changed.
+    current_command:   String,
+    /// One-shot; cleared after each brain call.
+    pending_message:   String,
+    /// Orbit state, created when action = GetHelp.
+    orbit:             Option<OrbitState>,
+    /// Survey / Sit timer (seconds remaining for timed-idle actions).
+    idle_timer:        f32,
 }
 
 #[cfg(target_os = "windows")]
 impl Yumon {
-    fn new(id: usize, pos: Vec3) -> Self {
-        let stagger = Duration::from_secs(5 + id as u64);
+    fn new() -> Self {
         Self {
-            id,
-            pos,
-            target: pos,
-            facing: (id as f32) * std::f32::consts::FRAC_PI_2,
-            action: Action::Idle,
-            anim: AnimState::Idle,
-            speech: String::new(),
-            speech_timer: 0.0,
-            next_action_at: Instant::now() + stagger,
+            pos:               Vec3::new(0.0, 0.0, 0.0),
+            target:            Vec3::new(0.0, 0.0, 0.0),
+            facing:            0.0,
+            action:            Action::Sit,
+            anim:              AnimState::Idle,
+            speech:            String::new(),
+            speech_timer:      0.0,
+            interval_timer:    ACTION_INTERVAL_SECS,
             waiting_for_brain: false,
-            parsed_emotion: "neutral".to_string(),
-            log: Vec::new(),
-            pending_announcement: None
+            parsed_emotion:    "neutral".to_string(),
+            log:               Vec::new(),
+            current_command:   String::new(),
+            pending_message:   String::new(),
+            orbit:             None,
+            idle_timer:        0.0,
         }
     }
 
@@ -287,54 +186,85 @@ impl Yumon {
         p
     }
 
-    fn apply_result(&mut self, r: GenerationResult) {
-        self.action    = r.action;
+    fn apply_result(&mut self, r: GenerationResult, player_pos: Vec3, dest_pos: Vec3) {
+        self.action         = r.action;
         self.parsed_emotion = r.parsed_emotion.clone();
         self.waiting_for_brain = false;
 
-        self.push_log(format!("[RAW]: {:?}", r.raw_output));
         self.push_log(format!("[ACTION]: {:?}", r.action));
 
         if !r.reply.is_empty() {
             self.set_speech(r.reply.clone());
             self.push_log(format!("💬 {}", r.reply));
-        } else {
-            let emote = r.parsed_emotion;
-            self.push_log(format!("({emote})"));
         }
-        
+
+        // Clear the one-shot message now that we've consumed it.
+        self.pending_message.clear();
+
+        // Apply movement / anim based on new action.
+        self.orbit     = None;
+        self.idle_timer = 0.0;
+
         match r.action {
-            Action::Speak | Action::Idle => {
-                self.anim   = AnimState::Idle;
-                self.target = self.pos;
+            Action::GoToDestination => {
+                self.set_walk_toward(dest_pos);
             }
-            Action::Travel => {
-                let dv = cardinal_vec(r.motion_dir);
-                self.target = Self::clamp_arena(self.pos + dv * TRAVEL_DIST);
-                self.facing = cardinal_angle(r.motion_dir);
-                self.anim   = AnimState::Walking;
-                self.push_log(format!("🚶 {:?}", r.motion_dir));
+            Action::GoHome => {
+                self.set_walk_toward(HOME_POS);
             }
-            Action::Build => {
-                self.anim   = AnimState::Building;
-                self.target = self.pos;
-                let msg = if r.reply.is_empty() { "🔨 building…".into() }
-                          else { format!("🔨 {}", r.reply) };
-                self.set_speech(msg.clone());
-                self.push_log(msg);
-            }
-            Action::Use => {
-                self.anim   = AnimState::Building;
-                self.target = self.pos;
-                if !r.reply.is_empty() {
-                    self.set_speech(r.reply.clone());
-                    self.push_log(format!("⚙️  {}", r.reply));
+            Action::Follow | Action::GetHelp => {
+                // Follow: re-targeted each tick in tick().
+                // GetHelp: orbit — set up orbit state and pick first waypoint.
+                if r.action == Action::GetHelp {
+                    let mut orbit = OrbitState::new(self.pos);
+                    let wp = orbit.next_waypoint();
+                    self.orbit = Some(orbit);
+                    self.set_walk_toward(wp);
+                } else {
+                    self.set_walk_toward(player_pos);
                 }
+            }
+            Action::Survey => {
+                self.anim       = AnimState::Idle;
+                self.target     = self.pos;
+                self.idle_timer = 6.0; // slow rotation for 6 s
+            }
+            Action::Collect => {
+                // Walk toward nearest resource node.
+                let nearest = RESOURCE_POSITIONS
+                    .iter()
+                    .min_by(|a, b| {
+                        ((**a) - self.pos).magnitude2()
+                            .partial_cmp(&((**b) - self.pos).magnitude2())
+                            .unwrap()
+                    })
+                    .copied()
+                    .unwrap_or(Vec3::zero());
+                self.set_walk_toward(nearest);
+            }
+            Action::Stack => {
+                // Walk to central building, then building anim.
+                self.set_walk_toward(BUILDING_POS);
+                self.anim = AnimState::Building;
+            }
+            Action::Sit => {
+                self.anim       = AnimState::Idle;
+                self.target     = self.pos;
+                self.idle_timer = 5.0;
             }
         }
 
-        self.next_action_at =
-            Instant::now() + Duration::from_secs(ACTION_INTERVAL_SECS);
+        // Reset interval timer.
+        self.interval_timer = ACTION_INTERVAL_SECS;
+    }
+
+    fn set_walk_toward(&mut self, dest: Vec3) {
+        self.target = Self::clamp_arena(dest);
+        let diff    = self.target - self.pos;
+        if diff.magnitude() > 0.1 {
+            self.facing = diff.z.atan2(diff.x) - PI * 0.5;
+        }
+        self.anim = AnimState::Walking;
     }
 
     fn set_speech(&mut self, s: String) {
@@ -347,7 +277,8 @@ impl Yumon {
         if self.log.len() > 12 { self.log.remove(0); }
     }
 
-    fn tick(&mut self, dt: f32) {
+    fn tick(&mut self, dt: f32, player_pos: Vec3) {
+        // Walk toward target.
         let diff = self.target - self.pos;
         let dist = diff.magnitude();
         if dist > 0.02 {
@@ -356,6 +287,24 @@ impl Yumon {
             self.anim = AnimState::Idle;
         }
 
+        // Follow: continuously re-target player.
+        if self.action == Action::Follow {
+            let offset = (self.pos - player_pos).normalize() * 1.2;
+            self.set_walk_toward(player_pos + offset);
+        }
+
+        // Survey: slow rotation in place.
+        if self.action == Action::Survey && self.idle_timer > 0.0 {
+            self.facing += dt * 0.6;
+            self.idle_timer -= dt;
+        }
+
+        // Sit idle timer.
+        if self.action == Action::Sit && self.idle_timer > 0.0 {
+            self.idle_timer -= dt;
+        }
+
+        // Speech bubble fade.
         if self.speech_timer > 0.0 {
             self.speech_timer -= dt;
             if self.speech_timer <= 0.0 { self.speech.clear(); }
@@ -363,7 +312,7 @@ impl Yumon {
     }
 
     fn bob(&self, t: f64) -> f32 {
-        let ph = t as f32 + self.id as f32 * 1.3;
+        let ph = t as f32;
         match self.anim {
             AnimState::Idle     => (ph * 1.1).sin() * 0.04,
             AnimState::Walking  => (ph * 4.2).sin() * 0.07,
@@ -372,8 +321,7 @@ impl Yumon {
     }
 
     fn world_transform(&self, t: f64) -> Mat4 {
-        // let y = 0.45 + self.bob(t);
-        let y = 0.45;
+        let y = 0.45 + self.bob(t);
         let squash = if self.anim == AnimState::Building {
             Mat4::from_nonuniform_scale(1.15, 0.78, 1.15)
         } else {
@@ -385,447 +333,448 @@ impl Yumon {
             * Mat4::from_scale(0.55)
     }
 
-    /// Build the JSON prompt string that describes this Yumon's surroundings.
-    fn build_prompt(&mut self, others: &[Building]) -> String {
-        let nearest_built = others.iter()
-            .min_by(|a, b| (a.pos - self.pos).magnitude2().partial_cmp(&(b.pos - self.pos).magnitude2()).unwrap())
-            .map(|b| relative_cardinal(self.pos, b.pos))
-            .unwrap_or(CardinalDir::None);
-
-        let obstacle_dir = nearest_cardinal(self.pos, &OBSTACLE_POSITIONS);
-        let building_dir = relative_cardinal(self.pos, BUILDING_POS);
-        let resource_dir = nearest_cardinal(self.pos, &RESOURCE_POSITIONS);
-        
-        // Take the announcement if it exists, otherwise empty string
-        let text = self.pending_announcement.take().unwrap_or_default(); // can be empty
-
+    /// Build the JSON prompt string for the brain.
+    fn build_prompt(&self) -> String {
+        let memories: Vec<serde_json::Value> = Vec::new(); // extend later
         serde_json::to_string_pretty(&serde_json::json!({
-            "obstacle_dir": cardinal_dir_name(obstacle_dir),
-            "building_dir": cardinal_dir_name(building_dir),
-            "resource_dir": cardinal_dir_name(resource_dir),
-            "message":      text,
+            "command": self.current_command,
+            "message": self.pending_message,
+            "memories": memories,
         }))
         .unwrap()
     }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── World constants ──────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
-fn cardinal_vec(d: CardinalDir) -> Vec3 {
-    match d {
-        CardinalDir::North => Vec3::new( 0.0, 0.0, -1.0),
-        CardinalDir::South => Vec3::new( 0.0, 0.0,  1.0),
-        CardinalDir::East  => Vec3::new( 1.0, 0.0,  0.0),
-        CardinalDir::West  => Vec3::new(-1.0, 0.0,  0.0),
-        CardinalDir::None  => Vec3::zero(),
-    }
-}
+const BUILDING_POS: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
 
-fn cardinal_angle(d: CardinalDir) -> f32 {
-    match d {
-        CardinalDir::North => 0.0,
-        CardinalDir::East  =>  std::f32::consts::FRAC_PI_2,
-        CardinalDir::South =>  std::f32::consts::PI,
-        CardinalDir::West  => -std::f32::consts::FRAC_PI_2,
-        CardinalDir::None  => 0.0,
-    }
-}
+#[cfg(target_os = "windows")]
+const RESOURCE_POSITIONS: [Vec3; 3] = [
+    Vec3 { x: -4.0, y: 0.0, z: -2.5 },
+    Vec3 { x:  4.5, y: 0.0, z:  1.0 },
+    Vec3 { x:  0.5, y: 0.0, z:  4.5 },
+];
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn action_icon(a: Action) -> &'static str {
     match a {
-        Action::Speak  => "💬",
-        Action::Build  => "🔨",
-        Action::Travel => "🚶",
-        Action::Use    => "⚙️ ",
-        Action::Idle   => "💤",
+        Action::GoToDestination => "📍",
+        Action::GoHome          => "🏠",
+        Action::Follow          => "🐾",
+        Action::GetHelp         => "🆘",
+        Action::Survey          => "🔭",
+        Action::Collect         => "🌿",
+        Action::Stack           => "🔨",
+        Action::Sit             => "💤",
     }
 }
 
-// ─── GLB loader helper ────────────────────────────────────────────────────────
+/// Raycast a mouse position against the ground plane (y = 0).
+/// Returns None if the ray points away from the ground.
+// #[cfg(target_os = "windows")]
+// fn ray_ground_intersect(camera: &Camera, screen_pos: (f64, f64), viewport: Viewport) -> Option<Vec3> {
+//     let ray = camera.pixel_ray(Vec2::new(screen_pos.0 as f32, screen_pos.1 as f32));
+//     let denom = ray.direction.y;
+//     if denom.abs() < 1e-5 { return None; }
+//     let t = -ray.origin.y / denom;
+//     if t < 0.0 { return None; }
+//     let p = ray.origin + ray.direction * t;
+//     let lim = ARENA - 0.6;
+//     Some(Vec3::new(p.x.clamp(-lim, lim), 0.0, p.z.clamp(-lim, lim)))
+// }
 
 #[cfg(target_os = "windows")]
-fn try_load_glb(context: &Context, path: &str) -> Option<Model<PhysicalMaterial>> {
-    let p = std::path::Path::new(path);
-    let filename = p.file_name().unwrap().to_str().unwrap();
+fn ray_ground_intersect(camera: &Camera, pixel: PhysicalPoint) -> Option<Vec3> {
+    // Camera position (ray origin)
+    let origin = camera.position();
+    // View direction through this pixel
+    let direction = camera.view_direction_at_pixel(pixel);
 
-    let mut loaded = three_d_asset::io::load(&[p])
-        .unwrap_or_else(|e| panic!("[world] Failed to load '{path}': {e}"));
-
-    let cpu: CpuModel = loaded.deserialize(filename)
-        .unwrap_or_else(|e| panic!("[world] Failed to deserialize '{path}': {e}"));
-
-    let model = Model::<PhysicalMaterial>::new(context, &cpu)
-        .unwrap_or_else(|e| panic!("[world] GPU upload failed for '{path}': {e}"));
-
-    println!("[world] Loaded {path}");
-    Some(model)
-}
-
-#[cfg(target_os = "windows")]
-struct Building {
-    // gm: Gm<Mesh, PhysicalMaterial>,
-    gms: Vec<Gm<Mesh, PhysicalMaterial>>,  // one mesh per level
-    pos: Vec3,
-    level: u32, // Track how many are stacked
+    // Intersect with y = 0 plane
+    let denom = direction.y;
+    if denom.abs() < 1e-5 { return None; }
+    let t = -origin.y / denom;
+    if t < 0.0 { return None; }
+    let p = origin + direction * t;
+    let lim = ARENA - 0.6;
+    Some(Vec3::new(p.x.clamp(-lim, lim), 0.0, p.z.clamp(-lim, lim)))
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 fn main() {
     #[cfg(target_os = "windows")]
-{    
-    // ── Channels ─────────────────────────────────────────────────────────────
-    let (tx_prompt, rx_prompt) = mpsc::channel::<WorldPrompt>();
-    let (tx_result, rx_result) = mpsc::channel::<(usize, GenerationResult)>();
-
-    // ── Brain thread ──────────────────────────────────────────────────────────
     {
-        use burn::backend::Wgpu;
-        let tx = tx_result;
-        std::thread::spawn(move || {
-            let device: burn::prelude::Device<Wgpu> = Default::default();
-            let (brain, tokenizer, config) =
-                match YumonBrain::<Wgpu>::load("checkpoints/brain/128h_2l_2a_180len_6e", &device) {
-                    Ok(m) => m,
-                    Err(e) => { eprintln!("[brain] load failed: {e}"); return; }
-                };
+        // ── Channels ──────────────────────────────────────────────────────────
+        let (tx_prompt, rx_prompt) = mpsc::channel::<WorldPrompt>();
+        let (tx_result, rx_result) = mpsc::channel::<GenerationResult>();
 
-            let bpe = match &tokenizer {
-                TokenizerKind::Bpe(b) => b,
-                _ => { eprintln!("[brain] BPE tokenizer required"); return; }
-            };
+        // ── Brain thread ──────────────────────────────────────────────────────
+        {
+            let tx = tx_result;
+            std::thread::spawn(move || {
+                use burn::backend::Wgpu;
+                let device: burn::prelude::Device<Wgpu> = Default::default();
+                let (brain, tokenizer, config) =
+                    match YumonBrain::<Wgpu>::load(
+                        "checkpoints/brain/128h_2l_2a_220len_6e", &device,
+                    ) {
+                        Ok(m) => m,
+                        Err(e) => { eprintln!("[brain] load failed: {e}"); return; }
+                    };
 
-            while let Ok(p) = rx_prompt.recv() {
-                let result = brain.generate_unmasked_parsed(
-                    &tokenizer,
-                    &p.prompt, config.max_seq_len, &device,
-                );
-                let _ = tx.send((p.yumon_id, result));
-            }
-        });
-    }
+                while let Ok(p) = rx_prompt.recv() {
+                    let result = brain.generate_unmasked_parsed(
+                        &tokenizer, &p.prompt, config.max_seq_len, &device,
+                    );
 
-    // ── Window ────────────────────────────────────────────────────────────────
-    let window = Window::new(WindowSettings {
-        title:    "Yumon World".into(),
-        max_size: Some((1440, 900)),
-        ..Default::default()
-    })
-    .expect("Failed to open window");
+                    println!("parsed result {:?}", result);
 
-    let context = window.gl();
-
-    // ── Camera + OrbitControl ─────────────────────────────────────────────────
-    let mut camera = Camera::new_perspective(
-        window.viewport(),
-        Vec3::new(0.0, 13.0, 16.0),
-        Vec3::new(0.0,  0.0,  0.0),
-        Vec3::unit_y(),
-        degrees(42.0),
-        0.1,
-        200.0,
-    );
-    let mut orbit = OrbitControl::new(*camera.target(), 2.0, 50.0);
-
-    // ── Lighting ──────────────────────────────────────────────────────────────
-    let ambient     = AmbientLight::new(&context, 0.45, Srgba::WHITE);
-    let directional = DirectionalLight::new(
-        &context, 1.3, Srgba::WHITE, &Vec3::new(-1.0, -2.5, -1.5),
-    );
-
-    let mut dynamic_buildings: Vec<Building> = Vec::new();
-
-    // ── Floor ─────────────────────────────────────────────────────────────────
-    let fs = ARENA * 2.0;
-    let fs64 = fs as f64;
-    let mut floor_mesh = CpuMesh::square();
-    match &mut floor_mesh.positions {
-        Positions::F32(x) => {
-            for p in x {
-                p.x *= fs * 0.5;
-                p.z *= fs * 0.5;
-            }
-        },
-        Positions::F64(x) => {
-            for p in x {
-                p.x *= fs64 * 0.5;
-                p.z *= fs64 * 0.5;
-            }
+                    let _ = tx.send(result);
+                }
+            });
         }
-    }
-    floor_mesh.compute_normals();
-    let mut floor = Gm::new(
-        Mesh::new(&context, &floor_mesh),
-        PhysicalMaterial::new_opaque(&context, &CpuMaterial {
-            albedo: Srgba::new(55, 85, 55, 255),
-            roughness: 0.92,
-            metallic: 0.0,
+
+        // ── Window ────────────────────────────────────────────────────────────
+        let window = Window::new(WindowSettings {
+            title:    "Yumon World".into(),
+            max_size: Some((1440, 900)),
             ..Default::default()
-        }),
-    );
-    floor.set_transformation(
-        Mat4::from_translation(Vec3::new(0.0, -0.01, 0.0))
-            * Mat4::from_angle_x(degrees(-90.0)),
-    );
+        })
+        .expect("Failed to open window");
 
-    // ── Walls ─────────────────────────────────────────────────────────────────
-    let wall_cpu = CpuMesh::cube();
-    let wall_mat = CpuMaterial {
-        albedo: Srgba::new(175, 155, 125, 255),
-        roughness: 0.85,
-        metallic: 0.0,
-        ..Default::default()
-    };
-    let half = ARENA + WALL_T * 0.5;
-    let wall_specs: [(Vec3, Vec3); 4] = [
-        (Vec3::new( 0.0, WALL_H*0.5, -half), Vec3::new(fs + WALL_T*2.0, WALL_H, WALL_T)),
-        (Vec3::new( 0.0, WALL_H*0.5,  half), Vec3::new(fs + WALL_T*2.0, WALL_H, WALL_T)),
-        (Vec3::new( half, WALL_H*0.5, 0.0),  Vec3::new(WALL_T, WALL_H, fs)),
-        (Vec3::new(-half, WALL_H*0.5, 0.0),  Vec3::new(WALL_T, WALL_H, fs)),
-    ];
-    let walls: Vec<Gm<Mesh, PhysicalMaterial>> = wall_specs.iter().map(|(pos, s)| {
-        let mut gm = Gm::new(
-            Mesh::new(&context, &wall_cpu),
-            PhysicalMaterial::new_opaque(&context, &wall_mat),
-        );
-        gm.set_transformation(
-            Mat4::from_translation(*pos)
-                * Mat4::from_nonuniform_scale(s.x*0.5, s.y*0.5, s.z*0.5),
-        );
-        gm
-    }).collect();
+        let context = window.gl();
 
-    // ── Central building (flat-topped tower at origin) ─────────────────────────
-    let building_cpu = CpuMesh::cube();
-    let mut central_building = Gm::new(
-        Mesh::new(&context, &building_cpu),
-        PhysicalMaterial::new_opaque(&context, &CpuMaterial {
-            albedo: Srgba::new(190, 170, 130, 255),
-            roughness: 0.70,
-            metallic: 0.05,
-            ..Default::default()
-        }),
-    );
-    // Scale: 1.2 wide × 1.6 tall × 1.2 deep, centred at origin
-    central_building.set_transformation(
-        Mat4::from_translation(Vec3::new(0.0, 0.8, 0.0))
-            * Mat4::from_nonuniform_scale(0.6, 0.8, 0.6),
-    );
-
-    // ── Resource nodes (glowing-ish gold spheres) ─────────────────────────────
-    let resource_sphere_cpu = CpuMesh::sphere(14);
-    let resource_mat = CpuMaterial {
-        albedo:    Srgba::new(220, 190, 60, 255),
-        roughness: 0.30,
-        metallic:  0.75,
-        ..Default::default()
-    };
-    let resource_nodes: Vec<Gm<Mesh, PhysicalMaterial>> = RESOURCE_POSITIONS.iter().map(|&pos| {
-        let mut gm = Gm::new(
-            Mesh::new(&context, &resource_sphere_cpu),
-            PhysicalMaterial::new_opaque(&context, &resource_mat),
+        // ── Camera ────────────────────────────────────────────────────────────
+        let mut camera = Camera::new_perspective(
+            window.viewport(),
+            Vec3::new(0.0, 18.0, 20.0),
+            Vec3::new(0.0,  0.0,  0.0),
+            Vec3::unit_y(),
+            degrees(42.0),
+            0.1,
+            200.0,
         );
-        gm.set_transformation(
-            Mat4::from_translation(Vec3::new(pos.x, 0.30, pos.z))
-                * Mat4::from_scale(0.28),
-        );
-        gm
-    }).collect();
+        let mut orbit_ctrl = OrbitControl::new(*camera.target(), 2.0, 60.0);
 
-    // ── Obstacles (rough dark boulders) ──────────────────────────────────────
-    let obstacle_cpu = CpuMesh::sphere(8); // low-poly → boulder feel
-    let obstacle_mat = CpuMaterial {
-        albedo:    Srgba::new(90, 80, 75, 255),
-        roughness: 0.95,
-        metallic:  0.0,
-        ..Default::default()
-    };
-    let obstacles: Vec<Gm<Mesh, PhysicalMaterial>> = OBSTACLE_POSITIONS.iter().enumerate().map(|(i, &pos)| {
-        // Vary sizes slightly so they don't look identical
-        let scale = 0.30 + (i as f32) * 0.06;
-        let mut gm = Gm::new(
-            Mesh::new(&context, &obstacle_cpu),
-            PhysicalMaterial::new_opaque(&context, &obstacle_mat),
+        // ── Lighting ──────────────────────────────────────────────────────────
+        let ambient     = AmbientLight::new(&context, 0.45, Srgba::WHITE);
+        let directional = DirectionalLight::new(
+            &context, 1.3, Srgba::WHITE, &Vec3::new(-1.0, -2.5, -1.5),
         );
-        gm.set_transformation(
-            Mat4::from_translation(Vec3::new(pos.x, scale * 0.5, pos.z))
-                * Mat4::from_nonuniform_scale(scale, scale * 0.75, scale),
-        );
-        gm
-    }).collect();
 
-    // ── Per-Yumon GLB models + sphere fallbacks ───────────────────────────────
-    let mut gpu_models: Vec<Option<Model<PhysicalMaterial>>> = MODEL_PATHS.iter()
-        .map(|p| try_load_glb(&context, p))
-        .collect();
-
-    let sphere_cpu = CpuMesh::sphere(20);
-    let mut fallback_spheres: Vec<Gm<Mesh, PhysicalMaterial>> = TINTS.iter().map(|&tint| {
-        Gm::new(
-            Mesh::new(&context, &sphere_cpu),
+        // ── Floor ─────────────────────────────────────────────────────────────
+        let fs = ARENA * 2.0;
+        let mut floor_mesh = CpuMesh::square();
+        if let Positions::F32(ref mut v) = floor_mesh.positions {
+            for p in v.iter_mut() { p.x *= fs * 0.5; p.z *= fs * 0.5; }
+        }
+        floor_mesh.compute_normals();
+        let mut floor = Gm::new(
+            Mesh::new(&context, &floor_mesh),
             PhysicalMaterial::new_opaque(&context, &CpuMaterial {
-                albedo: tint,
-                roughness: 0.55,
-                metallic: 0.1,
+                albedo: Srgba::new(55, 85, 55, 255),
+                roughness: 0.92,
+                metallic: 0.0,
                 ..Default::default()
             }),
-        )
-    }).collect();
+        );
+        floor.set_transformation(
+            Mat4::from_translation(Vec3::new(0.0, -0.01, 0.0))
+                * Mat4::from_angle_x(degrees(-90.0)),
+        );
 
-    // ── Yumon state ───────────────────────────────────────────────────────────
-    let mut yumons: Vec<Yumon> = (0..YUMON_COUNT).map(|i| {
-        let angle = (i as f32 / YUMON_COUNT as f32) * std::f32::consts::TAU;
-        Yumon::new(i, Vec3::new(angle.cos() * SPAWN_RADIUS, 0.0, angle.sin() * SPAWN_RADIUS))
-    }).collect();
+        // ── Walls ─────────────────────────────────────────────────────────────
+        let wall_cpu = CpuMesh::cube();
+        let wall_mat = CpuMaterial {
+            albedo: Srgba::new(175, 155, 125, 255),
+            roughness: 0.85,
+            metallic: 0.0,
+            ..Default::default()
+        };
+        let half = ARENA + WALL_T * 0.5;
+        let wall_specs: [(Vec3, Vec3); 4] = [
+            (Vec3::new( 0.0, WALL_H*0.5, -half), Vec3::new(fs + WALL_T*2.0, WALL_H, WALL_T)),
+            (Vec3::new( 0.0, WALL_H*0.5,  half), Vec3::new(fs + WALL_T*2.0, WALL_H, WALL_T)),
+            (Vec3::new( half, WALL_H*0.5, 0.0),  Vec3::new(WALL_T, WALL_H, fs)),
+            (Vec3::new(-half, WALL_H*0.5, 0.0),  Vec3::new(WALL_T, WALL_H, fs)),
+        ];
+        let walls: Vec<Gm<Mesh, PhysicalMaterial>> = wall_specs.iter().map(|(pos, s)| {
+            let mut gm = Gm::new(
+                Mesh::new(&context, &wall_cpu),
+                PhysicalMaterial::new_opaque(&context, &wall_mat),
+            );
+            gm.set_transformation(
+                Mat4::from_translation(*pos)
+                    * Mat4::from_nonuniform_scale(s.x*0.5, s.y*0.5, s.z*0.5),
+            );
+            gm
+        }).collect();
 
-    // ── egui ──────────────────────────────────────────────────────────────────
-    let mut gui = GUI::new(&context);
+        // ── Central building ──────────────────────────────────────────────────
+        let building_cpu = CpuMesh::cube();
+        let mut central_building = Gm::new(
+            Mesh::new(&context, &building_cpu),
+            PhysicalMaterial::new_opaque(&context, &CpuMaterial {
+                albedo: Srgba::new(190, 170, 130, 255),
+                roughness: 0.70,
+                metallic: 0.05,
+                ..Default::default()
+            }),
+        );
+        central_building.set_transformation(
+            Mat4::from_translation(Vec3::new(0.0, 0.8, 0.0))
+                * Mat4::from_nonuniform_scale(0.6, 0.8, 0.6),
+        );
 
-    // ── Frame timing ──────────────────────────────────────────────────────────
-    let mut last_frame = Instant::now();
+        // ── Resource nodes ────────────────────────────────────────────────────
+        let resource_sphere_cpu = CpuMesh::sphere(14);
+        let resource_mat = CpuMaterial {
+            albedo:    Srgba::new(220, 190, 60, 255),
+            roughness: 0.30,
+            metallic:  0.75,
+            ..Default::default()
+        };
+        let resource_nodes: Vec<Gm<Mesh, PhysicalMaterial>> =
+            RESOURCE_POSITIONS.iter().map(|&pos| {
+                let mut gm = Gm::new(
+                    Mesh::new(&context, &resource_sphere_cpu),
+                    PhysicalMaterial::new_opaque(&context, &resource_mat),
+                );
+                gm.set_transformation(
+                    Mat4::from_translation(Vec3::new(pos.x, 0.30, pos.z))
+                        * Mat4::from_scale(0.28),
+                );
+                gm
+            }).collect();
 
-    let mut ui_inputs = vec![String::new(); YUMON_COUNT];
+        // ── Home marker (blue sphere) ─────────────────────────────────────────
+        let mut home_marker = Gm::new(
+            Mesh::new(&context, &CpuMesh::sphere(14)),
+            PhysicalMaterial::new_opaque(&context, &CpuMaterial {
+                albedo:    Srgba::new(80, 140, 220, 255),
+                roughness: 0.40,
+                metallic:  0.5,
+                ..Default::default()
+            }),
+        );
+        home_marker.set_transformation(
+            Mat4::from_translation(Vec3::new(HOME_POS.x, 0.35, HOME_POS.z))
+                * Mat4::from_scale(0.30),
+        );
 
-    // ── Render loop ───────────────────────────────────────────────────────────
-    window.render_loop(move |mut frame_input| {
-        let now = Instant::now();
-        let dt  = now.duration_since(last_frame).as_secs_f32().min(0.1);
-        last_frame = now;
-        let t = frame_input.accumulated_time;
+        // ── Destination marker (orange flat disc) ─────────────────────────────
+        let mut dest_pos    = DEST_INIT;
+        let disc_cpu = CpuMesh::cylinder(16);
+        let mut dest_marker = Gm::new(
+            Mesh::new(&context, &disc_cpu),
+            PhysicalMaterial::new_opaque(&context, &CpuMaterial {
+                albedo:    Srgba::new(230, 120, 40, 255),
+                roughness: 0.60,
+                metallic:  0.1,
+                ..Default::default()
+            }),
+        );
+        // Flat disc: scale y very small, radius ~0.4
+        dest_marker.set_transformation(
+            Mat4::from_translation(Vec3::new(dest_pos.x, 0.03, dest_pos.z))
+                * Mat4::from_nonuniform_scale(0.4, 0.04, 0.4),
+        );
 
-        // Drain brain results
-        while let Ok((id, result)) = rx_result.try_recv() {
-            if id < YUMON_COUNT { yumons[id].apply_result(result.clone()); }
+        // ── Player cylinder (white/grey) ──────────────────────────────────────
+        let mut player = Player::new();
+        let cyl_cpu = CpuMesh::cylinder(20);
+        let mut player_gm = Gm::new(
+            Mesh::new(&context, &cyl_cpu),
+            PhysicalMaterial::new_opaque(&context, &CpuMaterial {
+                albedo:    Srgba::new(220, 220, 210, 255),
+                roughness: 0.50,
+                metallic:  0.15,
+                ..Default::default()
+            }),
+        );
 
-            // Inside the while let Ok((id, result)) = rx_result.try_recv() loop:
-            if result.action == Action::Build {
-                let y = &yumons[id];
-                let build_pos = y.pos; // Build at Yumon's current feet
+        // ── Yumon GLB + fallback ──────────────────────────────────────────────
+        let mut yumon         = Yumon::new();
+        let gpu_model: Option<Model<PhysicalMaterial>> = {
+            let p = std::path::Path::new(MODEL_PATH);
+            let filename = p.file_name().unwrap().to_str().unwrap();
+            three_d_asset::io::load(&[p]).ok().and_then(|mut loaded| {
+                loaded.deserialize(filename).ok().and_then(|cpu: CpuModel| {
+                    Model::<PhysicalMaterial>::new(&context, &cpu).ok()
+                })
+            })
+        };
+        let mut gpu_model = gpu_model;
 
-                // Check if we are building "on top" of an existing one nearby
-                let existing = dynamic_buildings.iter_mut()
-                    .find(|b| (b.pos - build_pos).magnitude() < 0.8);
+        let mut fallback_sphere = Gm::new(
+            Mesh::new(&context, &CpuMesh::sphere(20)),
+            PhysicalMaterial::new_opaque(&context, &CpuMaterial {
+                albedo:    Srgba::new(180, 120, 200, 255),
+                roughness: 0.55,
+                metallic:  0.1,
+                ..Default::default()
+            }),
+        );
 
-                // if let Some(b) = existing {
-                //     // Stack: Increase level and move the mesh up
-                //     b.level += 1;
-                //     let new_y = 0.8 + (b.level as f32 * 0.4); // 0.8 is base height
-                //     b.gm.set_transformation(Mat4::from_translation(Vec3::new(b.pos.x, new_y, b.pos.z)) 
-                //         * Mat4::from_nonuniform_scale(0.6, 0.2, 0.6)); // Make it a "slab"
-                // } 
-                if let Some(b) = existing {
-                    b.level += 1;
-                    let new_y = 0.4 + (b.level as f32 * 0.4); // each slab's centre
-                    let mat = CpuMaterial {
-                        albedo: Srgba::new(190, 70, 30, 255),
-                        roughness: 0.70,
-                        metallic: 0.05,
-                        ..Default::default()
-                    };
-                    let mut gm = Gm::new(
-                        Mesh::new(&context, &building_cpu),
-                        PhysicalMaterial::new_opaque(&context, &mat),
-                    );
-                    gm.set_transformation(
-                        Mat4::from_translation(Vec3::new(b.pos.x, new_y, b.pos.z))
-                            * Mat4::from_nonuniform_scale(0.5, 0.2, 0.5),
-                    );
-                    b.gms.push(gm); // add a new slab on top; old ones stay
+        // ── UI state ──────────────────────────────────────────────────────────
+        let mut gui           = GUI::new(&context);
+        let mut click_mode    = ClickMode::MovePlayer;
+        let mut ui_command    = String::new(); // editing buffer for command field
+        let mut ui_message    = String::new(); // editing buffer for message field
+        let mut last_frame    = Instant::now();
+
+        // ── Render loop ───────────────────────────────────────────────────────
+        window.render_loop(move |mut frame_input| {
+            let now = Instant::now();
+            let dt  = now.duration_since(last_frame).as_secs_f32().min(0.1);
+            last_frame = now;
+            let t = frame_input.accumulated_time;
+
+            // ── Brain results ─────────────────────────────────────────────────
+            if let Ok(result) = rx_result.try_recv() {
+                yumon.apply_result(result, player.pos, dest_pos);
+            }
+
+            // ── Interval timer → fire brain ───────────────────────────────────
+            if !yumon.waiting_for_brain {
+                yumon.interval_timer -= dt;
+                if yumon.interval_timer <= 0.0 {
+                    yumon.waiting_for_brain = true;
+                    let prompt = yumon.build_prompt();
+                    let _ = tx_prompt.send(WorldPrompt { prompt });
                 }
-                else {
-                    let mat = CpuMaterial {
-                        albedo: Srgba::new(190, 70, 30, 255),
-                        roughness: 0.70,
-                        metallic: 0.05,
-                        ..Default::default()
-                    };
-                    // New building: Create a fresh Gm
-                    let mut gm = Gm::new(
-                        Mesh::new(&context, &building_cpu),
-                        PhysicalMaterial::new_opaque(&context, &mat),
-                    );
-                    gm.set_transformation(Mat4::from_translation(Vec3::new(build_pos.x, 0.4, build_pos.z)) 
-                        * Mat4::from_nonuniform_scale(0.5, 0.4, 0.5));
-                    
-                    // dynamic_buildings.push(Building { gm, pos: build_pos, level: 0 });
-                    dynamic_buildings.push(Building { gms: vec![gm], pos: build_pos, level: 0 });
+            }
+
+            // ── Tick ──────────────────────────────────────────────────────────
+            player.tick(dt);
+            yumon.tick(dt, player.pos);
+
+            // ── Handle orbit waypoint advancement ─────────────────────────────
+            // When GetHelp and the Yumon arrives at its orbit waypoint, pick next.
+            if yumon.action == Action::GetHelp {
+                let diff = yumon.target - yumon.pos;
+                if diff.magnitude() < ARRIVE_THRESH {
+                    if let Some(ref mut orb) = yumon.orbit {
+                        let wp = orb.next_waypoint();
+                        yumon.set_walk_toward(wp);
+                    }
                 }
             }
-        }
 
-        // Schedule autonomous actions
-        for y in yumons.iter_mut() {
-            if !y.waiting_for_brain && Instant::now() >= y.next_action_at {
-                y.waiting_for_brain = true;
-                let prompt = y.build_prompt(&dynamic_buildings);
-                let _ = tx_prompt.send(WorldPrompt {
-                    yumon_id:  y.id,
-                    prompt,
-                    // emote_idx: y.emote_idx,
-                    world_ctx: WorldContext::default(),
-                });
+            // ── Camera ────────────────────────────────────────────────────────
+            camera.set_viewport(frame_input.viewport);
+
+            // Separate orbit events from click events so we can do ground pick.
+            let mut left_click: Option<PixelPoint> = None;
+            for event in &frame_input.events {
+                match event {
+                    Event::MousePress { button: MouseButton::Left, position, .. } => {
+                        left_click = Some(*position); // PhysicalPoint directly
+                    }
+                    _ => {}
+                }
             }
-        }
+            orbit_ctrl.handle_events(&mut camera, &mut frame_input.events);
 
-        // Tick world state
-        for y in yumons.iter_mut() { y.tick(dt); }
-
-        // Camera
-        camera.set_viewport(frame_input.viewport);
-        orbit.handle_events(&mut camera, &mut frame_input.events);
-
-        // Update fallback sphere transforms
-        for (i, y) in yumons.iter().enumerate() {
-            if gpu_models[i].is_none() {
-                fallback_spheres[i].set_transformation(y.world_transform(t));
+            // Ground click — after orbit handled (orbit consumes drag, not click).
+            // if let Some(pos) = left_click {
+            //     if let Some(world_pt) = ray_ground_intersect(
+            // &camera, pos, frame_input.viewport,
+                // ) {
+            if let Some(pixel) = left_click {
+                if let Some(world_pt) = ray_ground_intersect(&camera, pixel) {
+                    match click_mode {
+                        ClickMode::MovePlayer => {
+                            player.target = Player::clamp_arena(world_pt);
+                        }
+                        ClickMode::SetDestination => {
+                            dest_pos = world_pt;
+                            dest_marker.set_transformation(
+                                Mat4::from_translation(
+                                    Vec3::new(dest_pos.x, 0.03, dest_pos.z),
+                                )
+                                    * Mat4::from_nonuniform_scale(0.4, 0.04, 0.4),
+                            );
+                        }
+                    }
+                }
             }
-        }
 
-        
+            // ── Update transforms ─────────────────────────────────────────────
+            // Player cylinder: y scale = 0.5 height, centred at y=0.5
+            player_gm.set_transformation(
+                Mat4::from_translation(Vec3::new(player.pos.x, 0.5, player.pos.z))
+                    * Mat4::from_nonuniform_scale(0.25, 0.5, 0.25),
+            );
 
-        // egui panel
-        gui.update(
-            &mut frame_input.events,
-            frame_input.accumulated_time,
-            frame_input.viewport,
-            frame_input.device_pixel_ratio,
-            |ctx| {
-                SidePanel::right("yumon_panel")
-                    .min_width(240.0)
-                    .resizable(false)
-                    .show(ctx, |ui| {
-                        ui.add_space(6.0);
-                        ui.heading("🌿 Yumon World");
-                        ui.separator();
+            let yumon_xform = yumon.world_transform(t);
+            if gpu_model.is_none() {
+                fallback_sphere.set_transformation(yumon_xform);
+            }
 
-                        ui.add_space(4.0);
+            // ── egui panel ────────────────────────────────────────────────────
+            gui.update(
+                &mut frame_input.events,
+                frame_input.accumulated_time,
+                frame_input.viewport,
+                frame_input.device_pixel_ratio,
+                |ctx| {
+                    SidePanel::right("yumon_panel")
+                        .min_width(260.0)
+                        .resizable(false)
+                        .show(ctx, |ui| {
+                            ui.add_space(6.0);
+                            ui.heading("🌿 Yumon World");
+                            ui.separator();
 
-                        for y in &mut yumons {
-                            let waiting_str = if y.waiting_for_brain { "  ⏳" } else { "" };
-                            // let emote = EMOTE_NAMES.get(y.emote_idx).copied().unwrap_or("");
+                            // ── Click mode toggle ──────────────────────────────
+                            ui.add_space(4.0);
+                            ui.label(RichText::new("Click mode").size(11.0).color(Color32::from_gray(140)));
+                            ui.horizontal(|ui| {
+                                ui.radio_value(
+                                    &mut click_mode,
+                                    ClickMode::MovePlayer,
+                                    "🚶 Move player",
+                                );
+                                ui.radio_value(
+                                    &mut click_mode,
+                                    ClickMode::SetDestination,
+                                    "📍 Set destination",
+                                );
+                            });
+
+                            ui.separator();
+
+                            // ── Yumon panel ────────────────────────────────────
+                            let waiting_str = if yumon.waiting_for_brain { "  ⏳" } else { "" };
+                            let timer_str   = format!("  {:.1}s", yumon.interval_timer.max(0.0));
                             let header = format!(
-                                "{} {}  {}",
-                                action_icon(y.action),
-                                YUMON_NAMES[y.id],
-                                // emote,
+                                "{} Yumon  {}{}",
+                                action_icon(yumon.action),
                                 waiting_str,
+                                timer_str,
                             );
 
                             CollapsingHeader::new(header)
                                 .default_open(true)
                                 .show(ui, |ui| {
-                                    if !y.speech.is_empty() {
-                                        let alpha = ((y.speech_timer / BUBBLE_TTL) * 255.0)
+                                    // Speech bubble
+                                    if !yumon.speech.is_empty() {
+                                        let alpha = ((yumon.speech_timer / BUBBLE_TTL) * 255.0)
                                             .clamp(0.0, 255.0) as u8;
                                         ui.colored_label(
                                             Color32::from_rgba_unmultiplied(230, 225, 170, alpha),
-                                            format!("\"{}\"", y.speech),
+                                            format!("\"{}\"", yumon.speech),
                                         );
                                         ui.add_space(2.0);
                                     }
 
-                                    for entry in y.log.iter().rev().take(5) {
+                                    // Log
+                                    for entry in yumon.log.iter().rev().take(5) {
                                         ui.label(
                                             RichText::new(entry)
                                                 .size(11.0)
@@ -833,92 +782,109 @@ fn main() {
                                         );
                                     }
 
+                                    ui.add_space(4.0);
+                                    ui.separator();
+
+                                    // Command field (persists)
+                                    ui.label(
+                                        RichText::new("Command (persists)")
+                                            .size(11.0)
+                                            .color(Color32::from_gray(140)),
+                                    );
                                     ui.horizontal(|ui| {
-                                        ui.add(egui::TextEdit::singleline(&mut ui_inputs[y.id])
-                                            .hint_text("Announcement..."));
-                                        
-                                        if ui.button("Send").clicked() {
-                                            // Find the actual yumon in the vec and set the message
-                                            y.pending_announcement = Some(ui_inputs[y.id].clone());
-                                            ui_inputs[y.id].clear();
-                                            
-                                            // Optional: Force the brain to trigger immediately
-                                            y.next_action_at = std::time::Instant::now();
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut ui_command)
+                                                .hint_text("e.g. follow me"),
+                                        );
+                                        if ui.button("Set").clicked() && !ui_command.is_empty() {
+                                            yumon.current_command = ui_command.clone();
+                                            yumon.push_log(
+                                                format!("[CMD] {}", yumon.current_command),
+                                            );
+                                            // Trigger brain immediately on new command.
+                                            yumon.interval_timer    = 0.0;
+                                        }
+                                    });
+                                    if !yumon.current_command.is_empty() {
+                                        ui.label(
+                                            RichText::new(
+                                                format!("▶ {}", yumon.current_command),
+                                            )
+                                            .size(11.0)
+                                            .color(Color32::from_rgb(130, 200, 130)),
+                                        );
+                                    }
+
+                                    ui.add_space(4.0);
+
+                                    // Message field (one-shot)
+                                    ui.label(
+                                        RichText::new("Message (one-shot)")
+                                            .size(11.0)
+                                            .color(Color32::from_gray(140)),
+                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut ui_message)
+                                                .hint_text("e.g. hurry up!"),
+                                        );
+                                        if ui.button("Send").clicked() && !ui_message.is_empty() {
+                                            yumon.pending_message = ui_message.clone();
+                                            ui_message.clear();
+                                            // Trigger brain immediately for one-shot message.
+                                            yumon.interval_timer = 0.0;
                                         }
                                     });
                                 });
 
-                            ui.add_space(6.0);
-                        }
-
-                        ui.with_layout(
-                            egui::Layout::bottom_up(egui::Align::LEFT),
-                            |ui| {
-                                ui.separator();
-                                ui.label(
-                                    RichText::new("drag: orbit  •  scroll: zoom  •  right-drag: pan")
+                            ui.with_layout(
+                                egui::Layout::bottom_up(egui::Align::LEFT),
+                                |ui| {
+                                    ui.separator();
+                                    ui.label(
+                                        RichText::new(
+                                            "drag: orbit  •  scroll: zoom  •  right-drag: pan",
+                                        )
                                         .size(10.0)
                                         .color(Color32::from_gray(100)),
-                                );
-                            },
-                        );
-                    });
-            },
-        );
+                                    );
+                                },
+                            );
+                        });
+                },
+            );
 
-        // ── Draw ─────────────────────────────────────────────────────────────
-        let lights: [&dyn Light; 2] = [&ambient, &directional];
-        let screen = frame_input.screen();
-        screen.clear(ClearState::color_and_depth(0.10, 0.12, 0.15, 1.0, 1.0));
+            // ── Draw ──────────────────────────────────────────────────────────
+            let lights: [&dyn Light; 2] = [&ambient, &directional];
+            let screen = frame_input.screen();
+            screen.clear(ClearState::color_and_depth(0.10, 0.12, 0.15, 1.0, 1.0));
 
-        // Floor + walls
-        screen.render(&camera, [&floor as &dyn Object], &lights);
-        for w in &walls {
-            screen.render(&camera, [w as &dyn Object], &lights);
-        }
-
-        // Central building
-        screen.render(&camera, [&central_building as &dyn Object], &lights);
-
-        // for b in &dynamic_buildings {
-        //     screen.render(&camera, [&b.gm as &dyn Object], &lights);
-        // }
-
-        for b in &dynamic_buildings {
-            for gm in &b.gms {
-                screen.render(&camera, [gm as &dyn Object], &lights);
+            screen.render(&camera, [&floor as &dyn Object], &lights);
+            for w in &walls {
+                screen.render(&camera, [w as &dyn Object], &lights);
             }
-        }
+            screen.render(&camera, [&central_building as &dyn Object], &lights);
+            for r in &resource_nodes {
+                screen.render(&camera, [r as &dyn Object], &lights);
+            }
+            screen.render(&camera, [&home_marker    as &dyn Object], &lights);
+            screen.render(&camera, [&dest_marker    as &dyn Object], &lights);
+            screen.render(&camera, [&player_gm      as &dyn Object], &lights);
 
-        // Resource nodes
-        for r in &resource_nodes {
-            screen.render(&camera, [r as &dyn Object], &lights);
-        }
-
-        // Obstacles
-        for o in &obstacles {
-            screen.render(&camera, [o as &dyn Object], &lights);
-        }
-
-        // Yumon bodies
-        for (i, y) in yumons.iter().enumerate() {
-            let xform = y.world_transform(t);
-            if let Some(ref mut model) = gpu_models[i] {
+            // Yumon body
+            if let Some(ref mut model) = gpu_model {
                 for primitive in model.iter_mut() {
                     let original = primitive.transformation();
-                    primitive.set_transformation(xform * original);
+                    primitive.set_transformation(yumon_xform * original);
                     screen.render(&camera, [primitive as &dyn Object], &lights);
                     primitive.set_transformation(original);
                 }
             } else {
-                screen.render(&camera, [&fallback_spheres[i] as &dyn Object], &lights);
+                screen.render(&camera, [&fallback_sphere as &dyn Object], &lights);
             }
-        }
 
-        // egui on top
-        screen.write(|| gui.render()).unwrap();
-
-        FrameOutput::default()
-    });
-}
+            screen.write(|| gui.render()).unwrap();
+            FrameOutput::default()
+        });
+    }
 }

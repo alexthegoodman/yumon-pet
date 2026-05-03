@@ -695,7 +695,7 @@ pub fn load_txt_sentences(path: &str) -> Result<Vec<String>> {
         let trimmed = line.trim();
 
         for sent in trimmed.split(".") {
-            if is_good_sentence(&sent) && sent.len() > 30 { // have a nice sensible minimum length
+            if is_good_sentence(&sent) && sent.len() > 15 { // have a nice sensible minimum length
                 sentences.push(sent.to_string());
             }
         }
