@@ -1,6 +1,7 @@
 #![allow(warnings)]
 
 pub mod model;
+pub mod decoder_model;
 pub mod wiki;
 pub mod train;
 pub mod tokenizer;

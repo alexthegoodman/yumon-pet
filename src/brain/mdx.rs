@@ -191,7 +191,7 @@ pub fn load_csv_bible(bible_path: &str) -> Result<Vec<String>> {
         let bk = record.get(1).unwrap_or("").trim().to_string();
         let verse = record.get(4).unwrap_or("").trim().to_string();
 
-        if (bk == "20") { // proverbs only right now
+        // if (bk == "20") { // proverbs only right now
             if verse.is_empty() {
                 continue;
             }
@@ -212,7 +212,7 @@ pub fn load_csv_bible(bible_path: &str) -> Result<Vec<String>> {
                     break;
                 }
             }
-        }
+        // }
     }
 
     if !buffer.is_empty() {

@@ -15,6 +15,81 @@ use burn::backend::wgpu::{WgpuDevice, WgpuRuntime};
 
 use crate::brain::{flash_attn::bridge_ops::{launch_forward, read_f32, read_f32_async}, model::{MLP, MLPConfig, RMSNorm, RMSNormConfig}};
 
+// ── TransformerBlock ──────────────────────────────────────────────────────────
+
+#[derive(Config, Debug)]
+pub struct TransformerBlockConfig {
+    pub d_model:  usize,
+    pub d_hidden: usize,
+    pub n_heads:  usize,
+    #[config(default = 64)]
+    pub block_q:  usize,
+    #[config(default = 64)]
+    pub block_k:  usize,
+}
+ 
+impl TransformerBlockConfig {
+    pub fn init<B: Backend<Device = WgpuDevice>>(&self, device: &B::Device) -> TransformerBlock<B> {
+        TransformerBlock {
+            attn_norm: RMSNormConfig::new(self.d_model).init(device),
+            attn:      SelfAttentionConfig::new(self.d_model, self.n_heads)
+                           .with_block_q(self.block_q)
+                           .with_block_k(self.block_k)
+                           .init(device),
+            mlp_norm:  RMSNormConfig::new(self.d_model).init(device),
+            mlp:       MLPConfig::new(self.d_model, self.d_hidden).init(device),
+        }
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct TransformerBlock<B: Backend<Device = WgpuDevice>> {
+    pub attn_norm: RMSNorm<B>,
+    pub attn:      SelfAttention<B>,
+    pub mlp_norm:  RMSNorm<B>,
+    pub mlp:       MLP<B>,
+}
+
+impl<B: Backend<Device = WgpuDevice>> TransformerBlock<B> {
+    pub fn forward(
+        &self,
+        x:           Tensor<B, 3>,
+        rope:        &RotaryEncoding<B>,
+        causal_mask: Option<Tensor<B, 2>>,
+        pad_mask:    Option<Tensor<B, 2, Bool>>,
+    ) -> Tensor<B, 3> {
+        let x_device = x.device();
+        let x = x.clone()
+            + self.attn.forward(
+                self.attn_norm.forward(x),
+                rope,
+                causal_mask,
+                pad_mask,
+                &x_device,
+            );
+        x.clone() + self.mlp.forward(self.mlp_norm.forward(x))
+    }
+
+    pub async fn forward_async(
+        &self,
+        x:           Tensor<B, 3>,
+        rope:        &RotaryEncoding<B>,
+        causal_mask: Option<Tensor<B, 2>>,
+        pad_mask:    Option<Tensor<B, 2, Bool>>,
+    ) -> Tensor<B, 3> {
+        let x_device = x.device();
+        let x = x.clone()
+            + self.attn.forward_async(
+                self.attn_norm.forward(x),
+                rope,
+                causal_mask,
+                pad_mask,
+                &x_device,
+            ).await;
+        x.clone() + self.mlp.forward(self.mlp_norm.forward(x))
+    }
+}
+
 // ── Kernel bridge ─────────────────────────────────────────────────────────────
 //
 // Takes post-RoPE Q, K, V as Burn tensors [batch, heads, seq_q, d_k],

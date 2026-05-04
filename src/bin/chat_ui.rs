@@ -20,7 +20,7 @@ use rand::Rng;
 
 use yumon_pet::{
     brain::{
-        model::{GenerationResult, YUMON_SCHEMA, YumonBrain}, samples::{TrainingStage, WorldContext}, train::MAX_SEQ_LEN,
+        decoder_model::YumonDecBrain, model::{GenerationResult, YUMON_SCHEMA, YumonBrain}, samples::{TrainingStage, WorldContext}, train::MAX_SEQ_LEN
     },
     vision::{self, CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES},
 };
@@ -129,7 +129,8 @@ fn main() -> Result<()> {
 
     let device = app.device.clone();
     thread::spawn(move || {
-        let res = YumonBrain::<Wgpu>::load(&brain_cp, &device);
+        // let res = YumonBrain::<Wgpu>::load(&brain_cp, &device);
+        let res = YumonDecBrain::<Wgpu>::load(&brain_cp, &device);
         let (brain_model, tokenizer, config) = match res {
             Ok(m) => {
                 tx_model.send(Message::System("Models loaded!".into())).unwrap();
@@ -266,7 +267,7 @@ fn main() -> Result<()> {
                         let human = human.clone();
                         let bot   = r.reply.clone();
                         app.recent_memories.push((human, bot));
-                        if app.recent_memories.len() > 3 {
+                        if app.recent_memories.len() > 2 {
                             app.recent_memories.remove(0);
                         }
                     }
