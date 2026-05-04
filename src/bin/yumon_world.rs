@@ -64,7 +64,7 @@ const MODEL_PATH: &str    = "data/models/animal-parrot.glb";
 // ─── Click mode ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum ClickMode { MovePlayer, SetDestination }
+enum ClickMode { Camera, MovePlayer, SetDestination }
 
 // ─── Anim state ───────────────────────────────────────────────────────────────
 
@@ -622,7 +622,7 @@ fn main() {
 
         // ── UI state ──────────────────────────────────────────────────────────
         let mut gui           = GUI::new(&context);
-        let mut click_mode    = ClickMode::MovePlayer;
+        let mut click_mode    = ClickMode::Camera;
         let mut ui_command    = String::new(); // editing buffer for command field
         let mut ui_message    = String::new(); // editing buffer for message field
         let mut last_frame    = Instant::now();
@@ -665,64 +665,16 @@ fn main() {
                 }
             }
 
-            // ── Camera ────────────────────────────────────────────────────────
-            camera.set_viewport(frame_input.viewport);
-
-            // Separate orbit events from click events so we can do ground pick.
-            let mut left_click: Option<PixelPoint> = None;
-            for event in &frame_input.events {
-                match event {
-                    Event::MousePress { button: MouseButton::Left, position, .. } => {
-                        left_click = Some(*position); // PhysicalPoint directly
-                    }
-                    _ => {}
-                }
-            }
-            orbit_ctrl.handle_events(&mut camera, &mut frame_input.events);
-
-            // Ground click — after orbit handled (orbit consumes drag, not click).
-            // if let Some(pos) = left_click {
-            //     if let Some(world_pt) = ray_ground_intersect(
-            // &camera, pos, frame_input.viewport,
-                // ) {
-            if let Some(pixel) = left_click {
-                if let Some(world_pt) = ray_ground_intersect(&camera, pixel) {
-                    match click_mode {
-                        ClickMode::MovePlayer => {
-                            player.target = Player::clamp_arena(world_pt);
-                        }
-                        ClickMode::SetDestination => {
-                            dest_pos = world_pt;
-                            dest_marker.set_transformation(
-                                Mat4::from_translation(
-                                    Vec3::new(dest_pos.x, 0.03, dest_pos.z),
-                                )
-                                    * Mat4::from_nonuniform_scale(0.4, 0.04, 0.4),
-                            );
-                        }
-                    }
-                }
-            }
-
-            // ── Update transforms ─────────────────────────────────────────────
-            // Player cylinder: y scale = 0.5 height, centred at y=0.5
-            player_gm.set_transformation(
-                Mat4::from_translation(Vec3::new(player.pos.x, 0.5, player.pos.z))
-                    * Mat4::from_nonuniform_scale(0.25, 0.5, 0.25),
-            );
-
-            let yumon_xform = yumon.world_transform(t);
-            if gpu_model.is_none() {
-                fallback_sphere.set_transformation(yumon_xform);
-            }
-
             // ── egui panel ────────────────────────────────────────────────────
+            let mut gui_consumed = false;
             gui.update(
                 &mut frame_input.events,
                 frame_input.accumulated_time,
                 frame_input.viewport,
                 frame_input.device_pixel_ratio,
                 |ctx| {
+                    gui_consumed = ctx.wants_pointer_input();
+
                     SidePanel::right("yumon_panel")
                         .min_width(260.0)
                         .resizable(false)
@@ -735,6 +687,11 @@ fn main() {
                             ui.add_space(4.0);
                             ui.label(RichText::new("Click mode").size(11.0).color(Color32::from_gray(140)));
                             ui.horizontal(|ui| {
+                                ui.radio_value(
+                                    &mut click_mode,
+                                    ClickMode::Camera,
+                                    "🎥 Camera",
+                                );
                                 ui.radio_value(
                                     &mut click_mode,
                                     ClickMode::MovePlayer,
@@ -853,6 +810,59 @@ fn main() {
                         });
                 },
             );
+
+            // ── Camera ────────────────────────────────────────────────────────
+            camera.set_viewport(frame_input.viewport);
+
+            if !gui_consumed {
+                // Separate orbit events from click events so we can do ground pick.
+                let mut left_click: Option<PixelPoint> = None;
+                for event in &frame_input.events {
+                    match event {
+                        Event::MousePress {
+                            button: MouseButton::Left,
+                            position,
+                            ..
+                        } => {
+                            left_click = Some(*position); // PhysicalPoint directly
+                        }
+                        _ => {}
+                    }
+                }
+                orbit_ctrl.handle_events(&mut camera, &mut frame_input.events);
+
+                // Ground click — after orbit handled (orbit consumes drag, not click).
+                if let Some(pixel) = left_click {
+                    if let Some(world_pt) = ray_ground_intersect(&camera, pixel) {
+                        match click_mode {
+                            ClickMode::Camera => {} // No-op: purposeful decision
+                            ClickMode::MovePlayer => {
+                                player.target = Player::clamp_arena(world_pt);
+                            }
+                            ClickMode::SetDestination => {
+                                dest_pos = world_pt;
+                                dest_marker.set_transformation(
+                                    Mat4::from_translation(Vec3::new(
+                                        dest_pos.x, 0.03, dest_pos.z,
+                                    )) * Mat4::from_nonuniform_scale(0.4, 0.04, 0.4),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Update transforms ─────────────────────────────────────────────
+            // Player cylinder: y scale = 0.5 height, centred at y=0.5
+            player_gm.set_transformation(
+                Mat4::from_translation(Vec3::new(player.pos.x, 0.5, player.pos.z))
+                    * Mat4::from_nonuniform_scale(0.25, 0.5, 0.25),
+            );
+
+            let yumon_xform = yumon.world_transform(t);
+            if gpu_model.is_none() {
+                fallback_sphere.set_transformation(yumon_xform);
+            }
 
             // ── Draw ──────────────────────────────────────────────────────────
             let lights: [&dyn Light; 2] = [&ambient, &directional];
