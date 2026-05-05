@@ -117,7 +117,7 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // let brain_cp = "checkpoints/brain/1024h_8l_16a_180len".to_string();
-    let brain_cp = "checkpoints/brain/128h_2l_2a_220len_6e".to_string();
+    let brain_cp = "checkpoints/brain/128h_2l_2a_64len_6e".to_string();
     // let brain_cp = "checkpoints/brain/384h_4l_6a_160len".to_string();
     // let brain_cp = "checkpoints/brain/256h_2l_4a_180len".to_string();
     // let brain_cp = "checkpoints/brain/128h_2l_2a_180len".to_string();
@@ -129,8 +129,8 @@ fn main() -> Result<()> {
 
     let device = app.device.clone();
     thread::spawn(move || {
-        // let res = YumonBrain::<Wgpu>::load(&brain_cp, &device);
-        let res = YumonDecBrain::<Wgpu>::load(&brain_cp, &device);
+        let res = YumonBrain::<Wgpu>::load(&brain_cp, &device);
+        // let res = YumonDecBrain::<Wgpu>::load(&brain_cp, &device);
         let (brain_model, tokenizer, config) = match res {
             Ok(m) => {
                 tx_model.send(Message::System("Models loaded!".into())).unwrap();
@@ -267,7 +267,8 @@ fn main() -> Result<()> {
                         let human = human.clone();
                         let bot   = r.reply.clone();
                         app.recent_memories.push((human, bot));
-                        if app.recent_memories.len() > 2 {
+                        // if app.recent_memories.len() > 2 {
+                        if app.recent_memories.len() > 1 {
                             app.recent_memories.remove(0);
                         }
                     }

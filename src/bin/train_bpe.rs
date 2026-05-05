@@ -220,7 +220,7 @@ pub fn main() {
         .add("archive/arena_extract.txt",   FileKind::Chats, Some(200_000))
         // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
         .add("data/bible_bbe.csv", FileKind::BibleCsv, Some(200_000))
-        .add("data/creative_stories.txt", FileKind::Txt, Some(200_000))
+        // .add("data/creative_stories.txt", FileKind::Txt, Some(200_000))
         .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(200_000))
         .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(200_000))
         // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(50_000))

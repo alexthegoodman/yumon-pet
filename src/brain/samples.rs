@@ -964,10 +964,15 @@ pub fn prepare_paired_samples_split(
             .chain(input_encoded.iter().cloned())
             .collect();
 
-        if enc_input.len() > max_seq_len { continue; }
+        // if enc_input.len() > max_seq_len { continue; }
+        // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
+        // if enc_input.len() + target_encoded.len() < max_seq_len / 4 { continue; }
 
-        if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
-        if enc_input.len() + target_encoded.len() < max_seq_len / 8 { continue; }
+        if target_encoded.len() < max_seq_len / 2 { continue; }
+        if enc_input.len() < max_seq_len / 4 { continue; }
+        if target_encoded.len() > max_seq_len { continue; }
+        if enc_input.len() > max_seq_len { continue; }
+        // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
 
         let pad = |mut v: Vec<usize>| -> Vec<usize> {
             v.resize(max_seq_len, PAD_TOKEN);
@@ -1153,10 +1158,18 @@ pub fn prepare_paired_samples_split_sep(
             .chain(input_encoded.iter().cloned())
             .collect();
 
-        if enc_input.len() > max_seq_len { continue; }
+        // if enc_input.len() > max_seq_len { continue; }
 
-        if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
-        if enc_input.len() + target_encoded.len() < max_seq_len / 4 { continue; }
+        // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
+        // if enc_input.len() + target_encoded.len() < max_seq_len / 4 { continue; }
+
+        // if target_encoded.len() < max_seq_len / 4 { continue; }
+        // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
+
+        if target_encoded.len() < max_seq_len / 2 { continue; }
+        if enc_input.len() < max_seq_len / 4 { continue; }
+        if target_encoded.len() > max_seq_len { continue; }
+        if enc_input.len() > max_seq_len { continue; }
 
         let pad = |mut v: Vec<usize>| -> Vec<usize> {
             v.resize(max_seq_len, PAD_TOKEN);
@@ -1321,9 +1334,15 @@ pub fn prepare_paired_samples_chats(
                 .chain(input_encoded.iter().cloned())
                 .collect();
 
-            if enc_input.len() > max_seq_len { continue; }
-            if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
+            // if enc_input.len() > max_seq_len { continue; }
+            // if target_encoded.len() < max_seq_len / 4 { continue; }
+            // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
             // if enc_input.len() + target_encoded.len() < max_seq_len / 4 { continue; } // on Language stage, you want the short ones
+
+            if target_encoded.len() < max_seq_len / 2 { continue; }
+            if enc_input.len() < max_seq_len / 4 { continue; }
+            if target_encoded.len() > max_seq_len { continue; }
+            if enc_input.len() > max_seq_len { continue; }
 
             let pad = |mut v: Vec<usize>| -> Vec<usize> {
                 v.resize(max_seq_len, PAD_TOKEN);
