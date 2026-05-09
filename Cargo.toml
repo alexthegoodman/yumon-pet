@@ -7,6 +7,10 @@ edition = "2024"
 name = "train_bpe"
 path = "src/bin/train_bpe.rs"
 
+[[bin]]
+name = "train_ui"
+path = "src/bin/train_ui.rs"
+
 [dependencies]
 uuid = { version = "1.8.0", features = ["v4", "js"] }
 serde = { version = "1", features = ["derive"] }

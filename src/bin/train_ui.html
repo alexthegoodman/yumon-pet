@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Yumon Trainer</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .container {
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            gap: 20px;
+            flex-grow: 1;
+            overflow: hidden;
+        }
+        .sidebar {
+            background: #252526;
+            padding: 15px;
+            border-radius: 8px;
+            overflow-y: auto;
+        }
+        .main {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow: hidden;
+        }
+        .charts {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            flex-grow: 1;
+        }
+        .chart-container {
+            background: #252526;
+            padding: 10px;
+            border-radius: 8px;
+            position: relative;
+        }
+        h2 { margin-top: 0; font-size: 1.2em; color: #569cd6; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-size: 0.9em; }
+        input, select {
+            width: 100%;
+            background: #3c3c3c;
+            border: 1px solid #555;
+            color: white;
+            padding: 5px;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 10px;
+            background: #0e639c;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover { background: #1177bb; }
+        button.stop { background: #a1260d; }
+        button.stop:hover { background: #c72e11; }
+        .status-bar {
+            background: #007acc;
+            color: white;
+            padding: 5px 15px;
+            font-size: 0.9em;
+            display: flex;
+            justify-content: space-between;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+        .log {
+            background: #1e1e1e;
+            border: 1px solid #333;
+            padding: 10px;
+            font-family: 'Consolas', monospace;
+            font-size: 0.85em;
+            height: 150px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <div class="status-bar" id="statusBar">
+        <span>Ready</span>
+        <span id="epochBatch">Epoch: 0/0 | Batch: 0/0</span>
+    </div>
+
+    <div class="container">
+        <div class="sidebar">
+            <h2>Hyperparameters</h2>
+            <div class="form-group">
+                <label>Model Name</label>
+                <input type="text" id="modelName" value="ui_trained_model">
+            </div>
+            <div class="form-group">
+                <label>Embed Dim</label>
+                <input type="number" id="embedDim" value="128">
+            </div>
+            <div class="form-group">
+                <label>N Layers</label>
+                <input type="number" id="nLayers" value="2">
+            </div>
+            <div class="form-group">
+                <label>Attn Heads</label>
+                <input type="number" id="attnHeads" value="2">
+            </div>
+            <div class="form-group">
+                <label>FF Dim</label>
+                <input type="number" id="ffDim" value="512">
+            </div>
+            <div class="form-group">
+                <label>Max Seq Len</label>
+                <input type="number" id="maxSeqLen" value="64">
+            </div>
+            <hr>
+            <h3>Stage Config</h3>
+            <div class="form-group">
+                <label>Epochs</label>
+                <input type="number" id="epochs" value="10">
+            </div>
+            <div class="form-group">
+                <label>Batch Size</label>
+                <input type="number" id="batchSize" value="32">
+            </div>
+            <div class="form-group">
+                <label>Learning Rate</label>
+                <input type="text" id="lr" value="1e-3">
+            </div>
+            
+            <button id="startBtn">Start Training</button>
+            <button id="stopBtn" class="stop" style="display:none;">Stop Training</button>
+        </div>
+
+        <div class="main">
+            <div class="charts">
+                <div class="chart-container">
+                    <canvas id="lossChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <canvas id="entropyChart"></canvas>
+                </div>
+            </div>
+            <div class="log" id="log">Welcome to Yumon Trainer UI.
+Waiting for instructions...</div>
+        </div>
+    </div>
+
+    <script>
+        const lossCtx = document.getElementById('lossChart').getContext('2d');
+        const entropyCtx = document.getElementById('entropyChart').getContext('2d');
+
+        const chartConfig = (label, color) => ({
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: label,
+                    data: [],
+                    borderColor: color,
+                    tension: 0.1,
+                    pointRadius: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: { display: true, grid: { color: '#333' } },
+                    y: { display: true, grid: { color: '#333' } }
+                },
+                plugins: {
+                    legend: { labels: { color: '#d4d4d4' } }
+                }
+            }
+        });
+
+        const lossChart = new Chart(lossCtx, chartConfig('Loss', '#569cd6'));
+        const entropyChart = new Chart(entropyCtx, chartConfig('Entropy', '#c586c0'));
+
+        const log = (msg) => {
+            const el = document.getElementById('log');
+            el.textContent += '\n' + msg;
+            el.scrollTop = el.scrollHeight;
+        };
+
+        const updateStatus = (status, epoch, totalEpochs, batch, totalBatches) => {
+            document.getElementById('statusBar').firstElementChild.textContent = status;
+            document.getElementById('epochBatch').textContent = `Epoch: ${epoch}/${totalEpochs} | Batch: ${batch}/${totalBatches}`;
+        };
+
+        document.getElementById('startBtn').onclick = () => {
+            const config = {
+                type: 'START_TRAINING',
+                name: document.getElementById('modelName').value,
+                embed_dim: parseInt(document.getElementById('embedDim').value),
+                n_layers: parseInt(document.getElementById('nLayers').value),
+                attn_heads: parseInt(document.getElementById('attnHeads').value),
+                ff_dim: parseInt(document.getElementById('ffDim').value),
+                max_seq_len: parseInt(document.getElementById('maxSeqLen').value),
+                epochs: parseInt(document.getElementById('epochs').value),
+                batch_size: parseInt(document.getElementById('batchSize').value),
+                lr: parseFloat(document.getElementById('lr').value),
+            };
+            window.ipc.postMessage(JSON.stringify(config));
+            document.getElementById('startBtn').style.display = 'none';
+            document.getElementById('stopBtn').style.display = 'block';
+            
+            // Clear charts
+            lossChart.data.labels = [];
+            lossChart.data.datasets[0].data = [];
+            lossChart.update();
+            entropyChart.data.labels = [];
+            entropyChart.data.datasets[0].data = [];
+            entropyChart.update();
+        };
+
+        document.getElementById('stopBtn').onclick = () => {
+            window.ipc.postMessage(JSON.stringify({ type: 'STOP_TRAINING' }));
+        };
+
+        window.__update_progress = (data) => {
+            // data: { step, loss, avg_loss, entropy, epoch, total_epochs, batch, total_batches }
+            lossChart.data.labels.push(data.step);
+            lossChart.data.datasets[0].data.push(data.loss);
+            
+            entropyChart.data.labels.push(data.step);
+            entropyChart.data.datasets[0].data.push(data.entropy);
+
+            // Limit points for performance
+            if (lossChart.data.labels.length > 200) {
+                lossChart.data.labels.shift();
+                lossChart.data.datasets[0].data.shift();
+                entropyChart.data.labels.shift();
+                entropyChart.data.datasets[0].data.shift();
+            }
+
+            lossChart.update('none');
+            entropyChart.update('none');
+
+            updateStatus('Training...', data.epoch, data.total_epochs, data.batch, data.total_batches);
+        };
+
+        window.__training_done = () => {
+            document.getElementById('startBtn').style.display = 'block';
+            document.getElementById('stopBtn').style.display = 'none';
+            updateStatus('Ready', 0, 0, 0, 0);
+            log('Training complete.');
+        };
+
+        window.__log = (msg) => log(msg);
+    </script>
+</body>
+</html>
