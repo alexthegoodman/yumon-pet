@@ -535,6 +535,7 @@ impl TextRenderer {
             Mesh::new(context, &CpuMesh::square()),
             ColorMaterial {
                 color: Srgba::WHITE,
+                is_transparent: true,
                 ..Default::default()
             },
         );
@@ -587,15 +588,35 @@ impl TextRenderer {
         if w == 0 || h == 0 { return; }
 
         let mut pixels = vec![[0u8; 4]; (w * h) as usize];
+        // for g in glyphs {
+        //     if let Some(q) = font.outline_glyph(g) {
+        //         let b = q.px_bounds();
+        //         q.draw(|x, y, v| {
+        //             let px = (x as f32 + b.min.x - min_x + 4.0) as u32;
+        //             let py = (y as f32 + b.min.y - min_y + 4.0) as u32;
+        //             if px < w && py < h {
+        //                 let i = (py * w + px) as usize;
+        //                 pixels[i] = [255, 255, 255, (v * 255.0) as u8];
+        //             }
+        //         });
+        //     }
+        // }
+
         for g in glyphs {
             if let Some(q) = font.outline_glyph(g) {
                 let b = q.px_bounds();
-                q.draw(|x, y, v| {
-                    let px = (x as f32 + b.min.x - min_x + 4.0) as u32;
-                    let py = (y as f32 + b.min.y - min_y + 4.0) as u32;
-                    if px < w && py < h {
-                        let i = (py * w + px) as usize;
-                        pixels[i] = [255, 255, 255, (v * 255.0) as u8];
+                // b.min is the top-left corner of this glyph in the canvas coordinate system
+                // x, y inside draw() are pixel offsets *within* that bounding box
+                q.draw(|gx, gy, v| {
+                    let px = (b.min.x - min_x + 4.0) as i32 + gx as i32;
+                    let py = (b.min.y - min_y + 4.0) as i32 + gy as i32;
+                    if px >= 0 && py >= 0 && (px as u32) < w && (py as u32) < h {
+                        let i = (py as u32 * w + px as u32) as usize;
+                        let alpha = (v * 255.0) as u8;
+                        // Blend to avoid overwriting with 0 if glyphs overlap
+                        if alpha > pixels[i][3] {
+                            pixels[i] = [255, 255, 255, alpha];
+                        }
                     }
                 });
             }
