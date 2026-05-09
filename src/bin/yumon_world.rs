@@ -527,21 +527,21 @@ fn ray_ground_intersect(camera: &Camera, pixel: PhysicalPoint) -> Option<Vec3> {
 // `ColorMaterial` override with a hand-rolled `FragmentShader`.
 
 /// GLSL fragment source for the water surface.
-/// Uniforms: uTimeRes (vec4: x=time, y=res.x, z=res.y, w=unused), uMouse (vec4: x=mx, y=my, zw=unused)
+/// Uniforms: uTimeRes (vec4: x=time, y=res.x, z=res.y, w=unused), uEye (vec3)
 const WATER_FRAG_GLSL: &str = r#"
 precision highp float;
 
 uniform vec4  uTimeRes;
-uniform vec4  uMouse;
+uniform vec3  uEye;
 
 in vec2 v_texcoord;   // [0..1] from vertex shader
+in vec3 v_world_pos;
 
 #define uTime             uTimeRes.x
 #define uResolution       uTimeRes.yz
 
 #define DRAG_MULT         0.38
 #define WATER_DEPTH       1.0
-#define CAMERA_HEIGHT     1.5
 #define ITERATIONS_RAYMARCH 12
 #define ITERATIONS_NORMAL   36
 
@@ -596,25 +596,6 @@ vec3 normal(vec2 pos, float e, float depth) {
     ));
 }
 
-mat3 rotAxisAngle(vec3 axis, float angle) {
-    float s = sin(angle), c = cos(angle), oc = 1.0 - c;
-    return mat3(
-        oc*axis.x*axis.x+c,       oc*axis.x*axis.y-axis.z*s, oc*axis.z*axis.x+axis.y*s,
-        oc*axis.x*axis.y+axis.z*s, oc*axis.y*axis.y+c,       oc*axis.y*axis.z-axis.x*s,
-        oc*axis.z*axis.x-axis.y*s, oc*axis.y*axis.z+axis.x*s, oc*axis.z*axis.z+c
-    );
-}
-
-vec3 getRay(vec2 fragCoord) {
-    vec2 nm = uMouse.xy / uResolution;
-    vec2 uv = ((fragCoord / uResolution) * 2.0 - 1.0) * vec2(uResolution.x / uResolution.y, 1.0);
-    vec3 proj = normalize(vec3(uv.x, uv.y, 1.5));
-    if (uResolution.x < 600.0) return proj;
-    return rotAxisAngle(vec3(0.0, -1.0, 0.0), 3.0 * ((nm.x + 0.5) * 2.0 - 1.0))
-         * rotAxisAngle(vec3(1.0,  0.0, 0.0), 0.5 + 1.5 * (((nm.y == 0.0 ? 0.27 : nm.y)) * 2.0 - 1.0))
-         * proj;
-}
-
 float intersectPlane(vec3 origin, vec3 direction, vec3 point, vec3 nrm) {
     return clamp(dot(point - origin, nrm) / dot(direction, nrm), -1.0, 9991999.0);
 }
@@ -654,14 +635,13 @@ vec3 aces_tonemap(vec3 color) {
 out vec4 fragColor;
 
 void main() {
-    vec2 fragCoord = v_texcoord * uResolution;
-    vec3 ray       = getRay(fragCoord);
+    vec3 ray = normalize(v_world_pos - uEye);
     if (ray.y >= 0.0) {
         vec3 C = getAtmosphere(ray) + getSun(ray);
         fragColor = vec4(aces_tonemap(C * 2.0), 0.85);
         return;
     }
-    vec3 origin = vec3(uTime * 0.2, CAMERA_HEIGHT, 1.0);
+    vec3 origin = uEye;
     float highPlaneHit = intersectPlane(origin, ray, vec3(0.0), vec3(0.0, 1.0, 0.0));
     float lowPlaneHit  = intersectPlane(origin, ray, vec3(0.0, -WATER_DEPTH, 0.0), vec3(0.0, 1.0, 0.0));
     vec3 highHitPos = origin + ray * highPlaneHit;
@@ -791,18 +771,12 @@ fn main() {
         //
         // Build a simple fullscreen quad VAO in world space (y=0, covers arena).
         let water_size = ARENA * 1.2;
-        // Using Vec3 and Vec2 explicitly so three-d knows the attribute dimensions.
+        // Using Vec3 explicitly so three-d knows the attribute dimensions.
         let water_positions: Vec<Vec3> = vec![
             Vec3::new(-water_size, 0.0, -water_size), // 0: TL
             Vec3::new( water_size, 0.0, -water_size), // 1: TR
             Vec3::new( water_size, 0.0,  water_size), // 2: BR
             Vec3::new(-water_size, 0.0,  water_size), // 3: BL
-        ];
-        let water_uvs: Vec<Vec2> = vec![
-            Vec2::new(0.0, 1.0), // 0: TL
-            Vec2::new(1.0, 1.0), // 1: TR
-            Vec2::new(1.0, 0.0), // 2: BR
-            Vec2::new(0.0, 0.0), // 3: BL
         ];
         // Counter-clockwise indices for an upward-facing quad.
         let water_indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
@@ -810,11 +784,10 @@ fn main() {
         // Upload to GPU using three-d's context helpers.
         let water_vert_glsl = r#"
             in vec3 a_position;
-            in vec2 a_uv;
-            out vec2 v_texcoord;
+            out vec3 v_world_pos;
             uniform mat4 viewProjection;
             void main() {
-                v_texcoord  = a_uv;
+                v_world_pos = a_position;
                 gl_Position = viewProjection * vec4(a_position, 1.0);
             }
         "#;
@@ -830,10 +803,6 @@ fn main() {
         let water_vbo_pos = VertexBuffer::new_with_data(
             &context,
             &water_positions,
-        );
-        let water_vbo_uv = VertexBuffer::new_with_data(
-            &context,
-            &water_uvs,
         );
         let water_ibo = ElementBuffer::new_with_data(
             &context,
@@ -1339,28 +1308,17 @@ fn main() {
                 let vp_mat = camera.projection() * camera.view();
 
                 water_program.use_uniform("viewProjection", vp_mat);
-                // Packing into vec4 to avoid alignment issues.
-                water_program.use_uniform("uTimeRes", Vec4::new(
-                    t as f32,
-                    vp.width as f32,
-                    vp.height as f32,
-                    0.0
-                ));
-                water_program.use_uniform("uMouse", Vec4::new(
-                    mouse_pos.0,
-                    mouse_pos.1,
-                    0.0,
-                    0.0
-                ));
+                // Just pass time in the x component, yzw unused.
+                water_program.use_uniform("uTimeRes", Vec4::new(t as f32 * 0.001, 0.0, 0.0, 0.0));
+                water_program.use_uniform("uEye", *camera.position());
 
-                // Bind position and UV buffers.
+                // Bind only the position buffer.
                 water_program.use_vertex_attribute("a_position", &water_vbo_pos);
-                water_program.use_vertex_attribute("a_uv", &water_vbo_uv);
 
                 water_program.draw_elements(
                     RenderStates {
                         blend: Blend::TRANSPARENCY,
-                        depth_test: DepthTest::Always,
+                        depth_test: DepthTest::LessOrEqual,
                         ..Default::default()
                     },
                     vp,
