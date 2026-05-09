@@ -527,15 +527,17 @@ fn ray_ground_intersect(camera: &Camera, pixel: PhysicalPoint) -> Option<Vec3> {
 // `ColorMaterial` override with a hand-rolled `FragmentShader`.
 
 /// GLSL fragment source for the water surface.
-/// Uniforms: uTime (float), uResolution (vec2), uMouse (vec2)
+/// Uniforms: uTimeRes (vec4: x=time, y=res.x, z=res.y, w=unused), uMouse (vec4: x=mx, y=my, zw=unused)
 const WATER_FRAG_GLSL: &str = r#"
 precision highp float;
 
-uniform float uTime;
-uniform vec2  uResolution;
-uniform vec2  uMouse;
+uniform vec4  uTimeRes;
+uniform vec4  uMouse;
 
 in vec2 v_texcoord;   // [0..1] from vertex shader
+
+#define uTime             uTimeRes.x
+#define uResolution       uTimeRes.yz
 
 #define DRAG_MULT         0.38
 #define WATER_DEPTH       1.0
@@ -604,7 +606,7 @@ mat3 rotAxisAngle(vec3 axis, float angle) {
 }
 
 vec3 getRay(vec2 fragCoord) {
-    vec2 nm = uMouse / uResolution;
+    vec2 nm = uMouse.xy / uResolution;
     vec2 uv = ((fragCoord / uResolution) * 2.0 - 1.0) * vec2(uResolution.x / uResolution.y, 1.0);
     vec3 proj = normalize(vec3(uv.x, uv.y, 1.5));
     if (uResolution.x < 600.0) return proj;
@@ -789,24 +791,23 @@ fn main() {
         //
         // Build a simple fullscreen quad VAO in world space (y=0, covers arena).
         let water_size = ARENA * 1.2;
-        // We'll use ColorMaterial + override the shader via `Program`.
-        // Instead, build vertex positions + upload via raw GL.
-        use three_d::context::{
-            Buffer, ARRAY_BUFFER, FLOAT, STATIC_DRAW, TRIANGLES,
-        };
-        let gl = context.clone();
-        let water_verts: [f32; 20] = [
-            // x,       y,  z,       u,    v
-            -water_size, 0.0, -water_size, 0.0, 1.0,
-             water_size, 0.0, -water_size, 1.0, 1.0,
-             water_size, 0.0,  water_size, 1.0, 0.0,
-            -water_size, 0.0,  water_size, 0.0, 0.0,
+        // Using Vec3 and Vec2 explicitly so three-d knows the attribute dimensions.
+        let water_positions: Vec<Vec3> = vec![
+            Vec3::new(-water_size, 0.0, -water_size), // 0: TL
+            Vec3::new( water_size, 0.0, -water_size), // 1: TR
+            Vec3::new( water_size, 0.0,  water_size), // 2: BR
+            Vec3::new(-water_size, 0.0,  water_size), // 3: BL
         ];
+        let water_uvs: Vec<Vec2> = vec![
+            Vec2::new(0.0, 1.0), // 0: TL
+            Vec2::new(1.0, 1.0), // 1: TR
+            Vec2::new(1.0, 0.0), // 2: BR
+            Vec2::new(0.0, 0.0), // 3: BL
+        ];
+        // Counter-clockwise indices for an upward-facing quad.
         let water_indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
 
         // Upload to GPU using three-d's context helpers.
-        // `three_d::context` re-exports `glow` (GL on Web) or platform GL.
-        // We use the `Program` struct that three_d provides for raw shaders.
         let water_vert_glsl = r#"
             in vec3 a_position;
             in vec2 a_uv;
@@ -818,8 +819,7 @@ fn main() {
             }
         "#;
 
-        // Build the raw shader Program (three-d wraps glow).
-        // three-d 0.16+ exposes `Program::from_source`.
+        // Build the raw shader Program.
         let water_program = Program::from_source(
             &context,
             water_vert_glsl,
@@ -827,10 +827,13 @@ fn main() {
         )
         .expect("Failed to compile water shader");
 
-        // Build VBO / IBO with three-d's VertexBuffer / ElementBuffer wrappers.
-        let water_vbo = VertexBuffer::new_with_data(
+        let water_vbo_pos = VertexBuffer::new_with_data(
             &context,
-            &water_verts.to_vec(),
+            &water_positions,
+        );
+        let water_vbo_uv = VertexBuffer::new_with_data(
+            &context,
+            &water_uvs,
         );
         let water_ibo = ElementBuffer::new_with_data(
             &context,
@@ -1336,19 +1339,28 @@ fn main() {
                 let vp_mat = camera.projection() * camera.view();
 
                 water_program.use_uniform("viewProjection", vp_mat);
-                water_program.use_uniform("uTime",       t as f32 * 0.001);
-                water_program.use_uniform("uResolution", Vec2::new(vp.width as f32, vp.height as f32));
-                water_program.use_uniform("uMouse",      Vec2::new(mouse_pos.0, mouse_pos.1));
+                // Packing into vec4 to avoid alignment issues.
+                water_program.use_uniform("uTimeRes", Vec4::new(
+                    t as f32,
+                    vp.width as f32,
+                    vp.height as f32,
+                    0.0
+                ));
+                water_program.use_uniform("uMouse", Vec4::new(
+                    mouse_pos.0,
+                    mouse_pos.1,
+                    0.0,
+                    0.0
+                ));
 
-                // Bind position (stride = 5 floats, offset 0, 3 components).
-                water_program.use_vertex_attribute("a_position", &water_vbo);
-                // Bind UV (stride = 5 floats, offset 3, 2 components).
-                water_program.use_vertex_attribute("a_uv", &water_vbo);
+                // Bind position and UV buffers.
+                water_program.use_vertex_attribute("a_position", &water_vbo_pos);
+                water_program.use_vertex_attribute("a_uv", &water_vbo_uv);
 
                 water_program.draw_elements(
                     RenderStates {
                         blend: Blend::TRANSPARENCY,
-                        depth_test: DepthTest::Less,
+                        depth_test: DepthTest::Always,
                         ..Default::default()
                     },
                     vp,
