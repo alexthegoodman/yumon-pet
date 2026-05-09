@@ -705,6 +705,22 @@ pub fn load_txt_sentences(path: &str) -> Result<Vec<String>> {
     Ok(sentences)
 }
 
+pub fn load_txt_lines(path: &str) -> Result<Vec<String>> {
+    println!("📖 Loading txt: {path}");
+
+    let content = std::fs::read_to_string(path)?;
+    let mut sentences = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim().replace("\"", "");
+
+        sentences.push(trimmed.to_string());
+    }
+
+    println!("✅ Loaded {} txt lines", sentences.len());
+    Ok(sentences)
+}
+
 pub fn load_qa_pairs(path: &str) -> Result<Vec<(String, String)>> {
     println!("📖 Loading QA pairs: {path}");
 

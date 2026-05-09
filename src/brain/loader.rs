@@ -8,7 +8,7 @@ use crate::brain::bpe::TokenizerKind;
 use crate::brain::chats::load_distilled_chats;
 use crate::brain::mdx::{load_chats_from_csv, load_chats_from_friends_csv};
 #[cfg(target_os = "windows")]
-use crate::brain::mdx::{load_arena_chats, load_csv_bible, load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_specific_dict_sentences, load_txt_sentences};
+use crate::brain::mdx::{load_arena_chats, load_csv_bible, load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_specific_dict_sentences, load_txt_lines, load_txt_sentences};
 
 #[cfg(target_os = "windows")]
 use crate::brain::pdf::load_pdfs;
@@ -33,6 +33,7 @@ pub enum FileKind {
     Chats,
     JsonChats,
     Txt,
+    TxtLines,
     SpecificDict,
     PDF,
     DistillChat,
@@ -389,6 +390,7 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
         FileKind::BibleCsv    => load_csv_bible(path),
         FileKind::Handcrafted => load_handcrafted_sentences(path),
         FileKind::Txt         => load_txt_sentences(path),
+        FileKind::TxtLines    => load_txt_lines(path),
         FileKind::PDF       => {
             let paths: Vec<&str> = path.split(", ").collect();
             Ok(load_pdfs(paths))
