@@ -29,6 +29,8 @@ log = "0.4.29"
 futures = "0.3.30"
 tao = "0.35.0"
 wry = { version = "0.55.0", features = ["transparent"] }
+gilrs = "0.11.1"
+ab_glyph = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 three-d = { version = "0.17", features = ["egui-gui"] }
