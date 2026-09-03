@@ -12,21 +12,21 @@
 mod vision;
 mod brain;
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use clap::{Parser, Subcommand};
 use anyhow::Result;
 use burn::{backend::Wgpu, prelude::Module};
 
 #[derive(Parser)]
 #[command(name = "yumon", about = "Yumon ePet — tabletop AI companion")]
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 struct Cli {
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 enum Command {
     /// Train the Vision CNN (CIFAR-100 + FER2013)
     TrainVision {
@@ -110,10 +110,10 @@ enum Command {
 
 
 fn main() -> Result<()> {
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_arch = "wasm32"))]
     let cli = Cli::parse();
 
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_arch = "wasm32"))]
     match cli.command { 
         Command::TrainVision { cifar_dir, fer_dir, out_dir, epochs, batch_size } => {
             println!("🎓 Training Vision CNN...");
@@ -143,7 +143,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 fn run_chat(
     vision_cp:  &str,
     brain_cp:   &str,

@@ -9,7 +9,7 @@ use cubecl::wgpu::{AutoGraphicsApi, GraphicsApi, WebGpu, WgpuDevice, init_setup_
 use log::Level;
 use log::info;
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use outlines_core::{index::Index, prelude::Vocabulary};
 
 use serde::{Serialize, Deserialize};

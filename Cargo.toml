@@ -11,6 +11,19 @@ path = "src/bin/train_bpe.rs"
 name = "train_ui"
 path = "src/bin/train_ui.rs"
 
+[features]
+# Desktop/GUI bits (native window + webview + 3D engine + gamepad input) used by
+# the yumon_desktop/yumon_world/yumon_civ/train_ui/chat_ui bins. Not needed for
+# headless training (e.g. in a RunPod/Docker container) - disable with
+# `--no-default-features` there to skip needing GTK/WebKit/udev dev packages.
+default = ["desktop"]
+desktop = [
+    "dep:tao", "dep:wry", "dep:gilrs", "dep:ab_glyph",
+    "dep:three-d", "dep:three-d-asset",
+    "dep:bincode", "dep:mint", "dep:nalgebra", "dep:nalgebra-glm",
+    "dep:bytemuck", "dep:pollster",
+]
+
 [dependencies]
 uuid = { version = "1.8.0", features = ["v4", "js"] }
 serde = { version = "1", features = ["derive"] }
@@ -31,22 +44,13 @@ console_error_panic_hook = "0.1.7"
 console_log = "1.0.0"
 log = "0.4.29"
 futures = "0.3.30"
-tao = "0.35.0"
-wry = { version = "0.55.0", features = ["transparent"] }
-gilrs = "0.11.1"
-ab_glyph = "0.2"
 
-[target.'cfg(target_os = "windows")'.dependencies]
-three-d = { version = "0.17", features = ["egui-gui"] }
-three-d-asset = { version = "0.7", features = ["gltf", "png"] }
+# Native, non-wasm dependencies. Historically gated on `target_os = "windows"`,
+# but that was only ever a stand-in for "native build, not the wasm32 web
+# build" - it also builds fine on Linux (e.g. for headless training in Docker).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 crossterm = "0.28"
-pollster = "0.3"
-bytemuck = { version = "1.19.0", features = ["derive"] }
-nalgebra = { version = "0.32.5", features = ["mint"] }
-nalgebra-glm = "0.18.0"
-bincode     = "1"
 keyword_extraction = {version = "1.5", features = ["yake"]}
-mint = "0.5.9"
 pdf-extract = "0.10.0"
 outlines-core = "0.2.14"
 walkdir = "2"
@@ -61,14 +65,25 @@ fastrand = {version = "2", features = ["js"]}
 image       = "0.25"
 clap        = { version = "4",   features = ["derive"] }
 quick-error = "2.0.1"
-# floem = "0.2.0"
-# crossbeam-channel = "0.5.15"
 rayon = "1.11.0"
 stop-words = "0.8.0"
-# json-repair = "0.4.0" # requires nightly?
-# json-fix = "0.1.1" # bad logs
-# winit = "0.30.13"
 sentiment = "0.1.1"
+
+# Desktop-only (native window / webview / 3D engine / gamepad). Gated behind
+# the "desktop" feature (on by default) so a headless training build can skip
+# them with `--no-default-features` and avoid needing GTK/WebKit/udev.
+tao = { version = "0.35.0", optional = true }
+wry = { version = "0.55.0", features = ["transparent"], optional = true }
+gilrs = { version = "0.11.1", optional = true }
+ab_glyph = { version = "0.2", optional = true }
+three-d = { version = "0.17", features = ["egui-gui"], optional = true }
+three-d-asset = { version = "0.7", features = ["gltf", "png"], optional = true }
+pollster = { version = "0.3", optional = true }
+bytemuck = { version = "1.19.0", features = ["derive"], optional = true }
+nalgebra = { version = "0.32.5", features = ["mint"], optional = true }
+nalgebra-glm = { version = "0.18.0", optional = true }
+bincode     = { version = "1", optional = true }
+mint = { version = "0.5.9", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { version = "0.3", features = ["Window", "Navigator", "Location"] }

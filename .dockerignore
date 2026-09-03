@@ -1,0 +1,26 @@
+target/
+.git/
+dist/
+tmp/
+checkpoints/
+*.md
+output.mp4
+target.html
+index.html
+
+# Vision datasets, ebooks, and loose media aren't used by brain training -
+# trim data/ and archive/ down to just what the Dockerfile COPYs in.
+data/*
+!data/ideas.txt
+!data/wiki_extract.txt
+!data/bible_bbe.csv
+!data/bible_asv.csv
+!data/creative_stories.txt
+!data/The-Office-Lines-V4.csv
+!data/friends_all_episodes_clean.csv
+
+archive/*
+!archive/arena_extract.txt
+!archive/ov_chats.txt
+!archive/you_chats.txt
+!archive/clean_chats.txt

@@ -4,25 +4,25 @@ use anyhow::Result;
 use burn::{
     grad_clipping::GradientClippingConfig, module::AutodiffModule, nn::loss::CrossEntropyLossConfig, optim::{AdamConfig, AdamWConfig, GradientsParams, Optimizer}, prelude::*, tensor::{Int, TensorData, backend::AutodiffBackend}
 };
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use rand::{Rng, rngs::StdRng, seq::SliceRandom, thread_rng};
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use indicatif::{ProgressBar, ProgressStyle};
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use ratatui::{Terminal, TerminalOptions, Viewport, prelude::CrosstermBackend};
 use std::collections::HashMap;
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use rand::SeedableRng;
 
 use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, CL_ID, CR_ID, TokenizerKind}, chart::{TrainingState}, loader::{DataLoader, FileKind}, samples::{TrainingStage, WorldContext, prepare_paired_samples_split, prepare_paired_samples_split_sep}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use crate::brain::{chart::render, decoder_model::{BrainDecMetadata, YumonDecBrain, YumonDecBrainConfig}};
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use crate::brain::mdx::{load_dictionary_sentences, load_handcrafted_sentences, load_qa_pairs, load_qa_singles, load_txt_sentences};
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use crate::brain::pdf::{load_pdf_ebook_sentences, load_pdfs};
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use crate::brain::wiki::{save_sentence_pairs_to_file};
 
 use crate::brain::{
@@ -239,7 +239,7 @@ fn load_stage_data(
         .load(tokenizer, keyword_index, max_seq_len)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run(
     wiki_xml:          &str,
     _vision_checkpoint: &str,  // reserved for future real-image fine-tuning
@@ -420,12 +420,18 @@ pub fn run(
                 .init(&device);
 
             let mut rng = rand::thread_rng();
-            use std::io::stdout;
-            let backend = CrosstermBackend::new(stdout());
-            let mut terminal = Terminal::with_options(
-                backend,
-                TerminalOptions { viewport: Viewport::Inline(26) },
-            )?;
+            use std::io::{stdout, IsTerminal};
+            // Headless runs (e.g. a detached Docker/RunPod container) have no real
+            // terminal attached, so fall back to plain log lines instead of the TUI.
+            let mut terminal = if stdout().is_terminal() {
+                let backend = CrosstermBackend::new(stdout());
+                Some(Terminal::with_options(
+                    backend,
+                    TerminalOptions { viewport: Viewport::Inline(26) },
+                )?)
+            } else {
+                None
+            };
 
             let total_batches = training_samples.len() / stage_cfg.batch_size;
             let mut state = TrainingState {
@@ -542,7 +548,15 @@ pub fn run(
                     state.entropy_history.push((state.global_step as f64, entropy_val as f64));
                     state.lr_history.push((state.global_step as f64, current_lr));
 
-                    terminal.draw(|frame| render(frame, &state))?;
+                    if let Some(term) = terminal.as_mut() {
+                        term.draw(|frame| render(frame, &state))?;
+                    } else if state.global_step % 50 == 0 || batch_num + 1 == num_batches {
+                        println!(
+                            "epoch {}/{} batch {}/{} loss {:.4} avg {:.4} lr {:.2e} entropy {:.4}",
+                            state.epoch, state.total_epochs, state.batch, state.total_batches,
+                            state.current_loss, state.avg_loss, state.current_lr, state.entropy,
+                        );
+                    }
 
                     // Periodic save and inference every 500 batches
                     if (batch_num + 1) % 500 == 0 {
@@ -790,7 +804,9 @@ pub fn run(
                 }
             }
             epochs_already_done += state.epoch;
-            terminal.clear()?;
+            if let Some(term) = terminal.as_mut() {
+                term.clear()?;
+            }
 
             // Save Chart Image at end of stage
             let chart_path = format!("{}/{}_stage_{}.png", run_dir_str, run_cfg.name, stage_idx + 1);
@@ -832,7 +848,7 @@ pub fn keyword_emote_label(text: &str) -> usize {
 }
 
 // ─── Progress bar ─────────────────────────────────────────────────────────────
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn make_progress(total: usize, epoch: usize, epochs: usize) -> ProgressBar {
     let pb = ProgressBar::new(total as u64);
     pb.set_style(

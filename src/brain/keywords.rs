@@ -1,11 +1,11 @@
 // use keyword_extraction::prelude::*;   // or specific imports
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use keyword_extraction::yake::Yake;   // or text_rank::TextRank, etc.
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use stop_words::{get, LANGUAGE};
 
 // Usually you process per-document / per-sentence
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn extract_keywords(text: &str) -> Vec<(String, f32)> {
     let stop_words = get(LANGUAGE::English);
 

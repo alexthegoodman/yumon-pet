@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use rand::{Rng, rngs::StdRng};
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use crate::brain::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, bpe::TokenizerKind, mdx::HandcraftedChats, sentiment::EmotionAnalyzer, train::{MAX_SEQ_LEN, keyword_emote_label, matched_classes}};

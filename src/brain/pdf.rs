@@ -30,7 +30,7 @@
 //     Ok(sentences)
 // }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use crate::brain::train::MAX_SEQ_LEN_CHARS;
 use crate::brain::{train::MAX_SEQ_LEN, wiki::is_good_sentence};
 use anyhow::Result;
@@ -77,10 +77,10 @@ use anyhow::Result;
 //     Ok(sentences)
 // }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use rand::Rng; // Add this for random range generation
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_pdfs(paths: Vec<&str>) -> Vec<String> {
     let mut all_samples = Vec::new();
 
@@ -94,7 +94,7 @@ pub fn load_pdfs(paths: Vec<&str>) -> Vec<String> {
     all_samples
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_pdf_ebook_sentences(pdf_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading ebook PDF: {pdf_path}");
 

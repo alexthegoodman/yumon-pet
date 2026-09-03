@@ -15,7 +15,7 @@ pub struct TrainingState {
     pub last_reply: String,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
@@ -25,7 +25,7 @@ use ratatui::{
     widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Gauge, Paragraph},
 };
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -100,10 +100,10 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
     frame.render_widget(chart, chunks[1]);
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 use image::{Rgb, RgbImage};
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 impl TrainingState {
     pub fn save_chart_image(&self, path: &str) -> anyhow::Result<()> {
         let width = 1200;

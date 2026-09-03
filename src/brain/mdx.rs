@@ -1,7 +1,7 @@
 use crate::brain::wiki::is_good_sentence;
 use anyhow::Result;
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_mdx_sentences(mdx_dir: &str) -> Result<Vec<String>> {
     println!("📖 Scanning MDX directory: {mdx_dir}");
 
@@ -39,7 +39,7 @@ pub fn load_mdx_sentences(mdx_dir: &str) -> Result<Vec<String>> {
     Ok(final_sentences)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_notion_sentences(notion_dir: &str) -> Result<Vec<String>> {
     println!("📖 Scanning Notion directory: {notion_dir}");
 
@@ -81,7 +81,7 @@ pub fn load_notion_sentences(notion_dir: &str) -> Result<Vec<String>> {
 //     pub tags: Vec<String>,
 // }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_csv_quotes(csv_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading quotes CSV: {csv_path}");
 
@@ -118,7 +118,7 @@ pub fn load_csv_quotes(csv_path: &str) -> Result<Vec<String>> {
     Ok(quotes)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_csv_qna(csv_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading qna CSV: {csv_path}");
 
@@ -175,7 +175,7 @@ pub fn load_csv_qna(csv_path: &str) -> Result<Vec<String>> {
 //     Ok(quotes)
 // }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_csv_bible(bible_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading bible CSV: {bible_path}");
 
@@ -256,7 +256,7 @@ pub fn load_dictionary_sentences(dict_path: &str) -> Result<Vec<String>> {
     Ok(sentences)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_csv_words(csv_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading words CSV: {csv_path}");
 
@@ -325,7 +325,7 @@ pub fn load_specific_dict_sentences(dict_path: &str, selected_words: &Vec<String
     Ok(sentences)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_handcrafted_sentences(dict_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading handcrafted: {dict_path}");
 
@@ -821,7 +821,7 @@ pub fn load_qa_singles(path: &str) -> Result<Vec<String>> {
 //     Ok(sentences)
 // }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_arch = "wasm32"))]
 fn extract_definition(line: &str) -> Option<String> {
     // Strip etymology brackets at the end e.g. [latin from greek]
     let line = regex::Regex::new(r"\[.*?\]")
