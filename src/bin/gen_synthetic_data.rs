@@ -113,7 +113,7 @@ struct Args {
     topics: String,
 
     /// Target pair count per topic. 0 = run forever until interrupted.
-    #[arg(long, default_value_t = 25_000)]
+    #[arg(long, default_value_t = 1_800)]
     target: i64,
 
     #[arg(long, default_value_t = 5)]

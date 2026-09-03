@@ -968,8 +968,8 @@ pub fn prepare_paired_samples_split(
         // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
         // if enc_input.len() + target_encoded.len() < max_seq_len / 4 { continue; }
 
-        if target_encoded.len() < max_seq_len / 2 { continue; }
-        if enc_input.len() < max_seq_len / 4 { continue; }
+        if target_encoded.len() < max_seq_len / 10 { continue; }
+        if enc_input.len() < max_seq_len / 10 { continue; }
         if target_encoded.len() > max_seq_len { continue; }
         if enc_input.len() > max_seq_len { continue; }
         // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
@@ -1166,8 +1166,8 @@ pub fn prepare_paired_samples_split_sep(
         // if target_encoded.len() < max_seq_len / 4 { continue; }
         // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
 
-        if target_encoded.len() < max_seq_len / 2 { continue; }
-        if enc_input.len() < max_seq_len / 4 { continue; }
+        if target_encoded.len() < max_seq_len / 10 { continue; }
+        if enc_input.len() < max_seq_len / 10 { continue; }
         if target_encoded.len() > max_seq_len { continue; }
         if enc_input.len() > max_seq_len { continue; }
 
@@ -1339,8 +1339,8 @@ pub fn prepare_paired_samples_chats(
             // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
             // if enc_input.len() + target_encoded.len() < max_seq_len / 4 { continue; } // on Language stage, you want the short ones
 
-            if target_encoded.len() < max_seq_len / 2 { continue; }
-            if enc_input.len() < max_seq_len / 4 { continue; }
+            if target_encoded.len() < max_seq_len / 10 { continue; }
+            if enc_input.len() < max_seq_len / 10 { continue; }
             if target_encoded.len() > max_seq_len { continue; }
             if enc_input.len() > max_seq_len { continue; }
 

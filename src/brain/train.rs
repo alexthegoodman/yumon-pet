@@ -202,33 +202,33 @@ fn load_stage_data(
 
     loader = loader
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
-        .add("data/ideas.txt",   FileKind::TxtLines, Some(50_000))
-        .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
+        .add("data/ideas.txt",   FileKind::TxtLines, Some(2_000))
+        // .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
         // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(10_000))
         // .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
-        .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
-        .add("data/bible_asv.csv", FileKind::BibleCsv, None)
+        // .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
+        // .add("data/bible_asv.csv", FileKind::BibleCsv, None)
         // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs — proper
         // message/reply splits instead of BibleCsv's arbitrary mid-sentence cuts.
         .add("data/synthetic/bible.txt", FileKind::Chats, None)
         .add("data/synthetic/business.txt", FileKind::Chats, None)
         .add("data/synthetic/universe.txt", FileKind::Chats, None)
-        .add("data/creative_stories.txt", FileKind::Txt, Some(50_000)) // good but gets split
+        // .add("data/creative_stories.txt", FileKind::Txt, Some(50_000)) // good but gets split
         // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
         // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(25_000))
-        .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(25_000))
+        // .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(25_000))
+        // .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(25_000))
+        // .add("archive/ov_chats.txt", FileKind::Chats, None)
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
         .add("archive/ov_chats.txt", FileKind::Chats, None)
-        .add("archive/ov_chats.txt", FileKind::Chats, None)
+        // .add("archive/you_chats.txt", FileKind::Chats, None)
         // .add("archive/you_chats.txt", FileKind::Chats, None)
         // .add("archive/you_chats.txt", FileKind::Chats, None)
         .add("archive/you_chats.txt", FileKind::Chats, None)
-        .add("archive/you_chats.txt", FileKind::Chats, None)
         // .add("archive/clean_chats.txt", FileKind::Chats, None)
         // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        .add("archive/clean_chats.txt", FileKind::Chats, None)
+        // .add("archive/clean_chats.txt", FileKind::Chats, None)
         .add("archive/clean_chats.txt", FileKind::Chats, None);
         // .add(vec![
         //         "data/ebooks/faa-h-8083-25c.pdf".to_string(),
@@ -287,6 +287,27 @@ pub fn run(
         //     ],
         // },
 
+        // // memorizes extremely well. outputs memorized sentences regardless of input prompt though, not usually relevant to input prompt
+        RunConfig {
+            name: "128h_2l_2a_128len".to_string(),
+            embed_dim: 128, 
+            hidden_units: 128, 
+            n_layers: 2, 
+            attn_heads: 2, 
+            ff_dim: 512,
+            // max_seq_len: 40,
+            // max_seq_len: 64, // used on both sides in decoder-encoder arch 
+            // max_seq_len: 90, // TODO: would be ideal to set max seq for input and output separately, as input has memories that make it longer
+            max_seq_len: 128,
+            // max_seq_len: 256,
+            // max_seq_len: 1024,
+            // max_seq_len: 512,
+            stages: vec![
+                // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 5, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+            ],
+        },
+
         // testing
         RunConfig {
             name: "128h_6l_2a_64len".to_string(),
@@ -328,26 +349,6 @@ pub fn run(
                 StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 5, batch_size, first_lr: 5e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
             ],
         },
-
-        // // memorizes extremely well. outputs memorized sentences regardless of input prompt though, not usually relevant to input prompt
-        // RunConfig {
-        //     name: "128h_2l_2a_64len_6e".to_string(),
-        //     embed_dim: 128, 
-        //     hidden_units: 128, 
-        //     n_layers: 2, 
-        //     attn_heads: 2, 
-        //     ff_dim: 512,
-        //     // max_seq_len: 40,
-        //     max_seq_len: 64, // used on both sides in decoder-encoder arch 
-        //     // max_seq_len: 128,
-        //     // max_seq_len: 256,
-        //     // max_seq_len: 1024,
-        //     // max_seq_len: 512,
-        //     stages: vec![
-        //         // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-        //     ],
-        // },
 
         // // memorizes little, outputs odd, slightly garbled responses that are somewhat relevant to the input prompt
         // // RunConfig {

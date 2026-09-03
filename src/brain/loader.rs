@@ -212,7 +212,15 @@ impl DataLoader {
                     sents
                 },
                 _ => {
-                    load_sentences(&entry.path, &entry.kind)?
+                    let mut pairs = load_sentences(&entry.path, &entry.kind)?;
+
+                    // Per-file limit before sample prep to reduce load
+                    if let Some(n) = entry.limit {
+                        pairs.shuffle(&mut rng);
+                        pairs.truncate(n);
+                    }
+                    
+                    pairs
                 }
             };
 
