@@ -34,6 +34,7 @@ use crate::brain::{
 // Used by the local desktop training UI (src/bin/train_ui.rs), which runs on
 // wgpu since dev machines typically have no CUDA GPU.
 pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
+pub type TrainRuntime = cubecl::wgpu::WgpuRuntime;
 // pub type TrainBackend = burn::backend::Autodiff<burn::backend::NdArray<f32>>;
 
 // Used by the headless `train-brain` CLI path (`run`, below) — this is what
@@ -204,7 +205,7 @@ fn load_stage_data(
         .add("data/ideas.txt",   FileKind::TxtLines, Some(50_000))
         .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
         // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(10_000))
-        .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
+        // .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
         .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
         .add("data/bible_asv.csv", FileKind::BibleCsv, None)
         .add("data/creative_stories.txt", FileKind::Txt, Some(50_000)) // good but gets split
@@ -256,7 +257,8 @@ pub fn run(
     batch_size:        usize,
     max_articles:      usize,
 ) -> Result<()> {
-    let device = burn::backend::cuda::CudaDevice::default();
+    let device = burn::backend::wgpu::WgpuDevice::default();
+    // let device = burn::backend::cuda::CudaDevice::default(); // for runpod
     let label_keywords   = build_label_keywords();
     let keyword_index    = build_keyword_index(&label_keywords);
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
@@ -279,13 +281,13 @@ pub fn run(
         //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 3e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
         //     ],
         // },
-        
-        // memorizes extremely well. outputs memorized sentences regardless of input prompt though, not usually relevant to input prompt
+
+        // testing
         RunConfig {
-            name: "128h_2l_2a_64len_6e".to_string(),
+            name: "128h_6l_2a_64len".to_string(),
             embed_dim: 128, 
             hidden_units: 128, 
-            n_layers: 2, 
+            n_layers: 6, 
             attn_heads: 2, 
             ff_dim: 512,
             // max_seq_len: 40,
@@ -296,55 +298,97 @@ pub fn run(
             // max_seq_len: 512,
             stages: vec![
                 // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                // StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 5, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+            ],
+        },
+        
+        // testing
+        RunConfig {
+            name: "512h_1l_8a_64len".to_string(),
+            embed_dim: 512, 
+            hidden_units: 512, 
+            n_layers: 1,
+            attn_heads: 8, 
+            ff_dim: 2048, 
+            // max_seq_len: 40,
+            max_seq_len: 64, // used on both sides in decoder-encoder arch 
+            // max_seq_len: 128,
+            // max_seq_len: 256,
+            // max_seq_len: 1024,
+            // max_seq_len: 512,
+            stages: vec![
+                // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                // StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 5e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 5, batch_size, first_lr: 5e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
             ],
         },
 
-        // memorizes little, outputs odd, slightly garbled responses that are somewhat relevant to the input prompt
+        // // memorizes extremely well. outputs memorized sentences regardless of input prompt though, not usually relevant to input prompt
         // RunConfig {
-        //     name: "256h_2l_4a_180len".to_string(),
-        //     embed_dim: 256, 
-        //     hidden_units: 256, 
+        //     name: "128h_2l_2a_64len_6e".to_string(),
+        //     embed_dim: 128, 
+        //     hidden_units: 128, 
         //     n_layers: 2, 
-        //     attn_heads: 4, 
-        //     ff_dim: 1024,
-        //     max_seq_len: 180,
-        //     // max_seq_len: 600,
+        //     attn_heads: 2, 
+        //     ff_dim: 512,
+        //     // max_seq_len: 40,
+        //     max_seq_len: 64, // used on both sides in decoder-encoder arch 
+        //     // max_seq_len: 128,
+        //     // max_seq_len: 256,
+        //     // max_seq_len: 1024,
+        //     // max_seq_len: 512,
         //     stages: vec![
-        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 12, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 12, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
         //     ],
         // },
 
-        // more relevant to input, but worse memorization
-        RunConfig {
-            name: "512h_3l_8a_220len".to_string(),
-            embed_dim: 512, 
-            hidden_units: 512, 
-            n_layers: 3,
-            attn_heads: 8, 
-            ff_dim: 2048, 
-            max_seq_len: 220,
-            stages: vec![
-                // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-            ],
-        },
+        // // memorizes little, outputs odd, slightly garbled responses that are somewhat relevant to the input prompt
+        // // RunConfig {
+        // //     name: "256h_2l_4a_180len".to_string(),
+        // //     embed_dim: 256, 
+        // //     hidden_units: 256, 
+        // //     n_layers: 2, 
+        // //     attn_heads: 4, 
+        // //     ff_dim: 1024,
+        // //     max_seq_len: 180,
+        // //     // max_seq_len: 600,
+        // //     stages: vec![
+        // //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 12, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        // //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 12, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        // //     ],
+        // // },
 
-        // really slow, but just gibberish, no sense of correct
-        RunConfig {
-            name: "2048h_6l_16a_180len".to_string(),
-            embed_dim: 2048, 
-            hidden_units: 2048, 
-            n_layers: 6,
-            attn_heads: 16, 
-            ff_dim: 4096, 
-            max_seq_len: 180,
-            stages: vec![
-                // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-            ],
-        },
+        // // more relevant to input, but worse memorization
+        // RunConfig {
+        //     name: "512h_3l_8a_220len".to_string(),
+        //     embed_dim: 512, 
+        //     hidden_units: 512, 
+        //     n_layers: 3,
+        //     attn_heads: 8, 
+        //     ff_dim: 2048, 
+        //     max_seq_len: 220,
+        //     stages: vec![
+        //         // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
+
+        // // really slow, but just gibberish, no sense of correct
+        // RunConfig {
+        //     name: "2048h_6l_16a_180len".to_string(),
+        //     embed_dim: 2048, 
+        //     hidden_units: 2048, 
+        //     n_layers: 6,
+        //     attn_heads: 16, 
+        //     ff_dim: 4096, 
+        //     max_seq_len: 180,
+        //     stages: vec![
+        //         // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+        //     ],
+        // },
     ];
 
     for run_cfg in runs {
@@ -355,7 +399,7 @@ pub fn run(
         println!("\n🚀 Starting Run: {}", run_cfg.name);
 
         let (mut model, mut epochs_already_done) = if std::path::Path::new(run_dir_str).join("model.bin").exists() {
-            match YumonBrain::<CudaTrainBackend>::load(run_dir_str, &device) {
+            match YumonBrain::<TrainBackend>::load(run_dir_str, &device) {
             // match YumonDecBrain::<TrainBackend>::load(run_dir_str, &device) {
                 Ok((m, _tok, _config)) => {
                     let meta_json = std::fs::read_to_string(std::path::Path::new(run_dir_str).join("metadata.json"))?;
@@ -521,11 +565,12 @@ pub fn run(
                         all_lang_targets.extend(lang_targets);
                     }
 
-                    let lang_target_t = Tensor::<CudaTrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), &device);
-                    let enc_t = Tensor::<CudaTrainBackend, 2, Int>::from_ints(TensorData::new(all_enc_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
-                    let dec_t = Tensor::<CudaTrainBackend, 2, Int>::from_ints(TensorData::new(all_dec_input_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
+                    let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), &device);
+                    let enc_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_enc_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
+                    let dec_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_dec_input_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
 
-                    let token_logits = model.forward::<CudaTrainRuntime>(enc_t, dec_t.clone());
+                    let token_logits = model.forward::<TrainRuntime>(enc_t, dec_t.clone());
+                    // let token_logits = model.forward::<CudaTrainRuntime>(enc_t, dec_t.clone()); // runpod
 
                     // Entropy
                     let probs = burn::tensor::activation::softmax(token_logits.clone(), 2);
@@ -603,7 +648,10 @@ pub fn run(
                             })).unwrap()
 
                         } else { prompt_text };
-                        let result = inference_model.generate_unmasked_parsed::<CudaTrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+
+                        let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+                        // let result = inference_model.generate_unmasked_parsed::<CudaTrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device); // runpod
+                        
                         state.last_reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
                     }
 
@@ -807,7 +855,10 @@ pub fn run(
                         })).unwrap()
 
                     } else { prompt_text };
-                    let result = inference_model.generate_unmasked_parsed::<CudaTrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+
+                    let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+                    // let result = inference_model.generate_unmasked_parsed::<CudaTrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device); // runpod
+                    
                     state.last_reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
                 }
             }
