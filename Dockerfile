@@ -19,6 +19,20 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
+# cudarc (cubecl-cuda's CUDA binding) picks which driver-API symbols to load
+# based on a target CUDA version. This builder has no CUDA toolkit installed,
+# so it can't run `nvcc --version` to auto-detect one, and cudarc's fallback
+# is to assume the *newest* CUDA version it knows about - which then eagerly
+# dlsym's symbols (e.g. cuCtxGetDevice_v2) that don't exist in an older
+# driver, panicking at container start with "undefined symbol". Pin this to
+# match your RunPod pod's actual driver: run `nvidia-smi` there and read the
+# "CUDA Version: X.Y" in the header, then pass X0Y0 (e.g. 12.4 -> 12040;
+# round down to the nearest value cudarc supports if there's no exact match,
+# e.g. 12.7 -> 12060). Override at build time with
+# `--build-arg CUDARC_CUDA_VERSION=12080`.
+ARG CUDARC_CUDA_VERSION=12060
+ENV CUDARC_CUDA_VERSION=${CUDARC_CUDA_VERSION}
+
 RUN cargo build --release --no-default-features --bin yumon-pet
 
 ########################################
