@@ -68,6 +68,7 @@ quick-error = "2.0.1"
 rayon = "1.11.0"
 stop-words = "0.8.0"
 sentiment = "0.1.1"
+ureq = { version = "2", features = ["json"] }
 
 # Desktop-only (native window / webview / 3D engine / gamepad). Gated behind
 # the "desktop" feature (on by default) so a headless training build can skip

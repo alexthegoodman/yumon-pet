@@ -10793,6 +10793,7 @@ dependencies = [
  "three-d-asset",
  "tokenizers 0.19.1",
  "unicode-width 0.2.0",
+ "ureq",
  "uuid",
  "walkdir",
  "wasm-bindgen",
