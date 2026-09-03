@@ -5,6 +5,7 @@ use burn::{
 };
 use anyhow::Result;
 use cubecl::wgpu::{AutoGraphicsApi, GraphicsApi, WebGpu, WgpuDevice, init_setup_async};
+use cubecl::prelude::Runtime;
 use log::Level;
 use log::info;
 
@@ -78,7 +79,7 @@ pub struct MoEConfig {
 }
 
 impl MoEConfig {
-    pub fn init<B: Backend<Device = WgpuDevice>>(&self, device: &B::Device) -> MoE<B> {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> MoE<B> {
         let experts = (0..self.n_experts)
             .map(|_| MLPConfig::new(self.d_model, self.d_hidden).init(device))
             .collect();
@@ -94,14 +95,14 @@ impl MoEConfig {
 }
 
 #[derive(Module, Debug)]
-pub struct MoE<B: Backend<Device = WgpuDevice>> {
+pub struct MoE<B: Backend> {
     experts:   Vec<MLP<B>>,
     router:    Linear<B>,
     n_experts: usize,
     top_k:     usize,
 }
 
-impl<B: Backend<Device = WgpuDevice>> MoE<B> {
+impl<B: Backend> MoE<B> {
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let [batch, seq, d_model] = x.dims();
 
@@ -143,19 +144,19 @@ pub struct RMSNormConfig {
 }
 
 impl RMSNormConfig {
-    pub fn init<B: Backend<Device = WgpuDevice>>(&self, device: &B::Device) -> RMSNorm<B> {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> RMSNorm<B> {
         let weight = burn::module::Param::from_tensor(Tensor::ones([self.size], device));
         RMSNorm { weight, eps: self.eps }
     }
 }
 
 #[derive(Module, Debug)]
-pub struct RMSNorm<B: Backend<Device = WgpuDevice>> {
+pub struct RMSNorm<B: Backend> {
     weight: burn::module::Param<Tensor<B, 1>>,
     eps: f64,
 }
 
-impl<B: Backend<Device = WgpuDevice>> RMSNorm<B> {
+impl<B: Backend> RMSNorm<B> {
     pub fn forward<const D: usize>(&self, x: Tensor<B, D>) -> Tensor<B, D> {
         let rms = (x.clone().powf_scalar(2.0).mean_dim(D - 1) + self.eps).sqrt();
         (x / rms) * self.weight.val().unsqueeze()
@@ -188,7 +189,7 @@ pub struct LinearForceConfig {
 }
 
 impl LinearForceConfig {
-    pub fn init<B: Backend<Device = WgpuDevice>>(&self, device: &B::Device) -> MLP<B> {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> MLP<B> {
         MLP {
             w1:   LinearConfig::new(self.d_model, self.d_hidden).with_bias(false).init(device),
             w2:   LinearConfig::new(self.d_hidden, self.d_model).with_bias(false).init(device),
@@ -199,14 +200,14 @@ impl LinearForceConfig {
 }
 
 #[derive(Module, Debug)]
-pub struct LinearForce<B: Backend<Device = WgpuDevice>> {
+pub struct LinearForce<B: Backend> {
     w1:   Linear<B>,
     w2:   Linear<B>,
     w3:   Linear<B>,
     silu: SiLU,
 }
 
-impl<B: Backend<Device = WgpuDevice>> LinearForce<B> {
+impl<B: Backend> LinearForce<B> {
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let one = self.silu.forward(self.w1.forward(x));
         let two = self.silu.forward(self.w2.forward(one));
@@ -228,7 +229,7 @@ pub struct MLPConfig {
 }
 
 impl MLPConfig {
-    pub fn init<B: Backend<Device = WgpuDevice>>(&self, device: &B::Device) -> MLP<B> {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> MLP<B> {
         MLP {
             w1:   LinearConfig::new(self.d_model, self.d_hidden)
                 .with_initializer(Initializer::KaimingUniform {
@@ -254,14 +255,14 @@ impl MLPConfig {
 }
 
 #[derive(Module, Debug)]
-pub struct MLP<B: Backend<Device = WgpuDevice>> {
+pub struct MLP<B: Backend> {
     w1:   Linear<B>,
     w2:   Linear<B>,
     w3:   Linear<B>,
     silu: SiLU,
 }
 
-impl<B: Backend<Device = WgpuDevice>> MLP<B> {
+impl<B: Backend> MLP<B> {
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         // SwiGLU: w2( silu(w1(x)) * w3(x) )
         self.w2.forward(self.silu.forward(self.w1.forward(x.clone())) * self.w3.forward(x))
@@ -273,7 +274,7 @@ impl<B: Backend<Device = WgpuDevice>> MLP<B> {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[derive(Module, Debug)]
-pub struct YumonDecBrain<B: Backend<Device = WgpuDevice>> {
+pub struct YumonDecBrain<B: Backend> {
     pub config: Ignored<YumonDecBrainConfig>,
     // Shared RoPE (one instance, passed by reference to all blocks)
     rope: RotaryEncoding<B>,
@@ -307,7 +308,7 @@ pub struct YumonDecBrainConfig {
 }
 
 impl YumonDecBrainConfig {
-    pub fn init<B: Backend<Device = WgpuDevice>>(&self, device: &B::Device) -> YumonDecBrain<B> {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> YumonDecBrain<B> {
         let rope = RotaryEncodingConfig::new(self.max_seq_len, self.embed_dim / self.attn_heads).init(device);
 
         let blocks = (0..self.n_layers)
@@ -328,9 +329,9 @@ impl YumonDecBrainConfig {
     }
 }
 
-impl<B: Backend<Device = WgpuDevice>> YumonDecBrain<B> {
+impl<B: Backend> YumonDecBrain<B> {
     // ── Forward ───────────────────────────────────────────────────────────────
-    pub fn forward(
+    pub fn forward<R: Runtime<Device = B::Device>>(
         &self,
         tokens:  Tensor<B, 2, Int>,
     ) -> Tensor<B, 3> {
@@ -346,14 +347,14 @@ impl<B: Backend<Device = WgpuDevice>> YumonDecBrain<B> {
         );
 
         for block in &self.blocks {
-            x = block.forward(x, &self.rope, Some(cmask.clone()), Some(pad_mask.clone()));
+            x = block.forward::<R>(x, &self.rope, Some(cmask.clone()), Some(pad_mask.clone()));
         }
 
         let x = self.norm.forward(x);
         self.token_head.forward(x)
     }
 
-    pub async fn forward_async(
+    pub async fn forward_async<R: Runtime<Device = B::Device>>(
         &self,
         tokens:  Tensor<B, 2, Int>,
     ) -> Tensor<B, 3> {
@@ -369,14 +370,14 @@ impl<B: Backend<Device = WgpuDevice>> YumonDecBrain<B> {
         );
 
         for block in &self.blocks {
-            x = block.forward_async(x, &self.rope, Some(cmask.clone()), Some(pad_mask.clone())).await;
+            x = block.forward_async::<R>(x, &self.rope, Some(cmask.clone()), Some(pad_mask.clone())).await;
         }
 
         let x = self.norm.forward(x);
         self.token_head.forward(x)
     }
 
-    pub fn generate_unmasked_parsed(
+    pub fn generate_unmasked_parsed<R: Runtime<Device = B::Device>>(
         &self,
         tokenizer:      &TokenizerKind,
         seed_text:      &str,
@@ -409,7 +410,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonDecBrain<B> {
                 device,
             );
 
-            let token_logits = self.forward(dec_tokens_t);
+            let token_logits = self.forward::<R>(dec_tokens_t);
 
             let vocab_size  = tokenizer.vocab_size();
             let last_logits = token_logits
@@ -514,7 +515,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonDecBrain<B> {
         }
     }
 
-    pub async fn generate_unmasked_parsed_async(
+    pub async fn generate_unmasked_parsed_async<R: Runtime<Device = B::Device>>(
         &self,
         tokenizer:      &TokenizerKind,
         seed_text:      &str,
@@ -540,7 +541,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonDecBrain<B> {
                 device,
             );
 
-            let token_logits = self.forward_async(dec_tokens_t);
+            let token_logits = self.forward_async::<R>(dec_tokens_t);
 
             let vocab_size  = tokenizer.vocab_size();
             let last_logits = token_logits.await
@@ -747,7 +748,7 @@ impl<B: Backend<Device = WgpuDevice>> YumonDecBrain<B> {
     }
 }
 
-fn make_positions<B: Backend<Device = WgpuDevice>>(
+fn make_positions<B: Backend>(
     batch: usize,
     seq_len: usize,
     device: &B::Device,

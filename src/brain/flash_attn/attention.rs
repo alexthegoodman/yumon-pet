@@ -11,7 +11,7 @@
 use burn::{
     config::Config, module::Module, nn::{Initializer, Linear, LinearConfig, RotaryEncoding}, tensor::{Bool, Device, Tensor, backend::Backend}
 };
-use burn::backend::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl::prelude::Runtime;
 
 use crate::brain::{flash_attn::bridge_ops::{launch_forward, read_f32, read_f32_async}, model::{MLP, MLPConfig, RMSNorm, RMSNormConfig}};
 
@@ -29,7 +29,7 @@ pub struct TransformerBlockConfig {
 }
  
 impl TransformerBlockConfig {
-    pub fn init<B: Backend<Device = WgpuDevice>>(&self, device: &B::Device) -> TransformerBlock<B> {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> TransformerBlock<B> {
         TransformerBlock {
             attn_norm: RMSNormConfig::new(self.d_model).init(device),
             attn:      SelfAttentionConfig::new(self.d_model, self.n_heads)
@@ -43,15 +43,15 @@ impl TransformerBlockConfig {
 }
 
 #[derive(Module, Debug)]
-pub struct TransformerBlock<B: Backend<Device = WgpuDevice>> {
+pub struct TransformerBlock<B: Backend> {
     pub attn_norm: RMSNorm<B>,
     pub attn:      SelfAttention<B>,
     pub mlp_norm:  RMSNorm<B>,
     pub mlp:       MLP<B>,
 }
 
-impl<B: Backend<Device = WgpuDevice>> TransformerBlock<B> {
-    pub fn forward(
+impl<B: Backend> TransformerBlock<B> {
+    pub fn forward<R: Runtime<Device = B::Device>>(
         &self,
         x:           Tensor<B, 3>,
         rope:        &RotaryEncoding<B>,
@@ -60,7 +60,7 @@ impl<B: Backend<Device = WgpuDevice>> TransformerBlock<B> {
     ) -> Tensor<B, 3> {
         let x_device = x.device();
         let x = x.clone()
-            + self.attn.forward(
+            + self.attn.forward::<R>(
                 self.attn_norm.forward(x),
                 rope,
                 causal_mask,
@@ -70,7 +70,7 @@ impl<B: Backend<Device = WgpuDevice>> TransformerBlock<B> {
         x.clone() + self.mlp.forward(self.mlp_norm.forward(x))
     }
 
-    pub async fn forward_async(
+    pub async fn forward_async<R: Runtime<Device = B::Device>>(
         &self,
         x:           Tensor<B, 3>,
         rope:        &RotaryEncoding<B>,
@@ -79,7 +79,7 @@ impl<B: Backend<Device = WgpuDevice>> TransformerBlock<B> {
     ) -> Tensor<B, 3> {
         let x_device = x.device();
         let x = x.clone()
-            + self.attn.forward_async(
+            + self.attn.forward_async::<R>(
                 self.attn_norm.forward(x),
                 rope,
                 causal_mask,
@@ -103,12 +103,12 @@ impl<B: Backend<Device = WgpuDevice>> TransformerBlock<B> {
 //
 // Unmasked path: full CubeCL tiled kernel — no N×N matrix, O(N) memory.
 
-fn flash_attn_from_tensors<B: Backend<Device = WgpuDevice>>(
+fn flash_attn_from_tensors<B: Backend<Device = R::Device>, R: Runtime>(
     q:       Tensor<B, 4>,
     k:       Tensor<B, 4>,
     v:       Tensor<B, 4>,
     mask:    Option<Tensor<B, 4>>,
-    device:  &B::Device, 
+    device:  &B::Device,
     block_q: usize,
     block_k: usize,
 ) -> Tensor<B, 4> {
@@ -135,25 +135,25 @@ fn flash_attn_from_tensors<B: Backend<Device = WgpuDevice>>(
     let k_data: Vec<f32> = k_r.into_data().to_vec().unwrap();
     let v_data: Vec<f32> = v_r.into_data().to_vec().unwrap();
 
-    let result = launch_forward::<WgpuRuntime>(
+    let result = launch_forward::<R>(
         device,
         &q_data, &k_data, &v_data,
         bh, seq_q, seq_k, d_k, d_v,
         block_q, block_k,
     );
 
-    let out_data = read_f32::<WgpuRuntime>(device, result.out, bh * seq_q * d_v);
+    let out_data = read_f32::<R>(device, result.out, bh * seq_q * d_v);
 
     Tensor::<B, 4>::from_floats(out_data.as_slice(), &q_device)
         .reshape([batch, heads, seq_q, d_v])
 }
 
-async fn flash_attn_from_tensors_async<B: Backend<Device = WgpuDevice>>(
+async fn flash_attn_from_tensors_async<B: Backend<Device = R::Device>, R: Runtime>(
     q:       Tensor<B, 4>,
     k:       Tensor<B, 4>,
     v:       Tensor<B, 4>,
     mask:    Option<Tensor<B, 4>>,
-    device:  &B::Device, 
+    device:  &B::Device,
     block_q: usize,
     block_k: usize,
 ) -> Tensor<B, 4> {
@@ -180,14 +180,14 @@ async fn flash_attn_from_tensors_async<B: Backend<Device = WgpuDevice>>(
     let k_data: Vec<f32> = k_r.into_data_async().await.expect("Couldn't get data").to_vec().unwrap();
     let v_data: Vec<f32> = v_r.into_data_async().await.expect("Couldn't get data").to_vec().unwrap();
 
-    let result = launch_forward::<WgpuRuntime>(
+    let result = launch_forward::<R>(
         device,
         &q_data, &k_data, &v_data,
         bh, seq_q, seq_k, d_k, d_v,
         block_q, block_k,
     );
 
-    let out_data = read_f32_async::<WgpuRuntime>(device, result.out, bh * seq_q * d_v).await;
+    let out_data = read_f32_async::<R>(device, result.out, bh * seq_q * d_v).await;
 
     Tensor::<B, 4>::from_floats(out_data.as_slice(), &q_device)
         .reshape([batch, heads, seq_q, d_v])
@@ -281,8 +281,8 @@ pub struct SelfAttention<B: Backend> {
     block_k:  usize,
 }
 
-impl<B: Backend<Device = WgpuDevice>> SelfAttention<B> {
-    pub fn forward(
+impl<B: Backend> SelfAttention<B> {
+    pub fn forward<R: Runtime<Device = B::Device>>(
         &self,
         x:           Tensor<B, 3>,
         rope:        &RotaryEncoding<B>,
@@ -304,12 +304,12 @@ impl<B: Backend<Device = WgpuDevice>> SelfAttention<B> {
 
         let mask = build_mask(causal_mask, pad_mask, seq, seq);
 
-        let out = flash_attn_from_tensors(q, k, v, mask, device, self.block_q, self.block_k);
+        let out = flash_attn_from_tensors::<B, R>(q, k, v, mask, device, self.block_q, self.block_k);
 
         self.o.forward(out.swap_dims(1, 2).flatten(2, 3))
     }
 
-    pub async fn forward_async(
+    pub async fn forward_async<R: Runtime<Device = B::Device>>(
         &self,
         x:           Tensor<B, 3>,
         rope:        &RotaryEncoding<B>,
@@ -331,7 +331,7 @@ impl<B: Backend<Device = WgpuDevice>> SelfAttention<B> {
 
         let mask = build_mask(causal_mask, pad_mask, seq, seq);
 
-        let out = flash_attn_from_tensors_async(q, k, v, mask, device, self.block_q, self.block_k).await;
+        let out = flash_attn_from_tensors_async::<B, R>(q, k, v, mask, device, self.block_q, self.block_k).await;
 
         self.o.forward(out.swap_dims(1, 2).flatten(2, 3))
     }
@@ -382,8 +382,8 @@ pub struct CrossAttentionBlock<B: Backend> {
     block_k:  usize,
 }
 
-impl<B: Backend<Device = WgpuDevice>> CrossAttentionBlock<B> {
-    pub fn forward(
+impl<B: Backend> CrossAttentionBlock<B> {
+    pub fn forward<R: Runtime<Device = B::Device>>(
         &self,
         x:            Tensor<B, 3>,
         memory:       Tensor<B, 3>,
@@ -411,12 +411,12 @@ impl<B: Backend<Device = WgpuDevice>> CrossAttentionBlock<B> {
         // No causal mask on cross-attention, only optional encoder padding
         let mask = build_mask(None, enc_pad_mask, dec_len, enc_len);
 
-        let out = flash_attn_from_tensors(q, k, v, mask, device, self.block_q, self.block_k);
+        let out = flash_attn_from_tensors::<B, R>(q, k, v, mask, device, self.block_q, self.block_k);
 
         self.o.forward(out.swap_dims(1, 2).flatten(2, 3))
     }
 
-    pub async fn forward_async(
+    pub async fn forward_async<R: Runtime<Device = B::Device>>(
         &self,
         x:            Tensor<B, 3>,
         memory:       Tensor<B, 3>,
@@ -444,7 +444,7 @@ impl<B: Backend<Device = WgpuDevice>> CrossAttentionBlock<B> {
         // No causal mask on cross-attention, only optional encoder padding
         let mask = build_mask(None, enc_pad_mask, dec_len, enc_len);
 
-        let out = flash_attn_from_tensors_async(q, k, v, mask, device, self.block_q, self.block_k).await;
+        let out = flash_attn_from_tensors_async::<B, R>(q, k, v, mask, device, self.block_q, self.block_k).await;
 
         self.o.forward(out.swap_dims(1, 2).flatten(2, 3))
     }
@@ -464,7 +464,7 @@ pub struct EncoderBlockConfig {
 }
  
 impl EncoderBlockConfig {
-    pub fn init<B: Backend<Device = WgpuDevice>>(&self, device: &B::Device) -> EncoderBlock<B> {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> EncoderBlock<B> {
         EncoderBlock {
             attn_norm: RMSNormConfig::new(self.d_model).init(device),
             attn:      SelfAttentionConfig::new(self.d_model, self.n_heads)
@@ -478,15 +478,15 @@ impl EncoderBlockConfig {
 }
 
 #[derive(Module, Debug)]
-pub struct EncoderBlock<B: Backend<Device = WgpuDevice>> {
+pub struct EncoderBlock<B: Backend> {
     pub attn_norm: RMSNorm<B>,
     pub attn:      SelfAttention<B>,
     pub mlp_norm:  RMSNorm<B>,
     pub mlp:       MLP<B>,
 }
 
-impl<B: Backend<Device = WgpuDevice>> EncoderBlock<B> {
-    pub fn forward(
+impl<B: Backend> EncoderBlock<B> {
+    pub fn forward<R: Runtime<Device = B::Device>>(
         &self,
         x:        Tensor<B, 3>,
         rope:     &RotaryEncoding<B>,
@@ -495,13 +495,13 @@ impl<B: Backend<Device = WgpuDevice>> EncoderBlock<B> {
     ) -> Tensor<B, 3> {
         let x_device = x.device();
         let x = x.clone()
-            + self.attn.forward(
+            + self.attn.forward::<R>(
                 self.attn_norm.forward(x), rope, None, pad_mask, &x_device,
             );
         x.clone() + self.mlp.forward(self.mlp_norm.forward(x))
     }
 
-    pub async fn forward_async(
+    pub async fn forward_async<R: Runtime<Device = B::Device>>(
         &self,
         x:        Tensor<B, 3>,
         rope:     &RotaryEncoding<B>,
@@ -510,7 +510,7 @@ impl<B: Backend<Device = WgpuDevice>> EncoderBlock<B> {
     ) -> Tensor<B, 3> {
         let x_device = x.device();
         let x = x.clone()
-            + self.attn.forward_async(
+            + self.attn.forward_async::<R>(
                 self.attn_norm.forward(x), rope, None, pad_mask, &x_device,
             ).await;
         x.clone() + self.mlp.forward(self.mlp_norm.forward(x))
@@ -531,7 +531,7 @@ pub struct DecoderBlockConfig {
 }
  
 impl DecoderBlockConfig {
-    pub fn init<B: Backend<Device = WgpuDevice>>(&self, device: &B::Device) -> DecoderBlock<B> {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> DecoderBlock<B> {
         let attn_cfg = || SelfAttentionConfig::new(self.d_model, self.n_heads)
             .with_block_q(self.block_q)
             .with_block_k(self.block_k);
@@ -550,7 +550,7 @@ impl DecoderBlockConfig {
 }
 
 #[derive(Module, Debug)]
-pub struct DecoderBlock<B: Backend<Device = WgpuDevice>> {
+pub struct DecoderBlock<B: Backend> {
     pub self_attn_norm:  RMSNorm<B>,
     pub self_attn:       SelfAttention<B>,
     pub cross_attn_norm: RMSNorm<B>,
@@ -559,8 +559,8 @@ pub struct DecoderBlock<B: Backend<Device = WgpuDevice>> {
     pub mlp:             MLP<B>,
 }
 
-impl<B: Backend<Device = WgpuDevice>> DecoderBlock<B> {
-    pub fn forward(
+impl<B: Backend> DecoderBlock<B> {
+    pub fn forward<R: Runtime<Device = B::Device>>(
         &self,
         x:            Tensor<B, 3>,
         memory:       Tensor<B, 3>,
@@ -572,7 +572,7 @@ impl<B: Backend<Device = WgpuDevice>> DecoderBlock<B> {
     ) -> Tensor<B, 3> {
         let x_device = x.device();
         let x = x.clone()
-            + self.self_attn.forward(
+            + self.self_attn.forward::<R>(
                 self.self_attn_norm.forward(x),
                 rope,
                 Some(causal_mask),
@@ -580,7 +580,7 @@ impl<B: Backend<Device = WgpuDevice>> DecoderBlock<B> {
                 &x_device,
             );
         let x = x.clone()
-            + self.cross_attn.forward(
+            + self.cross_attn.forward::<R>(
                 self.cross_attn_norm.forward(x.clone()),
                 memory,
                 rope,
@@ -590,7 +590,7 @@ impl<B: Backend<Device = WgpuDevice>> DecoderBlock<B> {
         x.clone() + self.mlp.forward(self.mlp_norm.forward(x))
     }
 
-    pub async fn forward_async(
+    pub async fn forward_async<R: Runtime<Device = B::Device>>(
         &self,
         x:            Tensor<B, 3>,
         memory:       Tensor<B, 3>,
@@ -602,7 +602,7 @@ impl<B: Backend<Device = WgpuDevice>> DecoderBlock<B> {
     ) -> Tensor<B, 3> {
         let x_device = x.device();
         let x = x.clone()
-            + self.self_attn.forward_async(
+            + self.self_attn.forward_async::<R>(
                 self.self_attn_norm.forward(x),
                 rope,
                 Some(causal_mask),
@@ -610,7 +610,7 @@ impl<B: Backend<Device = WgpuDevice>> DecoderBlock<B> {
                 &x_device,
             ).await;
         let x = x.clone()
-            + self.cross_attn.forward_async(
+            + self.cross_attn.forward_async::<R>(
                 self.cross_attn_norm.forward(x.clone()),
                 memory,
                 rope,

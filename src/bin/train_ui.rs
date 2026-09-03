@@ -9,6 +9,7 @@ use burn::{
     prelude::*, 
     tensor::{Int, TensorData}
 };
+use cubecl::wgpu::WgpuRuntime;
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{mpsc, Arc, Mutex},
@@ -219,7 +220,7 @@ fn run_training_loop(
             let enc_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_enc_ids, [current_batch_size, max_seq_len]), &device);
             let dec_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_dec_input_ids, [current_batch_size, max_seq_len]), &device);
 
-            let token_logits = model.forward(enc_t, dec_t.clone());
+            let token_logits = model.forward::<WgpuRuntime>(enc_t, dec_t.clone());
 
             // Entropy
             let probs = burn::tensor::activation::softmax(token_logits.clone(), 2);

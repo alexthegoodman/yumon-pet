@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use burn::{backend::Wgpu, prelude::*};
-use cubecl::wgpu::WgpuDevice;
+use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 #[cfg(target_arch = "wasm32")]
 use ratzilla::{DomBackend, event::{KeyCode, KeyEvent}, WebRenderer};
 #[cfg(target_arch = "wasm32")]
@@ -205,7 +205,7 @@ fn main() -> Result<()> {
                 .unwrap() 
             };
 
-            let result = brain_model.generate_unmasked_parsed_async(
+            let result = brain_model.generate_unmasked_parsed_async::<WgpuRuntime>(
                 &tokenizer,
                 &prompt,
                 config.max_seq_len,

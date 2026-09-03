@@ -31,8 +31,16 @@ use crate::brain::{
     model::{YumonBrain, YumonBrainConfig, BrainMetadata, GenerationResult},
 };
 
+// Used by the local desktop training UI (src/bin/train_ui.rs), which runs on
+// wgpu since dev machines typically have no CUDA GPU.
 pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
 // pub type TrainBackend = burn::backend::Autodiff<burn::backend::NdArray<f32>>;
+
+// Used by the headless `train-brain` CLI path (`run`, below) — this is what
+// RunPod/Docker actually runs. CUDA talks to the driver directly and needs no
+// Vulkan/GL adapter, unlike wgpu, which RunPod's driver stack doesn't expose.
+pub type CudaTrainBackend = burn::backend::Autodiff<burn::backend::Cuda>;
+pub type CudaTrainRuntime = cubecl::cuda::CudaRuntime;
 
 // Max sequence length during training (tokens)
 // pub const MAX_SEQ_LEN:  usize = 120;
@@ -248,7 +256,7 @@ pub fn run(
     batch_size:        usize,
     max_articles:      usize,
 ) -> Result<()> {
-    let device = burn::backend::wgpu::WgpuDevice::default();
+    let device = burn::backend::cuda::CudaDevice::default();
     let label_keywords   = build_label_keywords();
     let keyword_index    = build_keyword_index(&label_keywords);
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
@@ -347,7 +355,7 @@ pub fn run(
         println!("\n🚀 Starting Run: {}", run_cfg.name);
 
         let (mut model, mut epochs_already_done) = if std::path::Path::new(run_dir_str).join("model.bin").exists() {
-            match YumonBrain::<TrainBackend>::load(run_dir_str, &device) {
+            match YumonBrain::<CudaTrainBackend>::load(run_dir_str, &device) {
             // match YumonDecBrain::<TrainBackend>::load(run_dir_str, &device) {
                 Ok((m, _tok, _config)) => {
                     let meta_json = std::fs::read_to_string(std::path::Path::new(run_dir_str).join("metadata.json"))?;
@@ -513,11 +521,11 @@ pub fn run(
                         all_lang_targets.extend(lang_targets);
                     }
 
-                    let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), &device);
-                    let enc_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_enc_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
-                    let dec_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_dec_input_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
+                    let lang_target_t = Tensor::<CudaTrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), &device);
+                    let enc_t = Tensor::<CudaTrainBackend, 2, Int>::from_ints(TensorData::new(all_enc_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
+                    let dec_t = Tensor::<CudaTrainBackend, 2, Int>::from_ints(TensorData::new(all_dec_input_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
 
-                    let token_logits = model.forward(enc_t, dec_t.clone());
+                    let token_logits = model.forward::<CudaTrainRuntime>(enc_t, dec_t.clone());
 
                     // Entropy
                     let probs = burn::tensor::activation::softmax(token_logits.clone(), 2);
@@ -595,7 +603,7 @@ pub fn run(
                             })).unwrap()
 
                         } else { prompt_text };
-                        let result = inference_model.generate_unmasked_parsed(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+                        let result = inference_model.generate_unmasked_parsed::<CudaTrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
                         state.last_reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
                     }
 
@@ -799,7 +807,7 @@ pub fn run(
                         })).unwrap()
 
                     } else { prompt_text };
-                    let result = inference_model.generate_unmasked_parsed(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+                    let result = inference_model.generate_unmasked_parsed::<CudaTrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
                     state.last_reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
                 }
             }

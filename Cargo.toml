@@ -35,9 +35,9 @@ fancy-regex = "0.17.0"
 textwrap = "0.16.2"
 derive-new = "0.7"
 unicode-width = "0.2"
-cubecl = { version = "0.9", features = ["wgpu"] }
+cubecl = { version = "0.9", features = ["wgpu", "cuda"] }
 cubecl-common = { version = "0.9", features = ["serde"] }
-burn = { version = "0.20", features = ["autodiff", "wgpu"] }
+burn = { version = "0.20", features = ["autodiff", "wgpu", "cuda"] }
 regex = "1"
 rand = "0.8.5"
 console_error_panic_hook = "0.1.7"

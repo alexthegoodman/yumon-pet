@@ -54,8 +54,8 @@ runtime is `libvulkan1` + the GPU's driver.
    out, since the image bakes in `yumon_bpe/` and the text training data):
 
    ```
-   docker build -t <registry>/yumon-brain:latest .
-   docker push <registry>/yumon-brain:latest
+   docker build -t alexthegoodman/yumon-brain:latest .
+   docker push alexthegoodman/yumon-brain:latest
    ```
 
 2. **Create a RunPod Network Volume** (Storage → Network Volumes) sized for your

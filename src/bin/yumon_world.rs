@@ -658,13 +658,14 @@ fn main() {
     // Brain thread
     std::thread::spawn(move || {
         use burn::backend::Wgpu;
+        use cubecl::wgpu::WgpuRuntime;
         let device: burn::prelude::Device<Wgpu> = Default::default();
         let (brain, tokenizer, config) = match YumonBrain::<Wgpu>::load("checkpoints/brain/128h_2l_2a_64len_6e", &device) {
             Ok(m) => m,
             Err(e) => { eprintln!("[brain] load failed: {e}"); return; }
         };
         while let Ok(p) = rx_prompt.recv() {
-            let result = brain.generate_unmasked_parsed(&tokenizer, &p.prompt, config.max_seq_len, &device);
+            let result = brain.generate_unmasked_parsed::<WgpuRuntime>(&tokenizer, &p.prompt, config.max_seq_len, &device);
             let _ = tx_result.send(result);
         }
     });

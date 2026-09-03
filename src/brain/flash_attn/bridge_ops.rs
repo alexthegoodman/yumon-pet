@@ -7,7 +7,6 @@
 //   - TensorArg::from_raw_parts for kernel arguments
 //   - Strides computed explicitly (row-major)
 
-use burn::backend::wgpu::{WgpuDevice, WgpuRuntime};
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
@@ -232,26 +231,3 @@ pub fn read_f32<R: Runtime>(device: &R::Device, handle: Handle, n: usize) -> Vec
     f32::from_bytes(&bytes)[..n].to_vec()
 }
 
-// ── Convenience type alias for your Burn WGPU backend ────────────────────────
-
-// pub type WgpuForwardResult  = ForwardResult<WgpuRuntime>;
-// pub type WgpuBackwardResult = BackwardResult<WgpuRuntime>;
-
-/// Entry point typed for Burn's WgpuDevice — call this from your Burn modules.
-pub fn forward_wgpu(
-    device:  &WgpuDevice,
-    q:       &[f32],
-    k:       &[f32],
-    v:       &[f32],
-    bh:      usize,
-    seq_q:   usize,
-    seq_k:   usize,
-    d_k:     usize,
-    d_v:     usize,
-    block_q: usize,
-    block_k: usize,
-) -> ForwardResult {
-    launch_forward::<WgpuRuntime>(
-        device, q, k, v, bh, seq_q, seq_k, d_k, d_v, block_q, block_k,
-    )
-}

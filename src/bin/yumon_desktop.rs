@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use burn::{backend::Wgpu, prelude::*};
-use cubecl::wgpu::WgpuDevice;
+use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{mpsc, Arc, Mutex},
@@ -121,7 +121,7 @@ pub fn run(brain_cp: String, device: WgpuDevice) -> Result<()> {
                     })).unwrap()
                 };
 
-                let result = brain_model.generate_unmasked_parsed(
+                let result = brain_model.generate_unmasked_parsed::<WgpuRuntime>(
                     &tokenizer,
                     &prompt,
                     config.max_seq_len,

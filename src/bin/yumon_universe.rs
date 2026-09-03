@@ -490,6 +490,7 @@ fn main() {
     // ── Brain thread ──────────────────────────────────────────────────────────
     {
         use burn::backend::Wgpu;
+        use cubecl::wgpu::WgpuRuntime;
         let tx = tx_result;
         std::thread::spawn(move || {
             let device: burn::prelude::Device<Wgpu> = Default::default();
@@ -505,7 +506,7 @@ fn main() {
             };
 
             while let Ok(p) = rx_prompt.recv() {
-                let result = brain.generate_unmasked_parsed(
+                let result = brain.generate_unmasked_parsed::<WgpuRuntime>(
                     &tokenizer,
                     &p.prompt, config.max_seq_len, &device,
                 );

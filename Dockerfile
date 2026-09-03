@@ -22,20 +22,22 @@ COPY src ./src
 RUN cargo build --release --no-default-features --bin yumon-pet
 
 ########################################
-# Runtime: minimal image with just the Vulkan loader for burn's wgpu backend.
-# The actual GPU driver + Vulkan ICD are provided at container start by
-# RunPod's nvidia-container-toolkit - nothing GPU-specific to install here.
+# Runtime: minimal image - training uses burn's CUDA backend, which talks to
+# the CUDA driver directly (via cudarc's dynamic loading of libcuda/libnvrtc
+# at process start). No Vulkan/GL loader needed here: RunPod's driver stack
+# doesn't expose a usable Vulkan/GL adapter, which is why this used to run on
+# wgpu/Vulkan and crash there with "No possible adapter available for
+# backend". The actual CUDA driver is provided at container start by RunPod's
+# nvidia-container-toolkit - nothing GPU-specific to install here.
 ########################################
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libvulkan1 \
-    vulkan-tools \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=graphics,compute,utility
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 WORKDIR /app
 COPY --from=builder /build/target/release/yumon-pet ./yumon-pet

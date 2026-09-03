@@ -8,7 +8,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use cubecl::wgpu::WgpuDevice;
+use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 
 #[cfg(target_os = "windows")]
 use ratatui::{
@@ -183,7 +183,7 @@ fn main() -> Result<()> {
                 })).unwrap()
             };
 
-            let result = brain_model.generate_unmasked_parsed(
+            let result = brain_model.generate_unmasked_parsed::<WgpuRuntime>(
                 &tokenizer,
                 &prompt,
                 config.max_seq_len,
