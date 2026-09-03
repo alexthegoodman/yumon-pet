@@ -208,7 +208,7 @@ pub fn load_csv_bible(bible_path: &str) -> Result<Vec<String>> {
                 buffer.clear();
 
                 count += 1;
-                if count >= 20_000 {
+                if count >= 5_000_000 {
                     break;
                 }
             }

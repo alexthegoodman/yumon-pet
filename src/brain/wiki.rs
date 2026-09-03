@@ -448,6 +448,7 @@ pub fn is_good_sentence(s: &str) -> bool {
         "em;",
         "px;",
         "||",
+        "|",
         // "\\",
         // "\\\\",
         // "\\\\\\"
