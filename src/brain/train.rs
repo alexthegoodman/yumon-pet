@@ -289,22 +289,22 @@ pub fn run(
 
         // // memorizes extremely well. outputs memorized sentences regardless of input prompt though, not usually relevant to input prompt
         RunConfig {
-            name: "128h_2l_2a_128len".to_string(),
+            name: "128h_2l_2a_64len_b2".to_string(),
             embed_dim: 128, 
             hidden_units: 128, 
             n_layers: 2, 
             attn_heads: 2, 
             ff_dim: 512,
             // max_seq_len: 40,
-            // max_seq_len: 64, // used on both sides in decoder-encoder arch 
+            max_seq_len: 64, // used on both sides in decoder-encoder arch 
             // max_seq_len: 90, // TODO: would be ideal to set max seq for input and output separately, as input has memories that make it longer
-            max_seq_len: 128,
+            // max_seq_len: 128,
             // max_seq_len: 256,
             // max_seq_len: 1024,
             // max_seq_len: 512,
             stages: vec![
                 // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 5, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 25, batch_size: 2, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
             ],
         },
 
@@ -648,7 +648,7 @@ pub fn run(
                             serde_json::to_string_pretty(&serde_json::json!({
                                 // "nearby_objects": Vec::<String>::new(),
                                 "memories":       Vec::<String>::new(),
-                                "command":        "".to_string(),
+                                // "command":        "".to_string(),
                                 "message":        prompt_text,
                                 // "directions":    dirs,
                             })).unwrap()
@@ -855,7 +855,7 @@ pub fn run(
                         serde_json::to_string_pretty(&serde_json::json!({
                             // "nearby_objects": Vec::<String>::new(),
                             "memories":       Vec::<String>::new(),
-                            "command":        "".to_string(),
+                            // "command":        "".to_string(),
                             "message":        prompt_text,
                             // "directions":    dirs,
                         })).unwrap()

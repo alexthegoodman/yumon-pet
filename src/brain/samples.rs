@@ -905,7 +905,7 @@ pub fn prepare_paired_samples_split(
                 let json = serde_json::to_string_pretty(&serde_json::json!({
                     // "nearby_objects": nearby_objects,
                     "memories":       prior_memories,
-                    "command":        command,
+                    // "command":        command,
                     "message":        sent_a,
                     // "directions":     dirs,
                 })).unwrap();
@@ -1102,7 +1102,7 @@ pub fn prepare_paired_samples_split_sep(
 
                 let json = serde_json::to_string_pretty(&serde_json::json!({
                     "memories":       prior_memories,
-                    "command":        command,
+                    // "command":        command,
                     "message":        sent_a,
                 })).unwrap();
                 
@@ -1288,7 +1288,7 @@ pub fn prepare_paired_samples_chats(
                     let json = serde_json::to_string_pretty(&serde_json::json!({
                         // "scene description": "a beautiful outdoors oasis".to_string(),
                         "memories":       prior_memories,
-                        "command":        command,
+                        // "command":        command,
                         "message":        memory.human,
                     })).unwrap();
 
