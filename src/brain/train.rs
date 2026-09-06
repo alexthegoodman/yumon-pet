@@ -215,8 +215,8 @@ fn load_stage_data(
         // .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
         // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(10_000))
         // .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
-        .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
-        .add("data/bible_asv.csv", FileKind::BibleCsv, None)
+        // .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
+        // .add("data/bible_asv.csv", FileKind::BibleCsv, None)
         // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs — proper
         // message/reply splits instead of BibleCsv's arbitrary mid-sentence cuts.
         .add("data/synthetic/bible.txt", FileKind::Chats, None)
@@ -227,7 +227,7 @@ fn load_stage_data(
         // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
         // .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(25_000))
-        .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(5_000))
+        // .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(5_000))
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
         .add("archive/ov_chats.txt", FileKind::Chats, None)
@@ -298,31 +298,66 @@ pub fn run(
         // },
 
         RunConfig {
-            name: "256h_3l_4a_64len_b2_DecoderOnly_Language".to_string(),
+            name: "512h_6l_4a_128len_b2_DecoderOnly_Structured".to_string(),
+            embed_dim: 512,
+            hidden_units: 512,
+            n_layers: 6,
+            attn_heads: 4,
+            ff_dim: 2048,
+            // max_seq_len: 64,
+            max_seq_len: 128,
+            // max_seq_len: 256,
+            architecture: Architecture::DecoderOnly,
+            stages: vec![
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.01, epochs: 15, batch_size: 2, first_lr: 3e-4, last_lr: 3e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
+            ],
+        },
+
+        RunConfig {
+            name: "512h_6l_4a_128len_b2_DecoderOnly_Language".to_string(),
+            embed_dim: 512,
+            hidden_units: 512,
+            n_layers: 6,
+            attn_heads: 4,
+            ff_dim: 2048,
+            // max_seq_len: 64,
+            max_seq_len: 128,
+            // max_seq_len: 256,
+            architecture: Architecture::DecoderOnly,
+            stages: vec![
+                StageConfig { stage: TrainingStage::Language, loss_threshold: 0.01, epochs: 15, batch_size: 2, first_lr: 3e-4, last_lr: 3e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
+            ],
+        },
+
+        RunConfig {
+            name: "256h_3l_4a_128len_b2_DecoderOnly_Language".to_string(),
             embed_dim: 256,
             hidden_units: 256,
             n_layers: 3,
             attn_heads: 4,
             ff_dim: 1024,
-            max_seq_len: 64,
+            // max_seq_len: 64,
+            max_seq_len: 128,
+            // max_seq_len: 256,
             architecture: Architecture::DecoderOnly,
             stages: vec![
-                StageConfig { stage: TrainingStage::Language, loss_threshold: 0.1, epochs: 15, batch_size: 2, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
+                StageConfig { stage: TrainingStage::Language, loss_threshold: 0.01, epochs: 15, batch_size: 2, first_lr: 6e-4, last_lr: 6e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
             ],
         },
 
         // testing — decoder-only counterpart of the run above, for side-by-side comparison
         RunConfig {
-            name: "128h_2l_2a_64len_b2_DecoderOnly_Language".to_string(),
+            name: "128h_2l_2a_128len_b2_DecoderOnly_Language".to_string(),
             embed_dim: 128,
             hidden_units: 128,
             n_layers: 2,
             attn_heads: 2,
             ff_dim: 512,
-            max_seq_len: 64,
+            // max_seq_len: 64,.
+            max_seq_len: 128,
             architecture: Architecture::DecoderOnly,
             stages: vec![
-                StageConfig { stage: TrainingStage::Language, loss_threshold: 0.1, epochs: 15, batch_size: 2, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
+                StageConfig { stage: TrainingStage::Language, loss_threshold: 0.01, epochs: 15, batch_size: 2, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
             ],
         },
 

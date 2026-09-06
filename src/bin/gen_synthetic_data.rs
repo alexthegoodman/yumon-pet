@@ -13,12 +13,11 @@
 //
 // (blocks separated by a single blank line)
 //
-// bible_asv.csv / bible_bbe.csv are currently loaded as raw verse text
-// (FileKind::BibleCsv) and samples.rs then cuts each chunk in half by word
-// count to fabricate an input/target pair, which routinely lands mid
-// sentence. This tool instead asks an LLM to produce real, topically
-// grounded question/answer turns in Yumon's short voice, so no arbitrary
-// splitting is needed at all.
+// bible_asv.csv / bible_bbe.csv are loaded as consecutive verse pairs
+// (FileKind::BibleCsv, see load_csv_bible_pairs) — verse N as input, verse
+// N+1 as target. This tool instead asks an LLM to produce real, topically
+// grounded question/answer turns in Yumon's short voice, for pairs with
+// actual conversational structure rather than adjacent scripture.
 //
 // Safe to interrupt (Ctrl-C) and re-run: progress and a dedup set are
 // persisted per topic under data/synthetic/.state/, and generated pairs are

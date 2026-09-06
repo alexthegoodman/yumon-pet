@@ -175,52 +175,36 @@ pub fn load_csv_qna(csv_path: &str) -> Result<Vec<String>> {
 //     Ok(quotes)
 // }
 
+/// Pairs up consecutive verses (verse N -> verse N+1) instead of splitting a
+/// concatenated chunk mid-sentence, so each side of the pair is a real,
+/// complete verse.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn load_csv_bible(bible_path: &str) -> Result<Vec<String>> {
+pub fn load_csv_bible_pairs(bible_path: &str) -> Result<Vec<(String, String)>> {
     println!("📖 Loading bible CSV: {bible_path}");
 
     let mut rdr = csv::Reader::from_path(bible_path)?;
-    let mut quotes = Vec::new();
-    let mut buffer = String::new();
-
-    let mut count = 0;
+    let mut verses = Vec::new();
 
     for result in rdr.records() {
         let record = result?;
-
-        let bk = record.get(1).unwrap_or("").trim().to_string();
         let verse = record.get(4).unwrap_or("").trim().to_string();
 
-        if (bk == "20") { // proverbs only right now
-            if verse.is_empty() {
-                continue;
-            }
-
-            if buffer.is_empty() {
-                buffer.push_str(&verse);
-            } else {
-                buffer.push(' ');
-                buffer.push_str(&verse);
-            }
-
-            if buffer.len() >= 90 {
-                quotes.push(buffer.clone());
-                buffer.clear();
-
-                count += 1;
-                if count >= 5_000_000 {
-                    break;
-                }
-            }
+        if verse.is_empty() {
+            continue;
         }
+
+        verses.push(verse);
     }
 
-    if !buffer.is_empty() {
-        quotes.push(buffer);
+    let mut pairs = Vec::new();
+    let mut i = 0;
+    while i + 1 < verses.len() {
+        pairs.push((verses[i].clone(), verses[i + 1].clone()));
+        i += 2;
     }
 
-    println!("✅ Loaded {} verses from {bible_path}", quotes.len());
-    Ok(quotes)
+    println!("✅ Loaded {} verse pairs from {bible_path}", pairs.len());
+    Ok(pairs)
 }
 
 pub fn load_dictionary_sentences(dict_path: &str) -> Result<Vec<String>> {
