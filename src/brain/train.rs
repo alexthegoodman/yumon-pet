@@ -212,8 +212,8 @@ fn load_stage_data(
     loader = loader
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
         .add("data/ideas.txt",   FileKind::TxtLines, Some(2_000))
-        // .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
-        // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(10_000))
+        .add("archive/arena_extract.txt",   FileKind::Chats, Some(10_000))
+        .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(10_000))
         // .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
         // .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
         // .add("data/bible_asv.csv", FileKind::BibleCsv, None)
@@ -298,15 +298,35 @@ pub fn run(
         // },
 
         RunConfig {
-            name: "512h_6l_4a_128len_b2_DecoderOnly_Structured".to_string(),
+            name: "256h_3l_4a_512len_b2_DecoderOnly_Structured".to_string(),
+            embed_dim: 256,
+            hidden_units: 256,
+            n_layers: 3,
+            attn_heads: 4,
+            ff_dim: 1024,
+            // max_seq_len: 64,
+            // max_seq_len: 128,
+            // max_seq_len: 256,
+            max_seq_len: 512, // supports up to 5 memories at any given moment (ideally, relevant memories from a bank) (perhaps 4, not including the main message)
+            architecture: Architecture::DecoderOnly,
+            stages: vec![
+                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.01, epochs: 15, batch_size: 2, first_lr: 3e-4, last_lr: 3e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
+            ],
+        },
+    
+        // altogether these hyperparameters seem fairly coherent, not too smart mind you
+        // its good with a good dataset, but would like to see more lightweight with larger dataset
+        RunConfig {
+            name: "512h_6l_4a_512len_b2_DecoderOnly_Structured".to_string(),
             embed_dim: 512,
             hidden_units: 512,
             n_layers: 6,
             attn_heads: 4,
             ff_dim: 2048,
             // max_seq_len: 64,
-            max_seq_len: 128,
+            // max_seq_len: 128,
             // max_seq_len: 256,
+            max_seq_len: 512, // supports up to 5 memories at any given moment (ideally, relevant memories from a bank) (perhaps 4, not including the main message)
             architecture: Architecture::DecoderOnly,
             stages: vec![
                 StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.01, epochs: 15, batch_size: 2, first_lr: 3e-4, last_lr: 3e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },

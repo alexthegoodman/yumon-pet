@@ -295,7 +295,7 @@ pub fn main() {
     // sentences.extend(wiki_sentences);
         
     let bpe = BpeTokenizer::train(
-        sentences, 
+        sentences.clone(),
         4096 // max size on my igpu at 128 batch size
         // 8192
         // 16384 // doesnt seem to help at all (can do at 16 batch size)
@@ -303,6 +303,175 @@ pub fn main() {
     let bpe = bpe.as_ref().expect("Couldn't train bpe");
 
     bpe.save("yumon_bpe").as_ref().expect("Couldn't save bpe");
+
+    // ── Diagnostic: avg sample length in chars/tokens ───────────────────────
+    // Helps size max_seq_len. These are raw pre-JSON sentences (individual
+    // human/bot turns) — budget extra on top for the Structured stage's
+    // "{memories, message}" / "{action, emotion, reply}" JSON wrapper.
+    {
+        let n = sentences.len();
+        let mut total_chars  = 0usize;
+        let mut total_tokens = 0usize;
+        let mut max_chars    = 0usize;
+        let mut max_tokens   = 0usize;
+
+        for sent in &sentences {
+            let chars  = sent.chars().count();
+            let tokens = bpe.encode_raw(sent).map(|t| t.len()).unwrap_or(0);
+            total_chars  += chars;
+            total_tokens += tokens;
+            max_chars  = max_chars.max(chars);
+            max_tokens = max_tokens.max(tokens);
+        }
+
+        let avg_chars  = total_chars as f64 / n.max(1) as f64;
+        let avg_tokens = total_tokens as f64 / n.max(1) as f64;
+
+        println!("\n📏 Corpus length diagnostic ({n} samples, per human/bot turn)");
+        println!("   avg chars:   {avg_chars:.1}  (max {max_chars})");
+        println!("   avg tokens:  {avg_tokens:.1}  (max {max_tokens})");
+        println!("   chars/token: {:.2}", avg_chars / avg_tokens.max(1.0));
+        println!("   +20% JSON overhead estimate: ~{:.0} tokens/turn", avg_tokens * 1.2);
+        println!("   packed pair estimate (input+sep+reply, +20%): ~{:.0} tokens", avg_tokens * 2.0 * 1.2);
+    }
+
+    // ── Diagnostic: Structured-stage packed sequence length, growing memories ──
+    // The `memories` array in the input JSON accumulates every prior turn in a
+    // chat block, so later turns carry far more input than a lone human/bot
+    // pair does. This walks the same chat corpora with the real memory-growth
+    // logic from samples.rs to measure the actual packed (input+sep+target)
+    // sequence the DecoderOnly path sees, worst case included.
+    {
+        use rand::thread_rng;
+        use yumon_pet::brain::samples::generate_training_sample;
+        use yumon_pet::brain::sentiment::EmotionAnalyzer;
+
+        let chat_files = [
+            "data/synthetic/bible.txt",
+            "data/synthetic/business.txt",
+            "data/synthetic/universe.txt",
+            "archive/ov_chats.txt",
+            "archive/you_chats.txt",
+            "archive/clean_chats.txt",
+        ];
+
+        let analyzer = EmotionAnalyzer::new();
+        let mut rng = thread_rng();
+        let sep_tokens_len = bpe.encode_raw("\n---\n").map(|t| t.len()).unwrap_or(0);
+
+        let mut n_blocks = 0usize;
+        let mut n_turns = 0usize;
+        let mut total_memories = 0usize;
+        let mut max_memories = 0usize;
+
+        let mut in_total_tokens = 0usize;
+        let mut in_max_tokens = 0usize;
+        let mut tgt_total_tokens = 0usize;
+        let mut tgt_max_tokens = 0usize;
+        let mut combined_total_tokens = 0usize;
+        let mut combined_max_tokens = 0usize;
+
+        // Bucketed by exact prior-memory count `i` (0, 1, 2, …) so we can read
+        // off a marginal per-memory token cost instead of one blended average.
+        let mut by_memcount: std::collections::BTreeMap<usize, (usize, usize, usize)> = std::collections::BTreeMap::new();
+        // (count, sum_in_tokens, max_in_tokens)
+
+        for path in chat_files {
+            let chats = match load_handcrafted_chats(path) {
+                Ok(c) => c,
+                Err(e) => { println!("   ⚠️  skipping {path}: {e}"); continue; }
+            };
+            for block in &chats.blocks {
+                n_blocks += 1;
+                max_memories = max_memories.max(block.memories.len());
+
+                for (i, memory) in block.memories.iter().enumerate() {
+                    n_turns += 1;
+                    total_memories += i;
+
+                    let prior_memories: Vec<serde_json::Value> = block.memories[..i]
+                        .iter()
+                        .map(|m| serde_json::json!({ "human": m.human, "yumon": m.bot }))
+                        .collect();
+
+                    let input_json = serde_json::to_string_pretty(&serde_json::json!({
+                        "memories": prior_memories,
+                        "message":  memory.human,
+                    })).unwrap();
+
+                    let tsample = generate_training_sample(&mut rng);
+                    let sentiment = sentiment::analyze(memory.bot.to_string());
+                    let emotion = analyzer.analyze(&memory.bot, &sentiment);
+
+                    let target_json = serde_json::to_string_pretty(&serde_json::json!({
+                        "action":  tsample.action.as_str(),
+                        "emotion": emotion,
+                        "reply":   memory.bot,
+                    })).unwrap();
+
+                    let in_tokens  = bpe.encode_raw(&input_json).map(|t| t.len()).unwrap_or(0);
+                    let tgt_tokens = bpe.encode_raw(&target_json).map(|t| t.len()).unwrap_or(0);
+                    let combined   = in_tokens + sep_tokens_len + tgt_tokens;
+
+                    in_total_tokens += in_tokens;
+                    in_max_tokens = in_max_tokens.max(in_tokens);
+                    tgt_total_tokens += tgt_tokens;
+                    tgt_max_tokens = tgt_max_tokens.max(tgt_tokens);
+                    combined_total_tokens += combined;
+                    combined_max_tokens = combined_max_tokens.max(combined);
+
+                    let bucket = by_memcount.entry(i).or_insert((0, 0, 0));
+                    bucket.0 += 1;
+                    bucket.1 += in_tokens;
+                    bucket.2 = bucket.2.max(in_tokens);
+                }
+            }
+        }
+
+        let avg = |t: usize| t as f64 / n_turns.max(1) as f64;
+
+        println!("\n📏 Structured packed-sequence diagnostic ({n_blocks} chat blocks, {n_turns} turns, incl. growing memories)");
+        println!("   avg memories/turn: {:.1}  (max chain depth: {max_memories})", total_memories as f64 / n_turns.max(1) as f64);
+        println!("   input  (memories+message)     — avg tokens: {:.1}  (max {in_max_tokens})", avg(in_total_tokens));
+        println!("   target (action+emotion+reply) — avg tokens: {:.1}  (max {tgt_max_tokens})", avg(tgt_total_tokens));
+        println!("   combined packed (input+sep+target) — avg tokens: {:.1}  (max {combined_max_tokens})", avg(combined_total_tokens));
+        println!("   +20% headroom on worst case: ~{:.0} tokens  <- size max_seq_len against this", combined_max_tokens as f64 * 1.2);
+
+        println!("\n📏 Input tokens by prior-memory count (marginal cost per memory)");
+        println!("   {:>8}  {:>7}  {:>12}  {:>12}", "memories", "turns", "avg_in_tok", "max_in_tok");
+        for (mem_count, (count, sum_in, max_in)) in &by_memcount {
+            println!("   {:>8}  {:>7}  {:>12.1}  {:>12}", mem_count, count, *sum_in as f64 / *count as f64, max_in);
+        }
+
+        // Linear fit (avg_in_tokens ~ base + slope * mem_count) over the observed
+        // buckets, so we can extrapolate to memory counts deeper than anything
+        // actually present in this corpus (max chain depth here: {max_memories}).
+        if by_memcount.len() >= 2 {
+            let points: Vec<(f64, f64)> = by_memcount.iter()
+                .map(|(&k, &(count, sum, _))| (k as f64, sum as f64 / count as f64))
+                .collect();
+            let n = points.len() as f64;
+            let sum_x: f64 = points.iter().map(|(x, _)| x).sum();
+            let sum_y: f64 = points.iter().map(|(_, y)| y).sum();
+            let sum_xy: f64 = points.iter().map(|(x, y)| x * y).sum();
+            let sum_xx: f64 = points.iter().map(|(x, _)| x * x).sum();
+            let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x);
+            let intercept = (sum_y - slope * sum_x) / n;
+
+            let avg_target = tgt_total_tokens as f64 / n_turns.max(1) as f64;
+
+            println!("\n📏 Extrapolated packed-sequence size for a chosen memory budget");
+            println!("   per-memory marginal cost: ~{slope:.1} tokens  (base message w/ 0 memories: ~{intercept:.1} tokens)");
+            for want in [1usize, 2, 3, 5, 8, 10, 15, 20] {
+                let est_in = intercept + slope * want as f64;
+                let est_combined = est_in + sep_tokens_len as f64 + avg_target;
+                println!(
+                    "   {:>2} memories → est. input ~{:.0} tok, combined ~{:.0} tok, +20% headroom → max_seq_len ~{:.0}",
+                    want, est_in, est_combined, est_combined * 1.2
+                );
+            }
+        }
+    }
 
     // // ----------------------
     // // ── Check samples sizes ─────────────────────────────────────────────

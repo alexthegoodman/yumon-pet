@@ -118,7 +118,7 @@ fn main() -> Result<()> {
 
     // let brain_cp = "checkpoints/brain/1024h_8l_16a_180len".to_string();
     // let brain_cp = "checkpoints/brain-runpod/512h_3l_8a_220len".to_string();
-    let brain_cp = "checkpoints/brain/512h_6l_4a_128len_b2_DecoderOnly_Language".to_string();
+    let brain_cp = "checkpoints/brain/256h_3l_4a_512len_b2_DecoderOnly_Structured".to_string();
     // let brain_cp = "checkpoints/brain/384h_4l_6a_160len".to_string();
     // let brain_cp = "checkpoints/brain/256h_2l_4a_180len".to_string();
     // let brain_cp = "checkpoints/brain/128h_2l_2a_180len".to_string();
@@ -268,8 +268,9 @@ fn main() -> Result<()> {
                         let human = human.clone();
                         let bot   = r.reply.clone();
                         app.recent_memories.push((human, bot));
+                        if app.recent_memories.len() > 3 { // up to 3 memories per message (+ the one youre sending)
                         // if app.recent_memories.len() > 2 {
-                        if app.recent_memories.len() > 1 {
+                        // if app.recent_memories.len() > 1 {
                             app.recent_memories.remove(0);
                         }
                     }
