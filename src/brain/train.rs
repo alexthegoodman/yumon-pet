@@ -191,6 +191,140 @@ pub struct RunConfig {
     pub stages: Vec<StageConfig>,
 }
 
+/// A run is abandoned (rather than run to its full epoch count) if one epoch
+/// fails to drop the average loss by at least this much versus the previous
+/// epoch. Most grid-searched configs never converge at all, so this is what
+/// makes covering the full grid in generate_run_configs() tractable.
+const MIN_EPOCH_LOSS_DROP: f32 = 0.2;
+
+/// Number of held-out prompts run through the model every time we do a
+/// qualitative inference check, for a well-rounded read on output quality
+/// (a single prompt can look fine or awful by chance).
+fn eval_prompts() -> Vec<String> {
+    vec![
+        "Should I start a business?".to_string(),
+        "What is the universe?".to_string(),
+        "How do plants grow?".to_string(),
+        "Tell me about friendship.".to_string(),
+        "What should I do today?".to_string(),
+    ]
+}
+
+fn build_inference_prompt(stage: TrainingStage, message: &str) -> String {
+    if stage == TrainingStage::Structured {
+        serde_json::to_string_pretty(&serde_json::json!({
+            "memories": Vec::<String>::new(),
+            "message":  message,
+        })).unwrap()
+    } else {
+        message.to_string()
+    }
+}
+
+/// Appends one qualitative-eval snapshot (all `entries` prompt/reply pairs)
+/// to the run's inference log. Appends rather than overwrites so the log
+/// reads as a history of how replies evolved over the run.
+fn append_inference_log(
+    log_path:     &str,
+    run_name:     &str,
+    stage_idx:    usize,
+    stage:        TrainingStage,
+    epoch:        usize,
+    total_epochs: usize,
+    batch:        usize,
+    total_batches: usize,
+    avg_loss:     f32,
+    entries:      &[(String, String)],
+) -> Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+
+    writeln!(
+        file,
+        "\n=== {} | stage {} ({:?}) | epoch {}/{} batch {}/{} | avg_loss {:.4} ===",
+        run_name, stage_idx + 1, stage, epoch, total_epochs, batch, total_batches, avg_loss,
+    )?;
+    for (i, (prompt, reply)) in entries.iter().enumerate() {
+        writeln!(file, "[{}] PROMPT: {}", i + 1, prompt)?;
+        writeln!(file, "[{}] REPLY:  {}", i + 1, reply)?;
+    }
+    Ok(())
+}
+
+/// Programmatically builds the full grid of RunConfigs to try, rather than a
+/// hand-picked list. Most combinations won't converge and will be cut short
+/// by MIN_EPOCH_LOSS_DROP, but this way we actually cover the space instead
+/// of only the sizes/depths someone happened to type in by hand.
+fn generate_run_configs(batch_size_option: usize) -> Vec<RunConfig> {
+    let sizes:       [usize; 3] = [64, 128, 256];
+    let layer_counts: [usize; 4] = [1, 2, 4, 8];
+    let head_counts:  [usize; 4] = [1, 2, 4, 8];
+    let seq_lens:     [usize; 2] = [64, 128];
+    let batch_sizes:     [usize; 2] = [2, 8];
+    let architectures = [Architecture::DecoderOnly, Architecture::EncoderDecoder];
+    let stages = [TrainingStage::Language, TrainingStage::Structured];
+
+    let mut runs = Vec::new();
+
+    for &size in &sizes {
+        for &n_layers in &layer_counts {
+            for &attn_heads in &head_counts {
+                if size % attn_heads != 0 { continue; }
+                for &max_seq_len in &seq_lens {
+                    for &batch_size in &batch_sizes {
+                        for &architecture in &architectures {
+                            for &stage in &stages {
+                                let (first_lr, last_lr) = match architecture {
+                                    Architecture::DecoderOnly    => (3e-4, 3e-5),
+                                    Architecture::EncoderDecoder => (1e-3, 1e-4),
+                                };
+                                let arch_tag = match architecture {
+                                    Architecture::DecoderOnly    => "DecoderOnly",
+                                    Architecture::EncoderDecoder => "EncoderDecoder",
+                                };
+                                let stage_tag = match stage {
+                                    TrainingStage::Language   => "Language",
+                                    TrainingStage::Structured => "Structured",
+                                };
+                                let name = format!(
+                                    "{}h_{}l_{}a_{}len_b{}_{}_{}",
+                                    size, n_layers, attn_heads, max_seq_len, batch_size, arch_tag, stage_tag,
+                                );
+                                runs.push(RunConfig {
+                                    name,
+                                    embed_dim: size,
+                                    hidden_units: size,
+                                    n_layers,
+                                    attn_heads,
+                                    ff_dim: size * 4,
+                                    max_seq_len,
+                                    architecture,
+                                    stages: vec![StageConfig {
+                                        stage,
+                                        loss_threshold: 0.01,
+                                        epochs: 15,
+                                        batch_size,
+                                        first_lr,
+                                        last_lr,
+                                        weight_decay: 0.01,
+                                        epsilon: 1e-7,
+                                        smoothing: 0.0,
+                                    }],
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    runs
+}
+
 fn load_stage_data(
     stage: TrainingStage, 
     tokenizer: &TokenizerKind, 
@@ -278,235 +412,11 @@ pub fn run(
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
 
     // ── Configure Runs ──────────────────────────────────────────────────────────
-    // Configurations explore three axes: model size (tiny→large), depth (shallow→deep),
-    // and training aggressiveness (fast→careful). Names reflect the dominant characteristic.
-    let prompt_text = "Should I start a business?".to_string();
-    let runs = vec![
-        // does not learn
-        // RunConfig {
-        //     name: "64h_2l_2a_180len".to_string(),
-        //     embed_dim: 64, 
-        //     hidden_units: 64, 
-        //     n_layers: 2, 
-        //     attn_heads: 2, 
-        //     ff_dim: 256, 
-        //     max_seq_len: 180,
-        //     stages: vec![
-        //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 3e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.22, epochs: 10, batch_size, first_lr: 3e-5, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-        //     ],
-        // },
-
-        RunConfig {
-            name: "256h_3l_4a_512len_b2_DecoderOnly_Structured".to_string(),
-            embed_dim: 256,
-            hidden_units: 256,
-            n_layers: 3,
-            attn_heads: 4,
-            ff_dim: 1024,
-            // max_seq_len: 64,
-            // max_seq_len: 128,
-            // max_seq_len: 256,
-            max_seq_len: 512, // supports up to 5 memories at any given moment (ideally, relevant memories from a bank) (perhaps 4, not including the main message)
-            architecture: Architecture::DecoderOnly,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.01, epochs: 15, batch_size: 2, first_lr: 3e-4, last_lr: 3e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
-            ],
-        },
-    
-        // altogether these hyperparameters seem fairly coherent, not too smart mind you
-        // its good with a good dataset, but would like to see more lightweight with larger dataset
-        RunConfig {
-            name: "512h_6l_4a_512len_b2_DecoderOnly_Structured".to_string(),
-            embed_dim: 512,
-            hidden_units: 512,
-            n_layers: 6,
-            attn_heads: 4,
-            ff_dim: 2048,
-            // max_seq_len: 64,
-            // max_seq_len: 128,
-            // max_seq_len: 256,
-            max_seq_len: 512, // supports up to 5 memories at any given moment (ideally, relevant memories from a bank) (perhaps 4, not including the main message)
-            architecture: Architecture::DecoderOnly,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.01, epochs: 15, batch_size: 2, first_lr: 3e-4, last_lr: 3e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
-            ],
-        },
-
-        RunConfig {
-            name: "512h_6l_4a_128len_b2_DecoderOnly_Language".to_string(),
-            embed_dim: 512,
-            hidden_units: 512,
-            n_layers: 6,
-            attn_heads: 4,
-            ff_dim: 2048,
-            // max_seq_len: 64,
-            max_seq_len: 128,
-            // max_seq_len: 256,
-            architecture: Architecture::DecoderOnly,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Language, loss_threshold: 0.01, epochs: 15, batch_size: 2, first_lr: 3e-4, last_lr: 3e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
-            ],
-        },
-
-        RunConfig {
-            name: "256h_3l_4a_128len_b2_DecoderOnly_Language".to_string(),
-            embed_dim: 256,
-            hidden_units: 256,
-            n_layers: 3,
-            attn_heads: 4,
-            ff_dim: 1024,
-            // max_seq_len: 64,
-            max_seq_len: 128,
-            // max_seq_len: 256,
-            architecture: Architecture::DecoderOnly,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Language, loss_threshold: 0.01, epochs: 15, batch_size: 2, first_lr: 6e-4, last_lr: 6e-5, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
-            ],
-        },
-
-        // testing — decoder-only counterpart of the run above, for side-by-side comparison
-        RunConfig {
-            name: "128h_2l_2a_128len_b2_DecoderOnly_Language".to_string(),
-            embed_dim: 128,
-            hidden_units: 128,
-            n_layers: 2,
-            attn_heads: 2,
-            ff_dim: 512,
-            // max_seq_len: 64,.
-            max_seq_len: 128,
-            architecture: Architecture::DecoderOnly,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Language, loss_threshold: 0.01, epochs: 15, batch_size: 2, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
-            ],
-        },
-
-        RunConfig {
-            name: "128h_2l_2a_64len_b2_DecoderOnly_Structured".to_string(),
-            embed_dim: 128,
-            hidden_units: 128,
-            n_layers: 2,
-            attn_heads: 2,
-            ff_dim: 512,
-            max_seq_len: 64,
-            architecture: Architecture::DecoderOnly,
-            stages: vec![
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 15, batch_size: 2, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
-            ],
-        },
-
-        // // memorizes extremely well. outputs memorized sentences regardless of input prompt though, not usually relevant to input prompt
-        RunConfig {
-            name: "128h_2l_2a_64len_b2_EncoderDecoder_Structured".to_string(),
-            embed_dim: 128, 
-            hidden_units: 128, 
-            n_layers: 2, 
-            attn_heads: 2, 
-            ff_dim: 512,
-            // max_seq_len: 40,
-            max_seq_len: 64, // used on both sides in decoder-encoder arch 
-            // max_seq_len: 90, // TODO: would be ideal to set max seq for input and output separately, as input has memories that make it longer
-            // max_seq_len: 128,
-            // max_seq_len: 256,
-            // max_seq_len: 1024,
-            // max_seq_len: 512,
-            architecture: Architecture::EncoderDecoder,
-            stages: vec![
-                // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 15, batch_size: 2, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 },
-            ],
-        },
-
-        // testing
-        RunConfig {
-            name: "128h_6l_2a_64len".to_string(),
-            embed_dim: 128,
-            hidden_units: 128,
-            n_layers: 6,
-            attn_heads: 2,
-            ff_dim: 512,
-            // max_seq_len: 40,
-            max_seq_len: 64, // used on both sides in decoder-encoder arch
-            // max_seq_len: 128,
-            // max_seq_len: 256,
-            // max_seq_len: 1024,
-            // max_seq_len: 512,
-            architecture: Architecture::EncoderDecoder,
-            stages: vec![
-                // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                // StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 5, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-            ],
-        },
-
-        // testing
-        RunConfig {
-            name: "512h_1l_8a_64len".to_string(),
-            embed_dim: 512,
-            hidden_units: 512,
-            n_layers: 1,
-            attn_heads: 8,
-            ff_dim: 2048,
-            // max_seq_len: 40,
-            max_seq_len: 64, // used on both sides in decoder-encoder arch
-            // max_seq_len: 128,
-            // max_seq_len: 256,
-            // max_seq_len: 1024,
-            // max_seq_len: 512,
-            architecture: Architecture::EncoderDecoder,
-            stages: vec![
-                // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                // StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 5e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-                StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 5, batch_size, first_lr: 5e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-            ],
-        },
-
-        // // memorizes little, outputs odd, slightly garbled responses that are somewhat relevant to the input prompt
-        // // RunConfig {
-        // //     name: "256h_2l_4a_180len".to_string(),
-        // //     embed_dim: 256, 
-        // //     hidden_units: 256, 
-        // //     n_layers: 2, 
-        // //     attn_heads: 4, 
-        // //     ff_dim: 1024,
-        // //     max_seq_len: 180,
-        // //     // max_seq_len: 600,
-        // //     stages: vec![
-        // //         StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 12, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-        // //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 12, batch_size, first_lr: 1e-4, last_lr: 1e-6, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-        // //     ],
-        // // },
-
-        // // more relevant to input, but worse memorization
-        // RunConfig {
-        //     name: "512h_3l_8a_220len".to_string(),
-        //     embed_dim: 512, 
-        //     hidden_units: 512, 
-        //     n_layers: 3,
-        //     attn_heads: 8, 
-        //     ff_dim: 2048, 
-        //     max_seq_len: 220,
-        //     stages: vec![
-        //         // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-        //     ],
-        // },
-
-        // // really slow, but just gibberish, no sense of correct
-        // RunConfig {
-        //     name: "2048h_6l_16a_180len".to_string(),
-        //     embed_dim: 2048, 
-        //     hidden_units: 2048, 
-        //     n_layers: 6,
-        //     attn_heads: 16, 
-        //     ff_dim: 4096, 
-        //     max_seq_len: 180,
-        //     stages: vec![
-        //         // StageConfig { stage: TrainingStage::Language,   loss_threshold: 0.05, epochs: 3, batch_size, first_lr: 1e-3, last_lr: 1e-7, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-        //         StageConfig { stage: TrainingStage::Structured, loss_threshold: 0.1, epochs: 10, batch_size, first_lr: 1e-3, last_lr: 1e-4, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.1 },
-        //     ],
-        // },
-    ];
+    // Full grid search (see generate_run_configs) instead of a hand-picked list -
+    // MIN_EPOCH_LOSS_DROP cuts non-converging configs short, so covering the whole
+    // space is affordable.
+    let prompts = eval_prompts();
+    let runs = generate_run_configs(batch_size);
 
     for run_cfg in runs {
         let run_dir = std::path::Path::new(out_dir).join(&run_cfg.name);
@@ -560,9 +470,9 @@ pub fn run(
             (config.init(&device), 0)
         };
 
-        for (stage_idx, stage_cfg) in run_cfg.stages.iter().enumerate() {
+        'stage_loop_enc: for (stage_idx, stage_cfg) in run_cfg.stages.iter().enumerate() {
             println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
-            
+
             let training_samples = load_stage_data(stage_cfg.stage.clone(), &tokenizer, &keyword_index, run_cfg.max_seq_len)?;
             println!("Training samples: {}", training_samples.len());
 
@@ -623,10 +533,12 @@ pub fn run(
             };
 
             let mut final_loss = 0.0f32;
+            let inference_log_path = format!("{}/{}_inference_log.txt", run_dir_str, run_cfg.name);
+            let chart_path = format!("{}/{}_stage_{}.png", run_dir_str, run_cfg.name, stage_idx + 1);
+            let mut prev_epoch_loss: Option<f32> = None;
+            let mut run_should_stop = false;
 
             'epoch_loop: for epoch in 0..stage_cfg.epochs {
-                let prompt_text = prompt_text.clone();
-                
                 state.epoch = epoch + 1;
                 let mut idx: Vec<usize> = (0..training_samples.len()).collect();
                 idx.shuffle(&mut rng);
@@ -635,8 +547,6 @@ pub fn run(
 
                 // --- Decoder-Encoder style
                 for batch_num in 0..num_batches {
-                    let prompt_text = prompt_text.clone();
-
                     let current_lr = {
                         let total_steps = stage_cfg.epochs * num_batches;
                         let step = epoch * num_batches + batch_num;
@@ -752,30 +662,25 @@ pub fn run(
                         };
                         model.save(run_dir_str, &tokenizer, &meta)?;
 
-                        // Periodic inference
+                        // Periodic inference — 5 prompts for a well-rounded qualitative read,
+                        // logged to disk (appended) and the loss chart re-saved (overwritten)
+                        // right away rather than only at the end of the run.
                         let inference_model = model.valid();
-                        
-                        let prompt = if stage_cfg.stage == TrainingStage::Structured { 
-                            // serde_json::to_string_pretty(&serde_json::json!({
-                            //     "obstacle_dir": "none", "building_dir": "none", "resource_dir": "none", "message": prompt_text,
-                            // })).unwrap() 
-
-                            let mut dirs: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-
-                            serde_json::to_string_pretty(&serde_json::json!({
-                                // "nearby_objects": Vec::<String>::new(),
-                                "memories":       Vec::<String>::new(),
-                                // "command":        "".to_string(),
-                                "message":        prompt_text,
-                                // "directions":    dirs,
-                            })).unwrap()
-
-                        } else { prompt_text };
-
-                        let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
-                        // let result = inference_model.generate_unmasked_parsed::<CudaTrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device); // runpod
-                        
-                        state.last_reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+                        let mut entries = Vec::with_capacity(prompts.len());
+                        for p in &prompts {
+                            let prompt = build_inference_prompt(stage_cfg.stage, p);
+                            let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+                            // let result = inference_model.generate_unmasked_parsed::<CudaTrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device); // runpod
+                            let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+                            entries.push((p.clone(), reply));
+                        }
+                        state.last_reply = entries[0].1.clone();
+                        if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
+                            eprintln!("⚠️  Failed to append inference log: {}", e);
+                        }
+                        if let Err(e) = state.save_chart_image(&chart_path) {
+                            eprintln!("⚠️  Failed to save chart image: {}", e);
+                        }
                     }
 
                     // Loss Threshold Exit
@@ -786,6 +691,21 @@ pub fn run(
                     }
                 }
                 final_loss = epoch_loss / num_batches.max(1) as f32;
+
+                // Automatic run-finish: if this epoch didn't drop avg loss by at
+                // least MIN_EPOCH_LOSS_DROP versus the previous epoch, this config
+                // isn't converging fast enough to be worth the remaining epochs —
+                // finish the run here and move on to the next RunConfig.
+                if let Some(prev) = prev_epoch_loss {
+                    if prev - final_loss < MIN_EPOCH_LOSS_DROP {
+                        println!(
+                            "\n⏹️  Epoch loss drop {:.4} < {:.4} (prev {:.4} -> {:.4}). Finishing run early.",
+                            prev - final_loss, MIN_EPOCH_LOSS_DROP, prev, final_loss,
+                        );
+                        run_should_stop = true;
+                    }
+                }
+                prev_epoch_loss = Some(final_loss);
 
                 // Save checkpoint after each epoch
                 let meta = BrainMetadata {
@@ -803,40 +723,35 @@ pub fn run(
                 };
                 model.save(run_dir_str, &tokenizer, &meta)?;
 
-                // periodic inference
+                // periodic inference — same 5-prompt log + chart save as above
                 {
                     let inference_model = model.valid();
-                    // let prompt_text = "What is the universe?".to_string();
-                    let prompt = if stage_cfg.stage == TrainingStage::Structured { 
-                        // serde_json::to_string_pretty(&serde_json::json!({
-                        //     "obstacle_dir": "none", "building_dir": "none", "resource_dir": "none", "message": prompt_text,
-                        // })).unwrap() 
-
-                        let mut dirs: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            // "nearby_objects": Vec::<String>::new(),
-                            "memories":       Vec::<String>::new(),
-                            // "command":        "".to_string(),
-                            "message":        prompt_text.clone(),
-                            // "directions":    dirs,
-                        })).unwrap()
-
-                    } else { prompt_text.clone() };
-
-                    let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
-                    // let result = inference_model.generate_unmasked_parsed::<CudaTrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device); // runpod
-                    
-                    state.last_reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+                    let mut entries = Vec::with_capacity(prompts.len());
+                    for p in &prompts {
+                        let prompt = build_inference_prompt(stage_cfg.stage, p);
+                        let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+                        // let result = inference_model.generate_unmasked_parsed::<CudaTrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device); // runpod
+                        let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+                        entries.push((p.clone(), reply));
+                    }
+                    state.last_reply = entries[0].1.clone();
+                    if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
+                        eprintln!("⚠️  Failed to append inference log: {}", e);
+                    }
+                    if let Err(e) = state.save_chart_image(&chart_path) {
+                        eprintln!("⚠️  Failed to save chart image: {}", e);
+                    }
                 }
+
+                if run_should_stop { break 'epoch_loop; }
             }
             epochs_already_done += state.epoch;
             if let Some(term) = terminal.as_mut() {
                 term.clear()?;
             }
 
-            // Save Chart Image at end of stage
-            let chart_path = format!("{}/{}_stage_{}.png", run_dir_str, run_cfg.name, stage_idx + 1);
+            // Final chart save as a safety net (the periodic saves above already
+            // keep this path current throughout training).
             if let Err(e) = state.save_chart_image(&chart_path) {
                 eprintln!("⚠️  Failed to save chart image: {}", e);
             } else {
@@ -844,6 +759,11 @@ pub fn run(
             }
 
             println!("✅ Stage complete. Final loss: {:.4}", final_loss);
+
+            if run_should_stop {
+                println!("⏹️  Run {} finished early, skipping remaining stages.", run_cfg.name);
+                break 'stage_loop_enc;
+            }
         }
 
         } // Architecture::EncoderDecoder
@@ -890,7 +810,7 @@ pub fn run(
             (config.init(&device), 0)
         };
 
-        for (stage_idx, stage_cfg) in run_cfg.stages.iter().enumerate() {
+        'stage_loop_dec: for (stage_idx, stage_cfg) in run_cfg.stages.iter().enumerate() {
             println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
 
             let training_samples = load_stage_data(stage_cfg.stage.clone(), &tokenizer, &keyword_index, run_cfg.max_seq_len)?;
@@ -951,6 +871,10 @@ pub fn run(
             };
 
             let mut final_loss = 0.0f32;
+            let inference_log_path = format!("{}/{}_inference_log.txt", run_dir_str, run_cfg.name);
+            let chart_path = format!("{}/{}_stage_{}.png", run_dir_str, run_cfg.name, stage_idx + 1);
+            let mut prev_epoch_loss: Option<f32> = None;
+            let mut run_should_stop = false;
 
             'epoch_loop_dec: for epoch in 0..stage_cfg.epochs {
                 state.epoch = epoch + 1;
@@ -1077,19 +1001,23 @@ pub fn run(
                         };
                         model.save(run_dir_str, &tokenizer, &meta)?;
 
-                        // Periodic inference
+                        // Periodic inference — 5 prompts, logged (appended) and the
+                        // loss chart re-saved (overwritten) right away.
                         let inference_model = model.valid();
-                        // let prompt_text = "What is the universe?".to_string();
-                        let prompt = if stage_cfg.stage == TrainingStage::Structured {
-                            serde_json::to_string_pretty(&serde_json::json!({
-                                "memories":       Vec::<String>::new(),
-                                "message":        prompt_text.clone(),
-                            })).unwrap()
-                        } else { prompt_text.clone() };
-
-                        let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
-
-                        state.last_reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+                        let mut entries = Vec::with_capacity(prompts.len());
+                        for p in &prompts {
+                            let prompt = build_inference_prompt(stage_cfg.stage, p);
+                            let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+                            let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+                            entries.push((p.clone(), reply));
+                        }
+                        state.last_reply = entries[0].1.clone();
+                        if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
+                            eprintln!("⚠️  Failed to append inference log: {}", e);
+                        }
+                        if let Err(e) = state.save_chart_image(&chart_path) {
+                            eprintln!("⚠️  Failed to save chart image: {}", e);
+                        }
                     }
 
                     // Loss Threshold Exit
@@ -1100,6 +1028,21 @@ pub fn run(
                     }
                 }
                 final_loss = epoch_loss / num_batches.max(1) as f32;
+
+                // Automatic run-finish: if this epoch didn't drop avg loss by at
+                // least MIN_EPOCH_LOSS_DROP versus the previous epoch, this config
+                // isn't converging fast enough to be worth the remaining epochs —
+                // finish the run here and move on to the next RunConfig.
+                if let Some(prev) = prev_epoch_loss {
+                    if prev - final_loss < MIN_EPOCH_LOSS_DROP {
+                        println!(
+                            "\n⏹️  Epoch loss drop {:.4} < {:.4} (prev {:.4} -> {:.4}). Finishing run early.",
+                            prev - final_loss, MIN_EPOCH_LOSS_DROP, prev, final_loss,
+                        );
+                        run_should_stop = true;
+                    }
+                }
+                prev_epoch_loss = Some(final_loss);
 
                 // Save checkpoint after each epoch
                 let meta = BrainDecMetadata {
@@ -1117,29 +1060,34 @@ pub fn run(
                 };
                 model.save(run_dir_str, &tokenizer, &meta)?;
 
-                // periodic inference
+                // periodic inference — same 5-prompt log + chart save as above
                 {
                     let inference_model = model.valid();
-                    // let prompt_text = "What is the universe?".to_string();
-                    let prompt = if stage_cfg.stage == TrainingStage::Structured {
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "memories":       Vec::<String>::new(),
-                            "message":        prompt_text.clone(),
-                        })).unwrap()
-                    } else { prompt_text.clone() };
-
-                    let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
-
-                    state.last_reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+                    let mut entries = Vec::with_capacity(prompts.len());
+                    for p in &prompts {
+                        let prompt = build_inference_prompt(stage_cfg.stage, p);
+                        let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+                        let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+                        entries.push((p.clone(), reply));
+                    }
+                    state.last_reply = entries[0].1.clone();
+                    if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
+                        eprintln!("⚠️  Failed to append inference log: {}", e);
+                    }
+                    if let Err(e) = state.save_chart_image(&chart_path) {
+                        eprintln!("⚠️  Failed to save chart image: {}", e);
+                    }
                 }
+
+                if run_should_stop { break 'epoch_loop_dec; }
             }
             epochs_already_done += state.epoch;
             if let Some(term) = terminal.as_mut() {
                 term.clear()?;
             }
 
-            // Save Chart Image at end of stage
-            let chart_path = format!("{}/{}_stage_{}.png", run_dir_str, run_cfg.name, stage_idx + 1);
+            // Final chart save as a safety net (the periodic saves above already
+            // keep this path current throughout training).
             if let Err(e) = state.save_chart_image(&chart_path) {
                 eprintln!("⚠️  Failed to save chart image: {}", e);
             } else {
@@ -1147,6 +1095,11 @@ pub fn run(
             }
 
             println!("✅ Stage complete. Final loss: {:.4}", final_loss);
+
+            if run_should_stop {
+                println!("⏹️  Run {} finished early, skipping remaining stages.", run_cfg.name);
+                break 'stage_loop_dec;
+            }
         }
 
         } // Architecture::DecoderOnly

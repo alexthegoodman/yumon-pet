@@ -296,6 +296,7 @@ pub fn main() {
         
     let bpe = BpeTokenizer::train(
         sentences.clone(),
+        // 1024 // puts more effort into spelling
         4096 // max size on my igpu at 128 batch size
         // 8192
         // 16384 // doesnt seem to help at all (can do at 16 batch size)
