@@ -33,6 +33,7 @@ use crate::brain::{
     // CONTEXT_DIMS,
     tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN},
     model::{YumonBrain, YumonBrainConfig, BrainMetadata, GenerationResult},
+    moe_model::{YumonMoeBrain, YumonMoeBrainConfig, MoeMetadata},
     xlstm_model::{YumonXLstmBrain, YumonXLstmBrainConfig, XLstmMetadata},
 };
 
@@ -186,6 +187,8 @@ pub enum Architecture {
     /// matrix memory), prompt+reply packed as one sequence like DecoderOnly, but
     /// recurrent rather than attention-based.
     XLstm,
+    /// Causal transformer with dropless sparse SwiGLU experts.
+    Moe { num_experts: usize, top_k: usize },
 }
 
 pub struct RunConfig {
@@ -269,25 +272,25 @@ fn append_inference_log(
 /// hand-picked list. Most combinations won't converge and will be cut short
 /// by MIN_EPOCH_LOSS_DROP, but this way we actually cover the space instead
 /// of only the sizes/depths someone happened to type in by hand.
-fn generate_run_configs(batch_size_option: usize) -> Vec<RunConfig> {
-    let sizes:       [usize; 2] = [
+fn generate_run_configs(batch_size_option: usize, architecture: Architecture) -> Vec<RunConfig> {
+    let sizes:       [usize; 1] = [
         // 32,
-        // 64, 
-        128, 
-        256,
+        64, 
+        // 128, 
+        // 256,
         // 512
     ];
-    let layer_counts: [usize; 1] = [
+    let layer_counts: [usize; 2] = [
         // 1, 
-        // 2, 
-        4, 
-        // 8
+        2, 
+        // 4, 
+        8
     ];
     let head_counts:  [usize; 1] = [
         // 1, 
         // 2, 
-        // 4, 
-        8,
+        4, 
+        // 8,
         // 16,
         // 32
         // 64
@@ -299,13 +302,14 @@ fn generate_run_configs(batch_size_option: usize) -> Vec<RunConfig> {
     let batch_sizes:     [usize; 1] = [
         // 2, 
         // 8
-        // 16
-        64
+        if matches!(architecture, Architecture::Moe { .. }) { batch_size_option } else { 16 }
+        // 32
+        // 64
     ];
     let architectures = [
         // Architecture::DecoderOnly,
         // Architecture::EncoderDecoder,
-        Architecture::XLstm,
+        architecture,
     ];
     let stages = [
         TrainingStage::Language, 
@@ -323,6 +327,7 @@ fn generate_run_configs(batch_size_option: usize) -> Vec<RunConfig> {
                         for &architecture in &architectures {
                             for &stage in &stages {
                                 let (first_lr, last_lr) = match architecture {
+                                    Architecture::Moe { .. } => (3e-4, 3e-5),
                                     Architecture::DecoderOnly    => (3e-4, 3e-5),
                                     Architecture::EncoderDecoder => (1e-3, 1e-4),
                                     // xLSTM's exponential gating is more sensitive to a hot LR
@@ -334,6 +339,7 @@ fn generate_run_configs(batch_size_option: usize) -> Vec<RunConfig> {
                                     // Architecture::XLstm          => (1e-2, 1e-6),
                                 };
                                 let arch_tag = match architecture {
+                                    Architecture::Moe { .. } => "Moe",
                                     Architecture::DecoderOnly    => "DecoderOnly",
                                     Architecture::EncoderDecoder => "EncoderDecoder",
                                     Architecture::XLstm          => "XLstm",
@@ -398,12 +404,12 @@ fn load_stage_data(
 
     loader = loader
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
-        .add("data/ideas.txt",   FileKind::TxtLines, Some(5_000))
-        // .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
-        // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(25_000))
+        .add("data/ideas.txt",   FileKind::TxtLines, Some(25_000))
+        .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
+        .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(25_000))
         // .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
-        // .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
-        // .add("data/bible_asv.csv", FileKind::BibleCsv, None)
+        .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
+        .add("data/bible_asv.csv", FileKind::BibleCsv, None)
         // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs — proper
         // message/reply splits instead of BibleCsv's arbitrary mid-sentence cuts.
         .add("data/synthetic/bible.txt", FileKind::Chats, None)
@@ -413,8 +419,8 @@ fn load_stage_data(
         // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
         // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(25_000))
-        // .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(25_000))
+        .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(25_000))
+        .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(25_000))
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
         .add("archive/ov_chats.txt", FileKind::Chats, None)
@@ -425,22 +431,22 @@ fn load_stage_data(
         // .add("archive/clean_chats.txt", FileKind::Chats, None)
         // .add("archive/clean_chats.txt", FileKind::Chats, None)
         // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        .add("archive/clean_chats.txt", FileKind::Chats, None);
-        // .add(vec![
-        //         "data/ebooks/faa-h-8083-25c.pdf".to_string(),
-        //         "data/ebooks/algor_intro.pdf".to_string(),
-        //         "data/ebooks/intro_engineer.pdf".to_string(),
-        //         "data/ebooks/meap.pdf".to_string(),
-        //         "data/ebooks/missiles.pdf".to_string(),
-        //         "data/ebooks/os_concepts.pdf".to_string(),
-        //         "data/ebooks/real-time-embedded.pdf".to_string(),
-        //         "data/ebooks/riscv.pdf".to_string(),
-        //         "data/ebooks/rtos.pdf".to_string(),
-        //         "data/ebooks/stephen_hawking_a_brief_history_of_time.pdf".to_string(),
-        //     ].join(", "), 
-        //     FileKind::PDF, 
-        //     None
-        // );
+        .add("archive/clean_chats.txt", FileKind::Chats, None)
+        .add(vec![
+                "data/ebooks/faa-h-8083-25c.pdf".to_string(),
+                "data/ebooks/algor_intro.pdf".to_string(),
+                "data/ebooks/intro_engineer.pdf".to_string(),
+                "data/ebooks/meap.pdf".to_string(),
+                // "data/ebooks/missiles.pdf".to_string(),
+                "data/ebooks/os_concepts.pdf".to_string(),
+                "data/ebooks/real-time-embedded.pdf".to_string(),
+                "data/ebooks/riscv.pdf".to_string(),
+                "data/ebooks/rtos.pdf".to_string(),
+                "data/ebooks/stephen_hawking_a_brief_history_of_time.pdf".to_string(),
+            ].join(", "), 
+            FileKind::PDF, 
+            None
+        );
 
     loader
         // .total_limit(2_000_000)
@@ -450,13 +456,21 @@ fn load_stage_data(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn run(
+pub fn run(wiki_xml: &str, vision_checkpoint: &str, out_dir: &str, epochs: usize,
+    batch_size: usize, max_articles: usize) -> Result<()> {
+    run_with_architecture(wiki_xml, vision_checkpoint, out_dir, epochs, batch_size,
+        max_articles, Architecture::XLstm)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_with_architecture(
     wiki_xml:          &str,
     _vision_checkpoint: &str,  // reserved for future real-image fine-tuning
     out_dir:           &str,
     epochs:            usize,
     batch_size:        usize,
     max_articles:      usize,
+    architecture: Architecture,
 ) -> Result<()> {
     let device = burn::backend::wgpu::WgpuDevice::default();
     // let device = burn::backend::cuda::CudaDevice::default(); // for runpod
@@ -469,7 +483,20 @@ pub fn run(
     // MIN_EPOCH_LOSS_DROP cuts non-converging configs short, so covering the whole
     // space is affordable.
     let prompts = eval_prompts();
-    let runs = generate_run_configs(batch_size);
+    if let Architecture::Moe { num_experts, top_k } = architecture {
+        anyhow::ensure!(batch_size > 0 && epochs > 0, "batch size and epochs must be positive");
+        anyhow::ensure!(num_experts > 0 && top_k > 0 && top_k <= num_experts, "MoE requires 1 <= top_k <= num_experts");
+    }
+    let mut runs = generate_run_configs(batch_size, architecture);
+    if let Architecture::Moe { num_experts, top_k } = architecture {
+        for run in &mut runs {
+            run.name.push_str(&format!("_e{num_experts}_k{top_k}"));
+            for stage in &mut run.stages {
+                stage.epochs = epochs;
+                stage.batch_size = batch_size;
+            }
+        }
+    }
 
     for run_cfg in runs {
         let run_dir = std::path::Path::new(out_dir).join(&run_cfg.name);
@@ -1142,6 +1169,333 @@ pub fn run(
         }
 
         } // Architecture::XLstm
+
+        Architecture::Moe { num_experts, top_k } => {
+
+        let config = YumonMoeBrainConfig::new(tokenizer.vocab_size(), run_cfg.stages[0].stage)
+            .with_embed_dim(run_cfg.embed_dim).with_hidden_units(run_cfg.hidden_units)
+            .with_n_layers(run_cfg.n_layers).with_attn_heads(run_cfg.attn_heads)
+            .with_ff_dim(run_cfg.ff_dim).with_max_seq_len(run_cfg.max_seq_len)
+            .with_num_experts(num_experts).with_top_k(top_k);
+        println!("MoE: {} experts, top-{}; FFN parameters/layer: {} total, {} active/token (excluding router).",
+            num_experts, top_k, 3 * run_cfg.embed_dim * run_cfg.ff_dim * num_experts,
+            3 * run_cfg.embed_dim * run_cfg.ff_dim * top_k);
+        let (mut model, mut epochs_already_done) = if run_dir.join("model.bin").exists() {
+            let (m, checkpoint_tokenizer, saved) = YumonMoeBrain::<TrainBackend>::load(run_dir_str, &device)?;
+            anyhow::ensure!(saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
+                && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
+                && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
+                && saved.num_experts == num_experts && saved.top_k == top_k,
+                "MoE checkpoint configuration differs from requested run");
+            let current_json = match &tokenizer { TokenizerKind::Bpe(t) => t.inner.to_string(false).map_err(|e| anyhow::anyhow!("{e}"))?, _ => unreachable!() };
+            let saved_json = match &checkpoint_tokenizer { TokenizerKind::Bpe(t) => t.inner.to_string(false).map_err(|e| anyhow::anyhow!("{e}"))?, _ => unreachable!() };
+            anyhow::ensure!(serde_json::from_str::<serde_json::Value>(&current_json)? == serde_json::from_str::<serde_json::Value>(&saved_json)?,
+                "MoE checkpoint tokenizer differs from training tokenizer");
+            let meta: MoeMetadata = serde_json::from_str(&std::fs::read_to_string(run_dir.join("metadata.json"))?)?;
+            (m, meta.epochs_trained)
+        } else { (config.init(&device), 0) };
+
+        'stage_loop_moe: for (stage_idx, stage_cfg) in run_cfg.stages.iter().enumerate() {
+            model.config.0.training_stage = stage_cfg.stage;
+            println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
+
+            let training_samples = load_stage_data(stage_cfg.stage.clone(), &tokenizer, &keyword_index, run_cfg.max_seq_len)?;
+            anyhow::ensure!(!training_samples.is_empty(), "No training samples for MoE stage");
+            println!("Training samples: {}", training_samples.len());
+
+            for (i, sample) in training_samples.iter().enumerate() {
+                if i >= 12 { break; }
+                println!("INPUT:  {:?}", tokenizer.decode(&sample.input_ids));
+                println!("TARGET: {:?}", tokenizer.decode(
+                    &sample.target_labels.iter()
+                        .map(|&t| if t == PAD_TOKEN { PAD_TOKEN } else { t })
+                        .collect::<Vec<_>>()
+                ));
+                println!("input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
+                println!("target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
+            }
+
+            let mut optimizer = AdamWConfig::new()
+                .with_epsilon(stage_cfg.epsilon)
+                .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
+                .with_weight_decay(stage_cfg.weight_decay)
+                .init();
+
+            let ce_loss = CrossEntropyLossConfig::new()
+                .with_pad_tokens(Some(vec![PAD_TOKEN as usize]))
+                .with_smoothing(Some(stage_cfg.smoothing))
+                .init(&device);
+
+            let mut rng = rand::thread_rng();
+            use std::io::{stdout, IsTerminal};
+            let mut terminal = if stdout().is_terminal() {
+                let backend = CrosstermBackend::new(stdout());
+                Some(Terminal::with_options(
+                    backend,
+                    TerminalOptions { viewport: Viewport::Inline(26) },
+                )?)
+            } else {
+                None
+            };
+
+            anyhow::ensure!(stage_cfg.batch_size > 0, "batch size must be positive");
+            let total_batches = training_samples.len().div_ceil(stage_cfg.batch_size);
+            let mut state = TrainingState {
+                loss_history: vec![],
+                avg_loss_history: vec![],
+                current_loss: 0.0,
+                avg_loss: 0.0,
+                epoch: 0,
+                total_epochs: stage_cfg.epochs,
+                batch: 0,
+                total_batches: total_batches,
+                current_lr: stage_cfg.first_lr,
+                lr_history: vec![],
+                global_step: 0,
+                entropy: 0.0,
+                entropy_history: vec![],
+                last_reply: String::new()
+            };
+
+            let mut final_loss = 0.0f32;
+            let inference_log_path = format!("{}/{}_inference_log.txt", run_dir_str, run_cfg.name);
+            let chart_path = format!("{}/{}_stage_{}.png", run_dir_str, run_cfg.name, stage_idx + 1);
+            let mut prev_epoch_loss: Option<f32> = None;
+            let mut run_should_stop = false;
+
+            'epoch_loop_moe: for epoch in 0..stage_cfg.epochs {
+                state.epoch = epoch + 1;
+                let mut idx: Vec<usize> = (0..training_samples.len()).collect();
+                idx.shuffle(&mut rng);
+                let num_batches = idx.len().div_ceil(stage_cfg.batch_size);
+                let mut epoch_loss = 0.0f32;
+                let mut processed_batches = 0usize;
+
+                // Decoder-only style: [prompt][separator][reply] packed into one causal sequence
+                let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { " " };
+                let sep_tokens = tokenizer.encode(sep_text);
+                let sep_len = sep_tokens.len();
+                anyhow::ensure!(sep_len + 2 <= run_cfg.max_seq_len, "Sequence too short for separator and reply");
+
+                for batch_num in 0..num_batches {
+                    let current_lr = {
+                        let total_steps = stage_cfg.epochs * num_batches;
+                        let step = epoch * num_batches + batch_num;
+                        let t = step as f64 / total_steps as f64;
+                        (stage_cfg.first_lr * (1.0 - t) + stage_cfg.last_lr * t)
+                    };
+
+                    let batch_start = batch_num * stage_cfg.batch_size;
+                    let batch_end = (batch_start + stage_cfg.batch_size).min(training_samples.len());
+                    let batch_idx = &idx[batch_start..batch_end];
+                    let current_batch_size = batch_idx.len();
+                    if current_batch_size == 0 { continue; }
+
+                    let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
+                    let mut all_seq_ids: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
+
+                    for &i in batch_idx {
+                        let sample = &training_samples[i];
+                        let input_ids = &sample.input_ids;
+                        let target_labels = &sample.target_labels;
+
+                        let input_len = input_ids.iter().position(|&t| t == PAD_TOKEN).unwrap_or(input_ids.len())
+                            .min(run_cfg.max_seq_len - sep_len - 1);
+                        let target_len = target_labels.iter().position(|&t| t == PAD_TOKEN).unwrap_or(target_labels.len());
+
+                        let mut full_seq = Vec::with_capacity(run_cfg.max_seq_len);
+                        full_seq.extend(&input_ids[..input_len]);
+                        full_seq.extend(sep_tokens.iter().map(|&t| t as usize));
+
+                        let remaining_space = run_cfg.max_seq_len.saturating_sub(full_seq.len());
+                        let actual_target_len = target_len.min(remaining_space);
+                        full_seq.extend(&target_labels[..actual_target_len]);
+                        full_seq.resize(run_cfg.max_seq_len, PAD_TOKEN);
+
+                        // Loss only on the separator + target tokens, not the prompt.
+                        let mut loss_targets = vec![PAD_TOKEN as i32; run_cfg.max_seq_len];
+
+                        let start_predict_idx = input_len.saturating_sub(1);
+                        let end_predict_idx = (input_len + sep_len + actual_target_len).saturating_sub(1).min(run_cfg.max_seq_len - 1);
+
+                        for idx in start_predict_idx..end_predict_idx {
+                            loss_targets[idx] = full_seq[idx + 1] as i32;
+                        }
+
+                        all_seq_ids.extend(full_seq.iter().map(|&t| t as i32));
+                        all_lang_targets.extend(loss_targets);
+                    }
+
+                    if all_lang_targets.iter().all(|&id| id == PAD_TOKEN as i32) { continue; }
+                    let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), &device);
+                    let tokens_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_seq_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
+
+                    let (token_logits, aux_loss, expert_counts) = model.forward_with_aux(tokens_t.clone());
+
+                    // Entropy
+                    let probs = burn::tensor::activation::softmax(token_logits.clone(), 2);
+                    let log_probs = (probs.clone() + 1e-10).log();
+                    let token_entropy = (probs * log_probs).sum_dim(2).neg().squeeze_dim::<2>(2);
+                    let non_pad_mask = tokens_t.clone().equal_elem(PAD_TOKEN as u32).bool_not().float();
+                    let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).sum().div(non_pad_mask.sum()).into_scalar();
+
+                    // Loss
+                    let vocab = tokenizer.vocab_size();
+                    let logits_2d = token_logits.reshape([current_batch_size * run_cfg.max_seq_len, vocab]);
+                    let lang_loss = ce_loss.forward(logits_2d, lang_target_t);
+
+                    let total_loss = lang_loss.clone() + aux_loss.clone();
+                    let grads = GradientsParams::from_grads(total_loss.backward(), &model);
+                    model = optimizer.step(current_lr, model, grads);
+
+                    let loss_val: f32 = lang_loss.clone().inner().to_data().to_vec::<f32>().unwrap()[0];
+                    epoch_loss += loss_val;
+                    processed_batches += 1;
+
+                    state.entropy = entropy_val;
+                    state.current_loss = loss_val;
+                    state.avg_loss = epoch_loss / processed_batches as f32;
+                    state.batch = batch_num + 1;
+                    state.current_lr = current_lr;
+                    state.global_step += 1;
+                    state.loss_history.push((state.global_step as f64, loss_val as f64));
+                    state.avg_loss_history.push((state.global_step as f64, state.avg_loss as f64));
+                    state.entropy_history.push((state.global_step as f64, entropy_val as f64));
+                    state.lr_history.push((state.global_step as f64, current_lr));
+
+                    if let Some(term) = terminal.as_mut() {
+                        term.draw(|frame| render(frame, &state))?;
+                    } else if state.global_step % 50 == 0 || batch_num + 1 == num_batches {
+                        println!(
+                            "epoch {}/{} batch {}/{} loss {:.4} avg {:.4} lr {:.2e} entropy {:.4}",
+                            state.epoch, state.total_epochs, state.batch, state.total_batches,
+                            state.current_loss, state.avg_loss, state.current_lr, state.entropy,
+                        );
+                    }
+
+                    if batch_num % 100 == 0 {
+                        println!("MoE auxiliary loss {:.5}; dispatched rows per layer/expert: {:?}", aux_loss.into_scalar(), expert_counts);
+                    }
+
+                    // Periodic save and inference every 500 batches
+                    if (batch_num + 1) % 500 == 0 {
+                        let current_final_loss = epoch_loss / processed_batches as f32;
+                        let meta = MoeMetadata {
+                            num_experts, top_k,
+                            aux_loss_weight: model.config.aux_loss_weight,
+                            z_loss_weight: model.config.z_loss_weight,
+                            dropout_rate: model.config.dropout_rate,
+                            vocab_size:     tokenizer.vocab_size(),
+                            epochs_trained: epochs_already_done + epoch,
+                            final_loss:     current_final_loss,
+                            batch_size:     stage_cfg.batch_size,
+                            training_stage: stage_cfg.stage.clone(),
+                            embed_dim:      run_cfg.embed_dim,
+                            hidden_units:   run_cfg.hidden_units,
+                            n_layers:       run_cfg.n_layers,
+                            attn_heads:     run_cfg.attn_heads,
+                            ff_dim:         run_cfg.ff_dim,
+                            max_seq_len:    run_cfg.max_seq_len,
+                        };
+                        model.save(run_dir_str, &tokenizer, &meta)?;
+
+                        let inference_model = model.valid();
+                        let mut entries = Vec::with_capacity(prompts.len());
+                        for p in &prompts {
+                            let prompt = build_inference_prompt(stage_cfg.stage, p);
+                            let result = inference_model.generate_unmasked_parsed(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+                            let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+                            entries.push((p.clone(), reply));
+                        }
+                        state.last_reply = entries[0].1.clone();
+                        if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
+                            eprintln!("⚠️  Failed to append inference log: {}", e);
+                        }
+                        if let Err(e) = state.save_chart_image(&chart_path) {
+                            eprintln!("⚠️  Failed to save chart image: {}", e);
+                        }
+                    }
+
+                    // Loss Threshold Exit
+                    if state.avg_loss < stage_cfg.loss_threshold {
+                        println!("\n🎯 Loss Threshold Reached: {:.4} < {:.4}. Ending Stage.", state.avg_loss, stage_cfg.loss_threshold);
+                        final_loss = state.avg_loss;
+                        break;
+                    }
+                }
+                anyhow::ensure!(processed_batches > 0, "MoE epoch contains no supervised tokens");
+                final_loss = epoch_loss / processed_batches as f32;
+
+                if let Some(prev) = prev_epoch_loss {
+                    if prev - final_loss < MIN_EPOCH_LOSS_DROP {
+                        println!(
+                            "\n⏹️  Epoch loss drop {:.4} < {:.4} (prev {:.4} -> {:.4}). Finishing run early.",
+                            prev - final_loss, MIN_EPOCH_LOSS_DROP, prev, final_loss,
+                        );
+                        run_should_stop = true;
+                    }
+                }
+                prev_epoch_loss = Some(final_loss);
+
+                let meta = MoeMetadata {
+                            num_experts, top_k,
+                            aux_loss_weight: model.config.aux_loss_weight,
+                            z_loss_weight: model.config.z_loss_weight,
+                            dropout_rate: model.config.dropout_rate,
+                    vocab_size:     tokenizer.vocab_size(),
+                    epochs_trained: epochs_already_done + epoch + 1,
+                    final_loss,
+                    batch_size: stage_cfg.batch_size,
+                    training_stage: stage_cfg.stage.clone(),
+                    embed_dim: run_cfg.embed_dim,
+                    hidden_units: run_cfg.hidden_units,
+                    n_layers: run_cfg.n_layers,
+                    attn_heads: run_cfg.attn_heads,
+                    ff_dim: run_cfg.ff_dim,
+                    max_seq_len: run_cfg.max_seq_len,
+                };
+                model.save(run_dir_str, &tokenizer, &meta)?;
+
+                {
+                    let inference_model = model.valid();
+                    let mut entries = Vec::with_capacity(prompts.len());
+                    for p in &prompts {
+                        let prompt = build_inference_prompt(stage_cfg.stage, p);
+                        let result = inference_model.generate_unmasked_parsed(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+                        let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+                        entries.push((p.clone(), reply));
+                    }
+                    state.last_reply = entries[0].1.clone();
+                    if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
+                        eprintln!("⚠️  Failed to append inference log: {}", e);
+                    }
+                    if let Err(e) = state.save_chart_image(&chart_path) {
+                        eprintln!("⚠️  Failed to save chart image: {}", e);
+                    }
+                }
+
+                if run_should_stop || final_loss < stage_cfg.loss_threshold { break 'epoch_loop_moe; }
+            }
+            epochs_already_done += state.epoch;
+            if let Some(term) = terminal.as_mut() {
+                term.clear()?;
+            }
+
+            if let Err(e) = state.save_chart_image(&chart_path) {
+                eprintln!("⚠️  Failed to save chart image: {}", e);
+            } else {
+                println!("📊 Chart saved to {}", chart_path);
+            }
+
+            println!("✅ Stage complete. Final loss: {:.4}", final_loss);
+
+            if run_should_stop {
+                println!("⏹️  Run {} finished early, skipping remaining stages.", run_cfg.name);
+                break 'stage_loop_moe;
+            }
+        }
+
+        } // Architecture::Moe
 
         // Architecture::DecoderOnly => {
 

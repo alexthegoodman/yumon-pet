@@ -2,6 +2,65 @@
 
 Yumon is a tabletop ePet that responds to various inputs with short text replies and emotes.
 
+## Sparse MoE training
+
+```sh
+cargo run --release --no-default-features --bin yumon-pet -- train-brain --architecture moe --moe-experts 4 --moe-top-k 1 --batch-size 16 --epochs 15 --out-dir checkpoints/moe
+```
+
+This selects `Architecture::Moe` in the existing training grid. It uses the same
+stage data, AdamW, charts, periodic text generation, and checkpoint workflow.
+The grid dimensions and data sources remain in `src/brain/train.rs`. The default
+architecture remains xLSTM; `--architecture encoder-decoder` selects the dense
+encoder/decoder. The separate `train_ui` and `chat_ui` binaries still use their
+existing hardcoded models; MoE training is selected through `train-brain`.
+
+The MoE decoder uses causal scaled attention with RoPE and sparse SwiGLU FFNs.
+Every non-padding token selects `--moe-top-k` of `--moe-experts` experts. Tokens
+are gathered into compact expert batches, unused experts are skipped, and the
+weighted results are scattered back. No expert capacity limit or token dropping
+is used. Only the integer dispatch indices are read back to the CPU; expert
+weights, activations, matrix multiplies, and gradients remain on the GPU.
+Top-1 is the cheapest setting. Top-k must be between 1 and the expert count.
+
+With 4 experts and top-1, expert matrix multiplies process one quarter of the
+rows required by evaluating all 4 experts for every token. This gives more
+parameter capacity at roughly one dense FFN's active expert arithmetic; it does
+**not** promise a 4x speedup over a single dense FFN. All experts still occupy
+memory, and attention, the vocabulary projection, optimizer state, routing,
+and dispatch also cost time. Variable-sized dispatch currently synchronizes
+with the host once per layer, so small workloads can be slower. This is sparse
+execution, not a fused grouped-GEMM kernel or multi-GPU expert parallelism.
+The checked-in training entry point uses WGPU; the generic model also supports
+Burn CUDA, but CUDA runtime performance must be measured on a CUDA device.
+
+The router uses full-softmax probabilities for selected experts (without
+renormalizing top-1 to 1), preserving gradients from the language loss. Training
+adds [Switch-style load balancing](https://www.jmlr.org/papers/v23/21-0998.html)
+(weight 0.01) and router z-loss (0.001), averaged across layers; padding is
+excluded. These weights are configurable in `YumonMoeBrainConfig`. Loss charts
+show language cross-entropy, while auxiliary loss and per-expert dispatched row
+counts are logged every 100 batches.
+
+Checkpoint directories include expert count and top-k. `model.bin`,
+`metadata.json`, and the checkpoint's own `tokenizer.json` are saved together.
+`YumonMoeBrain::load` restores the model and tokenizer for inference. Resume
+rejects incompatible configurations/tokenizers and failed checkpoint loads
+instead of silently starting over. As with the existing trainer, optimizer
+state is reinitialized on resume; this is a weights resume, not an exact restart.
+
+Run correctness checks and the GPU timing probe with:
+
+```sh
+cargo test --no-default-features --lib moe_ -- --test-threads=1
+cargo test --release --no-default-features --lib moe_timing_probe -- --ignored --nocapture --test-threads=1
+```
+
+The timing probe includes forward/backward and host dispatch overhead, comparing
+sparse execution to a dense masked reference with the same router and experts.
+It excludes attention, the vocabulary head, and optimizer updates, so it measures
+the FFN benefit rather than claiming an end-to-end training speedup.
+
 ## Hyperparameters
 
 ### Medium

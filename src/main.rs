@@ -46,8 +46,15 @@ enum Command {
         batch_size: usize,
     },
 
-    /// Pre-train the LSTM language brain on SimpleWiki
+    /// Train a brain variant using the configured data and model grid
     TrainBrain {
+        /// Model architecture for the training grid.
+        #[arg(long, default_value = "xlstm", value_parser = ["xlstm", "encoder-decoder", "moe"])]
+        architecture: String,
+        #[arg(long, default_value_t = 4)]
+        moe_experts: usize,
+        #[arg(long, default_value_t = 1)]
+        moe_top_k: usize,
         #[arg(long, default_value = "data/simplewiki-latest-pages-articles.xml")]
         wiki_xml: String,
 
@@ -122,11 +129,16 @@ fn main() -> Result<()> {
             )?;
         }
 
-        Command::TrainBrain { wiki_xml, vision_checkpoint, out_dir, epochs, batch_size, max_articles } => {
-            println!("🧠 Training LSTM Brain...");
-            brain::train::run(
+        Command::TrainBrain { wiki_xml, vision_checkpoint, out_dir, epochs, batch_size, max_articles, architecture, moe_experts, moe_top_k } => {
+            println!("🧠 Training Brain...");
+            let architecture = match architecture.as_str() {
+                "moe" => brain::train::Architecture::Moe { num_experts: moe_experts, top_k: moe_top_k },
+                "encoder-decoder" => brain::train::Architecture::EncoderDecoder,
+                _ => brain::train::Architecture::XLstm,
+            };
+            brain::train::run_with_architecture(
                 &wiki_xml, &vision_checkpoint, &out_dir,
-                epochs, batch_size, max_articles,
+                epochs, batch_size, max_articles, architecture,
             )?;
         }
 
