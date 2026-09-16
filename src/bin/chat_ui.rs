@@ -20,13 +20,8 @@ use rand::Rng;
 
 use yumon_pet::{
     brain::{
-        // decoder_model::YumonDecBrain,
-        // model::{GenerationResult, YUMON_SCHEMA, YumonBrain},
-        model::{GenerationResult, YUMON_SCHEMA},
-        xlstm_model::YumonXLstmBrain,
-        samples::{TrainingStage, WorldContext}, train::MAX_SEQ_LEN
-    },
-    vision::{self, CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES},
+        model::{GenerationResult, YUMON_SCHEMA}, moe_model::YumonMoeBrain, samples::{TrainingStage, WorldContext}, train::MAX_SEQ_LEN, xlstm_model::YumonXLstmBrain
+    }, vision::{self, CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES},
 };
 
 #[derive(Clone, Debug)]
@@ -123,7 +118,7 @@ fn main() -> Result<()> {
     // let brain_cp = "checkpoints/brain/1024h_8l_16a_180len".to_string();
     // let brain_cp = "checkpoints/brain-runpod/512h_3l_8a_220len".to_string();
     // let brain_cp = "checkpoints/brain-reg-attn-16k/128h_2l_32a_64len_b2_EncoderDecoder_Structured".to_string();
-    let brain_cp = "checkpoints/brain/64h_2l_4a_64len_b16_XLstm_Language".to_string();
+    let brain_cp = "checkpoints/brain/256h_16l_4a_32len_b8_Moe_e4_k1_Language".to_string();
     // let brain_cp = "checkpoints/brain/384h_4l_6a_160len".to_string();
     // let brain_cp = "checkpoints/brain/256h_2l_4a_180len".to_string();
     // let brain_cp = "checkpoints/brain/128h_2l_2a_180len".to_string();
@@ -136,7 +131,8 @@ fn main() -> Result<()> {
     let device = app.device.clone();
     thread::spawn(move || {
         // let res = YumonBrain::<Wgpu>::load(&brain_cp, &device);
-        let res = YumonXLstmBrain::<Wgpu>::load(&brain_cp, &device);
+        // let res = YumonXLstmBrain::<Wgpu>::load(&brain_cp, &device);
+        let res = YumonMoeBrain::<Wgpu>::load(&brain_cp, &device);
         let (brain_model, tokenizer, config) = match res {
             Ok(m) => {
                 tx_model.send(Message::System("Models loaded!".into())).unwrap();
