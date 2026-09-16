@@ -2,6 +2,7 @@
 
 pub mod model;
 pub mod decoder_model;
+pub mod xlstm_model;
 pub mod wiki;
 pub mod train;
 pub mod tokenizer;
