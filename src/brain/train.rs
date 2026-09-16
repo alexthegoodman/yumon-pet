@@ -277,9 +277,9 @@ fn generate_run_configs(batch_size_option: usize) -> Vec<RunConfig> {
         256,
         // 512
     ];
-    let layer_counts: [usize; 2] = [
+    let layer_counts: [usize; 1] = [
         // 1, 
-        2, 
+        // 2, 
         4, 
         // 8
     ];
@@ -287,8 +287,8 @@ fn generate_run_configs(batch_size_option: usize) -> Vec<RunConfig> {
         // 1, 
         // 2, 
         // 4, 
-        // 8,
-        16,
+        8,
+        // 16,
         // 32
         // 64
     ];
@@ -309,7 +309,7 @@ fn generate_run_configs(batch_size_option: usize) -> Vec<RunConfig> {
     ];
     let stages = [
         TrainingStage::Language, 
-        TrainingStage::Structured
+        // TrainingStage::Structured
     ];
 
     let mut runs = Vec::new();
