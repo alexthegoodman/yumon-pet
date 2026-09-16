@@ -51,8 +51,11 @@ enum Command {
         /// Model architecture for the training grid.
         #[arg(long, default_value = "xlstm", value_parser = ["xlstm", "encoder-decoder", "moe"])]
         architecture: String,
+        /// Unused when architecture=moe - generate_run_configs sweeps its own
+        /// num_experts/top_k matrix instead of a single fixed pair.
         #[arg(long, default_value_t = 4)]
         moe_experts: usize,
+        /// Unused when architecture=moe - see moe_experts.
         #[arg(long, default_value_t = 1)]
         moe_top_k: usize,
         #[arg(long, default_value = "data/simplewiki-latest-pages-articles.xml")]

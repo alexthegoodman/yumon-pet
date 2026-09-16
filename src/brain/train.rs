@@ -273,46 +273,75 @@ fn append_inference_log(
 /// by MIN_EPOCH_LOSS_DROP, but this way we actually cover the space instead
 /// of only the sizes/depths someone happened to type in by hand.
 fn generate_run_configs(batch_size_option: usize, architecture: Architecture) -> Vec<RunConfig> {
+    // ~150k training records at these sizes puts every combo below well under
+    // a 20x-tokens-per-active-param ratio even for a single epoch, so capacity
+    // here is gated by iGPU compute (see TrainBrain's batch_size CLI comment -
+    // batch 256 was already too large at 128 hidden on this hardware), not by
+    // data volume. Reduce this matrix, don't reduce the dataset, if a sweep
+    // runs too slow.
     let sizes:       [usize; 1] = [
         // 32,
-        64, 
-        // 128, 
-        // 256,
+        // 64,
+        // 128,
+        256, // stretch: ~28M total / ~9.5M active params at 4 layers/8 experts
         // 512
+        // 1024
     ];
-    let layer_counts: [usize; 2] = [
-        // 1, 
-        2, 
-        // 4, 
-        8
+    let layer_counts: [usize; 1] = [
+        // 1,
+        // 2,
+        // 4,
+        // 8,
+        // 8, // stretch: slower on iGPU - each MoE layer forces a host readback
+        16
     ];
     let head_counts:  [usize; 1] = [
-        // 1, 
-        // 2, 
-        4, 
+        // 1,
+        // 2,
+        4,
         // 8,
         // 16,
         // 32
         // 64
     ];
     let seq_lens:     [usize; 1] = [
-        64, 
+        32,
+        // 64,
         // 128
     ];
     let batch_sizes:     [usize; 1] = [
-        // 2, 
+        // 2,
         // 8
         if matches!(architecture, Architecture::Moe { .. }) { batch_size_option } else { 16 }
         // 32
         // 64
     ];
-    let architectures = [
-        // Architecture::DecoderOnly,
-        // Architecture::EncoderDecoder,
-        architecture,
+    // For Moe, num_experts/top_k are swept here as real matrix dimensions
+    // instead of the single fixed pair the CLI's --moe-experts/--moe-top-k
+    // used to stamp onto every run - those two CLI flags are now unused for
+    // architecture=moe (kept only for the other architectures' CLI parsing).
+    let moe_expert_configs: [(usize, usize); 4] = [
+        // (2, 1),
+        (4, 1),
+        (4, 2),
+        (8, 1),
+        (8, 2),
+        // (16, 2), // stretch: doubles total params, same active params as (8,2)
     ];
+    let architectures: Vec<Architecture> = if matches!(architecture, Architecture::Moe { .. }) {
+        moe_expert_configs
+            .iter()
+            .map(|&(num_experts, top_k)| Architecture::Moe { num_experts, top_k })
+            .collect()
+    } else {
+        vec![
+            // Architecture::DecoderOnly,
+            // Architecture::EncoderDecoder,
+            architecture,
+        ]
+    };
     let stages = [
-        TrainingStage::Language, 
+        TrainingStage::Language,
         // TrainingStage::Structured
     ];
 
@@ -327,7 +356,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                         for &architecture in &architectures {
                             for &stage in &stages {
                                 let (first_lr, last_lr) = match architecture {
-                                    Architecture::Moe { .. } => (3e-4, 3e-5),
+                                    // Architecture::Moe { .. } => (3e-4, 3e-5),
+                                    Architecture::Moe { .. } => (1e-4, 1e-5),
                                     Architecture::DecoderOnly    => (3e-4, 3e-5),
                                     Architecture::EncoderDecoder => (1e-3, 1e-4),
                                     // xLSTM's exponential gating is more sensitive to a hot LR
@@ -339,10 +369,10 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     // Architecture::XLstm          => (1e-2, 1e-6),
                                 };
                                 let arch_tag = match architecture {
-                                    Architecture::Moe { .. } => "Moe",
-                                    Architecture::DecoderOnly    => "DecoderOnly",
-                                    Architecture::EncoderDecoder => "EncoderDecoder",
-                                    Architecture::XLstm          => "XLstm",
+                                    Architecture::Moe { num_experts, top_k } => format!("Moe_e{num_experts}_k{top_k}"),
+                                    Architecture::DecoderOnly    => "DecoderOnly".to_string(),
+                                    Architecture::EncoderDecoder => "EncoderDecoder".to_string(),
+                                    Architecture::XLstm          => "XLstm".to_string(),
                                 };
                                 let stage_tag = match stage {
                                     TrainingStage::Language   => "Language",
@@ -404,49 +434,49 @@ fn load_stage_data(
 
     loader = loader
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
-        .add("data/ideas.txt",   FileKind::TxtLines, Some(25_000))
-        .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
-        .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(25_000))
+        // .add("data/ideas.txt",   FileKind::TxtLines, Some(25_000))
+        // .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
+        // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(25_000))
         // .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
-        .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
-        .add("data/bible_asv.csv", FileKind::BibleCsv, None)
+        // .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
+        // .add("data/bible_asv.csv", FileKind::BibleCsv, None)
         // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs — proper
         // message/reply splits instead of BibleCsv's arbitrary mid-sentence cuts.
         .add("data/synthetic/bible.txt", FileKind::Chats, None)
         .add("data/synthetic/business.txt", FileKind::Chats, None)
         .add("data/synthetic/universe.txt", FileKind::Chats, None)
-        // .add("data/creative_stories.txt", FileKind::Txt, Some(50_000)) // good but gets split
-        // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
-        // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
+        // // .add("data/creative_stories.txt", FileKind::Txt, Some(50_000)) // good but gets split
+        // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
+        // // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
+        // // .add("archive/ov_chats.txt", FileKind::Chats, None)
+        // .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(25_000))
+        // .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(25_000))
+        // // .add("archive/ov_chats.txt", FileKind::Chats, None)
+        // // .add("archive/ov_chats.txt", FileKind::Chats, None)
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(25_000))
-        .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(25_000))
-        // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // .add("archive/you_chats.txt", FileKind::Chats, None)
-        // .add("archive/you_chats.txt", FileKind::Chats, None)
-        // .add("archive/you_chats.txt", FileKind::Chats, None)
+        // // .add("archive/you_chats.txt", FileKind::Chats, None)
+        // // .add("archive/you_chats.txt", FileKind::Chats, None)
+        // // .add("archive/you_chats.txt", FileKind::Chats, None)
         .add("archive/you_chats.txt", FileKind::Chats, None)
-        // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        .add("archive/clean_chats.txt", FileKind::Chats, None)
-        .add(vec![
-                "data/ebooks/faa-h-8083-25c.pdf".to_string(),
-                "data/ebooks/algor_intro.pdf".to_string(),
-                "data/ebooks/intro_engineer.pdf".to_string(),
-                "data/ebooks/meap.pdf".to_string(),
-                // "data/ebooks/missiles.pdf".to_string(),
-                "data/ebooks/os_concepts.pdf".to_string(),
-                "data/ebooks/real-time-embedded.pdf".to_string(),
-                "data/ebooks/riscv.pdf".to_string(),
-                "data/ebooks/rtos.pdf".to_string(),
-                "data/ebooks/stephen_hawking_a_brief_history_of_time.pdf".to_string(),
-            ].join(", "), 
-            FileKind::PDF, 
-            None
-        );
+        // // .add("archive/clean_chats.txt", FileKind::Chats, None)
+        // // .add("archive/clean_chats.txt", FileKind::Chats, None)
+        // // .add("archive/clean_chats.txt", FileKind::Chats, None)
+        .add("archive/clean_chats.txt", FileKind::Chats, None);
+        // .add(vec![
+        //         "data/ebooks/faa-h-8083-25c.pdf".to_string(),
+        //         "data/ebooks/algor_intro.pdf".to_string(),
+        //         "data/ebooks/intro_engineer.pdf".to_string(),
+        //         "data/ebooks/meap.pdf".to_string(),
+        //         // "data/ebooks/missiles.pdf".to_string(),
+        //         "data/ebooks/os_concepts.pdf".to_string(),
+        //         "data/ebooks/real-time-embedded.pdf".to_string(),
+        //         "data/ebooks/riscv.pdf".to_string(),
+        //         "data/ebooks/rtos.pdf".to_string(),
+        //         "data/ebooks/stephen_hawking_a_brief_history_of_time.pdf".to_string(),
+        //     ].join(", "), 
+        //     FileKind::PDF, 
+        //     None
+        // );
 
     loader
         // .total_limit(2_000_000)
@@ -483,14 +513,15 @@ pub fn run_with_architecture(
     // MIN_EPOCH_LOSS_DROP cuts non-converging configs short, so covering the whole
     // space is affordable.
     let prompts = eval_prompts();
-    if let Architecture::Moe { num_experts, top_k } = architecture {
+    if matches!(architecture, Architecture::Moe { .. }) {
         anyhow::ensure!(batch_size > 0 && epochs > 0, "batch size and epochs must be positive");
-        anyhow::ensure!(num_experts > 0 && top_k > 0 && top_k <= num_experts, "MoE requires 1 <= top_k <= num_experts");
     }
     let mut runs = generate_run_configs(batch_size, architecture);
-    if let Architecture::Moe { num_experts, top_k } = architecture {
+    if matches!(architecture, Architecture::Moe { .. }) {
+        // num_experts/top_k are per-run (see generate_run_configs' own sweep),
+        // so only epochs/batch_size - the training-duration knobs, not capacity
+        // knobs - get stamped on uniformly here.
         for run in &mut runs {
-            run.name.push_str(&format!("_e{num_experts}_k{top_k}"));
             for stage in &mut run.stages {
                 stage.epochs = epochs;
                 stage.batch_size = batch_size;
@@ -1373,9 +1404,9 @@ pub fn run_with_architecture(
                         );
                     }
 
-                    if batch_num % 100 == 0 {
-                        println!("MoE auxiliary loss {:.5}; dispatched rows per layer/expert: {:?}", aux_loss.into_scalar(), expert_counts);
-                    }
+                    // if batch_num % 100 == 0 {
+                    //     println!("MoE auxiliary loss {:.5}; dispatched rows per layer/expert: {:?}", aux_loss.into_scalar(), expert_counts);
+                    // }
 
                     // Periodic save and inference every 500 batches
                     if (batch_num + 1) % 500 == 0 {
