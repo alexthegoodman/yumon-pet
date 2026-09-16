@@ -25,8 +25,8 @@ use crate::{
     vision::EMOTE_CLASSES,
 };
 
-// use crate::brain::classic_attn::{DecoderBlock, DecoderBlockConfig, EncoderBlock, EncoderBlockConfig, causal_mask};
-use crate::brain::flash_attn::attention::{DecoderBlock, DecoderBlockConfig, EncoderBlock, EncoderBlockConfig, causal_mask};
+use crate::brain::classic_attn::{DecoderBlock, DecoderBlockConfig, EncoderBlock, EncoderBlockConfig, causal_mask};
+// use crate::brain::flash_attn::attention::{DecoderBlock, DecoderBlockConfig, EncoderBlock, EncoderBlockConfig, causal_mask};
 
 pub const TEMPERATURE:  f32   = 0.9;
 // pub const TEMPERATURE:  f32   = 0.75;
@@ -362,7 +362,8 @@ impl<B: Backend> YumonBrain<B> {
         );
 
         for block in &self.enc_blocks {
-            x = block.forward::<R>(x, &self.rope, Some(pad_mask.clone()));
+            // x = block.forward::<R>(x, &self.rope, Some(pad_mask.clone()));
+            x = block.forward(x, &self.rope, Some(pad_mask.clone()));
         }
 
         self.enc_norm.forward(x)
@@ -388,7 +389,7 @@ impl<B: Backend> YumonBrain<B> {
         let cmask = causal_mask::<B>(dec_len, &x.device());
 
         for block in &self.dec_blocks {
-            x = block.forward::<R>(
+            x = block.forward(
                 x,
                 memory.clone(),
                 &self.rope,
@@ -417,76 +418,76 @@ impl<B: Backend> YumonBrain<B> {
         self.decode::<R>(dec_tokens, memory, Some(enc_pad_mask))
     }
 
-    // ── Encoder ──────────────────────────────────────────────────────────────
-    pub async fn encode_async<R: Runtime<Device = B::Device>>(
-        &self,
-        enc_tokens:  Tensor<B, 2, Int>,
-    ) -> Tensor<B, 3> {
-        let enc_tokens_cl = enc_tokens.clone();
+    // // ── Encoder ──────────────────────────────────────────────────────────────
+    // pub async fn encode_async<R: Runtime<Device = B::Device>>(
+    //     &self,
+    //     enc_tokens:  Tensor<B, 2, Int>,
+    // ) -> Tensor<B, 3> {
+    //     let enc_tokens_cl = enc_tokens.clone();
 
-        let [batch, enc_len] = enc_tokens.dims();
+    //     let [batch, enc_len] = enc_tokens.dims();
 
-        let pad_mask = enc_tokens.equal_elem(PAD_TOKEN as u32); // [batch, enc_len]
+    //     let pad_mask = enc_tokens.equal_elem(PAD_TOKEN as u32); // [batch, enc_len]
 
-        let mut x = self.dropout.forward(
-            self.enc_embedding.forward(enc_tokens_cl)
-        );
+    //     let mut x = self.dropout.forward(
+    //         self.enc_embedding.forward(enc_tokens_cl)
+    //     );
 
-        for block in &self.enc_blocks {
-            x = block.forward_async::<R>(x, &self.rope, Some(pad_mask.clone())).await;
-        }
+    //     for block in &self.enc_blocks {
+    //         x = block.forward_async(x, &self.rope, Some(pad_mask.clone())).await;
+    //     }
 
-        self.enc_norm.forward(x)
-    }
+    //     self.enc_norm.forward(x)
+    // }
 
-    // ── Decoder ──────────────────────────────────────────────────────────────
-    pub async fn decode_async<R: Runtime<Device = B::Device>>(
-        &self,
-        dec_tokens:  Tensor<B, 2, Int>,
-        memory:      Tensor<B, 3>,
-        enc_pad_mask: Option<Tensor<B, 2, Bool>>,
-    ) -> Tensor<B, 3> {
-        let dec_tokens_cl = dec_tokens.clone();
+    // // ── Decoder ──────────────────────────────────────────────────────────────
+    // pub async fn decode_async<R: Runtime<Device = B::Device>>(
+    //     &self,
+    //     dec_tokens:  Tensor<B, 2, Int>,
+    //     memory:      Tensor<B, 3>,
+    //     enc_pad_mask: Option<Tensor<B, 2, Bool>>,
+    // ) -> Tensor<B, 3> {
+    //     let dec_tokens_cl = dec_tokens.clone();
 
-        let [batch, dec_len] = dec_tokens.dims();
+    //     let [batch, dec_len] = dec_tokens.dims();
 
-        let dec_pad_mask = dec_tokens.equal_elem(PAD_TOKEN as u32);
+    //     let dec_pad_mask = dec_tokens.equal_elem(PAD_TOKEN as u32);
 
-        let mut x = self.dropout.forward(
-            self.dec_embedding.forward(dec_tokens_cl)
-        );
+    //     let mut x = self.dropout.forward(
+    //         self.dec_embedding.forward(dec_tokens_cl)
+    //     );
 
-        let cmask = causal_mask::<B>(dec_len, &x.device());
+    //     let cmask = causal_mask::<B>(dec_len, &x.device());
 
-        for block in &self.dec_blocks {
-            x = block.forward_async::<R>(
-                x,
-                memory.clone(),
-                &self.rope,
-                cmask.clone(),
-                Some(dec_pad_mask.clone()),
-                enc_pad_mask.clone(),
-            ).await;
-        }
+    //     for block in &self.dec_blocks {
+    //         x = block.forward_async(
+    //             x,
+    //             memory.clone(),
+    //             &self.rope,
+    //             cmask.clone(),
+    //             Some(dec_pad_mask.clone()),
+    //             enc_pad_mask.clone(),
+    //         ).await;
+    //     }
 
-        let x = self.dec_norm.forward(x);
+    //     let x = self.dec_norm.forward(x);
 
-        let token_logits = self.token_head.forward(x.clone());
+    //     let token_logits = self.token_head.forward(x.clone());
 
-        token_logits
-    }
+    //     token_logits
+    // }
 
     // ── Forward ───────────────────────────────────────────────────────────────
-    pub async fn forward_async<R: Runtime<Device = B::Device>>(
-        &self,
-        enc_tokens:  Tensor<B, 2, Int>,
-        dec_tokens:  Tensor<B, 2, Int>,
-    ) -> Tensor<B, 3> {
-        let enc_tokens_cl = enc_tokens.clone();
-        let enc_pad_mask = enc_tokens.equal_elem(PAD_TOKEN as u32);
-        let memory = self.encode_async::<R>(enc_tokens_cl).await;
-        self.decode_async::<R>(dec_tokens, memory, Some(enc_pad_mask)).await
-    }
+    // pub async fn forward_async<R: Runtime<Device = B::Device>>(
+    //     &self,
+    //     enc_tokens:  Tensor<B, 2, Int>,
+    //     dec_tokens:  Tensor<B, 2, Int>,
+    // ) -> Tensor<B, 3> {
+    //     let enc_tokens_cl = enc_tokens.clone();
+    //     let enc_pad_mask = enc_tokens.equal_elem(PAD_TOKEN as u32);
+    //     let memory = self.encode_async::<R>(enc_tokens_cl).await;
+    //     self.decode_async::<R>(dec_tokens, memory, Some(enc_pad_mask)).await
+    // }
 
     pub fn generate_unmasked_parsed<R: Runtime<Device = B::Device>>(
         &self,
@@ -655,154 +656,154 @@ impl<B: Backend> YumonBrain<B> {
         }
     }
 
-    pub async fn generate_unmasked_parsed_async<R: Runtime<Device = B::Device>>(
-        &self,
-        tokenizer:      &TokenizerKind,
-        seed_text:      &str,
-        max_tokens:     usize,
-        device:         &B::Device,
-    ) -> GenerationResult {
-        // ── Encode input once ──────────────────────────────────────────────────
-        let enc_ids: Vec<i32> = {
-            let mut ids = vec![BOS_TOKEN as i32];
-            if !seed_text.is_empty() {
-                ids.extend(tokenizer.encode(seed_text).iter().map(|&t| t as i32));
-            }
-            ids.resize(self.config.max_seq_len, PAD_TOKEN as i32);
-            ids
-        };
+    // pub async fn generate_unmasked_parsed_async<R: Runtime<Device = B::Device>>(
+    //     &self,
+    //     tokenizer:      &TokenizerKind,
+    //     seed_text:      &str,
+    //     max_tokens:     usize,
+    //     device:         &B::Device,
+    // ) -> GenerationResult {
+    //     // ── Encode input once ──────────────────────────────────────────────────
+    //     let enc_ids: Vec<i32> = {
+    //         let mut ids = vec![BOS_TOKEN as i32];
+    //         if !seed_text.is_empty() {
+    //             ids.extend(tokenizer.encode(seed_text).iter().map(|&t| t as i32));
+    //         }
+    //         ids.resize(self.config.max_seq_len, PAD_TOKEN as i32);
+    //         ids
+    //     };
 
-        let enc_tokens_t = Tensor::<B, 2, Int>::from_ints(
-            TensorData::new(enc_ids, [1, self.config.max_seq_len]),
-            device,
-        );
+    //     let enc_tokens_t = Tensor::<B, 2, Int>::from_ints(
+    //         TensorData::new(enc_ids, [1, self.config.max_seq_len]),
+    //         device,
+    //     );
 
-        let enc_tokens_t_cl = enc_tokens_t.clone();
+    //     let enc_tokens_t_cl = enc_tokens_t.clone();
 
-        let enc_pad_mask = enc_tokens_t.equal_elem(PAD_TOKEN as u32);
+    //     let enc_pad_mask = enc_tokens_t.equal_elem(PAD_TOKEN as u32);
 
-        let memory = self.encode_async::<R>(enc_tokens_t_cl).await;  // run once
+    //     let memory = self.encode_async::<R>(enc_tokens_t_cl).await;  // run once
 
-        // ── Decode autoregressively — no FSM masking ───────────────────────────
-        let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
-        let mut rng = rand::thread_rng();
-        let mut last_emote_logits: Option<Vec<f32>> = None;
+    //     // ── Decode autoregressively — no FSM masking ───────────────────────────
+    //     let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
+    //     let mut rng = rand::thread_rng();
+    //     let mut last_emote_logits: Option<Vec<f32>> = None;
 
-        for _ in 0..max_tokens {
-            let clamped_len = dec_ids.len().min(self.config.max_seq_len);
-            let mut padded = dec_ids[dec_ids.len() - clamped_len..].to_vec();
-            padded.resize(self.config.max_seq_len, PAD_TOKEN);
+    //     for _ in 0..max_tokens {
+    //         let clamped_len = dec_ids.len().min(self.config.max_seq_len);
+    //         let mut padded = dec_ids[dec_ids.len() - clamped_len..].to_vec();
+    //         padded.resize(self.config.max_seq_len, PAD_TOKEN);
 
-            let dec_tokens_t = Tensor::<B, 2, Int>::from_ints(
-                TensorData::new(
-                    padded.iter().map(|&t| t as i32).collect::<Vec<_>>(),
-                    [1, self.config.max_seq_len],
-                ),
-                device,
-            );
+    //         let dec_tokens_t = Tensor::<B, 2, Int>::from_ints(
+    //             TensorData::new(
+    //                 padded.iter().map(|&t| t as i32).collect::<Vec<_>>(),
+    //                 [1, self.config.max_seq_len],
+    //             ),
+    //             device,
+    //         );
 
-            let token_logits = self.decode_async::<R>(dec_tokens_t, memory.clone(), Some(enc_pad_mask.clone()));
+    //         let token_logits = self.decode_async::<R>(dec_tokens_t, memory.clone(), Some(enc_pad_mask.clone()));
 
-            let vocab_size  = tokenizer.vocab_size();
-            let last_logits = token_logits.await
-                .slice([0..1, clamped_len - 1..clamped_len, 0..vocab_size])
-                .reshape([vocab_size]);
+    //         let vocab_size  = tokenizer.vocab_size();
+    //         let last_logits = token_logits.await
+    //             .slice([0..1, clamped_len - 1..clamped_len, 0..vocab_size])
+    //             .reshape([vocab_size]);
 
-            // no masking — pure model output
-            let logits_vec: Vec<f32> = last_logits.to_data_async().await.expect("Need logits").to_vec().unwrap();
-            let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
+    //         // no masking — pure model output
+    //         let logits_vec: Vec<f32> = last_logits.to_data_async().await.expect("Need logits").to_vec().unwrap();
+    //         let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
 
-            if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
-            dec_ids.push(next_token);
-        }
+    //         if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
+    //         dec_ids.push(next_token);
+    //     }
 
-        // ── Decode tokens → string (skip BOS) ─────────────────────────────────
-        let raw_output = tokenizer.decode(&dec_ids[1..]);
+    //     // ── Decode tokens → string (skip BOS) ─────────────────────────────────
+    //     let raw_output = tokenizer.decode(&dec_ids[1..]);
 
-        let fixed = fix_json_syntax(&raw_output).fixed;
+    //     let fixed = fix_json_syntax(&raw_output).fixed;
 
-        let extract = |key: &str| -> String {
-            fancy_regex::Regex::new(&format!(r#"(?<=\s*"{key}"\s*:\s*)"([^"]*)""#))
-                .ok()
-                .and_then(|re| re.captures(&fixed).ok().flatten())
-                .and_then(|caps| caps.get(1))
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default()
-        };
+    //     let extract = |key: &str| -> String {
+    //         fancy_regex::Regex::new(&format!(r#"(?<=\s*"{key}"\s*:\s*)"([^"]*)""#))
+    //             .ok()
+    //             .and_then(|re| re.captures(&fixed).ok().flatten())
+    //             .and_then(|caps| caps.get(1))
+    //             .map(|m| m.as_str().to_string())
+    //             .unwrap_or_default()
+    //     };
 
-        let mut parsed_action     = extract("action");
-        let mut parsed_reply  = extract("reply");
-        let mut parsed_emotion  = extract("emotion");
+    //     let mut parsed_action     = extract("action");
+    //     let mut parsed_reply  = extract("reply");
+    //     let mut parsed_emotion  = extract("emotion");
 
-        if parsed_action.is_empty() || parsed_action.len() < 3 {
-            parsed_action     = extract(" action");
-            parsed_reply  = extract(" reply");
-            parsed_emotion  = extract(" emotion");
-        }
+    //     if parsed_action.is_empty() || parsed_action.len() < 3 {
+    //         parsed_action     = extract(" action");
+    //         parsed_reply  = extract(" reply");
+    //         parsed_emotion  = extract(" emotion");
+    //     }
 
-        if parsed_reply.is_empty() || parsed_reply.len() < 4 {
-            let parsed: serde_json::Value = serde_json::from_str(&fixed)
-                .unwrap_or_else(|_| {
-                    let extract = |key: &str| -> String {
-                        regex::Regex::new(&format!(r#""{key}"\s*:\s*"([^"]*)"#))
-                            .ok()
-                            .and_then(|re| re.captures(&fixed))
-                            .and_then(|caps| caps.get(1))
-                            .map(|m| m.as_str().to_string())
-                            .unwrap_or_default()
-                    };
+    //     if parsed_reply.is_empty() || parsed_reply.len() < 4 {
+    //         let parsed: serde_json::Value = serde_json::from_str(&fixed)
+    //             .unwrap_or_else(|_| {
+    //                 let extract = |key: &str| -> String {
+    //                     regex::Regex::new(&format!(r#""{key}"\s*:\s*"([^"]*)"#))
+    //                         .ok()
+    //                         .and_then(|re| re.captures(&fixed))
+    //                         .and_then(|caps| caps.get(1))
+    //                         .map(|m| m.as_str().to_string())
+    //                         .unwrap_or_default()
+    //                 };
 
-                    serde_json::json!({
-                        "action":     extract("action"),
-                        "emotion":      extract("emotion"),
-                        "reply":      extract("reply"),
-                    })
-                });
+    //                 serde_json::json!({
+    //                     "action":     extract("action"),
+    //                     "emotion":      extract("emotion"),
+    //                     "reply":      extract("reply"),
+    //                 })
+    //             });
 
-            parsed_action = parsed["action"].to_string().trim().to_string();
-            parsed_reply = parsed["reply"].to_string().trim().to_string();
-            parsed_emotion = parsed["emotion"].to_string().trim().to_string();
-        }
+    //         parsed_action = parsed["action"].to_string().trim().to_string();
+    //         parsed_reply = parsed["reply"].to_string().trim().to_string();
+    //         parsed_emotion = parsed["emotion"].to_string().trim().to_string();
+    //     }
 
-        parsed_action = parsed_action.replace("\"", "").trim().to_string();
-        parsed_reply = parsed_reply.replace("\"", "").trim().to_string();
-        parsed_emotion = parsed_emotion.replace("\"", "").trim().to_string();
+    //     parsed_action = parsed_action.replace("\"", "").trim().to_string();
+    //     parsed_reply = parsed_reply.replace("\"", "").trim().to_string();
+    //     parsed_emotion = parsed_emotion.replace("\"", "").trim().to_string();
 
-        let action = match parsed_action.as_str().trim() {
-            "go to destination"     => Action::GoToDestination,
-            "go home"               => Action::GoHome         ,
-            "follow"                => Action::Follow,
-            "get help"              => Action::GetHelp,
-            "survey area"           => Action::Survey,
-            "collect items"         => Action::Collect,
-            "stack items"           => Action::Stack ,
-            _                       => Action::Sit  ,
-        };  
+    //     let action = match parsed_action.as_str().trim() {
+    //         "go to destination"     => Action::GoToDestination,
+    //         "go home"               => Action::GoHome         ,
+    //         "follow"                => Action::Follow,
+    //         "get help"              => Action::GetHelp,
+    //         "survey area"           => Action::Survey,
+    //         "collect items"         => Action::Collect,
+    //         "stack items"           => Action::Stack ,
+    //         _                       => Action::Sit  ,
+    //     };  
 
-        // let motion_dir = match parsed_motion_dir.as_str() {
-        //     "north" => CardinalDir::North,
-        //     "south" => CardinalDir::South,
-        //     "east"  => CardinalDir::East,
-        //     "west"  => CardinalDir::West,
-        //     _       => CardinalDir::None,
-        // };
+    //     // let motion_dir = match parsed_motion_dir.as_str() {
+    //     //     "north" => CardinalDir::North,
+    //     //     "south" => CardinalDir::South,
+    //     //     "east"  => CardinalDir::East,
+    //     //     "west"  => CardinalDir::West,
+    //     //     _       => CardinalDir::None,
+    //     // };
 
-        let reply = parsed_reply
-            .as_str()
-            .to_string();
+    //     let reply = parsed_reply
+    //         .as_str()
+    //         .to_string();
 
         
 
-        GenerationResult {
-            reply,
-            action,
-            motion_dir: CardinalDir::None,
-            parsed_emotion,
-            raw_output,
-            fsm_state: 0,
-            allowed_count: None,
-        }
-    }
+    //     GenerationResult {
+    //         reply,
+    //         action,
+    //         motion_dir: CardinalDir::None,
+    //         parsed_emotion,
+    //         raw_output,
+    //         fsm_state: 0,
+    //         allowed_count: None,
+    //     }
+    // }
 
     // ── Checkpoint I/O ────────────────────────────────────────────────────────
 

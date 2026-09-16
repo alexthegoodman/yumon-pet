@@ -16,8 +16,12 @@ use rand::SeedableRng;
 
 use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, CL_ID, CR_ID, TokenizerKind}, chart::{TrainingState}, loader::{DataLoader, FileKind}, samples::{TrainingStage, WorldContext, prepare_paired_samples_split, prepare_paired_samples_split_sep}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 
+// #[cfg(not(target_arch = "wasm32"))]
+// use crate::brain::{decoder_model::{BrainDecMetadata, YumonDecBrain, YumonDecBrainConfig}};
+
 #[cfg(not(target_arch = "wasm32"))]
-use crate::brain::{chart::render, decoder_model::{BrainDecMetadata, YumonDecBrain, YumonDecBrainConfig}};
+use crate::brain::{chart::render};
+
 #[cfg(not(target_arch = "wasm32"))]
 use crate::brain::mdx::{load_dictionary_sentences, load_handcrafted_sentences, load_qa_pairs, load_qa_singles, load_txt_sentences};
 #[cfg(not(target_arch = "wasm32"))]
@@ -195,7 +199,9 @@ pub struct RunConfig {
 /// fails to drop the average loss by at least this much versus the previous
 /// epoch. Most grid-searched configs never converge at all, so this is what
 /// makes covering the full grid in generate_run_configs() tractable.
-const MIN_EPOCH_LOSS_DROP: f32 = 0.2;
+// const MIN_EPOCH_LOSS_DROP: f32 = 0.2;
+// const MIN_EPOCH_LOSS_DROP: f32 = 0.05;
+const MIN_EPOCH_LOSS_DROP: f32 = 0.025;
 
 /// Number of held-out prompts run through the model every time we do a
 /// qualitative inference check, for a well-rounded read on output quality
@@ -259,13 +265,44 @@ fn append_inference_log(
 /// by MIN_EPOCH_LOSS_DROP, but this way we actually cover the space instead
 /// of only the sizes/depths someone happened to type in by hand.
 fn generate_run_configs(batch_size_option: usize) -> Vec<RunConfig> {
-    let sizes:       [usize; 3] = [64, 128, 256];
-    let layer_counts: [usize; 4] = [1, 2, 4, 8];
-    let head_counts:  [usize; 4] = [1, 2, 4, 8];
-    let seq_lens:     [usize; 2] = [64, 128];
-    let batch_sizes:     [usize; 2] = [2, 8];
-    let architectures = [Architecture::DecoderOnly, Architecture::EncoderDecoder];
-    let stages = [TrainingStage::Language, TrainingStage::Structured];
+    let sizes:       [usize; 2] = [
+        // 32,
+        // 64, 
+        128, 
+        256,
+        // 512
+    ];
+    let layer_counts: [usize; 2] = [
+        // 1, 
+        2, 
+        4, 
+        // 8
+    ];
+    let head_counts:  [usize; 1] = [
+        // 1, 
+        // 2, 
+        // 4, 
+        // 8,
+        // 16,
+        32
+        // 64
+    ];
+    let seq_lens:     [usize; 1] = [
+        64, 
+        // 128
+    ];
+    let batch_sizes:     [usize; 1] = [
+        2, 
+        // 8
+    ];
+    let architectures = [
+        // Architecture::DecoderOnly, 
+        Architecture::EncoderDecoder
+    ];
+    let stages = [
+        // TrainingStage::Language, 
+        TrainingStage::Structured
+    ];
 
     let mut runs = Vec::new();
 
@@ -345,9 +382,9 @@ fn load_stage_data(
 
     loader = loader
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
-        .add("data/ideas.txt",   FileKind::TxtLines, Some(2_000))
-        .add("archive/arena_extract.txt",   FileKind::Chats, Some(10_000))
-        .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(10_000))
+        .add("data/ideas.txt",   FileKind::TxtLines, Some(5_000))
+        // .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
+        // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(25_000))
         // .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
         // .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
         // .add("data/bible_asv.csv", FileKind::BibleCsv, None)
@@ -361,7 +398,7 @@ fn load_stage_data(
         // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
         // .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(25_000))
-        // .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(5_000))
+        // .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(25_000))
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
         .add("archive/ov_chats.txt", FileKind::Chats, None)
@@ -768,341 +805,342 @@ pub fn run(
 
         } // Architecture::EncoderDecoder
 
-        Architecture::DecoderOnly => {
+        // Architecture::DecoderOnly => {
 
-        let (mut model, mut epochs_already_done) = if std::path::Path::new(run_dir_str).join("model.bin").exists() {
-            match YumonDecBrain::<TrainBackend>::load(run_dir_str, &device) {
-                Ok((m, _tok, _config)) => {
-                    let meta_json = std::fs::read_to_string(std::path::Path::new(run_dir_str).join("metadata.json"))?;
-                    let meta: BrainDecMetadata = serde_json::from_str(&meta_json)?;
-                    println!("▶️  Resuming run {} from checkpoint ({} epochs done, loss={:.4})",
-                             run_cfg.name, meta.epochs_trained, meta.final_loss);
-                    (m, meta.epochs_trained)
-                }
-                Err(_) => {
-                    let config = YumonDecBrainConfig {
-                        vocab_size: tokenizer.vocab_size(),
-                        embed_dim: run_cfg.embed_dim,
-                        hidden_units: run_cfg.hidden_units,
-                        n_layers: run_cfg.n_layers,
-                        attn_heads: run_cfg.attn_heads,
-                        ff_dim: run_cfg.ff_dim,
-                        max_seq_len: run_cfg.max_seq_len,
-                        training_stage: run_cfg.stages.get(0).expect("Couldn't get stage").stage,
-                        dropout_rate: 0.05,
-                    };
-                    (config.init(&device), 0)
-                }
-            }
-        } else {
-            println!("🆕 Starting fresh run: {}", run_cfg.name);
-            let config = YumonDecBrainConfig {
-                vocab_size: tokenizer.vocab_size(),
-                embed_dim: run_cfg.embed_dim,
-                hidden_units: run_cfg.hidden_units,
-                n_layers: run_cfg.n_layers,
-                attn_heads: run_cfg.attn_heads,
-                ff_dim: run_cfg.ff_dim,
-                max_seq_len: run_cfg.max_seq_len,
-                training_stage: run_cfg.stages.get(0).expect("Couldn't get stage").stage,
-                dropout_rate: 0.05,
-            };
-            (config.init(&device), 0)
-        };
+        // let (mut model, mut epochs_already_done) = if std::path::Path::new(run_dir_str).join("model.bin").exists() {
+        //     match YumonDecBrain::<TrainBackend>::load(run_dir_str, &device) {
+        //         Ok((m, _tok, _config)) => {
+        //             let meta_json = std::fs::read_to_string(std::path::Path::new(run_dir_str).join("metadata.json"))?;
+        //             let meta: BrainDecMetadata = serde_json::from_str(&meta_json)?;
+        //             println!("▶️  Resuming run {} from checkpoint ({} epochs done, loss={:.4})",
+        //                      run_cfg.name, meta.epochs_trained, meta.final_loss);
+        //             (m, meta.epochs_trained)
+        //         }
+        //         Err(_) => {
+        //             let config = YumonDecBrainConfig {
+        //                 vocab_size: tokenizer.vocab_size(),
+        //                 embed_dim: run_cfg.embed_dim,
+        //                 hidden_units: run_cfg.hidden_units,
+        //                 n_layers: run_cfg.n_layers,
+        //                 attn_heads: run_cfg.attn_heads,
+        //                 ff_dim: run_cfg.ff_dim,
+        //                 max_seq_len: run_cfg.max_seq_len,
+        //                 training_stage: run_cfg.stages.get(0).expect("Couldn't get stage").stage,
+        //                 dropout_rate: 0.05,
+        //             };
+        //             (config.init(&device), 0)
+        //         }
+        //     }
+        // } else {
+        //     println!("🆕 Starting fresh run: {}", run_cfg.name);
+        //     let config = YumonDecBrainConfig {
+        //         vocab_size: tokenizer.vocab_size(),
+        //         embed_dim: run_cfg.embed_dim,
+        //         hidden_units: run_cfg.hidden_units,
+        //         n_layers: run_cfg.n_layers,
+        //         attn_heads: run_cfg.attn_heads,
+        //         ff_dim: run_cfg.ff_dim,
+        //         max_seq_len: run_cfg.max_seq_len,
+        //         training_stage: run_cfg.stages.get(0).expect("Couldn't get stage").stage,
+        //         dropout_rate: 0.05,
+        //     };
+        //     (config.init(&device), 0)
+        // };
 
-        'stage_loop_dec: for (stage_idx, stage_cfg) in run_cfg.stages.iter().enumerate() {
-            println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
+        // 'stage_loop_dec: for (stage_idx, stage_cfg) in run_cfg.stages.iter().enumerate() {
+        //     println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
 
-            let training_samples = load_stage_data(stage_cfg.stage.clone(), &tokenizer, &keyword_index, run_cfg.max_seq_len)?;
-            println!("Training samples: {}", training_samples.len());
+        //     let training_samples = load_stage_data(stage_cfg.stage.clone(), &tokenizer, &keyword_index, run_cfg.max_seq_len)?;
+        //     println!("Training samples: {}", training_samples.len());
 
-            // debug print — first 12 samples
-            for (i, sample) in training_samples.iter().enumerate() {
-                if i >= 12 { break; }
-                println!("INPUT:  {:?}", tokenizer.decode(&sample.input_ids));
-                println!("TARGET: {:?}", tokenizer.decode(
-                    &sample.target_labels.iter()
-                        .map(|&t| if t == PAD_TOKEN { PAD_TOKEN } else { t })
-                        .collect::<Vec<_>>()
-                ));
-                println!("input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
-                println!("target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
-            }
+        //     // debug print — first 12 samples
+        //     for (i, sample) in training_samples.iter().enumerate() {
+        //         if i >= 12 { break; }
+        //         println!("INPUT:  {:?}", tokenizer.decode(&sample.input_ids));
+        //         println!("TARGET: {:?}", tokenizer.decode(
+        //             &sample.target_labels.iter()
+        //                 .map(|&t| if t == PAD_TOKEN { PAD_TOKEN } else { t })
+        //                 .collect::<Vec<_>>()
+        //         ));
+        //         println!("input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
+        //         println!("target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
+        //     }
 
-            let mut optimizer = AdamWConfig::new()
-                .with_epsilon(stage_cfg.epsilon)
-                .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
-                .with_weight_decay(stage_cfg.weight_decay)
-                .init();
+        //     let mut optimizer = AdamWConfig::new()
+        //         .with_epsilon(stage_cfg.epsilon)
+        //         .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
+        //         .with_weight_decay(stage_cfg.weight_decay)
+        //         .init();
 
-            let ce_loss = CrossEntropyLossConfig::new()
-                .with_pad_tokens(Some(vec![PAD_TOKEN as usize]))
-                .with_smoothing(Some(stage_cfg.smoothing))
-                .init(&device);
+        //     let ce_loss = CrossEntropyLossConfig::new()
+        //         .with_pad_tokens(Some(vec![PAD_TOKEN as usize]))
+        //         .with_smoothing(Some(stage_cfg.smoothing))
+        //         .init(&device);
 
-            let mut rng = rand::thread_rng();
-            use std::io::{stdout, IsTerminal};
-            let mut terminal = if stdout().is_terminal() {
-                let backend = CrosstermBackend::new(stdout());
-                Some(Terminal::with_options(
-                    backend,
-                    TerminalOptions { viewport: Viewport::Inline(26) },
-                )?)
-            } else {
-                None
-            };
+        //     let mut rng = rand::thread_rng();
+        //     use std::io::{stdout, IsTerminal};
+        //     let mut terminal = if stdout().is_terminal() {
+        //         let backend = CrosstermBackend::new(stdout());
+        //         Some(Terminal::with_options(
+        //             backend,
+        //             TerminalOptions { viewport: Viewport::Inline(26) },
+        //         )?)
+        //     } else {
+        //         None
+        //     };
 
-            let total_batches = training_samples.len() / stage_cfg.batch_size;
-            let mut state = TrainingState {
-                loss_history: vec![],
-                avg_loss_history: vec![],
-                current_loss: 0.0,
-                avg_loss: 0.0,
-                epoch: 0,
-                total_epochs: stage_cfg.epochs,
-                batch: 0,
-                total_batches: total_batches,
-                current_lr: stage_cfg.first_lr,
-                lr_history: vec![],
-                global_step: 0,
-                entropy: 0.0,
-                entropy_history: vec![],
-                last_reply: String::new()
-            };
+        //     let total_batches = training_samples.len() / stage_cfg.batch_size;
+        //     let mut state = TrainingState {
+        //         loss_history: vec![],
+        //         avg_loss_history: vec![],
+        //         current_loss: 0.0,
+        //         avg_loss: 0.0,
+        //         epoch: 0,
+        //         total_epochs: stage_cfg.epochs,
+        //         batch: 0,
+        //         total_batches: total_batches,
+        //         current_lr: stage_cfg.first_lr,
+        //         lr_history: vec![],
+        //         global_step: 0,
+        //         entropy: 0.0,
+        //         entropy_history: vec![],
+        //         last_reply: String::new()
+        //     };
 
-            let mut final_loss = 0.0f32;
-            let inference_log_path = format!("{}/{}_inference_log.txt", run_dir_str, run_cfg.name);
-            let chart_path = format!("{}/{}_stage_{}.png", run_dir_str, run_cfg.name, stage_idx + 1);
-            let mut prev_epoch_loss: Option<f32> = None;
-            let mut run_should_stop = false;
+        //     let mut final_loss = 0.0f32;
+        //     let inference_log_path = format!("{}/{}_inference_log.txt", run_dir_str, run_cfg.name);
+        //     let chart_path = format!("{}/{}_stage_{}.png", run_dir_str, run_cfg.name, stage_idx + 1);
+        //     let mut prev_epoch_loss: Option<f32> = None;
+        //     let mut run_should_stop = false;
 
-            'epoch_loop_dec: for epoch in 0..stage_cfg.epochs {
-                state.epoch = epoch + 1;
-                let mut idx: Vec<usize> = (0..training_samples.len()).collect();
-                idx.shuffle(&mut rng);
-                let num_batches = idx.len().max(1) / stage_cfg.batch_size;
-                let mut epoch_loss = 0.0f32;
+        //     'epoch_loop_dec: for epoch in 0..stage_cfg.epochs {
+        //         state.epoch = epoch + 1;
+        //         let mut idx: Vec<usize> = (0..training_samples.len()).collect();
+        //         idx.shuffle(&mut rng);
+        //         let num_batches = idx.len().max(1) / stage_cfg.batch_size;
+        //         let mut epoch_loss = 0.0f32;
 
-                // --- Decoder-only style: [prompt][separator][reply] packed into one causal sequence
-                let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { " " };
-                let sep_tokens = tokenizer.encode(sep_text);
-                let sep_len = sep_tokens.len();
+        //         // --- Decoder-only style: [prompt][separator][reply] packed into one causal sequence
+        //         let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { " " };
+        //         let sep_tokens = tokenizer.encode(sep_text);
+        //         let sep_len = sep_tokens.len();
 
-                for batch_num in 0..num_batches {
-                    let current_lr = {
-                        let total_steps = stage_cfg.epochs * num_batches;
-                        let step = epoch * num_batches + batch_num;
-                        let t = step as f64 / total_steps as f64;
-                        (stage_cfg.first_lr * (1.0 - t) + stage_cfg.last_lr * t)
-                    };
+        //         for batch_num in 0..num_batches {
+        //             let current_lr = {
+        //                 let total_steps = stage_cfg.epochs * num_batches;
+        //                 let step = epoch * num_batches + batch_num;
+        //                 let t = step as f64 / total_steps as f64;
+        //                 (stage_cfg.first_lr * (1.0 - t) + stage_cfg.last_lr * t)
+        //             };
 
-                    let batch_start = batch_num * stage_cfg.batch_size;
-                    let batch_end = (batch_start + stage_cfg.batch_size).min(training_samples.len());
-                    let batch_idx = &idx[batch_start..batch_end];
-                    let current_batch_size = batch_idx.len();
-                    if current_batch_size == 0 { continue; }
+        //             let batch_start = batch_num * stage_cfg.batch_size;
+        //             let batch_end = (batch_start + stage_cfg.batch_size).min(training_samples.len());
+        //             let batch_idx = &idx[batch_start..batch_end];
+        //             let current_batch_size = batch_idx.len();
+        //             if current_batch_size == 0 { continue; }
 
-                    let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
-                    let mut all_seq_ids: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
+        //             let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
+        //             let mut all_seq_ids: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
 
-                    for &i in batch_idx {
-                        let sample = &training_samples[i];
-                        let input_ids = &sample.input_ids;
-                        let target_labels = &sample.target_labels;
+        //             for &i in batch_idx {
+        //                 let sample = &training_samples[i];
+        //                 let input_ids = &sample.input_ids;
+        //                 let target_labels = &sample.target_labels;
 
-                        // Find actual length of input (up to PAD)
-                        let input_len = input_ids.iter().position(|&t| t == PAD_TOKEN).unwrap_or(run_cfg.max_seq_len);
-                        let target_len = target_labels.iter().position(|&t| t == PAD_TOKEN).unwrap_or(run_cfg.max_seq_len);
+        //                 // Find actual length of input (up to PAD)
+        //                 let input_len = input_ids.iter().position(|&t| t == PAD_TOKEN).unwrap_or(run_cfg.max_seq_len);
+        //                 let target_len = target_labels.iter().position(|&t| t == PAD_TOKEN).unwrap_or(run_cfg.max_seq_len);
 
-                        // Construct single sequence: [Input] [Separator] [Target]
-                        let mut full_seq = Vec::with_capacity(run_cfg.max_seq_len);
-                        full_seq.extend(&input_ids[..input_len]);
-                        full_seq.extend(sep_tokens.iter().map(|&t| t as usize));
+        //                 // Construct single sequence: [Input] [Separator] [Target]
+        //                 let mut full_seq = Vec::with_capacity(run_cfg.max_seq_len);
+        //                 full_seq.extend(&input_ids[..input_len]);
+        //                 full_seq.extend(sep_tokens.iter().map(|&t| t as usize));
 
-                        let remaining_space = run_cfg.max_seq_len.saturating_sub(full_seq.len());
-                        let actual_target_len = target_len.min(remaining_space);
-                        full_seq.extend(&target_labels[..actual_target_len]);
-                        full_seq.resize(run_cfg.max_seq_len, PAD_TOKEN);
+        //                 let remaining_space = run_cfg.max_seq_len.saturating_sub(full_seq.len());
+        //                 let actual_target_len = target_len.min(remaining_space);
+        //                 full_seq.extend(&target_labels[..actual_target_len]);
+        //                 full_seq.resize(run_cfg.max_seq_len, PAD_TOKEN);
 
-                        // Targets for loss: shifted left by 1. We only want loss on the
-                        // separator + target tokens, not the prompt tokens.
-                        let mut loss_targets = vec![PAD_TOKEN as i32; run_cfg.max_seq_len];
+        //                 // Targets for loss: shifted left by 1. We only want loss on the
+        //                 // separator + target tokens, not the prompt tokens.
+        //                 let mut loss_targets = vec![PAD_TOKEN as i32; run_cfg.max_seq_len];
 
-                        let start_predict_idx = input_len.saturating_sub(1);
-                        let end_predict_idx = (input_len + sep_len + actual_target_len).saturating_sub(1).min(run_cfg.max_seq_len - 1);
+        //                 let start_predict_idx = input_len.saturating_sub(1);
+        //                 let end_predict_idx = (input_len + sep_len + actual_target_len).saturating_sub(1).min(run_cfg.max_seq_len - 1);
 
-                        for idx in start_predict_idx..end_predict_idx {
-                            loss_targets[idx] = full_seq[idx + 1] as i32;
-                        }
+        //                 for idx in start_predict_idx..end_predict_idx {
+        //                     loss_targets[idx] = full_seq[idx + 1] as i32;
+        //                 }
 
-                        all_seq_ids.extend(full_seq.iter().map(|&t| t as i32));
-                        all_lang_targets.extend(loss_targets);
-                    }
+        //                 all_seq_ids.extend(full_seq.iter().map(|&t| t as i32));
+        //                 all_lang_targets.extend(loss_targets);
+        //             }
 
-                    let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), &device);
-                    let tokens_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_seq_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
+        //             let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), &device);
+        //             let tokens_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_seq_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
 
-                    let token_logits = model.forward::<TrainRuntime>(tokens_t.clone());
+        //             let token_logits = model.forward::<TrainRuntime>(tokens_t.clone());
 
-                    // Entropy
-                    let probs = burn::tensor::activation::softmax(token_logits.clone(), 2);
-                    let log_probs = (probs.clone() + 1e-10).log();
-                    let token_entropy = (probs * log_probs).sum_dim(2).neg().squeeze::<2>();
-                    let non_pad_mask = tokens_t.clone().equal_elem(PAD_TOKEN as u32).bool_not().float();
-                    let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).sum().div(non_pad_mask.sum()).into_scalar();
+        //             // Entropy
+        //             let probs = burn::tensor::activation::softmax(token_logits.clone(), 2);
+        //             let log_probs = (probs.clone() + 1e-10).log();
+        //             let token_entropy = (probs * log_probs).sum_dim(2).neg().squeeze::<2>();
+        //             let non_pad_mask = tokens_t.clone().equal_elem(PAD_TOKEN as u32).bool_not().float();
+        //             let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).sum().div(non_pad_mask.sum()).into_scalar();
 
-                    // Loss
-                    let vocab = tokenizer.vocab_size();
-                    let logits_2d = token_logits.reshape([current_batch_size * run_cfg.max_seq_len, vocab]);
-                    let lang_loss = ce_loss.forward(logits_2d, lang_target_t);
+        //             // Loss
+        //             let vocab = tokenizer.vocab_size();
+        //             let logits_2d = token_logits.reshape([current_batch_size * run_cfg.max_seq_len, vocab]);
+        //             let lang_loss = ce_loss.forward(logits_2d, lang_target_t);
 
-                    let grads = GradientsParams::from_grads(lang_loss.backward(), &model);
-                    model = optimizer.step(current_lr, model, grads);
+        //             let grads = GradientsParams::from_grads(lang_loss.backward(), &model);
+        //             model = optimizer.step(current_lr, model, grads);
 
-                    let loss_val: f32 = lang_loss.clone().inner().to_data().to_vec::<f32>().unwrap()[0];
-                    epoch_loss += loss_val;
+        //             let loss_val: f32 = lang_loss.clone().inner().to_data().to_vec::<f32>().unwrap()[0];
+        //             epoch_loss += loss_val;
 
-                    state.entropy = entropy_val;
-                    state.current_loss = loss_val;
-                    state.avg_loss = epoch_loss / (batch_num + 1) as f32;
-                    state.batch = batch_num + 1;
-                    state.current_lr = current_lr;
-                    state.global_step += 1;
-                    state.loss_history.push((state.global_step as f64, loss_val as f64));
-                    state.avg_loss_history.push((state.global_step as f64, state.avg_loss as f64));
-                    state.entropy_history.push((state.global_step as f64, entropy_val as f64));
-                    state.lr_history.push((state.global_step as f64, current_lr));
+        //             state.entropy = entropy_val;
+        //             state.current_loss = loss_val;
+        //             state.avg_loss = epoch_loss / (batch_num + 1) as f32;
+        //             state.batch = batch_num + 1;
+        //             state.current_lr = current_lr;
+        //             state.global_step += 1;
+        //             state.loss_history.push((state.global_step as f64, loss_val as f64));
+        //             state.avg_loss_history.push((state.global_step as f64, state.avg_loss as f64));
+        //             state.entropy_history.push((state.global_step as f64, entropy_val as f64));
+        //             state.lr_history.push((state.global_step as f64, current_lr));
 
-                    if let Some(term) = terminal.as_mut() {
-                        term.draw(|frame| render(frame, &state))?;
-                    } else if state.global_step % 50 == 0 || batch_num + 1 == num_batches {
-                        println!(
-                            "epoch {}/{} batch {}/{} loss {:.4} avg {:.4} lr {:.2e} entropy {:.4}",
-                            state.epoch, state.total_epochs, state.batch, state.total_batches,
-                            state.current_loss, state.avg_loss, state.current_lr, state.entropy,
-                        );
-                    }
+        //             if let Some(term) = terminal.as_mut() {
+        //                 term.draw(|frame| render(frame, &state))?;
+        //             } else if state.global_step % 50 == 0 || batch_num + 1 == num_batches {
+        //                 println!(
+        //                     "epoch {}/{} batch {}/{} loss {:.4} avg {:.4} lr {:.2e} entropy {:.4}",
+        //                     state.epoch, state.total_epochs, state.batch, state.total_batches,
+        //                     state.current_loss, state.avg_loss, state.current_lr, state.entropy,
+        //                 );
+        //             }
 
-                    // Periodic save and inference every 500 batches
-                    if (batch_num + 1) % 500 == 0 {
-                        let current_final_loss = epoch_loss / (batch_num + 1) as f32;
-                        let meta = BrainDecMetadata {
-                            vocab_size:     tokenizer.vocab_size(),
-                            epochs_trained: epochs_already_done + epoch, // Partial epoch progress
-                            final_loss:     current_final_loss,
-                            batch_size:     stage_cfg.batch_size,
-                            training_stage: stage_cfg.stage.clone(),
-                            embed_dim:      run_cfg.embed_dim,
-                            hidden_units:   run_cfg.hidden_units,
-                            n_layers:       run_cfg.n_layers,
-                            attn_heads:     run_cfg.attn_heads,
-                            ff_dim:         run_cfg.ff_dim,
-                            max_seq_len:    run_cfg.max_seq_len,
-                        };
-                        model.save(run_dir_str, &tokenizer, &meta)?;
+        //             // Periodic save and inference every 500 batches
+        //             if (batch_num + 1) % 500 == 0 {
+        //                 let current_final_loss = epoch_loss / (batch_num + 1) as f32;
+        //                 let meta = BrainDecMetadata {
+        //                     vocab_size:     tokenizer.vocab_size(),
+        //                     epochs_trained: epochs_already_done + epoch, // Partial epoch progress
+        //                     final_loss:     current_final_loss,
+        //                     batch_size:     stage_cfg.batch_size,
+        //                     training_stage: stage_cfg.stage.clone(),
+        //                     embed_dim:      run_cfg.embed_dim,
+        //                     hidden_units:   run_cfg.hidden_units,
+        //                     n_layers:       run_cfg.n_layers,
+        //                     attn_heads:     run_cfg.attn_heads,
+        //                     ff_dim:         run_cfg.ff_dim,
+        //                     max_seq_len:    run_cfg.max_seq_len,
+        //                 };
+        //                 model.save(run_dir_str, &tokenizer, &meta)?;
 
-                        // Periodic inference — 5 prompts, logged (appended) and the
-                        // loss chart re-saved (overwritten) right away.
-                        let inference_model = model.valid();
-                        let mut entries = Vec::with_capacity(prompts.len());
-                        for p in &prompts {
-                            let prompt = build_inference_prompt(stage_cfg.stage, p);
-                            let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
-                            let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
-                            entries.push((p.clone(), reply));
-                        }
-                        state.last_reply = entries[0].1.clone();
-                        if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
-                            eprintln!("⚠️  Failed to append inference log: {}", e);
-                        }
-                        if let Err(e) = state.save_chart_image(&chart_path) {
-                            eprintln!("⚠️  Failed to save chart image: {}", e);
-                        }
-                    }
+        //                 // Periodic inference — 5 prompts, logged (appended) and the
+        //                 // loss chart re-saved (overwritten) right away.
+        //                 let inference_model = model.valid();
+        //                 let mut entries = Vec::with_capacity(prompts.len());
+        //                 for p in &prompts {
+        //                     let prompt = build_inference_prompt(stage_cfg.stage, p);
+        //                     let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+        //                     let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+        //                     entries.push((p.clone(), reply));
+        //                 }
+        //                 state.last_reply = entries[0].1.clone();
+        //                 if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
+        //                     eprintln!("⚠️  Failed to append inference log: {}", e);
+        //                 }
+        //                 if let Err(e) = state.save_chart_image(&chart_path) {
+        //                     eprintln!("⚠️  Failed to save chart image: {}", e);
+        //                 }
+        //             }
 
-                    // Loss Threshold Exit
-                    if state.avg_loss < stage_cfg.loss_threshold {
-                        println!("\n🎯 Loss Threshold Reached: {:.4} < {:.4}. Ending Stage.", state.avg_loss, stage_cfg.loss_threshold);
-                        final_loss = state.avg_loss;
-                        break 'epoch_loop_dec;
-                    }
-                }
-                final_loss = epoch_loss / num_batches.max(1) as f32;
+        //             // Loss Threshold Exit
+        //             if state.avg_loss < stage_cfg.loss_threshold {
+        //                 println!("\n🎯 Loss Threshold Reached: {:.4} < {:.4}. Ending Stage.", state.avg_loss, stage_cfg.loss_threshold);
+        //                 final_loss = state.avg_loss;
+        //                 break 'epoch_loop_dec;
+        //             }
+        //         }
+        //         final_loss = epoch_loss / num_batches.max(1) as f32;
 
-                // Automatic run-finish: if this epoch didn't drop avg loss by at
-                // least MIN_EPOCH_LOSS_DROP versus the previous epoch, this config
-                // isn't converging fast enough to be worth the remaining epochs —
-                // finish the run here and move on to the next RunConfig.
-                if let Some(prev) = prev_epoch_loss {
-                    if prev - final_loss < MIN_EPOCH_LOSS_DROP {
-                        println!(
-                            "\n⏹️  Epoch loss drop {:.4} < {:.4} (prev {:.4} -> {:.4}). Finishing run early.",
-                            prev - final_loss, MIN_EPOCH_LOSS_DROP, prev, final_loss,
-                        );
-                        run_should_stop = true;
-                    }
-                }
-                prev_epoch_loss = Some(final_loss);
+        //         // Automatic run-finish: if this epoch didn't drop avg loss by at
+        //         // least MIN_EPOCH_LOSS_DROP versus the previous epoch, this config
+        //         // isn't converging fast enough to be worth the remaining epochs —
+        //         // finish the run here and move on to the next RunConfig.
+        //         if let Some(prev) = prev_epoch_loss {
+        //             if prev - final_loss < MIN_EPOCH_LOSS_DROP {
+        //                 println!(
+        //                     "\n⏹️  Epoch loss drop {:.4} < {:.4} (prev {:.4} -> {:.4}). Finishing run early.",
+        //                     prev - final_loss, MIN_EPOCH_LOSS_DROP, prev, final_loss,
+        //                 );
+        //                 run_should_stop = true;
+        //             }
+        //         }
+        //         prev_epoch_loss = Some(final_loss);
 
-                // Save checkpoint after each epoch
-                let meta = BrainDecMetadata {
-                    vocab_size:     tokenizer.vocab_size(),
-                    epochs_trained: epochs_already_done + epoch + 1,
-                    final_loss,
-                    batch_size: stage_cfg.batch_size,
-                    training_stage: stage_cfg.stage.clone(),
-                    embed_dim: run_cfg.embed_dim,
-                    hidden_units: run_cfg.hidden_units,
-                    n_layers: run_cfg.n_layers,
-                    attn_heads: run_cfg.attn_heads,
-                    ff_dim: run_cfg.ff_dim,
-                    max_seq_len: run_cfg.max_seq_len,
-                };
-                model.save(run_dir_str, &tokenizer, &meta)?;
+        //         // Save checkpoint after each epoch
+        //         let meta = BrainDecMetadata {
+        //             vocab_size:     tokenizer.vocab_size(),
+        //             epochs_trained: epochs_already_done + epoch + 1,
+        //             final_loss,
+        //             batch_size: stage_cfg.batch_size,
+        //             training_stage: stage_cfg.stage.clone(),
+        //             embed_dim: run_cfg.embed_dim,
+        //             hidden_units: run_cfg.hidden_units,
+        //             n_layers: run_cfg.n_layers,
+        //             attn_heads: run_cfg.attn_heads,
+        //             ff_dim: run_cfg.ff_dim,
+        //             max_seq_len: run_cfg.max_seq_len,
+        //         };
+        //         model.save(run_dir_str, &tokenizer, &meta)?;
 
-                // periodic inference — same 5-prompt log + chart save as above
-                {
-                    let inference_model = model.valid();
-                    let mut entries = Vec::with_capacity(prompts.len());
-                    for p in &prompts {
-                        let prompt = build_inference_prompt(stage_cfg.stage, p);
-                        let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
-                        let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
-                        entries.push((p.clone(), reply));
-                    }
-                    state.last_reply = entries[0].1.clone();
-                    if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
-                        eprintln!("⚠️  Failed to append inference log: {}", e);
-                    }
-                    if let Err(e) = state.save_chart_image(&chart_path) {
-                        eprintln!("⚠️  Failed to save chart image: {}", e);
-                    }
-                }
+        //         // periodic inference — same 5-prompt log + chart save as above
+        //         {
+        //             let inference_model = model.valid();
+        //             let mut entries = Vec::with_capacity(prompts.len());
+        //             for p in &prompts {
+        //                 let prompt = build_inference_prompt(stage_cfg.stage, p);
+        //                 let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
+        //                 let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+        //                 entries.push((p.clone(), reply));
+        //             }
+        //             state.last_reply = entries[0].1.clone();
+        //             if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
+        //                 eprintln!("⚠️  Failed to append inference log: {}", e);
+        //             }
+        //             if let Err(e) = state.save_chart_image(&chart_path) {
+        //                 eprintln!("⚠️  Failed to save chart image: {}", e);
+        //             }
+        //         }
 
-                if run_should_stop { break 'epoch_loop_dec; }
-            }
-            epochs_already_done += state.epoch;
-            if let Some(term) = terminal.as_mut() {
-                term.clear()?;
-            }
+        //         if run_should_stop { break 'epoch_loop_dec; }
+        //     }
+        //     epochs_already_done += state.epoch;
+        //     if let Some(term) = terminal.as_mut() {
+        //         term.clear()?;
+        //     }
 
-            // Final chart save as a safety net (the periodic saves above already
-            // keep this path current throughout training).
-            if let Err(e) = state.save_chart_image(&chart_path) {
-                eprintln!("⚠️  Failed to save chart image: {}", e);
-            } else {
-                println!("📊 Chart saved to {}", chart_path);
-            }
+        //     // Final chart save as a safety net (the periodic saves above already
+        //     // keep this path current throughout training).
+        //     if let Err(e) = state.save_chart_image(&chart_path) {
+        //         eprintln!("⚠️  Failed to save chart image: {}", e);
+        //     } else {
+        //         println!("📊 Chart saved to {}", chart_path);
+        //     }
 
-            println!("✅ Stage complete. Final loss: {:.4}", final_loss);
+        //     println!("✅ Stage complete. Final loss: {:.4}", final_loss);
 
-            if run_should_stop {
-                println!("⏹️  Run {} finished early, skipping remaining stages.", run_cfg.name);
-                break 'stage_loop_dec;
-            }
-        }
+        //     if run_should_stop {
+        //         println!("⏹️  Run {} finished early, skipping remaining stages.", run_cfg.name);
+        //         break 'stage_loop_dec;
+        //     }
+        // }
 
-        } // Architecture::DecoderOnly
+        // } // Architecture::DecoderOnly
+        _ => {},
         } // match run_cfg.architecture
     }
 

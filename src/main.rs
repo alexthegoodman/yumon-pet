@@ -54,7 +54,7 @@ enum Command {
         #[arg(long, default_value = "checkpoints/vision")]
         vision_checkpoint: String,
 
-        #[arg(long, default_value = "checkpoints/brain")]
+        #[arg(long, default_value = "checkpoints/brain-reg-attn-16k")]
         out_dir: String,
 
         #[arg(long, default_value_t = 50)]
