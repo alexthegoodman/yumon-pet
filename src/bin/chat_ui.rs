@@ -8,7 +8,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl::wgpu::WgpuDevice;
 
 #[cfg(target_os = "windows")]
 use ratatui::{
@@ -20,8 +20,11 @@ use rand::Rng;
 
 use yumon_pet::{
     brain::{
-        // decoder_model::YumonDecBrain, 
-        model::{GenerationResult, YUMON_SCHEMA, YumonBrain}, samples::{TrainingStage, WorldContext}, train::MAX_SEQ_LEN
+        // decoder_model::YumonDecBrain,
+        // model::{GenerationResult, YUMON_SCHEMA, YumonBrain},
+        model::{GenerationResult, YUMON_SCHEMA},
+        xlstm_model::YumonXLstmBrain,
+        samples::{TrainingStage, WorldContext}, train::MAX_SEQ_LEN
     },
     vision::{self, CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES},
 };
@@ -119,7 +122,8 @@ fn main() -> Result<()> {
 
     // let brain_cp = "checkpoints/brain/1024h_8l_16a_180len".to_string();
     // let brain_cp = "checkpoints/brain-runpod/512h_3l_8a_220len".to_string();
-    let brain_cp = "checkpoints/brain-reg-attn-16k/128h_2l_32a_64len_b2_EncoderDecoder_Structured".to_string();
+    // let brain_cp = "checkpoints/brain-reg-attn-16k/128h_2l_32a_64len_b2_EncoderDecoder_Structured".to_string();
+    let brain_cp = "checkpoints/brain/128h_2l_16a_64len_b64_XLstm_Language".to_string();
     // let brain_cp = "checkpoints/brain/384h_4l_6a_160len".to_string();
     // let brain_cp = "checkpoints/brain/256h_2l_4a_180len".to_string();
     // let brain_cp = "checkpoints/brain/128h_2l_2a_180len".to_string();
@@ -131,8 +135,8 @@ fn main() -> Result<()> {
 
     let device = app.device.clone();
     thread::spawn(move || {
-        let res = YumonBrain::<Wgpu>::load(&brain_cp, &device);
-        // let res = YumonDecBrain::<Wgpu>::load(&brain_cp, &device);
+        // let res = YumonBrain::<Wgpu>::load(&brain_cp, &device);
+        let res = YumonXLstmBrain::<Wgpu>::load(&brain_cp, &device);
         let (brain_model, tokenizer, config) = match res {
             Ok(m) => {
                 tx_model.send(Message::System("Models loaded!".into())).unwrap();
@@ -185,7 +189,7 @@ fn main() -> Result<()> {
                 })).unwrap()
             };
 
-            let result = brain_model.generate_unmasked_parsed::<WgpuRuntime>(
+            let result = brain_model.generate_unmasked_parsed(
                 &tokenizer,
                 &prompt,
                 config.max_seq_len,
