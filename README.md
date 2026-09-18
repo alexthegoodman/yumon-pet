@@ -34,10 +34,48 @@ You may need clang for chat_web.
 - `cargo run --release --bin yumon-pet -- train-brain` to start training on the provided (or your own) dataset
 - `cargo run --release --bin chat_ui` to get started chatting
 - `cargo run --release --bin yumon_world` to start a Yumon World simulation
+- `cargo run --release --bin yumon_universe -- --checkpoint <language-checkpoint> --seed 42` to explore a procedural suburban neighborhood (Windows, desktop feature)
 - `cargo run --release --bin endless_data` TUI to answer endless questions in order to generate some data
 - `cargo run --release --bin train_bpe` train your tokenizer on your data
 
 - `trunk serve --release` for chat web (or `trunk build --release` for deployment)
+
+### Yumon Universe
+
+Universe generates a seeded neighborhood with roads, sidewalks, houses, shops,
+trees, gardens, flowers, benches, balls, mailboxes, and a pond. Omit `--seed` for
+a new neighborhood each launch; the sidebar displays the seed for replay.
+All scenery is built from primitives. Yumons use the animal GLBs in `data/models`
+when available, with colored spheres as fallbacks.
+
+Use a checkpoint trained with `TrainingStage::Language`. The default architecture
+is MoE; `--architecture xlstm` and `--architecture encoder-decoder` select the
+other supported loaders. `--checkpoint` points at the checkpoint directory, not
+the model file. Structured checkpoints are rejected with an explanation in the
+sidebar. The default path matches chat_ui's Language MoE checkpoint; supply your
+own path if it is not installed.
+
+Each Yumon receives short plain-text questions about one of its closest objects,
+such as "The ball is east. Would you like to play with it?" The raw language
+reply is shown in the activity log and interpreted using conservative phrase
+matching. Affirmative replies accept the offered activity; explicit verbs can
+select a compatible nearby target. Refusals, uncertain replies, and unrecognized
+text produce rest. Actions include visiting, resting, inspecting, playing,
+collecting, gardening, and exploring. Movement avoids object footprints and the
+world boundary; blocked trips stop and allow a new decision. Local activities
+animate the Yumon and increment the object's interaction count on arrival.
+This is a heuristic language-to-action bridge, not a trained action classifier
+or a full inventory/economy simulation.
+
+The sidebar supports direct messages, pause, and per-Yumon question/reply/action
+logs. Inference runs on a worker thread. Messages that would leave fewer than
+eight reply tokens are rejected visibly instead of silently truncating context;
+longer-context checkpoints work better for custom messages. A missing checkpoint
+still allows viewing the generated neighborhood, but autonomous decisions need
+a working Language model.
+
+Verify the world and reply bridge with `cargo test --lib universe::tests` and
+compile the desktop integration with `cargo check --bin yumon_universe`.
 
 ### Training on RunPod (Docker)
 
