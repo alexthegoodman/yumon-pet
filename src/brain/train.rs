@@ -435,16 +435,16 @@ fn load_stage_data(
     loader = loader
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
         // .add("data/ideas.txt",   FileKind::TxtLines, Some(25_000))
-        // .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
+        .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
         // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(25_000))
         // .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
         // .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
         // .add("data/bible_asv.csv", FileKind::BibleCsv, None)
         // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs — proper
         // message/reply splits instead of BibleCsv's arbitrary mid-sentence cuts.
-        .add("data/synthetic/bible.txt", FileKind::Chats, None)
-        .add("data/synthetic/business.txt", FileKind::Chats, None)
-        .add("data/synthetic/universe.txt", FileKind::Chats, None)
+        .add("archive/synthetic/bible.txt", FileKind::Chats, None)
+        .add("archive/synthetic/business.txt", FileKind::Chats, None)
+        .add("archive/synthetic/universe.txt", FileKind::Chats, None)
         // // .add("data/creative_stories.txt", FileKind::Txt, Some(50_000)) // good but gets split
         // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
         // // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
@@ -619,7 +619,7 @@ pub fn run_with_architecture(
                 let backend = CrosstermBackend::new(stdout());
                 Some(Terminal::with_options(
                     backend,
-                    TerminalOptions { viewport: Viewport::Inline(26) },
+                    TerminalOptions { viewport: Viewport::Inline(46) },
                 )?)
             } else {
                 None
@@ -956,7 +956,7 @@ pub fn run_with_architecture(
                 let backend = CrosstermBackend::new(stdout());
                 Some(Terminal::with_options(
                     backend,
-                    TerminalOptions { viewport: Viewport::Inline(26) },
+                    TerminalOptions { viewport: Viewport::Inline(46) },
                 )?)
             } else {
                 None
@@ -1263,7 +1263,7 @@ pub fn run_with_architecture(
                 let backend = CrosstermBackend::new(stdout());
                 Some(Terminal::with_options(
                     backend,
-                    TerminalOptions { viewport: Viewport::Inline(26) },
+                    TerminalOptions { viewport: Viewport::Inline(46) },
                 )?)
             } else {
                 None
@@ -1606,7 +1606,7 @@ pub fn run_with_architecture(
         //         let backend = CrosstermBackend::new(stdout());
         //         Some(Terminal::with_options(
         //             backend,
-        //             TerminalOptions { viewport: Viewport::Inline(26) },
+        //             TerminalOptions { viewport: Viewport::Inline(46) },
         //         )?)
         //     } else {
         //         None
