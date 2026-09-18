@@ -39,6 +39,12 @@ pub enum Kind {
     Garden,
     Mailbox,
     Pond,
+    /// Landmarks a Yumon can build taller over repeated visits, instead of a
+    /// themed re-skin of an existing slot - so their noun and verb stay the
+    /// same in both Suburban and Urban worlds.
+    Business,
+    Church,
+    Telescope,
 }
 impl Kind {
     /// The same slot carries a different noun per theme. Urban nouns are pulled
@@ -46,7 +52,10 @@ impl Kind {
     /// Language stage trains on (see `load_stage_data` in `src/brain/train.rs`) -
     /// and picked by frequency there, not invented office jargon the model has
     /// never seen a token of. Layout, radius, and behavior compatibility never
-    /// change with theme.
+    /// change with theme. The three buildable landmarks are pulled the same way
+    /// from the other two files that same Language stage trains on: "tower"
+    /// from `business.txt` ("building a tower, one block at a time"), "temple"
+    /// from `bible.txt`, and "telescope" from `universe.txt`.
     pub fn noun(self, theme: Theme) -> &'static str {
         match (self, theme) {
             (Self::House, Theme::Suburban) => "house",
@@ -67,12 +76,17 @@ impl Kind {
             (Self::Mailbox, Theme::Urban) => "deal", // 31
             (Self::Pond, Theme::Suburban) => "pond",
             (Self::Pond, Theme::Urban) => "brand", // 115
+            (Self::Business, _) => "tower",
+            (Self::Church, _) => "temple",
+            (Self::Telescope, _) => "telescope",
         }
     }
     pub fn radius(self) -> f32 {
         match self {
-            Self::House | Self::Shop => 2.4,
+            Self::House | Self::Shop | Self::Business => 2.4,
+            Self::Church => 2.6,
             Self::Pond => 1.6,
+            Self::Telescope => 1.8,
             Self::Tree => 0.5,
             _ => 0.4,
         }
@@ -92,6 +106,7 @@ impl Kind {
             },
             Self::Flowers => ("collect", Behavior::Collect),
             Self::House | Self::Shop => ("visit", Behavior::Visit),
+            Self::Business | Self::Church | Self::Telescope => ("build", Behavior::Build),
             _ => ("look at", Behavior::Inspect),
         }
     }
@@ -114,6 +129,7 @@ pub enum Behavior {
     Tend,
     Inspect,
     Explore,
+    Build,
 }
 impl Behavior {
     /// "gardening" only reads right for a literal garden - a server gets
@@ -130,6 +146,7 @@ impl Behavior {
             },
             Self::Inspect => "looking around",
             Self::Explore => "exploring",
+            Self::Build => "building",
         }
     }
 }
@@ -166,12 +183,19 @@ impl Neighborhood {
             for col in 0..4 {
                 let x = -22.5 + col as f32 * 15.0;
                 let z = -22.5 + row as f32 * 15.0;
-                let main = if row == 1 && col == 1 {
-                    Kind::Pond
-                } else if (row + col) % 5 == 0 {
-                    Kind::Shop
-                } else {
-                    Kind::House
+                // Landmark cells are fixed coordinates, not a modulo pattern -
+                // their footprint (radius() above) is bigger than House/Shop's,
+                // so a formula that could cluster two of them together risks
+                // the non-overlap invariant `seeded_world_is_varied_and_safe`
+                // checks below. Same cells in both themes: the buildable set is
+                // additive civilization progress, not a themed re-skin.
+                let main = match (row, col) {
+                    (1, 1) => Kind::Pond,
+                    (0, 3) => Kind::Church,
+                    (3, 0) => Kind::Telescope,
+                    (0, 0) | (1, 3) | (2, 1) | (3, 3) => Kind::Business,
+                    (2, 3) | (3, 2) => Kind::Shop,
+                    _ => Kind::House,
                 };
                 // Suburban tints stay warm/earthy; urban tints shift cool toward
                 // glass and steel to read as an office park at a glance.
@@ -360,6 +384,11 @@ pub fn infer_reply(reply: &str, question: &Question, world: &Neighborhood, pos: 
         .any(|p| has(p))
     {
         Some(Behavior::Tend)
+    } else if ["build", "construct", "raise", "expand"]
+        .iter()
+        .any(|p| has(p))
+    {
+        Some(Behavior::Build)
     } else if ["look", "inspect", "watch", "check"].iter().any(|p| has(p)) {
         Some(Behavior::Inspect)
     } else if ["visit", "go", "walk", "head"].iter().any(|p| has(p)) {
@@ -395,13 +424,19 @@ pub fn infer_reply(reply: &str, question: &Question, world: &Neighborhood, pos: 
         Behavior::Collect => kind == Kind::Flowers,
         Behavior::Tend => kind == Kind::Garden,
         Behavior::Rest => kind == Kind::Bench,
+        Behavior::Build => matches!(kind, Kind::Business | Kind::Church | Kind::Telescope),
         Behavior::Explore => false,
         _ => true,
     };
     let place = target.filter(|&id| compatible(world.places[id].kind));
     if matches!(
         behavior,
-        Behavior::Play | Behavior::Collect | Behavior::Tend | Behavior::Visit | Behavior::Inspect
+        Behavior::Play
+            | Behavior::Collect
+            | Behavior::Tend
+            | Behavior::Visit
+            | Behavior::Inspect
+            | Behavior::Build
     ) && place.is_none()
     {
         return rest;
@@ -471,6 +506,72 @@ mod tests {
                 place: Some(id)
             }
         );
+    }
+    #[test]
+    fn build_landmarks_are_theme_invariant_and_offer_build() {
+        // Unlike the themed slots above, the buildable landmarks are the same
+        // civilization-progress objects in both worlds - only their build tier
+        // (Place::activity_count, updated by the caller as a Yumon builds) ever
+        // changes them, not the theme.
+        for kind in [Kind::Business, Kind::Church, Kind::Telescope] {
+            assert_eq!(kind.noun(Theme::Suburban), kind.noun(Theme::Urban));
+            assert_eq!(
+                kind.verb_and_behavior(Theme::Suburban),
+                kind.verb_and_behavior(Theme::Urban)
+            );
+            assert_eq!(kind.verb_and_behavior(Theme::Suburban).0, "build");
+            assert_eq!(kind.verb_and_behavior(Theme::Suburban).1, Behavior::Build);
+        }
+        let world = Neighborhood::generate(9, Theme::Suburban);
+        let id = world
+            .places
+            .iter()
+            .position(|p| p.kind == Kind::Church)
+            .unwrap();
+        let q = world.question(world.places[id].pos, 0);
+        assert!(q.text.contains("temple"));
+        assert!(q.text.contains("build"));
+        assert_eq!(q.offered, Behavior::Build);
+        let pos = world.approach(Point { x: 0.0, z: 0.0 }, id);
+        let decision = infer_reply("Sure, let's build it taller", &q, &world, pos);
+        assert_eq!(
+            decision,
+            Decision {
+                behavior: Behavior::Build,
+                place: Some(id)
+            }
+        );
+        // A build reply near an incompatible place (no landmark nearby) still
+        // falls back to Rest, same as every other targeted behavior.
+        assert_eq!(
+            infer_reply(
+                "Let's build it",
+                &q,
+                &world,
+                Point { x: 29.0, z: 29.0 }
+            )
+            .place,
+            None
+        );
+    }
+    #[test]
+    fn build_landmark_nouns_are_present_in_the_training_corpus() {
+        // Same grounding rule as the Urban nouns above, but checked against the
+        // full Language-stage corpus (load_stage_data in src/brain/train.rs
+        // combines all three files), since each landmark noun is pulled from a
+        // different one of the three.
+        let corpus = ["bible.txt", "business.txt", "universe.txt"]
+            .iter()
+            .map(|f| std::fs::read_to_string(format!("archive/synthetic/{f}")).unwrap())
+            .collect::<String>()
+            .to_lowercase();
+        for kind in [Kind::Business, Kind::Church, Kind::Telescope] {
+            let noun = kind.noun(Theme::Suburban);
+            assert!(
+                corpus.contains(noun),
+                "landmark noun {noun:?} for {kind:?} does not appear in the Language corpus"
+            );
+        }
     }
     #[test]
     fn urban_nouns_are_present_in_the_training_corpus() {

@@ -40,59 +40,6 @@ You may need clang for chat_web.
 
 - `trunk serve --release` for chat web (or `trunk build --release` for deployment)
 
-### Yumon Universe
-
-Universe generates a seeded neighborhood with roads, sidewalks, houses, shops,
-trees, gardens, flowers, benches, balls, mailboxes, and a pond. Omit `--seed` for
-a new neighborhood each launch; the sidebar displays the seed for replay.
-All scenery is built from primitives. Yumons use the animal GLBs in `data/models`
-when available, with colored spheres as fallbacks.
-
-`--theme suburban` (default) is the neighborhood above. `--theme urban` reskins
-the identical layout as a downtown business district: the same nine `Kind` slots
-(`src/universe.rs`) get different nouns, one themed verb ("maintain" instead of
-"tend" for the garden slot), and different scenery in `scenery()`
-(`src/bin/yumon_universe.rs`) - glass office towers instead of houses, market
-stalls instead of shops, a debt notice board instead of a tree, stacked cash
-instead of flowers, a coffee counter instead of a bench, a product crate instead
-of a ball, an ascending bar chart instead of a garden bed, a signing-podium
-folder instead of a mailbox, and a plaza medallion instead of a pond. Urban nouns
-are picked by frequency in `archive/synthetic/business.txt` - the corpus this
-checkpoint's Language stage actually trains on (`load_stage_data` in
-`src/brain/train.rs`) - not invented office jargon the model has never seen a
-token of; `cargo test --lib universe::tests::urban_nouns_are_present_in_the_training_corpus`
-checks every Urban noun still occurs in that file. Both themes share one seeded
-layout (same positions, same `Kind` per slot), so `--seed` reproduces the same
-town shape under either theme.
-
-Use a checkpoint trained with `TrainingStage::Language`. The default architecture
-is MoE; `--architecture xlstm` and `--architecture encoder-decoder` select the
-other supported loaders. `--checkpoint` points at the checkpoint directory, not
-the model file. Structured checkpoints are rejected with an explanation in the
-sidebar. The default path matches chat_ui's Language MoE checkpoint; supply your
-own path if it is not installed.
-
-Each Yumon receives short plain-text questions about one of its closest objects,
-such as "The ball is east. Would you like to play with it?" The raw language
-reply is shown in the activity log and interpreted using conservative phrase
-matching. Affirmative replies accept the offered activity; explicit verbs can
-select a compatible nearby target. Refusals, uncertain replies, and unrecognized
-text produce rest. Actions include visiting, resting, inspecting, playing,
-collecting, gardening, and exploring. Movement avoids object footprints and the
-world boundary; blocked trips stop and allow a new decision. Local activities
-animate the Yumon and increment the object's interaction count on arrival.
-This is a heuristic language-to-action bridge, not a trained action classifier
-or a full inventory/economy simulation.
-
-The sidebar supports direct messages, pause, and per-Yumon question/reply/action
-logs. Inference runs on a worker thread. Messages that would leave fewer than
-eight reply tokens are rejected visibly instead of silently truncating context;
-longer-context checkpoints work better for custom messages. A missing checkpoint
-still allows viewing the generated neighborhood, but autonomous decisions need
-a working Language model.
-
-Verify the world and reply bridge with `cargo test --lib universe::tests` and
-compile the desktop integration with `cargo check --bin yumon_universe`.
 
 ### Training on RunPod (Docker)
 
