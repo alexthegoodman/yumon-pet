@@ -1,8 +1,21 @@
 //! Procedural neighborhood and the plain-language bridge used by Universe.
 //! Kept independent of rendering and model inference so world behavior is testable.
 
+use clap::ValueEnum;
+
 pub const EXTENT: f32 = 30.0;
 pub const SIGHT: f32 = 12.0;
+
+/// Selects which real-world setting the generated world, its scenery, and its
+/// procedural prompts are skinned as. The underlying `Kind` slots, layout, and
+/// behavior categories are identical across themes - only the nouns, the odd
+/// verb, and rendering differ, so both settings share one tested world model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Default)]
+pub enum Theme {
+    #[default]
+    Suburban,
+    Urban,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Point {
@@ -28,17 +41,32 @@ pub enum Kind {
     Pond,
 }
 impl Kind {
-    pub fn noun(self) -> &'static str {
-        match self {
-            Self::House => "house",
-            Self::Shop => "shop",
-            Self::Tree => "tree",
-            Self::Flowers => "flowers",
-            Self::Bench => "bench",
-            Self::Ball => "ball",
-            Self::Garden => "garden",
-            Self::Mailbox => "mailbox",
-            Self::Pond => "pond",
+    /// The same slot carries a different noun per theme. Urban nouns are pulled
+    /// from `archive/synthetic/business.txt` - the actual corpus this checkpoint's
+    /// Language stage trains on (see `load_stage_data` in `src/brain/train.rs`) -
+    /// and picked by frequency there, not invented office jargon the model has
+    /// never seen a token of. Layout, radius, and behavior compatibility never
+    /// change with theme.
+    pub fn noun(self, theme: Theme) -> &'static str {
+        match (self, theme) {
+            (Self::House, Theme::Suburban) => "house",
+            (Self::House, Theme::Urban) => "business", // 613 occurrences (incl. plural)
+            (Self::Shop, Theme::Suburban) => "shop",
+            (Self::Shop, Theme::Urban) => "market", // 126
+            (Self::Tree, Theme::Suburban) => "tree",
+            (Self::Tree, Theme::Urban) => "debt", // 132
+            (Self::Flowers, Theme::Suburban) => "flowers",
+            (Self::Flowers, Theme::Urban) => "money", // 141
+            (Self::Bench, Theme::Suburban) => "bench",
+            (Self::Bench, Theme::Urban) => "coffee", // 3, kept for "rest by" fit
+            (Self::Ball, Theme::Suburban) => "ball",
+            (Self::Ball, Theme::Urban) => "product", // 142
+            (Self::Garden, Theme::Suburban) => "garden",
+            (Self::Garden, Theme::Urban) => "budget", // 48
+            (Self::Mailbox, Theme::Suburban) => "mailbox",
+            (Self::Mailbox, Theme::Urban) => "deal", // 31
+            (Self::Pond, Theme::Suburban) => "pond",
+            (Self::Pond, Theme::Urban) => "brand", // 115
         }
     }
     pub fn radius(self) -> f32 {
@@ -47,6 +75,24 @@ impl Kind {
             Self::Pond => 1.6,
             Self::Tree => 0.5,
             _ => 0.4,
+        }
+    }
+    /// The verb offered in a question, paired with the behavior it maps to.
+    /// Only the garden/budget slot needs a themed verb - "tend" reads fine for a
+    /// garden but not for a budget, which gets "maintain" instead. `maintain`
+    /// itself is common in `business.txt` (paired there with brand/cash flow/
+    /// partnership, not literally with budget), so it isn't a novel token either.
+    pub fn verb_and_behavior(self, theme: Theme) -> (&'static str, Behavior) {
+        match self {
+            Self::Bench => ("rest by", Behavior::Rest),
+            Self::Ball => ("play with", Behavior::Play),
+            Self::Garden => match theme {
+                Theme::Suburban => ("tend", Behavior::Tend),
+                Theme::Urban => ("maintain", Behavior::Tend),
+            },
+            Self::Flowers => ("collect", Behavior::Collect),
+            Self::House | Self::Shop => ("visit", Behavior::Visit),
+            _ => ("look at", Behavior::Inspect),
         }
     }
 }
@@ -70,13 +116,18 @@ pub enum Behavior {
     Explore,
 }
 impl Behavior {
-    pub fn label(self) -> &'static str {
+    /// "gardening" only reads right for a literal garden - a server gets
+    /// "maintaining" instead. Every other label already fits both themes.
+    pub fn label(self, theme: Theme) -> &'static str {
         match self {
             Self::Rest => "resting",
             Self::Visit => "visiting",
             Self::Play => "playing",
             Self::Collect => "collecting",
-            Self::Tend => "gardening",
+            Self::Tend => match theme {
+                Theme::Suburban => "gardening",
+                Theme::Urban => "maintaining",
+            },
             Self::Inspect => "looking around",
             Self::Explore => "exploring",
         }
@@ -97,10 +148,11 @@ pub struct Decision {
 
 pub struct Neighborhood {
     pub seed: u64,
+    pub theme: Theme,
     pub places: Vec<Place>,
 }
 impl Neighborhood {
-    pub fn generate(seed: u64) -> Self {
+    pub fn generate(seed: u64, theme: Theme) -> Self {
         let mut state = seed;
         let mut random = || {
             state = state.wrapping_add(0x9e3779b97f4a7c15);
@@ -121,11 +173,20 @@ impl Neighborhood {
                 } else {
                     Kind::House
                 };
-                let tint = [
-                    140 + (random() * 90.0) as u8,
-                    140 + (random() * 80.0) as u8,
-                    120 + (random() * 90.0) as u8,
-                ];
+                // Suburban tints stay warm/earthy; urban tints shift cool toward
+                // glass and steel to read as an office park at a glance.
+                let tint = match theme {
+                    Theme::Suburban => [
+                        140 + (random() * 90.0) as u8,
+                        140 + (random() * 80.0) as u8,
+                        120 + (random() * 90.0) as u8,
+                    ],
+                    Theme::Urban => [
+                        90 + (random() * 60.0) as u8,
+                        100 + (random() * 65.0) as u8,
+                        120 + (random() * 75.0) as u8,
+                    ],
+                };
                 places.push(Place {
                     kind: main,
                     pos: Point {
@@ -160,7 +221,7 @@ impl Neighborhood {
                 }
             }
         }
-        Self { seed, places }
+        Self { seed, theme, places }
     }
 
     pub fn nearby(&self, pos: Point) -> Vec<usize> {
@@ -192,18 +253,11 @@ impl Neighborhood {
         // Rotate among the closest few objects, keeping prompts small for Language checkpoints.
         let id = nearby[turn % nearby.len().min(4)];
         let place = &self.places[id];
-        let (verb, offered) = match place.kind {
-            Kind::Bench => ("rest by", Behavior::Rest),
-            Kind::Ball => ("play with", Behavior::Play),
-            Kind::Garden => ("tend", Behavior::Tend),
-            Kind::Flowers => ("collect", Behavior::Collect),
-            Kind::House | Kind::Shop => ("visit", Behavior::Visit),
-            _ => ("look at", Behavior::Inspect),
-        };
+        let (verb, offered) = place.kind.verb_and_behavior(self.theme);
         Question {
             text: format!(
                 "The {} is {}. Would you like to {} it?",
-                place.kind.noun(),
+                place.kind.noun(self.theme),
                 direction(pos, place.pos),
                 verb
             ),
@@ -296,14 +350,17 @@ pub fn infer_reply(reply: &str, question: &Question, world: &Neighborhood, pos: 
         Some(Behavior::Rest)
     } else if ["play", "kick", "throw"].iter().any(|p| has(p)) {
         Some(Behavior::Play)
-    } else if ["collect", "gather", "pick", "pick up"]
+    } else if ["collect", "gather", "pick", "pick up", "restock", "grab"]
         .iter()
         .any(|p| has(p))
     {
         Some(Behavior::Collect)
-    } else if ["water", "tend", "plant"].iter().any(|p| has(p)) {
+    } else if ["water", "tend", "plant", "maintain", "fix"]
+        .iter()
+        .any(|p| has(p))
+    {
         Some(Behavior::Tend)
-    } else if ["look", "inspect", "watch"].iter().any(|p| has(p)) {
+    } else if ["look", "inspect", "watch", "check"].iter().any(|p| has(p)) {
         Some(Behavior::Inspect)
     } else if ["visit", "go", "walk", "head"].iter().any(|p| has(p)) {
         Some(Behavior::Visit)
@@ -331,7 +388,7 @@ pub fn infer_reply(reply: &str, question: &Question, world: &Neighborhood, pos: 
     let named = nearby
         .iter()
         .copied()
-        .find(|&id| has(world.places[id].kind.noun()));
+        .find(|&id| has(world.places[id].kind.noun(world.theme)));
     let target = named.or(question.place.filter(|id| nearby.contains(id)));
     let compatible = |kind| match behavior {
         Behavior::Play => kind == Kind::Ball,
@@ -357,22 +414,94 @@ mod tests {
     use super::*;
     #[test]
     fn seeded_world_is_varied_and_safe() {
-        let world = Neighborhood::generate(42);
-        assert_eq!(world.places, Neighborhood::generate(42).places);
-        assert_ne!(world.places, Neighborhood::generate(43).places);
-        for (i, p) in world.places.iter().enumerate() {
-            assert!(p.pos.x.abs() + p.kind.radius() < EXTENT);
-            assert!(p.pos.z.abs() + p.kind.radius() < EXTENT);
-            for other in world.places.iter().skip(i + 1) {
-                assert!(p.pos.distance(other.pos) > p.kind.radius() + other.kind.radius());
+        for theme in [Theme::Suburban, Theme::Urban] {
+            let world = Neighborhood::generate(42, theme);
+            assert_eq!(world.places, Neighborhood::generate(42, theme).places);
+            assert_ne!(world.places, Neighborhood::generate(43, theme).places);
+            for (i, p) in world.places.iter().enumerate() {
+                assert!(p.pos.x.abs() + p.kind.radius() < EXTENT);
+                assert!(p.pos.z.abs() + p.kind.radius() < EXTENT);
+                for other in world.places.iter().skip(i + 1) {
+                    assert!(p.pos.distance(other.pos) > p.kind.radius() + other.kind.radius());
+                }
             }
+            assert!(world.walkable(Point { x: 0.0, z: 0.0 }));
+            assert!(!world.walkable(world.places[0].pos));
         }
-        assert!(world.walkable(Point { x: 0.0, z: 0.0 }));
-        assert!(!world.walkable(world.places[0].pos));
+        // The suburban and urban layouts share the same seeded positions/kinds -
+        // only the theming (noun, verb, tint) differs.
+        let suburban = Neighborhood::generate(42, Theme::Suburban);
+        let urban = Neighborhood::generate(42, Theme::Urban);
+        assert_eq!(
+            suburban.places.iter().map(|p| p.kind).collect::<Vec<_>>(),
+            urban.places.iter().map(|p| p.kind).collect::<Vec<_>>()
+        );
+    }
+    #[test]
+    fn urban_theme_renames_every_kind_without_changing_behavior() {
+        let world = Neighborhood::generate(9, Theme::Urban);
+        for kind in [
+            Kind::House,
+            Kind::Shop,
+            Kind::Tree,
+            Kind::Flowers,
+            Kind::Bench,
+            Kind::Ball,
+            Kind::Garden,
+            Kind::Mailbox,
+            Kind::Pond,
+        ] {
+            assert_ne!(kind.noun(Theme::Urban), kind.noun(Theme::Suburban));
+        }
+        let id = world
+            .places
+            .iter()
+            .position(|p| p.kind == Kind::Garden)
+            .unwrap();
+        let q = world.question(world.places[id].pos, 0);
+        assert!(q.text.contains("budget"));
+        assert!(q.text.contains("maintain"));
+        assert_eq!(q.offered, Behavior::Tend);
+        let pos = world.approach(Point { x: 0.0, z: 0.0 }, id);
+        let decision = infer_reply("Sure, I'll maintain it", &q, &world, pos);
+        assert_eq!(
+            decision,
+            Decision {
+                behavior: Behavior::Tend,
+                place: Some(id)
+            }
+        );
+    }
+    #[test]
+    fn urban_nouns_are_present_in_the_training_corpus() {
+        // Every Urban noun must actually occur in the corpus the Language stage
+        // trains on (src/brain/train.rs's load_stage_data), not just read as
+        // plausible business vocabulary - otherwise the checkpoint has no real
+        // grounding for the word and the whole point of this theme is lost.
+        let corpus = std::fs::read_to_string("archive/synthetic/business.txt")
+            .expect("training corpus for the Urban theme")
+            .to_lowercase();
+        for kind in [
+            Kind::House,
+            Kind::Shop,
+            Kind::Tree,
+            Kind::Flowers,
+            Kind::Bench,
+            Kind::Ball,
+            Kind::Garden,
+            Kind::Mailbox,
+            Kind::Pond,
+        ] {
+            let noun = kind.noun(Theme::Urban);
+            assert!(
+                corpus.contains(noun),
+                "Urban noun {noun:?} for {kind:?} does not appear in business.txt"
+            );
+        }
     }
     #[test]
     fn questions_and_replies_are_grounded() {
-        let world = Neighborhood::generate(9);
+        let world = Neighborhood::generate(9, Theme::Suburban);
         let id = world
             .places
             .iter()
@@ -421,18 +550,20 @@ mod tests {
     fn generated_questions_fit_small_language_context() {
         use crate::brain::bpe::BpeTokenizer;
         let tokenizer = BpeTokenizer::load("yumon_bpe").expect("repository tokenizer");
-        let world = Neighborhood::generate(42);
-        for place in &world.places {
-            for turn in 0..4 {
-                let q = world.question(place.pos, turn);
-                assert!(
-                    tokenizer.encode(&q.text).unwrap().len()
-                        + tokenizer.encode(" ").unwrap().len()
-                        + 9
-                        <= 32,
-                    "Question exceeds the default Language context: {}",
-                    q.text
-                );
+        for theme in [Theme::Suburban, Theme::Urban] {
+            let world = Neighborhood::generate(42, theme);
+            for place in &world.places {
+                for turn in 0..4 {
+                    let q = world.question(place.pos, turn);
+                    assert!(
+                        tokenizer.encode(&q.text).unwrap().len()
+                            + tokenizer.encode(" ").unwrap().len()
+                            + 9
+                            <= 32,
+                        "Question exceeds the default Language context: {}",
+                        q.text
+                    );
+                }
             }
         }
     }

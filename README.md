@@ -34,7 +34,7 @@ You may need clang for chat_web.
 - `cargo run --release --bin yumon-pet -- train-brain` to start training on the provided (or your own) dataset
 - `cargo run --release --bin chat_ui` to get started chatting
 - `cargo run --release --bin yumon_world` to start a Yumon World simulation
-- `cargo run --release --bin yumon_universe -- --checkpoint <language-checkpoint> --seed 42` to explore a procedural suburban neighborhood (Windows, desktop feature)
+- `cargo run --release --bin yumon_universe -- --checkpoint <language-checkpoint> --seed 42 --theme suburban|urban` to explore a procedural neighborhood or downtown (Windows, desktop feature)
 - `cargo run --release --bin endless_data` TUI to answer endless questions in order to generate some data
 - `cargo run --release --bin train_bpe` train your tokenizer on your data
 
@@ -47,6 +47,23 @@ trees, gardens, flowers, benches, balls, mailboxes, and a pond. Omit `--seed` fo
 a new neighborhood each launch; the sidebar displays the seed for replay.
 All scenery is built from primitives. Yumons use the animal GLBs in `data/models`
 when available, with colored spheres as fallbacks.
+
+`--theme suburban` (default) is the neighborhood above. `--theme urban` reskins
+the identical layout as a downtown business district: the same nine `Kind` slots
+(`src/universe.rs`) get different nouns, one themed verb ("maintain" instead of
+"tend" for the garden slot), and different scenery in `scenery()`
+(`src/bin/yumon_universe.rs`) - glass office towers instead of houses, market
+stalls instead of shops, a debt notice board instead of a tree, stacked cash
+instead of flowers, a coffee counter instead of a bench, a product crate instead
+of a ball, an ascending bar chart instead of a garden bed, a signing-podium
+folder instead of a mailbox, and a plaza medallion instead of a pond. Urban nouns
+are picked by frequency in `archive/synthetic/business.txt` - the corpus this
+checkpoint's Language stage actually trains on (`load_stage_data` in
+`src/brain/train.rs`) - not invented office jargon the model has never seen a
+token of; `cargo test --lib universe::tests::urban_nouns_are_present_in_the_training_corpus`
+checks every Urban noun still occurs in that file. Both themes share one seeded
+layout (same positions, same `Kind` per slot), so `--seed` reproduces the same
+town shape under either theme.
 
 Use a checkpoint trained with `TrainingStage::Language`. The default architecture
 is MoE; `--architecture xlstm` and `--architecture encoder-decoder` select the

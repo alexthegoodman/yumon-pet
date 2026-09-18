@@ -17,7 +17,9 @@ mod desktop {
             bpe::TokenizerKind, model::YumonBrain, moe_model::YumonMoeBrain,
             samples::TrainingStage, xlstm_model::YumonXLstmBrain,
         },
-        universe::{Behavior, Decision, EXTENT, Kind, Neighborhood, Point, Question, infer_reply},
+        universe::{
+            Behavior, Decision, EXTENT, Kind, Neighborhood, Point, Question, Theme, infer_reply,
+        },
     };
 
     #[derive(Clone, Copy, ValueEnum)]
@@ -38,6 +40,8 @@ mod desktop {
         architecture: Architecture,
         #[arg(long)]
         seed: Option<u64>,
+        #[arg(long, value_enum, default_value = "suburban")]
+        theme: Theme,
     }
     enum BrainEvent {
         Ready,
@@ -132,7 +136,10 @@ mod desktop {
             };
             self.decision = infer_reply(&reply, &question, world, self.pos);
             self.log(format!("Yumon: {reply}"));
-            self.log(format!("Action: {}", self.decision.behavior.label()));
+            self.log(format!(
+                "Action: {}",
+                self.decision.behavior.label(world.theme)
+            ));
             self.target = if let Some(id) = self.decision.place {
                 world.approach(self.pos, id)
             } else if self.decision.behavior == Behavior::Explore {
@@ -190,13 +197,14 @@ mod desktop {
             } else if !self.arrived {
                 self.arrived = true;
                 if let Some(id) = self.decision.place {
+                    let theme = world.theme;
                     let place = &mut world.places[id];
                     if self.pos.distance(place.pos) <= place.kind.radius() + 1.0 {
                         place.activity_count += 1;
                         self.log(format!(
                             "{} by the {} (visit {}).",
-                            self.decision.behavior.label(),
-                            place.kind.noun(),
+                            self.decision.behavior.label(theme),
+                            place.kind.noun(theme),
                             place.activity_count
                         ));
                     }
@@ -231,7 +239,7 @@ mod desktop {
 
         #[test]
         fn affirmative_reply_moves_to_ball_and_interacts_once() {
-            let mut world = Neighborhood::generate(42);
+            let mut world = Neighborhood::generate(42, Theme::Suburban);
             let id = world
                 .places
                 .iter()
@@ -261,7 +269,7 @@ mod desktop {
 
         #[test]
         fn movement_stays_outside_solid_objects_and_eventually_stops() {
-            let mut world = Neighborhood::generate(42);
+            let mut world = Neighborhood::generate(42, Theme::Suburban);
             let mut y = resident(Point { x: 0.0, z: 0.0 });
             y.target = world.places[0].pos;
             y.arrived = false;
@@ -308,11 +316,15 @@ mod desktop {
         let mut meshes = vec![];
         let mut add =
             |sphere, pos, size, color| meshes.push(shape(context, sphere, pos, size, color));
+        let ground = match world.theme {
+            Theme::Suburban => [115, 163, 91],
+            Theme::Urban => [168, 168, 163],
+        };
         add(
             false,
             [0.0, -0.15, 0.0],
             [EXTENT * 2.0, 0.25, EXTENT * 2.0],
-            [115, 163, 91],
+            ground,
         );
         for axis in [-15.0, 0.0, 15.0] {
             add(false, [axis, 0.01, 0.0], [5.0, 0.05, 60.0], [192, 190, 178]);
@@ -328,8 +340,8 @@ mod desktop {
         for p in &world.places {
             let x = p.pos.x;
             let z = p.pos.z;
-            match p.kind {
-                Kind::House | Kind::Shop => {
+            match (p.kind, world.theme) {
+                (Kind::House, Theme::Suburban) | (Kind::Shop, Theme::Suburban) => {
                     let height = if p.kind == Kind::Shop { 2.2 } else { 2.8 };
                     add(false, [x, height / 2.0, z], [3.6, height, 3.3], p.tint);
                     add(false, [x, height + 0.25, z], [4.1, 0.5, 3.8], [110, 74, 65]);
@@ -353,19 +365,77 @@ mod desktop {
                         );
                     }
                 }
-                Kind::Tree => {
+                // Market: the same stall silhouette as the suburban shop (an
+                // awning already reads as a market stall) with a cooler tone.
+                (Kind::Shop, Theme::Urban) => {
+                    add(false, [x, 1.1, z], [3.6, 2.2, 3.3], p.tint);
+                    add(false, [x, 2.35, z], [4.1, 0.5, 3.8], [90, 92, 98]);
+                    add(false, [x, 0.65, z + 1.67], [0.65, 1.3, 0.1], [70, 72, 78]);
+                    for side in [-1.1, 1.1] {
+                        add(
+                            false,
+                            [x + side, 1.55, z + 1.68],
+                            [0.7, 0.8, 0.1],
+                            [157, 215, 230],
+                        );
+                    }
+                    add(false, [x, 2.0, z + 1.9], [3.8, 0.25, 0.8], [201, 62, 58]);
+                }
+                // Business: a flat-roofed glass tower - a rooftop utility unit
+                // and window bands stand in for the house's pitched roof/chimney.
+                (Kind::House, Theme::Urban) => {
+                    let height = 4.4;
+                    add(false, [x, height / 2.0, z], [3.6, height, 3.3], p.tint);
+                    add(false, [x, height + 0.15, z], [3.8, 0.3, 3.5], [70, 72, 78]);
+                    for band in [1.2, 2.2, 3.2] {
+                        add(
+                            false,
+                            [x, band, z + 1.66],
+                            [3.2, 0.4, 0.08],
+                            [157, 205, 225],
+                        );
+                    }
+                    add(
+                        false,
+                        [x + 0.9, height + 0.55, z - 0.6],
+                        [0.7, 0.5, 0.7],
+                        [60, 62, 68],
+                    );
+                }
+                (Kind::Tree, Theme::Suburban) => {
                     add(false, [x, 0.85, z], [0.4, 1.7, 0.4], [112, 81, 51]);
                     add(true, [x, 2.1, z], [2.1, 2.4, 2.1], [59, 119, 62]);
                 }
-                Kind::Bench => {
+                // Debt: a notice board on a post instead of a tree.
+                (Kind::Tree, Theme::Urban) => {
+                    add(false, [x, 0.85, z], [0.15, 1.7, 0.15], [90, 92, 98]);
+                    add(false, [x, 1.85, z], [1.2, 0.8, 0.08], [196, 74, 68]);
+                }
+                (Kind::Bench, Theme::Suburban) => {
                     add(false, [x, 0.45, z], [1.4, 0.15, 0.6], [153, 105, 62]);
                     add(false, [x, 0.8, z - 0.25], [1.4, 0.65, 0.12], [153, 105, 62]);
                     for side in [-0.5, 0.5] {
                         add(false, [x + side, 0.2, z], [0.1, 0.4, 0.5], [65, 70, 74]);
                     }
                 }
-                Kind::Ball => add(true, [x, 0.3, z], [0.6, 0.6, 0.6], [241, 121, 81]),
-                Kind::Garden => {
+                // Coffee: the bench's own counter shape, recolored, with a cup on top.
+                (Kind::Bench, Theme::Urban) => {
+                    add(false, [x, 0.45, z], [1.4, 0.15, 0.6], [80, 58, 45]);
+                    add(false, [x, 0.8, z - 0.25], [1.4, 0.65, 0.12], [214, 205, 190]);
+                    for side in [-0.5, 0.5] {
+                        add(false, [x + side, 0.2, z], [0.1, 0.4, 0.5], [65, 70, 74]);
+                    }
+                    add(true, [x, 0.58, z + 0.15], [0.22, 0.22, 0.22], [235, 235, 232]);
+                }
+                (Kind::Ball, Theme::Suburban) => {
+                    add(true, [x, 0.3, z], [0.6, 0.6, 0.6], [241, 121, 81])
+                }
+                // Product: a crate on display with a label stripe instead of a ball.
+                (Kind::Ball, Theme::Urban) => {
+                    add(false, [x, 0.3, z], [0.6, 0.6, 0.6], [214, 178, 128]);
+                    add(false, [x, 0.3, z], [0.62, 0.14, 0.62], [66, 133, 199]);
+                }
+                (Kind::Garden, Theme::Suburban) => {
                     add(false, [x, 0.09, z], [0.9, 0.18, 0.9], [106, 77, 49]);
                     for offset in [-0.25, 0.0, 0.25] {
                         add(
@@ -376,7 +446,20 @@ mod desktop {
                         );
                     }
                 }
-                Kind::Flowers => {
+                // Budget: a small ascending bar chart instead of a garden bed.
+                (Kind::Garden, Theme::Urban) => {
+                    add(false, [x, 0.05, z], [0.9, 0.1, 0.9], [70, 72, 78]);
+                    for (i, height) in [0.25, 0.45, 0.7].into_iter().enumerate() {
+                        let offset = (i as f32 - 1.0) * 0.28;
+                        add(
+                            false,
+                            [x + offset, height / 2.0, z],
+                            [0.2, height, 0.2],
+                            [66, 133, 199],
+                        );
+                    }
+                }
+                (Kind::Flowers, Theme::Suburban) => {
                     for (i, color) in [[239, 121, 157], [248, 203, 79], [168, 134, 210]]
                         .into_iter()
                         .enumerate()
@@ -389,12 +472,33 @@ mod desktop {
                         );
                     }
                 }
-                Kind::Mailbox => {
+                // Money: stacked bills topped with a coin instead of flowers.
+                (Kind::Flowers, Theme::Urban) => {
+                    add(false, [x - 0.15, 0.08, z], [0.4, 0.05, 0.25], [76, 140, 90]);
+                    add(
+                        false,
+                        [x + 0.05, 0.13, z + 0.05],
+                        [0.4, 0.05, 0.25],
+                        [90, 158, 104],
+                    );
+                    add(true, [x, 0.24, z], [0.18, 0.06, 0.18], [222, 188, 92]);
+                }
+                (Kind::Mailbox, Theme::Suburban) => {
                     add(false, [x, 0.5, z], [0.12, 1.0, 0.12], [96, 85, 73]);
                     add(false, [x, 1.05, z], [0.6, 0.4, 0.45], [73, 115, 155]);
                 }
-                Kind::Pond => {
+                // Deal: a signing podium with a folder instead of a mailbox.
+                (Kind::Mailbox, Theme::Urban) => {
+                    add(false, [x, 0.5, z], [0.16, 1.0, 0.16], [90, 92, 98]);
+                    add(false, [x, 1.05, z], [0.6, 0.08, 0.45], [201, 178, 122]);
+                }
+                (Kind::Pond, Theme::Suburban) => {
                     add(true, [x, 0.02, z], [3.2, 0.15, 3.2], [88, 165, 184]);
+                }
+                // Brand: a plaza medallion instead of a pond.
+                (Kind::Pond, Theme::Urban) => {
+                    add(true, [x, 0.02, z], [3.2, 0.12, 3.2], [200, 200, 195]);
+                    add(true, [x, 0.05, z], [1.8, 0.1, 1.8], [66, 133, 199]);
                 }
             }
         }
@@ -404,12 +508,17 @@ mod desktop {
     pub fn run() {
         let args = Args::parse();
         let seed = args.seed.unwrap_or_else(rand::random);
-        let mut world = Neighborhood::generate(seed);
+        let theme = args.theme;
+        let mut world = Neighborhood::generate(seed, theme);
         let (tx_prompt, rx_prompt) = mpsc::channel::<Request>();
         let (tx_result, rx_result) = mpsc::channel();
         std::thread::spawn(move || brain_worker(args, rx_prompt, tx_result));
+        let place_word = match theme {
+            Theme::Suburban => "Neighborhood",
+            Theme::Urban => "Downtown",
+        };
         let window = Window::new(WindowSettings {
-            title: "Yumon Universe — Neighborhood".into(),
+            title: format!("Yumon Universe — {place_word}"),
             max_size: Some((1440, 900)),
             ..Default::default()
         })
@@ -525,11 +634,11 @@ mod desktop {
             }
             gui.update(&mut frame.events,frame.accumulated_time,frame.viewport,frame.device_pixel_ratio,|ctx| {
                 egui::SidePanel::right("neighborhood").default_width(320.0).show(ctx,|ui| {
-                    ui.heading("Yumon Universe");ui.label(format!("Neighborhood seed: {}",world.seed));
+                    ui.heading("Yumon Universe");ui.label(format!("{place_word} seed: {}",world.seed));
                     ui.label(&status);ui.checkbox(&mut paused,"Pause simulation");ui.separator();
                     egui::ScrollArea::vertical().show(ui,|ui| {
                         for (id,y) in yumons.iter_mut().enumerate() {
-                            egui::CollapsingHeader::new(format!("{} — {}{}",NAMES[id],y.decision.behavior.label(),if y.waiting { " (thinking)" } else { "" })).default_open(id==0).show(ui,|ui| {
+                            egui::CollapsingHeader::new(format!("{} — {}{}",NAMES[id],y.decision.behavior.label(theme),if y.waiting { " (thinking)" } else { "" })).default_open(id==0).show(ui,|ui| {
                                 for entry in &y.log { ui.label(RichText::new(entry).size(12.0).color(Color32::from_gray(205))); }
                                 ui.text_edit_singleline(&mut y.input);
                                 if ui.add_enabled(ready&&!y.waiting&&!y.input.trim().is_empty(),egui::Button::new("Send message")).clicked() {
