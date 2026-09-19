@@ -33,7 +33,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use rand::Rng;
 use regex::Regex;
@@ -42,11 +42,29 @@ use serde::{Deserialize, Serialize};
 const BAD_WORDS: [&str; 5] = ["sex", "drug", "kill", "rape", "nazi"]; // mirrors src/brain/samples.rs
 const MAX_SEEN_HASHES: usize = 20_000; // bound state-file growth
 const BIBLE_WINDOW: usize = 7; // verses per grounding passage
+const DEFAULT_ENDPOINT: &str = "https://ol0ne67zwqaksv-11434.proxy.runpod.net";
+const SUPPORTED_TOPICS: &[&str] = &[
+    "bible",
+    "business",
+    "universe",
+    "world_basics",
+    "daily_life",
+    "social_life",
+];
 
 const FEW_SHOT: [(&str, &str); 3] = [
-    ("What is the universe?", "The universe is a wide open space filled with planets."),
-    ("What does it mean to be wide?", "Something wide is big and hard to traverse."),
-    ("What is a feeling?", "A feeling is an emotion like happiness or sadness."),
+    (
+        "What is the universe?",
+        "The universe is a wide open space filled with planets.",
+    ),
+    (
+        "What does it mean to be wide?",
+        "Something wide is big and hard to traverse.",
+    ),
+    (
+        "What is a feeling?",
+        "A feeling is an emotion like happiness or sadness.",
+    ),
 ];
 
 const SYSTEM_PROMPT: &str = r#"You generate training data for Yumon, a small tabletop pet AI.
@@ -66,22 +84,130 @@ Respond with ONLY valid JSON, no markdown fences, no commentary, in exactly this
 "#;
 
 const BUSINESS_SUBTOPICS: &[&str] = &[
-    "starting a small business", "budgeting and saving money", "getting your first customers",
-    "pricing a product fairly", "hiring and building a team", "negotiating a deal",
-    "good customer service", "building a brand people trust", "cash flow and profit",
-    "taking smart risks", "setting goals for a business", "competing in a market",
-    "leadership and hard decisions", "saving for the future", "a job versus a business",
-    "supply and demand", "advertising ideas", "earning customer loyalty",
-    "learning from failure in business", "planning for next year", "writing a business plan",
-    "managing debt", "investing money wisely", "working with partners", "time management at work",
+    "starting a small business",
+    "budgeting and saving money",
+    "getting your first customers",
+    "pricing a product fairly",
+    "hiring and building a team",
+    "negotiating a deal",
+    "good customer service",
+    "building a brand people trust",
+    "cash flow and profit",
+    "taking smart risks",
+    "setting goals for a business",
+    "competing in a market",
+    "leadership and hard decisions",
+    "saving for the future",
+    "a job versus a business",
+    "supply and demand",
+    "advertising ideas",
+    "earning customer loyalty",
+    "learning from failure in business",
+    "planning for next year",
+    "writing a business plan",
+    "managing debt",
+    "investing money wisely",
+    "working with partners",
+    "time management at work",
 ];
 
 const UNIVERSE_SUBTOPICS: &[&str] = &[
-    "the solar system", "planets", "stars", "galaxies", "the moon", "the sun",
-    "black holes", "the Big Bang", "gravity", "space exploration", "astronauts",
-    "comets and asteroids", "how big the universe is", "constellations", "day and night",
-    "the seasons", "telescopes", "whether life exists elsewhere", "space travel",
-    "the speed of light", "meteor showers", "eclipses", "space stations", "the Milky Way",
+    "the solar system",
+    "planets",
+    "stars",
+    "galaxies",
+    "the moon",
+    "the sun",
+    "black holes",
+    "the Big Bang",
+    "gravity",
+    "space exploration",
+    "astronauts",
+    "comets and asteroids",
+    "how big the universe is",
+    "constellations",
+    "day and night",
+    "the seasons",
+    "telescopes",
+    "whether life exists elsewhere",
+    "space travel",
+    "the speed of light",
+    "meteor showers",
+    "eclipses",
+    "space stations",
+    "the Milky Way",
+];
+
+// Concrete concepts Yumon can use when reasoning about its simulated world.
+// These remain ordinary short Q&A pairs: they teach vocabulary and basic
+// relationships without changing the conversational training format.
+const WORLD_BASICS_SUBTOPICS: &[&str] = &[
+    "left, right, above, and below",
+    "near and far",
+    "inside, outside, and between",
+    "containers and what fits inside them",
+    "open and closed things",
+    "moving objects",
+    "where an object is after it moves",
+    "finding a lost object",
+    "giving and taking objects",
+    "full and empty containers",
+    "big and small objects",
+    "heavy and light objects",
+    "stacking and arranging objects",
+    "doors, paths, and obstacles",
+    "rooms and places",
+    "simple maps and directions",
+    "what can be seen from a place",
+    "cause and effect in everyday actions",
+    "objects staying where they were left",
+    "using an object for its purpose",
+];
+
+const DAILY_LIFE_SUBTOPICS: &[&str] = &[
+    "morning and bedtime routines",
+    "being hungry and eating",
+    "being thirsty and drinking",
+    "resting when tired",
+    "staying warm or cool",
+    "keeping a home tidy",
+    "caring for belongings",
+    "choosing what to do next",
+    "waiting patiently",
+    "planning a simple day",
+    "sharing a meal",
+    "getting ready to go outside",
+    "weather changing a daily plan",
+    "making a cozy space",
+    "noticing time passing",
+    "finishing a small task",
+    "asking for help with a task",
+    "taking breaks",
+    "doing something again tomorrow",
+    "small habits that help someone feel well",
+];
+
+const SOCIAL_LIFE_SUBTOPICS: &[&str] = &[
+    "greeting someone",
+    "making a new friend",
+    "taking turns",
+    "sharing something fairly",
+    "helping someone",
+    "asking for help",
+    "saying thank you",
+    "apologizing after a mistake",
+    "keeping a promise",
+    "working together",
+    "listening before answering",
+    "respecting personal space",
+    "asking before borrowing something",
+    "handling a disagreement calmly",
+    "including someone in an activity",
+    "cheering someone up",
+    "being honest kindly",
+    "saying no politely",
+    "trust growing over time",
+    "celebrating another person's success",
 ];
 
 const QUESTION_STYLES: &[&str] = &[
@@ -93,10 +219,13 @@ const QUESTION_STYLES: &[&str] = &[
 ];
 
 #[derive(Parser)]
-#[command(name = "gen_synthetic_data", about = "Generate synthetic Yumon Q&A data via an Ollama/Llama endpoint")]
+#[command(
+    name = "gen_synthetic_data",
+    about = "Generate synthetic Yumon Q&A data via an Ollama/Llama endpoint"
+)]
 struct Args {
     /// Ollama base URL, e.g. http://<runpod-host>:11434 (or set OLLAMA_ENDPOINT)
-    #[arg(long, default_value = "https://se7u0668xtfx6e-11434.proxy.runpod.net")]
+    #[arg(long, default_value = "https://ol0ne67zwqaksv-11434.proxy.runpod.net")]
     endpoint: Option<String>,
 
     /// Optional bearer token, if your endpoint is protected (or set OLLAMA_API_KEY)
@@ -107,8 +236,8 @@ struct Args {
     #[arg(long, default_value = "llama3")]
     model: String,
 
-    /// Comma-separated subset of: bible,business,universe
-    #[arg(long, default_value = "bible,business,universe")]
+    /// Comma-separated subset of: bible,business,universe,world_basics,daily_life,social_life
+    #[arg(long, default_value = "world_basics,daily_life,social_life")]
     topics: String,
 
     /// Target pair count per topic. 0 = run forever until interrupted.
@@ -119,7 +248,7 @@ struct Args {
     pairs_per_call: usize,
 
     /// Seconds to sleep between calls
-    #[arg(long, default_value_t = 5.0)]
+    #[arg(long, default_value_t = 1.0)]
     delay: f64,
 
     #[arg(long, default_value_t = 0.9)]
@@ -232,8 +361,18 @@ fn validate_pairs(v: &serde_json::Value) -> Vec<(String, String)> {
         return out;
     };
     for p in pairs {
-        let human = p.get("human").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-        let bot = p.get("bot").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        let human = p
+            .get("human")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let bot = p
+            .get("bot")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if human.is_empty() || bot.is_empty() {
             continue;
         }
@@ -255,7 +394,11 @@ fn validate_pairs(v: &serde_json::Value) -> Vec<(String, String)> {
 }
 
 fn norm_hash(s: &str) -> String {
-    let normalized: String = s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+    let normalized: String = s
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     normalized.hash(&mut hasher);
     format!("{:x}", hasher.finish())
@@ -272,7 +415,9 @@ fn load_bible_passages() -> Vec<String> {
         let Ok(mut rdr) = csv::ReaderBuilder::new().has_headers(true).from_path(name) else {
             continue;
         };
-        let Ok(headers) = rdr.headers().cloned() else { continue };
+        let Ok(headers) = rdr.headers().cloned() else {
+            continue;
+        };
         let col = |n: &str| headers.iter().position(|h| h.trim() == n);
         let (Some(ci_b), Some(ci_c), Some(ci_t)) = (col("b"), col("c"), col("t")) else {
             continue;
@@ -297,7 +442,8 @@ fn load_bible_passages() -> Vec<String> {
             let (b, c) = (rows[i].0.clone(), rows[i].1.clone());
             let mut verses = Vec::new();
             let mut j = i;
-            while j < rows.len() && rows[j].0 == b && rows[j].1 == c && verses.len() < BIBLE_WINDOW {
+            while j < rows.len() && rows[j].0 == b && rows[j].1 == c && verses.len() < BIBLE_WINDOW
+            {
                 verses.push(rows[j].2.clone());
                 j += 1;
             }
@@ -349,7 +495,13 @@ fn few_shot_block() -> String {
         .join("\n")
 }
 
-fn build_user_prompt(topic: &str, n: usize, cursor: usize, passages: &[String], rng: &mut impl Rng) -> String {
+fn build_user_prompt(
+    topic: &str,
+    n: usize,
+    cursor: usize,
+    passages: &[String],
+    rng: &mut impl Rng,
+) -> String {
     let style = QUESTION_STYLES[rng.gen_range(0..QUESTION_STYLES.len())];
 
     if topic == "bible" {
@@ -364,9 +516,24 @@ fn build_user_prompt(topic: &str, n: usize, cursor: usize, passages: &[String], 
             few_shot_block()
         )
     } else {
-        let subtopics: &[&str] = if topic == "business" { BUSINESS_SUBTOPICS } else { UNIVERSE_SUBTOPICS };
+        let (domain, subtopics): (&str, &[&str]) = match topic {
+            "business" => ("business and entrepreneurship", BUSINESS_SUBTOPICS),
+            "universe" => ("space and the universe", UNIVERSE_SUBTOPICS),
+            "world_basics" => (
+                "everyday spatial reasoning and physical relationships",
+                WORLD_BASICS_SUBTOPICS,
+            ),
+            "daily_life" => (
+                "daily life, routines, and practical self-care",
+                DAILY_LIFE_SUBTOPICS,
+            ),
+            "social_life" => (
+                "friendship, cooperation, and respectful social behavior",
+                SOCIAL_LIFE_SUBTOPICS,
+            ),
+            _ => unreachable!("topics are validated before prompts are built"),
+        };
         let subtopic = subtopics[cursor % subtopics.len()];
-        let domain = if topic == "business" { "business and entrepreneurship" } else { "space and the universe" };
         format!(
             "Topic area: {domain}. Subtopic: {subtopic}.\n\n\
              Write {n} distinct human/bot exchanges about this subtopic, phrased like {style}. \
@@ -389,9 +556,15 @@ fn run_topic(topic: &str, cfg: &Config, passages: &[String], rng: &mut impl Rng)
     let mut seen: HashSet<String> = state.seen.iter().cloned().collect();
 
     let mut have = count_existing_pairs(&out_path)?;
-    println!("[{topic}] starting with {have} existing pairs, target {}", cfg.target);
+    println!(
+        "[{topic}] starting with {have} existing pairs, target {}",
+        cfg.target
+    );
 
-    let mut out_f = OpenOptions::new().create(true).append(true).open(&out_path)
+    let mut out_f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&out_path)
         .with_context(|| format!("opening {}", out_path.display()))?;
 
     let mut calls: u64 = 0;
@@ -400,7 +573,9 @@ fn run_topic(topic: &str, cfg: &Config, passages: &[String], rng: &mut impl Rng)
         let content = call_with_retry(cfg, SYSTEM_PROMPT, &prompt);
         state.cursor = state.cursor.wrapping_add(1);
 
-        let pairs = extract_json(&content).map(|v| validate_pairs(&v)).unwrap_or_default();
+        let pairs = extract_json(&content)
+            .map(|v| validate_pairs(&v))
+            .unwrap_or_default();
         let rejected = pairs.len();
         let mut fresh = Vec::new();
         for (h, b) in pairs {
@@ -424,7 +599,11 @@ fn run_topic(topic: &str, cfg: &Config, passages: &[String], rng: &mut impl Rng)
 
         calls += 1;
         if calls % 5 == 0 || !fresh.is_empty() {
-            let target_str = if cfg.target > 0 { cfg.target.to_string() } else { "\u{221e}".to_string() };
+            let target_str = if cfg.target > 0 {
+                cfg.target.to_string()
+            } else {
+                "\u{221e}".to_string()
+            };
             println!(
                 "[{topic}] +{} this call, {have}/{target_str} total (cursor {}, {} dupes/rejected)",
                 fresh.len(),
@@ -454,12 +633,20 @@ fn main() -> Result<()> {
         .endpoint
         .clone()
         .or_else(|| std::env::var("OLLAMA_ENDPOINT").ok())
-        .context("--endpoint <URL> or OLLAMA_ENDPOINT env var is required")?;
-    let api_key = args.api_key.clone().or_else(|| std::env::var("OLLAMA_API_KEY").ok());
+        .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
+    let api_key = args
+        .api_key
+        .clone()
+        .or_else(|| std::env::var("OLLAMA_API_KEY").ok());
 
-    let topics: Vec<String> = args.topics.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+    let topics: Vec<String> = args
+        .topics
+        .split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
     for t in &topics {
-        if !["bible", "business", "universe"].contains(&t.as_str()) {
+        if !SUPPORTED_TOPICS.contains(&t.as_str()) {
             bail!("unknown topic: {t}");
         }
     }
@@ -498,4 +685,28 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::SeedableRng;
+
+    use super::{build_user_prompt, SUPPORTED_TOPICS};
+
+    #[test]
+    fn simulation_topics_are_supported_and_have_distinct_domains() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let cases = [
+            ("world_basics", "everyday spatial reasoning"),
+            ("daily_life", "daily life, routines"),
+            ("social_life", "friendship, cooperation"),
+        ];
+
+        for (topic, domain) in cases {
+            assert!(SUPPORTED_TOPICS.contains(&topic));
+            let prompt = build_user_prompt(topic, 5, 0, &[], &mut rng);
+            assert!(prompt.contains(domain));
+            assert!(prompt.contains("Write 5 distinct human/bot exchanges"));
+        }
+    }
 }

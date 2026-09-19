@@ -442,9 +442,12 @@ fn load_stage_data(
         // .add("data/bible_asv.csv", FileKind::BibleCsv, None)
         // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs — proper
         // message/reply splits instead of BibleCsv's arbitrary mid-sentence cuts.
-        .add("archive/synthetic/bible.txt", FileKind::Chats, None)
-        .add("archive/synthetic/business.txt", FileKind::Chats, None)
-        .add("archive/synthetic/universe.txt", FileKind::Chats, None)
+        .add("data/synthetic/bible.txt", FileKind::Chats, None)
+        .add("data/synthetic/business.txt", FileKind::Chats, None)
+        .add("data/synthetic/universe.txt", FileKind::Chats, None)
+        .add("data/synthetic/world_basics.txt", FileKind::Chats, None)
+        .add("data/synthetic/daily_life.txt", FileKind::Chats, None)
+        .add("data/synthetic/social_life.txt", FileKind::Chats, None)
         // // .add("data/creative_stories.txt", FileKind::Txt, Some(50_000)) // good but gets split
         // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
         // // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
