@@ -82,7 +82,7 @@ already set in the image).
 ## Sparse MoE training
 
 ```sh
-cargo run --release --no-default-features --bin yumon-pet -- train-brain --architecture moe --moe-experts 4 --moe-top-k 1 --batch-size 16 --epochs 15 --out-dir checkpoints/moe
+cargo run --release --no-default-features --bin yumon-pet -- train-brain --architecture moe --batch-size 8 --epochs 15 --out-dir checkpoints/moe --moe-experts 4 --moe-top-k 1
 ```
 
 This selects `Architecture::Moe` in the existing training grid. It uses the same

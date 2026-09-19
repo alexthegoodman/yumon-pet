@@ -217,49 +217,52 @@ pub fn main() {
 
     loader = loader
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
-        .add("data/ideas.txt",   FileKind::TxtLines, Some(25_000))
-        .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
-        .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(25_000))
+        // .add("data/ideas.txt",   FileKind::TxtLines, Some(25_000))
+        // .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
+        // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(25_000))
         // .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
-        .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
-        .add("data/bible_asv.csv", FileKind::BibleCsv, None)
+        .add("data/bible_bbe.csv", FileKind::BibleCsv, Some(5_000))
+        .add("data/bible_asv.csv", FileKind::BibleCsv, Some(5_000))
         // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs — proper
         // message/reply splits instead of BibleCsv's arbitrary mid-sentence cuts.
-        .add("data/synthetic/bible.txt", FileKind::Chats, None)
-        .add("data/synthetic/business.txt", FileKind::Chats, None)
-        .add("data/synthetic/universe.txt", FileKind::Chats, None)
-        // .add("data/creative_stories.txt", FileKind::Txt, Some(50_000)) // good but gets split
-        // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
-        // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
-        // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(25_000))
-        .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(25_000))
-        // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // .add("archive/ov_chats.txt", FileKind::Chats, None)
+        .add("archive/synthetic/bible.txt", FileKind::Chats, None)
+        .add("archive/synthetic/business.txt", FileKind::Chats, None)
+        .add("archive/synthetic/universe.txt", FileKind::Chats, None)
+        .add("archive/synthetic/world_basics.txt", FileKind::Chats, None)
+        .add("archive/synthetic/daily_life.txt", FileKind::Chats, None)
+        .add("archive/synthetic/social_life.txt", FileKind::Chats, None)
+        // // .add("data/creative_stories.txt", FileKind::Txt, Some(50_000)) // good but gets split
+        // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
+        // // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
+        // // .add("archive/ov_chats.txt", FileKind::Chats, None)
+        // .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(25_000))
+        // .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(25_000))
+        // // .add("archive/ov_chats.txt", FileKind::Chats, None)
+        // // .add("archive/ov_chats.txt", FileKind::Chats, None)
         .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // .add("archive/you_chats.txt", FileKind::Chats, None)
-        // .add("archive/you_chats.txt", FileKind::Chats, None)
-        // .add("archive/you_chats.txt", FileKind::Chats, None)
+        // // .add("archive/you_chats.txt", FileKind::Chats, None)
+        // // .add("archive/you_chats.txt", FileKind::Chats, None)
+        // // .add("archive/you_chats.txt", FileKind::Chats, None)
         .add("archive/you_chats.txt", FileKind::Chats, None)
-        // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        .add("archive/clean_chats.txt", FileKind::Chats, None)
-        .add(vec![
-                "data/ebooks/faa-h-8083-25c.pdf".to_string(),
-                "data/ebooks/algor_intro.pdf".to_string(),
-                "data/ebooks/intro_engineer.pdf".to_string(),
-                "data/ebooks/meap.pdf".to_string(),
-                // "data/ebooks/missiles.pdf".to_string(),
-                "data/ebooks/os_concepts.pdf".to_string(),
-                "data/ebooks/real-time-embedded.pdf".to_string(),
-                "data/ebooks/riscv.pdf".to_string(),
-                "data/ebooks/rtos.pdf".to_string(),
-                "data/ebooks/stephen_hawking_a_brief_history_of_time.pdf".to_string(),
-            ].join(", "), 
-            FileKind::PDF, 
-            None
-        );
+        // // .add("archive/clean_chats.txt", FileKind::Chats, None)
+        // // .add("archive/clean_chats.txt", FileKind::Chats, None)
+        // // .add("archive/clean_chats.txt", FileKind::Chats, None)
+        .add("archive/clean_chats.txt", FileKind::Chats, None);
+        // .add(vec![
+        //         "data/ebooks/faa-h-8083-25c.pdf".to_string(),
+        //         "data/ebooks/algor_intro.pdf".to_string(),
+        //         "data/ebooks/intro_engineer.pdf".to_string(),
+        //         "data/ebooks/meap.pdf".to_string(),
+        //         // "data/ebooks/missiles.pdf".to_string(),
+        //         "data/ebooks/os_concepts.pdf".to_string(),
+        //         "data/ebooks/real-time-embedded.pdf".to_string(),
+        //         "data/ebooks/riscv.pdf".to_string(),
+        //         "data/ebooks/rtos.pdf".to_string(),
+        //         "data/ebooks/stephen_hawking_a_brief_history_of_time.pdf".to_string(),
+        //     ].join(", "), 
+        //     FileKind::PDF, 
+        //     None
+        // );
 
     let sentences: Vec<String> = loader.total_limit(400_000).seed(4815162342).load_sentences().expect("Couldn't get sentences");
     let sentences: Vec<&String> = sentences.iter().collect();
