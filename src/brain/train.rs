@@ -435,7 +435,7 @@ fn load_stage_data(
     loader = loader
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
         // .add("data/ideas.txt",   FileKind::TxtLines, Some(25_000))
-        // .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
+        .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
         // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(25_000))
         // .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
         .add("data/bible_bbe.csv", FileKind::BibleCsv, Some(2_500))

@@ -218,11 +218,11 @@ pub fn main() {
     loader = loader
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
         // .add("data/ideas.txt",   FileKind::TxtLines, Some(25_000))
-        // .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
+        .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
         // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(25_000))
         // .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
-        .add("data/bible_bbe.csv", FileKind::BibleCsv, Some(5_000))
-        .add("data/bible_asv.csv", FileKind::BibleCsv, Some(5_000))
+        .add("data/bible_bbe.csv", FileKind::BibleCsv, Some(2_500))
+        .add("data/bible_asv.csv", FileKind::BibleCsv, Some(2_500))
         // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs — proper
         // message/reply splits instead of BibleCsv's arbitrary mid-sentence cuts.
         .add("archive/synthetic/bible.txt", FileKind::Chats, None)
