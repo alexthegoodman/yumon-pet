@@ -38,7 +38,7 @@ mod desktop {
     pub struct Args {
         #[arg(
             long,
-            default_value = "checkpoints/brain/256h_16l_4a_32len_b8_Moe_e4_k1_Language"
+            default_value = "checkpoints/brain/256h_16l_4a_32len_b32_Moe_e4_k1_Language"
         )]
         checkpoint: String,
         #[arg(long, value_enum, default_value = "moe")]
