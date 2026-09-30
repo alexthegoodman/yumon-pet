@@ -499,7 +499,8 @@ mod tests {
 
     #[test]
     fn xlstm_forward_backward_smoke() {
-        let device = burn::backend::wgpu::WgpuDevice::default();
+        // let device = burn::backend::wgpu::WgpuDevice::default();
+        let device = burn::backend::cuda::CudaDevice::default(); // for runpod
 
         let config = YumonXLstmBrainConfig {
             vocab_size:   50,
@@ -546,7 +547,8 @@ mod tests {
     #[test]
     #[ignore]
     fn xlstm_timing_probe() {
-        let device = burn::backend::wgpu::WgpuDevice::default();
+        // let device = burn::backend::wgpu::WgpuDevice::default();
+        let device = burn::backend::cuda::CudaDevice::default(); // for runpod
 
         let config = YumonXLstmBrainConfig {
             vocab_size:   4000,

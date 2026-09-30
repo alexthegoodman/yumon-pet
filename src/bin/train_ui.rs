@@ -25,13 +25,7 @@ use tao::{
 use wry::{WebViewBuilder, http::Request};
 
 use yumon_pet::brain::{
-    PAD_TOKEN, BOS_TOKEN,
-    bpe::{BpeTokenizer, TokenizerKind},
-    chart::TrainingState,
-    loader::{DataLoader, FileKind},
-    samples::{TrainingStage, WorldContext},
-    model::{YumonBrain, YumonBrainConfig, BrainMetadata},
-    train::{build_keyword_index, build_label_keywords, TrainBackend},
+    BOS_TOKEN, PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind}, chart::TrainingState, loader::{DataLoader, FileKind}, model::{BrainMetadata, YumonBrain, YumonBrainConfig}, samples::{TrainingStage, WorldContext}, train::{TrainBackend, TrainRuntime, build_keyword_index, build_label_keywords},
 };
 
 // ── Custom event ──────────────────────────────────────────────────────────
@@ -122,7 +116,9 @@ fn run_training_loop(
     is_training: Arc<AtomicBool>,
     proxy: EventLoopProxy<TrainerEvent>,
 ) -> Result<()> {
-    let device = burn::backend::wgpu::WgpuDevice::default();
+    // let device = burn::backend::wgpu::WgpuDevice::default();
+    let device = burn::backend::cuda::CudaDevice::default(); // for runpod
+
     let label_keywords = build_label_keywords();
     let keyword_index = build_keyword_index(&label_keywords);
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
@@ -220,7 +216,7 @@ fn run_training_loop(
             let enc_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_enc_ids, [current_batch_size, max_seq_len]), &device);
             let dec_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_dec_input_ids, [current_batch_size, max_seq_len]), &device);
 
-            let token_logits = model.forward::<WgpuRuntime>(enc_t, dec_t.clone());
+            let token_logits = model.forward::<TrainRuntime>(enc_t, dec_t.clone());
 
             // Entropy
             let probs = burn::tensor::activation::softmax(token_logits.clone(), 2);
