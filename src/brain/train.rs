@@ -293,7 +293,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 4,
         // 8,
         // 8, // stretch: slower on iGPU - each MoE layer forces a host readback
-        16
+        // 16
+        32
     ];
     let head_counts:  [usize; 1] = [
         // 1,
@@ -434,12 +435,12 @@ fn load_stage_data(
 
     loader = loader
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
-        // .add("data/ideas.txt",   FileKind::TxtLines, Some(25_000))
-        .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
-        // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(25_000))
+        .add("data/ideas.txt",   FileKind::TxtLines, None)
+        .add("archive/arena_extract.txt",   FileKind::Chats, None)
+        .add("data/distillchatv1.csv",   FileKind::DistillChat, None)
         // .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
-        .add("data/bible_bbe.csv", FileKind::BibleCsv, Some(2_500))
-        .add("data/bible_asv.csv", FileKind::BibleCsv, Some(2_500))
+        .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
+        .add("data/bible_asv.csv", FileKind::BibleCsv, None)
         // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs — proper
         // message/reply splits instead of BibleCsv's arbitrary mid-sentence cuts.
         .add("archive/synthetic/bible.txt", FileKind::Chats, None)
@@ -448,12 +449,12 @@ fn load_stage_data(
         .add("archive/synthetic/world_basics.txt", FileKind::Chats, None)
         .add("archive/synthetic/daily_life.txt", FileKind::Chats, None)
         .add("archive/synthetic/social_life.txt", FileKind::Chats, None)
-        // // .add("data/creative_stories.txt", FileKind::Txt, Some(50_000)) // good but gets split
+        .add("data/creative_stories.txt", FileKind::Txt, None) // good but gets split
         // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
         // // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
         // // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(25_000))
-        // .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(25_000))
+        .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, None)
+        .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, None)
         // // .add("archive/ov_chats.txt", FileKind::Chats, None)
         // // .add("archive/ov_chats.txt", FileKind::Chats, None)
         .add("archive/ov_chats.txt", FileKind::Chats, None)
