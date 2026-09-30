@@ -87,9 +87,8 @@ COPY data/ideas.txt data/wiki_extract.txt data/bible_bbe.csv data/bible_asv.csv 
      data/creative_stories.txt data/The-Office-Lines-V4.csv \
      data/friends_all_episodes_clean.csv data/distillchatv1.csv ./data/
 COPY archive/arena_extract.txt archive/ov_chats.txt archive/you_chats.txt \
-     archive/synthetic/bible.txt archive/synthetic/business.txt archive/synthetic/universe.txt \
-     archive/synthetic/world_basics.txt archive/synthetic/daily_life.txt archive/synthetic/social_life.txt \
      archive/clean_chats.txt ./archive/
+COPY archive/synthetic/ ./archive/synthetic/
 
 # Checkpoints must land on a mounted RunPod Network Volume (not this image's
 # writable layer) so they survive the pod being stopped/terminated - mount

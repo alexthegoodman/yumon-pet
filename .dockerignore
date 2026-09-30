@@ -25,4 +25,5 @@ archive/*
 !archive/ov_chats.txt
 !archive/you_chats.txt
 !archive/clean_chats.txt
-!archive/synthetic/*
+!archive/synthetic
+!archive/synthetic/**
