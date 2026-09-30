@@ -38,6 +38,7 @@ unicode-width = "0.2"
 cubecl = { version = "0.9", features = ["wgpu", "cuda"] }
 cubecl-common = { version = "0.9", features = ["serde"] }
 burn = { version = "0.20", features = ["autodiff", "wgpu", "cuda"] }
+burn-cubecl = { version = "0.20", default-features = false }
 regex = "1"
 rand = "0.8.5"
 console_error_panic_hook = "0.1.7"

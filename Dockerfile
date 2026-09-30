@@ -76,6 +76,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV RUST_BACKTRACE=1
 
 WORKDIR /app
 COPY --from=builder /build/target/release/yumon-pet ./yumon-pet

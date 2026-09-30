@@ -46,7 +46,7 @@ pub type WgpuTrainRuntime = cubecl::wgpu::WgpuRuntime;
 // Used by the headless `train-brain` CLI path (`run`, below) — this is what
 // RunPod/Docker actually runs. CUDA talks to the driver directly and needs no
 // Vulkan/GL adapter, unlike wgpu, which RunPod's driver stack doesn't expose.
-pub type TrainBackend = burn::backend::Autodiff<burn::backend::Cuda>;
+pub type TrainBackend = burn::backend::Autodiff<burn_cubecl::CubeBackend<cubecl::cuda::CudaRuntime, f32, i32, u8>>;
 pub type TrainRuntime = cubecl::cuda::CudaRuntime;
 
 // Max sequence length during training (tokens)
