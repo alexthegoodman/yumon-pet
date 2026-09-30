@@ -18,9 +18,11 @@ data/*
 !data/creative_stories.txt
 !data/The-Office-Lines-V4.csv
 !data/friends_all_episodes_clean.csv
+!data/distillchatv1.csv
 
 archive/*
 !archive/arena_extract.txt
 !archive/ov_chats.txt
 !archive/you_chats.txt
 !archive/clean_chats.txt
+!archive/synthetic/*
