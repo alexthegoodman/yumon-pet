@@ -4,6 +4,8 @@ pub mod model;
 pub mod decoder_model;
 pub mod xlstm_model;
 pub mod moe_model;
+pub mod prediction_model;
+pub mod daw_actions;
 pub mod wiki;
 pub mod train;
 pub mod tokenizer;

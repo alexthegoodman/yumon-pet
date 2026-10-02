@@ -116,8 +116,8 @@ fn run_training_loop(
     is_training: Arc<AtomicBool>,
     proxy: EventLoopProxy<TrainerEvent>,
 ) -> Result<()> {
-    // let device = burn::backend::wgpu::WgpuDevice::default();
-    let device = burn::backend::cuda::CudaDevice::default(); // for runpod
+    let device = burn::backend::wgpu::WgpuDevice::default();
+    // let device = burn::backend::cuda::CudaDevice::default(); // for runpod
 
     let label_keywords = build_label_keywords();
     let keyword_index = build_keyword_index(&label_keywords);

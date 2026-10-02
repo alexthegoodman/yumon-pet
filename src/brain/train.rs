@@ -39,15 +39,15 @@ use crate::brain::{
 
 // Used by the local desktop training UI (src/bin/train_ui.rs), which runs on
 // wgpu since dev machines typically have no CUDA GPU.
-pub type WgpuTrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
-pub type WgpuTrainRuntime = cubecl::wgpu::WgpuRuntime;
+pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
+pub type TrainRuntime = cubecl::wgpu::WgpuRuntime;
 // pub type TrainBackend = burn::backend::Autodiff<burn::backend::NdArray<f32>>;
 
 // Used by the headless `train-brain` CLI path (`run`, below) — this is what
 // RunPod/Docker actually runs. CUDA talks to the driver directly and needs no
 // Vulkan/GL adapter, unlike wgpu, which RunPod's driver stack doesn't expose.
-pub type TrainBackend = burn::backend::Autodiff<burn_cubecl::CubeBackend<cubecl::cuda::CudaRuntime, f32, i32, u8>>;
-pub type TrainRuntime = cubecl::cuda::CudaRuntime;
+pub type CudaTrainBackend = burn::backend::Autodiff<burn_cubecl::CubeBackend<cubecl::cuda::CudaRuntime, f32, i32, u8>>;
+pub type CudaTrainRuntime = cubecl::cuda::CudaRuntime;
 
 // Max sequence length during training (tokens)
 // pub const MAX_SEQ_LEN:  usize = 120;
@@ -506,8 +506,8 @@ pub fn run_with_architecture(
     max_articles:      usize,
     architecture: Architecture,
 ) -> Result<()> {
-    // let device = burn::backend::wgpu::WgpuDevice::default();
-    let device = burn::backend::cuda::CudaDevice::default(); // for runpod
+    let device = burn::backend::wgpu::WgpuDevice::default();
+    // let device = burn::backend::cuda::CudaDevice::default(); // for runpod
     let label_keywords   = build_label_keywords();
     let keyword_index    = build_keyword_index(&label_keywords);
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
