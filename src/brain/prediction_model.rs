@@ -7,12 +7,13 @@
 //! actions.
 
 use super::{
-    daw_actions::{ACTION_VOCAB_SIZE, BOS_ACTION, EOS_ACTION, MAX_ACTION_PARAMS, PAD_ACTION},
+    daw_actions::{ACTION_VOCAB_SIZE, BOS_ACTION, DawAction, EOS_ACTION, MAX_ACTION_PARAMS, NUM_DAW_ACTIONS, PAD_ACTION},
     model::{MLPConfig, RMSNorm, RMSNormConfig},
     moe_model::SparseMoe,
 };
 use anyhow::Result;
 use burn::{
+    backend::Wgpu,
     module::Ignored,
     nn::{
         Dropout, DropoutConfig, Embedding, EmbeddingConfig, Linear, LinearConfig,
@@ -357,6 +358,191 @@ pub struct PredictionMetadata {
     pub final_loss: f32,
     pub batch_size: usize,
     pub num_sequences: usize,
+}
+
+// ── High-Level Inference API ──────────────────────────────────────────────────
+
+/// A predicted action with metadata, suggested defaults, and confidence score.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PredictedAction {
+    pub action_id: u32,
+    pub name: String,
+    pub display_name: String,
+    pub category: String,
+    pub icon: String,
+    pub params: Vec<f32>,
+    pub confidence: f32,
+}
+
+/// Action predictor instance holding the loaded model on WGPU device.
+pub struct ActionPredictor {
+    model: PredictionModel<Wgpu>,
+    pub config: PredictionModelConfig,
+    device: burn::backend::wgpu::WgpuDevice,
+}
+
+impl ActionPredictor {
+    pub fn new(directory: &str) -> Result<Self> {
+        let device = burn::backend::wgpu::WgpuDevice::default();
+        let (model, config) = PredictionModel::<Wgpu>::load(directory, &device)?;
+        Ok(Self { model, config, device })
+    }
+
+    pub fn predict_actions(
+        &self,
+        context_ids: &[u32],
+        context_params: Option<&[[f32; MAX_ACTION_PARAMS]]>,
+        steps: usize,
+    ) -> Vec<PredictedAction> {
+        let mut ids: Vec<u32> = if context_ids.is_empty() {
+            vec![BOS_ACTION]
+        } else {
+            let mut v = Vec::with_capacity(context_ids.len() + 1);
+            if context_ids[0] != BOS_ACTION {
+                v.push(BOS_ACTION);
+            }
+            v.extend_from_slice(context_ids);
+            v
+        };
+
+        let mut params: Vec<[f32; MAX_ACTION_PARAMS]> = Vec::new();
+        if let Some(cp) = context_params {
+            if context_ids.is_empty() || context_ids[0] != BOS_ACTION {
+                params.push([0.0; MAX_ACTION_PARAMS]);
+            }
+            params.extend_from_slice(cp);
+        }
+        while params.len() < ids.len() {
+            params.push([0.0; MAX_ACTION_PARAMS]);
+        }
+
+        let mut predicted_actions = Vec::with_capacity(steps);
+        let max_seq = self.config.max_seq_len;
+
+        for _ in 0..steps {
+            let cur_len = ids.len().min(max_seq);
+            let start = ids.len().saturating_sub(max_seq);
+            let win_ids = &ids[start..];
+            let win_params = &params[start..];
+
+            let ids_tensor = Tensor::<Wgpu, 2, Int>::from_ints(
+                burn::tensor::TensorData::new(
+                    win_ids.iter().map(|&x| x as i32).collect::<Vec<_>>(),
+                    [1, cur_len],
+                ),
+                &self.device,
+            );
+
+            let params_flat: Vec<f32> = win_params.iter().flat_map(|p| p.iter().copied()).collect();
+            let params_tensor = Tensor::<Wgpu, 3>::from_data(
+                burn::tensor::TensorData::new(
+                    params_flat,
+                    [1, cur_len, MAX_ACTION_PARAMS],
+                ),
+                &self.device,
+            );
+
+            let (logits, _aux) = self.model.forward(ids_tensor, params_tensor);
+            let last_logits = logits
+                .slice([0..1, cur_len - 1..cur_len, 0..self.config.vocab_size])
+                .reshape([self.config.vocab_size]);
+
+            let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
+
+            let max_logit = logits_vec.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = logits_vec.iter().map(|&x| (x - max_logit).exp()).collect();
+            let sum_exp: f32 = exps.iter().sum();
+
+            let mut best_id = PAD_ACTION;
+            let mut best_prob = 0.0f32;
+
+            for (i, &p) in exps.iter().enumerate() {
+                let prob = if sum_exp > 0.0 { p / sum_exp } else { 0.0 };
+                if (i as u32) < NUM_DAW_ACTIONS as u32 {
+                    if prob > best_prob {
+                        best_prob = prob;
+                        best_id = i as u32;
+                    }
+                }
+            }
+
+            if best_id == PAD_ACTION || best_id == EOS_ACTION {
+                break;
+            }
+
+            if let Some(action) = DawAction::from_id(best_id) {
+                predicted_actions.push(PredictedAction {
+                    action_id: best_id,
+                    name: action.name().to_string(),
+                    display_name: action.display_name().to_string(),
+                    category: action.category().to_string(),
+                    icon: action.icon().to_string(),
+                    params: action.default_params().to_vec(),
+                    confidence: (best_prob * 100.0).round() / 100.0,
+                });
+
+                ids.push(best_id);
+                params.push(action.default_params());
+            } else {
+                break;
+            }
+        }
+
+        predicted_actions
+    }
+}
+
+static PREDICTOR: std::sync::Mutex<Option<ActionPredictor>> = std::sync::Mutex::new(None);
+
+/// Resolve the prediction checkpoint directory by checking candidate locations.
+pub fn resolve_prediction_checkpoint_dir() -> Result<std::path::PathBuf> {
+    let candidates = [
+        "checkpoints/prediction",
+        "../yumon-pet/checkpoints/prediction",
+        "yumon-pet/checkpoints/prediction",
+        "../../yumon-pet/checkpoints/prediction",
+        "D:/projects/common/yumon-pet/checkpoints/prediction",
+    ];
+
+    for candidate in &candidates {
+        let p = std::path::Path::new(candidate);
+        if p.join("metadata.json").exists() && (p.join("model.bin").exists() || p.join("model").exists()) {
+            return Ok(p.to_path_buf());
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let p = parent.join("checkpoints/prediction");
+            if p.join("metadata.json").exists() {
+                return Ok(p);
+            }
+        }
+    }
+
+    anyhow::bail!("Could not locate prediction checkpoint directory")
+}
+
+/// High-level function to predict next DAW actions from action history.
+pub fn predict_next_actions(
+    checkpoint_dir: Option<&str>,
+    context_ids: &[u32],
+    context_params: Option<&[[f32; MAX_ACTION_PARAMS]]>,
+    steps: usize,
+) -> Result<Vec<PredictedAction>> {
+    let mut guard = PREDICTOR.lock().map_err(|e| anyhow::anyhow!("prediction mutex poisoned: {e}"))?;
+    if guard.is_none() {
+        let dir = if let Some(d) = checkpoint_dir {
+            std::path::PathBuf::from(d)
+        } else {
+            resolve_prediction_checkpoint_dir()?
+        };
+        let predictor = ActionPredictor::new(dir.to_str().unwrap())?;
+        *guard = Some(predictor);
+    }
+
+    let predictor = guard.as_ref().unwrap();
+    Ok(predictor.predict_actions(context_ids, context_params, steps))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

@@ -57,7 +57,7 @@ struct Cli {
     batch_size: usize,
 
     /// Context window size (action history the model sees).
-    #[arg(long, default_value_t = 32)]
+    #[arg(long, default_value_t = 8)]
     context_len: usize,
 
     /// Model embedding dimension.

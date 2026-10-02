@@ -128,6 +128,136 @@ impl DawAction {
         }
     }
 
+    /// Human-readable display label for the UI.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::AddTrack         => "Add Track",
+            Self::RemoveTrack      => "Remove Track",
+            Self::SelectTrack      => "Select Track",
+            Self::SetBpm           => "Set BPM",
+            Self::Play             => "Play",
+            Self::Stop             => "Stop",
+            Self::Rewind           => "Rewind",
+            Self::Seek             => "Seek",
+            Self::AddNote          => "Add Note",
+            Self::RemoveNote       => "Remove Note",
+            Self::SelectPattern    => "Select Pattern",
+            Self::NewPattern       => "New Pattern",
+            Self::PlaceClip        => "Place Clip",
+            Self::RemoveClip       => "Remove Clip",
+            Self::LoadInstrument   => "Load Instrument",
+            Self::LoadPreset       => "Load Preset",
+            Self::SetVolume        => "Set Volume",
+            Self::SetPan           => "Set Pan",
+            Self::MuteTrack        => "Mute Track",
+            Self::SoloTrack        => "Solo Track",
+            Self::SetReverb        => "Set Reverb",
+            Self::SetEq            => "Set EQ",
+            Self::OpenMixer        => "Open Mixer",
+            Self::OpenPianoRoll    => "Open Piano Roll",
+            Self::PlayNotePreview  => "Preview Note",
+            Self::SetScale         => "Set Scale",
+            Self::SetRootNote      => "Set Root Note",
+            Self::ExportWav        => "Export WAV",
+            Self::SaveProject      => "Save Project",
+            Self::Undo             => "Undo",
+            Self::ToggleAnalyzer   => "Toggle Analyzer",
+            Self::SetCharacterKnob => "Set Character",
+        }
+    }
+
+    /// Category for grouping and UI badges.
+    pub fn category(self) -> &'static str {
+        match self {
+            Self::AddTrack | Self::RemoveTrack | Self::SelectTrack => "Track",
+            Self::SetBpm | Self::Play | Self::Stop | Self::Rewind | Self::Seek => "Transport",
+            Self::AddNote | Self::RemoveNote => "Piano Roll",
+            Self::SelectPattern | Self::NewPattern => "Pattern",
+            Self::PlaceClip | Self::RemoveClip => "Arrangement",
+            Self::LoadInstrument | Self::LoadPreset => "Instrument",
+            Self::SetVolume | Self::SetPan | Self::MuteTrack | Self::SoloTrack => "Mixer",
+            Self::SetReverb | Self::SetEq | Self::SetCharacterKnob => "Effects",
+            Self::OpenMixer | Self::OpenPianoRoll | Self::ToggleAnalyzer => "View",
+            Self::PlayNotePreview | Self::SetScale | Self::SetRootNote => "Theory",
+            Self::ExportWav | Self::SaveProject | Self::Undo => "Project",
+        }
+    }
+
+    /// Phosphor icon name for rendering in UI buttons and step lists.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::AddTrack         => "plus-circle",
+            Self::RemoveTrack      => "trash",
+            Self::SelectTrack      => "cursor",
+            Self::SetBpm           => "metronome",
+            Self::Play             => "play",
+            Self::Stop             => "stop",
+            Self::Rewind           => "skip-back",
+            Self::Seek             => "crosshair",
+            Self::AddNote          => "music-notes",
+            Self::RemoveNote       => "eraser",
+            Self::SelectPattern    => "squares-four",
+            Self::NewPattern       => "file-plus",
+            Self::PlaceClip        => "waveform",
+            Self::RemoveClip       => "scissors",
+            Self::LoadInstrument   => "piano-keys",
+            Self::LoadPreset       => "sliders",
+            Self::SetVolume        => "speaker-high",
+            Self::SetPan           => "arrows-left-right",
+            Self::MuteTrack        => "speaker-slash",
+            Self::SoloTrack        => "star",
+            Self::SetReverb        => "waves",
+            Self::SetEq            => "equalizer",
+            Self::OpenMixer        => "faders",
+            Self::OpenPianoRoll    => "keyboard",
+            Self::PlayNotePreview  => "headphones",
+            Self::SetScale         => "scales",
+            Self::SetRootNote      => "tuning-fork",
+            Self::ExportWav        => "download-simple",
+            Self::SaveProject      => "floppy-disk",
+            Self::Undo             => "arrow-u-up-left",
+            Self::ToggleAnalyzer   => "chart-bar",
+            Self::SetCharacterKnob => "knob",
+        }
+    }
+
+    /// Suggested sensible default parameters for this action.
+    pub fn default_params(self) -> [f32; MAX_ACTION_PARAMS] {
+        match self {
+            Self::AddTrack         => [0.0, 0.0, 0.0, 0.0], // synth
+            Self::RemoveTrack      => [0.0, 0.0, 0.0, 0.0],
+            Self::SelectTrack      => [0.0, 0.0, 0.0, 0.0],
+            Self::SetBpm           => [120.0, 0.0, 0.0, 0.0], // 120 bpm
+            Self::Play | Self::Stop | Self::Rewind => [0.0; MAX_ACTION_PARAMS],
+            Self::Seek             => [0.0, 0.0, 0.0, 0.0],
+            Self::AddNote          => [4.0, 0.0, 4.0, 0.8], // row 4, step 0, length 4, vel 0.8
+            Self::RemoveNote       => [4.0, 0.0, 0.0, 0.0],
+            Self::SelectPattern    => [0.0, 0.0, 0.0, 0.0],
+            Self::NewPattern       => [16.0, 0.0, 0.0, 0.0],
+            Self::PlaceClip        => [0.0, 0.0, 0.0, 0.0],
+            Self::RemoveClip       => [0.0, 0.0, 0.0, 0.0],
+            Self::LoadInstrument   => [0.0, 0.0, 0.0, 0.0],
+            Self::LoadPreset       => [0.0, 0.0, 0.0, 0.0],
+            Self::SetVolume        => [0.8, 0.0, 0.0, 0.0],
+            Self::SetPan           => [0.0, 0.0, 0.0, 0.0],
+            Self::MuteTrack | Self::SoloTrack => [0.0; MAX_ACTION_PARAMS],
+            Self::SetReverb        => [0.0, 0.35, 0.0, 0.0],
+            Self::SetEq            => [1.0, 0.0, 0.0, 0.0],
+            Self::OpenMixer | Self::OpenPianoRoll => [0.0; MAX_ACTION_PARAMS],
+            Self::PlayNotePreview  => [60.0, 0.8, 0.0, 0.0], // C4, vel 0.8
+            Self::SetScale         => [0.0, 0.0, 0.0, 0.0],
+            Self::SetRootNote      => [60.0, 0.0, 0.0, 0.0],
+            Self::ExportWav | Self::SaveProject | Self::Undo => [0.0; MAX_ACTION_PARAMS],
+            Self::ToggleAnalyzer   => [0.0; MAX_ACTION_PARAMS],
+            Self::SetCharacterKnob => [0.0, 0.5, 0.0, 0.0],
+        }
+    }
+
+    /// Resolve action from snake_case identifier name.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|a| a.name() == name)
+    }
+
     /// Number of meaningful float parameters this action carries (0..=4).
     pub fn param_count(self) -> usize {
         match self {

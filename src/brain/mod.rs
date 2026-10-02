@@ -25,6 +25,16 @@ pub mod chats;
 // Re-export tokenizer for convenience
 pub use tokenizer::{Tokenizer, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, UNK_TOKEN};
 
+// Re-export DAW prediction model types and inference
+pub use prediction_model::{
+    ActionPredictor, PredictedAction, PredictionMetadata, PredictionModel,
+    PredictionModelConfig, predict_next_actions, resolve_prediction_checkpoint_dir,
+};
+pub use daw_actions::{
+    ActionStep, DawAction, DawTask, ACTION_VOCAB_SIZE, BOS_ACTION, EOS_ACTION,
+    MAX_ACTION_PARAMS, NUM_DAW_ACTIONS, NUM_DAW_TASKS, PAD_ACTION,
+};
+
 // ─── Context vector layout ────────────────────────────────────────────────────
 //
 // At each LSTM timestep, a context vector is concatenated with the token embedding:
