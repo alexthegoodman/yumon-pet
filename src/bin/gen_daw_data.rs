@@ -40,7 +40,7 @@ struct Cli {
     seed: u64,
 
     /// Maximum actions per trajectory.
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = 16)]
     max_len: usize,
 }
 
