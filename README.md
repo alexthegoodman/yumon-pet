@@ -35,10 +35,44 @@ You may need clang for chat_web.
 - `cargo run --release --bin chat_ui` to get started chatting
 - `cargo run --release --bin yumon_world` to start a Yumon World simulation
 - `cargo run --release --bin yumon_universe -- --checkpoint <language-checkpoint> --seed 42 --theme suburban|urban` to explore a procedural neighborhood or downtown (Windows, desktop feature)
+- `cargo run --release --bin yumon_rss -- --checkpoint <language-checkpoint>` for a transparent desktop news companion (desktop feature)
 - `cargo run --release --bin endless_data` TUI to answer endless questions in order to generate some data
 - `cargo run --release --bin train_bpe` train your tokenizer on your data
 
 - `trunk serve --release` for chat web (or `trunk build --release` for deployment)
+
+### Yumon RSS
+
+Yumon RSS sits in the bottom-left desktop corner in a transparent, always-on-top
+window. It checks BBC World, Guardian Science, and NASA on launch and every
+15 minutes after each check completes. Each check takes at most the newest article
+from each source, skips links already in history, and asks the local Yumon model
+for a short reaction to the headline. It reads titles only, not article bodies.
+There are no emotes or chat input; scroll through the news and comments, click a
+headline to open it in your browser, drag the header to move the window, or use
+the refresh and close buttons.
+
+```sh
+cargo run --release --bin yumon_rss -- --checkpoint <language-checkpoint> --architecture moe
+cargo run --release --bin yumon_rss -- --check-feeds
+```
+
+The default checkpoint matches `chat_ui` and `yumon_universe`. Use
+`--architecture moe|xlstm|encoder-decoder` to match your **Language-stage**
+checkpoint. Long headlines are shortened for the model's context window while
+the complete title remains visible. Comments come from the local model and may
+be imperfect.
+
+The latest 200 entries are saved in the platform's local application data folder
+(`%LOCALAPPDATA%\Yumon\YumonRSS\data\history.json` on Windows). Use
+`--history <path>` to choose a different JSON file. Unreadable history files
+produce an error rather than being overwritten. Feed failures appear in the
+window and are retried on the next check. Edit `SOURCES` in `src/bin/rss/mod.rs`
+to change the hardcoded RSS 2.0 feed links.
+
+```sh
+cargo test --bin yumon_rss
+```
 
 
 ### Training on RunPod (Docker)

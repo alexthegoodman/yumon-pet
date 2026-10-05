@@ -11,6 +11,11 @@ path = "src/bin/train_bpe.rs"
 name = "train_ui"
 path = "src/bin/train_ui.rs"
 
+[[bin]]
+name = "yumon_rss"
+path = "src/bin/yumon_rss.rs"
+required-features = ["desktop"]
+
 [features]
 # Desktop/GUI bits (native window + webview + 3D engine + gamepad input) used by
 # the yumon_desktop/yumon_world/yumon_civ/train_ui/chat_ui bins. Not needed for
