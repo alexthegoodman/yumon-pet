@@ -22,6 +22,10 @@
   button:focus-visible { outline: 2px solid #9dd8b3; outline-offset: 2px; }
   button:disabled { opacity: .35; cursor: default; }
   #tagline { font-size: 11px; color: #9db4a5; margin: 0 16px 12px; }
+  [hidden] { display: none !important; }
+  .tabs { display: flex; gap: 6px; padding: 0 14px 10px; }
+  .tab { flex: 1; padding: 7px; font-size: 12px; border-color: rgba(157, 216, 179, .13); }
+  .tab[aria-selected="true"] { color: #c5efd3; background: rgba(157, 216, 179, .12); border-color: rgba(157, 216, 179, .3); }
   #history { flex: 1; min-height: 0; overflow-y: auto; padding: 0 14px 12px; scrollbar-width: thin; scrollbar-color: #465f50 transparent; }
   #empty { height: 100%; min-height: 130px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: #b4c9bb; padding: 24px; }
   #empty strong { font-size: 15px; font-weight: 500; }
@@ -39,6 +43,21 @@
   footer { border-top: 1px solid rgba(157, 216, 179, .13); padding: 10px 16px 12px; }
   #status { margin: 0; max-height: 52px; overflow-y: auto; color: #afc5b7; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
   #next { display: block; margin-top: 3px; color: #829a8b; font-size: 10px; }
+  #chat-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  #chat-messages { flex: 1; min-height: 0; overflow-y: auto; padding: 0 14px 10px; scrollbar-width: thin; scrollbar-color: #465f50 transparent; }
+  .chat-empty { color: #8da596; font-size: 12px; line-height: 1.6; text-align: center; padding: 30px 12px; }
+  .message { padding: 10px 12px; margin: 8px 0; border-radius: 10px; background: rgba(157, 216, 179, .07); }
+  .message.user { margin-left: 24px; background: rgba(157, 216, 179, .13); }
+  .message.yumon { margin-right: 24px; }
+  .message.error { border: 1px solid #a77d65; }
+  .message small { color: #9dd8b3; font-size: 10px; }
+  .message p { margin: 4px 0 0; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+  #chat-form { padding: 0 14px 12px; }
+  .composer { display: flex; align-items: flex-end; gap: 6px; }
+  #chat-input { flex: 1; min-width: 0; resize: none; border: 1px solid rgba(157, 216, 179, .24); border-radius: 8px; padding: 9px; color: #e2eee7; background: rgba(0, 0, 0, .15); font: inherit; font-size: 12px; line-height: 1.5; }
+  #chat-input:focus { outline: 2px solid #9dd8b3; outline-offset: 1px; }
+  #chat-send { padding: 9px; border-color: rgba(157, 216, 179, .24); font-size: 12px; }
+  #chat-status { margin: 6px 0 0; color: #92aa9a; font-size: 10px; line-height: 1.5; }
 </style>
 </head>
 <body>
@@ -47,15 +66,78 @@
     <div class="controls"><button class="control" id="refresh" aria-label="Refresh today's products" title="Refresh today's products" disabled>↻</button><button class="control" id="close" aria-label="Close Yumon RSS" title="Close">×</button></div>
   </header>
   <p id="tagline">Fresh products. A little Yumon.</p>
-  <main id="history" aria-label="Products and Yumon's comments"><div id="empty"><strong>What will they build next?</strong><p>Yumon will read today's Product Hunt ideas and share a thought every five minutes.</p></div></main>
+  <nav class="tabs" role="tablist" aria-label="Yumon views">
+    <button class="tab" id="products-tab" role="tab" aria-selected="true" aria-controls="history">Products</button>
+    <button class="tab" id="chat-tab" role="tab" aria-selected="false" aria-controls="chat-panel" tabindex="-1">Chat</button>
+  </nav>
+  <main id="history" role="tabpanel" aria-labelledby="products-tab"><div id="empty"><strong>What will they build next?</strong><p>Yumon will read today's Product Hunt ideas and share a thought every five minutes.</p></div></main>
+  <section id="chat-panel" role="tabpanel" aria-labelledby="chat-tab" hidden>
+    <div id="chat-messages" role="log" aria-label="Conversation with Yumon" aria-live="polite"><p class="chat-empty">Say hello, ask a question, or share a business idea with Yumon.</p></div>
+    <form id="chat-form">
+      <div class="composer"><textarea id="chat-input" rows="2" maxlength="4096" placeholder="Say something to Yumon..." aria-label="Message to Yumon"></textarea><button id="chat-send" type="submit" disabled>Send</button></div>
+      <p id="chat-status" role="status">Waking Yumon up...</p>
+    </form>
+  </section>
   <footer><p id="status" role="status">Waking Yumon up...</p><small id="next">Product Hunt · Daily products</small></footer>
 </section>
 <script>
   const send = (type, extra = {}) => window.ipc?.postMessage(JSON.stringify({ type, ...extra }));
   const history = document.getElementById('history');
   const refresh = document.getElementById('refresh');
+  const chatPanel = document.getElementById('chat-panel');
+  const chatMessages = document.getElementById('chat-messages');
+  const chatInput = document.getElementById('chat-input');
+  const chatSend = document.getElementById('chat-send');
+  const tabs = [...document.querySelectorAll('[role="tab"]')];
+  let canChat = false;
+  let submitting = false;
+  let submittedMessage = null;
+  let submittedChatFingerprint = '';
+  let renderedChat = '';
   let renderedEntries = '';
   let nextCheck = null;
+  const selectTab = tab => {
+    for (const button of tabs) {
+      const selected = button === tab;
+      button.setAttribute('aria-selected', String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    }
+    history.hidden = tab.id !== 'products-tab';
+    chatPanel.hidden = tab.id !== 'chat-tab';
+    if (!chatPanel.hidden) {
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+      chatInput.focus();
+    }
+  };
+  for (const tab of tabs) {
+    tab.addEventListener('click', () => selectTab(tab));
+    tab.addEventListener('keydown', event => {
+      if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault();
+        const target = event.key === 'Home' ? tabs[0] : event.key === 'End' ? tabs[1] : tabs.find(button => button !== tab);
+        selectTab(target);
+        target.focus();
+      }
+    });
+  }
+  const updateSend = () => { chatSend.disabled = !canChat || submitting || !chatInput.value.trim(); };
+  chatInput.addEventListener('input', updateSend);
+  document.getElementById('chat-form').addEventListener('submit', event => {
+    event.preventDefault();
+    const message = chatInput.value.trim();
+    if (!canChat || submitting || !message) return;
+    submitting = true;
+    submittedMessage = message;
+    submittedChatFingerprint = renderedChat;
+    updateSend();
+    send('chat', { message });
+  });
+  chatInput.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      document.getElementById('chat-form').requestSubmit();
+    }
+  });
   refresh.addEventListener('click', () => { refresh.disabled = true; send('refresh'); });
   document.getElementById('close').addEventListener('click', () => send('close'));
   document.getElementById('drag').addEventListener('pointerdown', event => {
@@ -74,7 +156,32 @@
   };
   window.__yumon_rss = state => {
     document.getElementById('status').textContent = state.status;
-    refresh.disabled = state.busy || !state.can_refresh;
+    refresh.disabled = state.busy || state.chat_busy || !state.can_refresh;
+    canChat = state.can_refresh && !state.busy && !state.chat_busy;
+    document.getElementById('chat-status').textContent = state.busy && state.can_refresh
+      ? 'Yumon is reading products. You can send your message shortly.' : state.chat_status;
+    const messages = state.chat || [];
+    const chatFingerprint = JSON.stringify(messages);
+    if (submittedMessage && chatFingerprint !== submittedChatFingerprint && messages.findLast(message => message.role === 'user')?.text === submittedMessage) {
+      if (chatInput.value.trim() === submittedMessage) chatInput.value = '';
+      submittedMessage = null;
+    }
+    submitting = state.chat_busy;
+    updateSend();
+    if (chatFingerprint !== renderedChat) {
+      renderedChat = chatFingerprint;
+      if (messages.length) {
+        const atBottom = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 40;
+        const fragment = document.createDocumentFragment();
+        for (const message of messages) {
+          const bubble = element('div', `message ${message.role}`, '');
+          bubble.append(element('small', '', message.role === 'user' ? 'You' : message.role === 'error' ? 'Oops' : 'Yumon'), element('p', '', message.text));
+          fragment.append(bubble);
+        }
+        chatMessages.replaceChildren(fragment);
+        if (atBottom || submittedMessage) chatMessages.scrollTop = chatMessages.scrollHeight;
+      }
+    }
     nextCheck = state.next_check ? new Date(state.next_check).getTime() : null;
     updateNext();
     const fingerprint = JSON.stringify(state.entries);

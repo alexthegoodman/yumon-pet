@@ -62,10 +62,24 @@ mod desktop {
     #[derive(Clone, Serialize)]
     struct ViewState {
         entries: Vec<Entry>,
+        chat: Vec<ChatMessage>,
+        chat_busy: bool,
+        chat_status: String,
         status: String,
         busy: bool,
         can_refresh: bool,
         next_check: Option<DateTime<Utc>>,
+    }
+
+    #[derive(Clone, Serialize)]
+    struct ChatMessage {
+        role: &'static str,
+        text: String,
+    }
+
+    enum WorkerRequest {
+        Refresh,
+        Chat(String),
     }
 
     #[derive(Debug, Deserialize)]
@@ -76,6 +90,7 @@ mod desktop {
         Drag,
         Close,
         Open { link: String },
+        Chat { message: String },
     }
 
     enum RssEvent {
@@ -83,7 +98,12 @@ mod desktop {
         Ui(Ipc),
     }
 
-    type Commenter = Box<dyn Fn(&str) -> Result<String>>;
+    enum PromptKind {
+        Product,
+        Chat,
+    }
+
+    type Responder = Box<dyn Fn(&str, PromptKind) -> Result<String>>;
 
     /// Keep room for BOS, the Language separator, and at least eight reply tokens.
     /// Trim at UTF-8 boundaries and re-encode, since BPE merges can change at a cut.
@@ -114,6 +134,45 @@ mod desktop {
         }
     }
 
+    fn fit_chat_prompt(
+        message: &str,
+        budget: usize,
+        token_count: impl Fn(&str) -> usize,
+    ) -> Result<String> {
+        let mut prompt = message.trim().to_owned();
+        while token_count(&prompt) > budget {
+            prompt.pop();
+        }
+        anyhow::ensure!(
+            !prompt.trim().is_empty(),
+            "Checkpoint context cannot fit your message"
+        );
+        Ok(prompt)
+    }
+
+    fn answer_chat(state: &mut ViewState, message: String, responder: &Responder) {
+        match responder(&message, PromptKind::Chat) {
+            Ok(reply) => {
+                state.chat.push(ChatMessage {
+                    role: "yumon",
+                    text: reply,
+                });
+                state.chat_status = "Say hello or share an idea.".into();
+            }
+            Err(error) => {
+                state.chat.push(ChatMessage {
+                    role: "error",
+                    text: format!("Could not reply: {error:#}"),
+                });
+                state.chat_status = "Try sending your message again.".into();
+            }
+        }
+        if state.chat.len() > HISTORY_LIMIT {
+            state.chat.drain(..state.chat.len() - HISTORY_LIMIT);
+        }
+        state.chat_busy = false;
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -131,9 +190,56 @@ mod desktop {
                 "Your thoughts on Short?"
             );
         }
+
+        #[test]
+        fn chat_prompt_preserves_direct_messages_and_trims_unicode() {
+            assert_eq!(
+                fit_chat_prompt("  Hello Yumon!  ", 32, |s| s.chars().count()).unwrap(),
+                "Hello Yumon!"
+            );
+            assert_eq!(
+                fit_chat_prompt("Hello 🐾 friend", 7, |s| s.chars().count()).unwrap(),
+                "Hello 🐾"
+            );
+            assert!(fit_chat_prompt("Hello", 0, |s| s.chars().count()).is_err());
+            assert!(fit_chat_prompt(" \n ", 20, |s| s.chars().count()).is_err());
+        }
+
+        #[test]
+        fn chat_replies_and_failures_leave_the_product_schedule_untouched() {
+            let next_check = Some(Utc::now() + chrono::Duration::minutes(5));
+            let mut state = ViewState {
+                entries: Vec::new(),
+                chat: Vec::new(),
+                chat_busy: true,
+                chat_status: "Thinking".into(),
+                status: "Products waiting".into(),
+                busy: false,
+                can_refresh: true,
+                next_check,
+            };
+            let responder: Responder = Box::new(|text, kind| {
+                assert!(matches!(kind, PromptKind::Chat));
+                assert_eq!(text, "Hello Yumon!");
+                Ok("Hello friend!".into())
+            });
+            answer_chat(&mut state, "Hello Yumon!".into(), &responder);
+            assert_eq!(state.chat[0].text, "Hello friend!");
+            assert_eq!(state.chat[0].role, "yumon");
+            assert!(!state.chat_busy);
+            let failed: Responder = Box::new(|_, _| anyhow::bail!("GPU unavailable"));
+            state.chat_busy = true;
+            answer_chat(&mut state, "Try again".into(), &failed);
+            assert_eq!(state.chat[1].role, "error");
+            assert!(state.chat[1].text.contains("GPU unavailable"));
+            assert!(!state.chat_busy);
+            assert_eq!(state.next_check, next_check);
+            assert_eq!(state.status, "Products waiting");
+            assert!(state.entries.is_empty());
+        }
     }
 
-    fn load_commenter(args: &Args) -> Result<Commenter> {
+    fn load_responder(args: &Args) -> Result<Responder> {
         let metadata: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
             PathBuf::from(&args.checkpoint).join("metadata.json"),
         )?)?;
@@ -151,8 +257,20 @@ mod desktop {
                 );
                 // Check before fetching so an unusable context produces one visible error.
                 comment_prompt("idea", config.max_seq_len, &tokenizer)?;
-                Ok(Box::new(move |title: &str| {
-                    let prompt = comment_prompt(title, config.max_seq_len, &tokenizer)?;
+                Ok(Box::new(move |text: &str, kind: PromptKind| {
+                    let prompt = match kind {
+                        PromptKind::Product => {
+                            comment_prompt(text, config.max_seq_len, &tokenizer)?
+                        }
+                        PromptKind::Chat => {
+                            let overhead = 1 + tokenizer.encode(" ").len() + 8;
+                            let budget = config
+                                .max_seq_len
+                                .checked_sub(overhead)
+                                .context("Checkpoint context is too short")?;
+                            fit_chat_prompt(text, budget, |s| tokenizer.encode(s).len())?
+                        }
+                    };
                     let generate: fn(&$model, &TokenizerKind, &str, usize, &_) -> String =
                         $generate;
                     let reply = generate(
@@ -163,9 +281,9 @@ mod desktop {
                         &device,
                     );
                     let reply = reply.trim().to_owned();
-                    anyhow::ensure!(!reply.is_empty(), "Yumon returned an empty comment");
+                    anyhow::ensure!(!reply.is_empty(), "Yumon returned an empty reply");
                     Ok(reply)
-                }) as Commenter)
+                }) as Responder)
             }};
         }
         match args.architecture {
@@ -193,20 +311,22 @@ mod desktop {
         cache_path: PathBuf,
         mut cache: Option<product_hunt::DailyCache>,
         mut state: ViewState,
-        rx: mpsc::Receiver<()>,
+        rx: mpsc::Receiver<WorkerRequest>,
         proxy: EventLoopProxy<RssEvent>,
     ) {
         let publish = |state: &ViewState| proxy.send_event(RssEvent::State(state.clone())).is_ok();
-        let commenter = match load_commenter(&args) {
-            Ok(commenter) => commenter,
+        let responder = match load_responder(&args) {
+            Ok(responder) => responder,
             Err(error) => {
                 state.status = format!("Could not load Yumon: {error:#}");
                 state.busy = false;
+                state.chat_status = "Yumon could not load. See the status below.".into();
                 publish(&state);
                 return;
             }
         };
         state.can_refresh = true;
+        state.chat_status = "Say hello or share an idea.".into();
         let agent = agent();
         let mut deadline = Instant::now();
         let mut refresh = false;
@@ -250,7 +370,7 @@ mod desktop {
                         }
                         // Put the description first: small checkpoints should spend
                         // their limited context on the idea rather than its name.
-                        match commenter(&product.article.description) {
+                        match responder(&product.article.description, PromptKind::Product) {
                             Ok(comment) => {
                                 state.entries.push(Entry {
                                     source: "Product Hunt".into(),
@@ -299,10 +419,34 @@ mod desktop {
             if !publish(&state) {
                 return;
             }
-            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(()) => refresh = true,
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            loop {
+                match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(WorkerRequest::Refresh) => {
+                        refresh = true;
+                        break;
+                    }
+                    Ok(WorkerRequest::Chat(message)) => {
+                        state.chat_busy = true;
+                        state.chat_status = "Yumon is thinking...".into();
+                        state.chat.push(ChatMessage {
+                            role: "user",
+                            text: message.clone(),
+                        });
+                        if !publish(&state) {
+                            return;
+                        }
+                        answer_chat(&mut state, message, &responder);
+                        if !publish(&state) {
+                            return;
+                        }
+                        // Chat uses the same model but leaves the product deadline intact.
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
             }
         }
     }
@@ -365,6 +509,9 @@ mod desktop {
 
         let mut state = ViewState {
             entries,
+            chat: Vec::new(),
+            chat_busy: false,
+            chat_status: "Waking Yumon up...".into(),
             status: "Waking Yumon up...".into(),
             busy: true,
             can_refresh: false,
@@ -443,11 +590,22 @@ mod desktop {
                 Event::UserEvent(RssEvent::Ui(Ipc::Ready)) => ready = true,
                 Event::UserEvent(RssEvent::State(update)) => state = update,
                 Event::UserEvent(RssEvent::Ui(Ipc::Refresh))
-                    if state.can_refresh && !state.busy =>
+                    if state.can_refresh && !state.busy && !state.chat_busy =>
                 {
-                    if tx.try_send(()).is_ok() {
+                    if tx.try_send(WorkerRequest::Refresh).is_ok() {
                         state.busy = true;
                         state.status = "Refreshing Product Hunt...".into();
+                    }
+                }
+                Event::UserEvent(RssEvent::Ui(Ipc::Chat { message }))
+                    if state.can_refresh && !state.busy && !state.chat_busy =>
+                {
+                    let message = message.trim();
+                    if !message.is_empty() && message.chars().count() <= 4096 {
+                        if tx.try_send(WorkerRequest::Chat(message.to_owned())).is_ok() {
+                            state.chat_busy = true;
+                            state.chat_status = "Yumon is thinking...".into();
+                        }
                     }
                 }
                 Event::UserEvent(RssEvent::Ui(Ipc::Drag)) => {

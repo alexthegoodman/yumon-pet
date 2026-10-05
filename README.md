@@ -60,6 +60,14 @@ Yumon waits for a refresh or the next day. Scroll through the products and
 comments, click a product to open it in your browser, or drag the header to move
 the window.
 
+The **Chat** tab lets you send messages to the same local Yumon model. Press Enter
+to send or Shift+Enter for a new line. The product feed continues on its timer
+while you chat; sending waits briefly if Yumon is already reading a product.
+Chat stays available across tab switches and keeps the latest 200 messages for
+the current session. It is not saved when the app closes. Yumon answers the
+current message directly; earlier chat messages are displayed but are not added
+to the model prompt. Long messages are shortened to fit the checkpoint's context.
+
 ```sh
 cargo run --release --bin yumon_rss -- --checkpoint <language-checkpoint> --architecture moe
 cargo run --release --bin yumon_rss -- --check-feeds
