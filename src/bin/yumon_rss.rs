@@ -1,4 +1,4 @@
-//! A quiet desktop news companion: RSS headlines and local Yumon commentary.
+//! A desktop Product Hunt companion with cached products and local commentary.
 #![recursion_limit = "256"]
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -7,10 +7,10 @@ mod rss;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod desktop {
-    use super::rss::{self, Entry, HISTORY_LIMIT, POLL_INTERVAL, SOURCES};
+    use super::rss::{self, Entry, HISTORY_LIMIT, POLL_INTERVAL, product_hunt};
     use anyhow::{Context, Result};
     use burn::backend::Wgpu;
-    use chrono::{DateTime, Utc};
+    use chrono::{DateTime, Local, Utc};
     use clap::{Parser, ValueEnum};
     use serde::{Deserialize, Serialize};
     use std::{
@@ -39,7 +39,7 @@ mod desktop {
     }
 
     #[derive(Parser)]
-    #[command(about = "Yumon RSS: desktop headlines with a little local commentary")]
+    #[command(about = "Yumon RSS: daily Product Hunt ideas with local commentary")]
     struct Args {
         #[arg(
             long,
@@ -51,7 +51,10 @@ mod desktop {
         /// JSON history location (defaults to YumonRSS's local application data).
         #[arg(long)]
         history: Option<PathBuf>,
-        /// Fetch and print the latest headlines without loading a model or window.
+        /// Daily product cache (defaults to producthunt-cache.json beside history).
+        #[arg(long)]
+        cache: Option<PathBuf>,
+        /// Print today's cached Product Hunt descriptions without a model or window.
         #[arg(long)]
         check_feeds: bool,
     }
@@ -101,7 +104,7 @@ mod desktop {
         loop {
             anyhow::ensure!(
                 !headline.trim().is_empty(),
-                "Checkpoint context cannot fit a news headline"
+                "Checkpoint context cannot fit a product description"
             );
             let prompt = format!("Your thoughts on {headline}?");
             if token_count(&prompt) <= budget {
@@ -147,7 +150,7 @@ mod desktop {
                     "Expected Language stage"
                 );
                 // Check before fetching so an unusable context produces one visible error.
-                comment_prompt("news", config.max_seq_len, &tokenizer)?;
+                comment_prompt("idea", config.max_seq_len, &tokenizer)?;
                 Ok(Box::new(move |title: &str| {
                     let prompt = comment_prompt(title, config.max_seq_len, &tokenizer)?;
                     let generate: fn(&$model, &TokenizerKind, &str, usize, &_) -> String =
@@ -187,6 +190,8 @@ mod desktop {
     fn worker(
         args: Args,
         history_path: PathBuf,
+        cache_path: PathBuf,
+        mut cache: Option<product_hunt::DailyCache>,
         mut state: ViewState,
         rx: mpsc::Receiver<()>,
         proxy: EventLoopProxy<RssEvent>,
@@ -203,69 +208,90 @@ mod desktop {
         };
         state.can_refresh = true;
         let agent = agent();
+        let mut deadline = Instant::now();
+        let mut refresh = false;
         loop {
             state.busy = true;
             state.next_check = None;
-            let mut added = 0;
             let mut errors = Vec::new();
-            for source in SOURCES {
-                state.status = format!("Checking {}...", source.name);
+            let day = Local::now().date_naive();
+            if cache.as_ref().is_some_and(|c| c.day != day) {
+                cache = None;
+            }
+            if refresh || cache.is_none() {
+                state.status = "Loading today's Product Hunt products...".into();
                 if !publish(&state) {
                     return;
                 }
-                let article = match rss::fetch_latest(&agent, source) {
-                    Ok(Some(article)) => article,
-                    Ok(None) => {
-                        errors.push(format!("{}: no articles", source.name));
-                        continue;
+                match product_hunt::fetch(&agent, day) {
+                    Ok(mut fetched) => {
+                        if let Some(previous) = &cache {
+                            fetched.commented = previous.commented.clone();
+                        }
+                        if let Err(error) = product_hunt::save(&cache_path, &fetched) {
+                            errors.push(format!("Cache: {error:#}"));
+                        }
+                        cache = Some(fetched);
+                        refresh = false;
                     }
                     Err(error) => {
-                        errors.push(format!("{}: {error:#}", source.name));
-                        continue;
+                        errors.push(format!("Product Hunt: {error:#}"));
+                        refresh = true;
                     }
-                };
-                if rss::already_seen(&state.entries, &article) {
-                    continue;
                 }
-                state.status = format!("Yumon is reading {}...", source.name);
-                if !publish(&state) {
-                    return;
-                }
-                let comment = match commenter(&article.title) {
-                    Ok(comment) => comment,
-                    Err(error) => {
-                        errors.push(format!("{}: {error:#}", source.name));
-                        continue;
+            }
+            // Refresh updates the snapshot without accelerating the comment timer.
+            if Instant::now() >= deadline {
+                if let Some(daily) = &mut cache {
+                    if let Some(product) = daily.next_product().cloned() {
+                        state.status = format!("Yumon is reading {}...", product.article.title);
+                        if !publish(&state) {
+                            return;
+                        }
+                        // Put the description first: small checkpoints should spend
+                        // their limited context on the idea rather than its name.
+                        match commenter(&product.article.description) {
+                            Ok(comment) => {
+                                state.entries.push(Entry {
+                                    source: "Product Hunt".into(),
+                                    article: product.article,
+                                    comment,
+                                    received: Utc::now(),
+                                });
+                                if state.entries.len() > HISTORY_LIMIT {
+                                    state.entries.remove(0);
+                                }
+                                daily.commented.insert(product.id);
+                                if let Err(error) = rss::save_history(&history_path, &state.entries)
+                                {
+                                    errors.push(format!("History: {error:#}"));
+                                }
+                            }
+                            Err(error) => errors.push(format!("Comment: {error:#}")),
+                        }
                     }
-                };
-                state.entries.push(Entry {
-                    source: source.name.into(),
-                    article,
-                    comment,
-                    received: Utc::now(),
-                });
-                if state.entries.len() > HISTORY_LIMIT {
-                    state.entries.remove(0);
                 }
-                added += 1;
-                if let Err(error) = rss::save_history(&history_path, &state.entries) {
-                    errors.push(format!("History: {error:#}"));
-                }
-                if !publish(&state) {
-                    return;
+                deadline = Instant::now() + POLL_INTERVAL;
+            }
+            if let Some(daily) = &cache {
+                if let Err(error) = product_hunt::save(&cache_path, daily) {
+                    errors.push(format!("Cache: {error:#}"));
                 }
             }
             state.busy = false;
-            let deadline = Instant::now() + POLL_INTERVAL;
-            state.next_check = Some(Utc::now() + chrono::Duration::minutes(15));
-            state.status = if errors.is_empty() {
-                if added == 0 {
-                    "All caught up. No new headlines.".into()
-                } else {
-                    format!(
-                        "{added} new headline{}. All caught up.",
-                        if added == 1 { "" } else { "s" }
+            state.next_check = Some(
+                Utc::now()
+                    + chrono::Duration::from_std(
+                        deadline.saturating_duration_since(Instant::now()),
                     )
+                    .unwrap(),
+            );
+            state.status = if errors.is_empty() {
+                let remaining = cache.as_ref().map_or(0, |c| c.remaining());
+                if remaining == 0 {
+                    "All caught up with today's products. Refresh for new arrivals.".into()
+                } else {
+                    format!("{remaining} products waiting. Another thought in five minutes.")
                 }
             } else {
                 format!("{} Will retry on the next check.", errors.join(" · "))
@@ -274,7 +300,8 @@ mod desktop {
                 return;
             }
             match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Ok(()) => refresh = true,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
         }
@@ -301,36 +328,40 @@ mod desktop {
 
     pub fn run() -> Result<()> {
         let args = Args::parse();
-        if args.check_feeds {
-            let agent = agent();
-            let mut failed = false;
-            for source in SOURCES {
-                match rss::fetch_latest(&agent, source) {
-                    Ok(Some(article)) => {
-                        println!("{}: {}\n{}", source.name, article.title, article.link)
-                    }
-                    Ok(None) => {
-                        eprintln!("{}: no articles", source.name);
-                        failed = true;
-                    }
-                    Err(error) => {
-                        eprintln!("{}: {error:#}", source.name);
-                        failed = true;
-                    }
-                }
-            }
-            anyhow::ensure!(!failed, "Some feeds could not be read");
-            return Ok(());
-        }
         let history_path = args.history.clone().unwrap_or_else(|| {
             directories::ProjectDirs::from("", "Yumon", "YumonRSS")
                 .map(|dirs| dirs.data_local_dir().join("history.json"))
                 .unwrap_or_else(|| PathBuf::from("yumon-rss-history.json"))
         });
-        
+        let cache_path = args
+            .cache
+            .clone()
+            .unwrap_or_else(|| history_path.with_file_name("producthunt-cache.json"));
+        anyhow::ensure!(
+            cache_path != history_path,
+            "Cache and history must use different files"
+        );
+        let day = Local::now().date_naive();
+        let cache = product_hunt::load(&cache_path, day)?;
+        if args.check_feeds {
+            let cache = match cache {
+                Some(cache) => cache,
+                None => {
+                    let cache = product_hunt::fetch(&agent(), day)?;
+                    product_hunt::save(&cache_path, &cache)?;
+                    cache
+                }
+            };
+            for product in cache.products {
+                println!(
+                    "{}\n{}\n{}\n",
+                    product.article.title, product.article.description, product.article.link
+                );
+            }
+            return Ok(());
+        }
         // Never overwrite an unreadable history with an empty one.
-        // let entries: Vec<Entry> = rss::load_history(&history_path)?;
-        let entries: Vec<Entry> = Vec::new(); // dont want to load old history yet
+        let entries = rss::load_history(&history_path)?;
 
         let mut state = ViewState {
             entries,
@@ -386,7 +417,17 @@ mod desktop {
         };
         let (tx, rx) = mpsc::sync_channel(1);
         let worker_state = state.clone();
-        thread::spawn(move || worker(args, history_path, worker_state, rx, proxy));
+        thread::spawn(move || {
+            worker(
+                args,
+                history_path,
+                cache_path,
+                cache,
+                worker_state,
+                rx,
+                proxy,
+            )
+        });
         let mut ready = false;
         event_loop.run(move |event, _, control_flow| {
             *control_flow = ControlFlow::Wait;
@@ -406,7 +447,7 @@ mod desktop {
                 {
                     if tx.try_send(()).is_ok() {
                         state.busy = true;
-                        state.status = "Checking the news...".into();
+                        state.status = "Refreshing Product Hunt...".into();
                     }
                 }
                 Event::UserEvent(RssEvent::Ui(Ipc::Drag)) => {

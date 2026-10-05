@@ -3,7 +3,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{io::Read, path::Path, time::Duration};
 
-pub const POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
+pub mod product_hunt;
+
+pub const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub const HISTORY_LIMIT: usize = 200;
 
 pub struct Source {
@@ -15,6 +17,7 @@ pub struct Source {
 // https://www.theverge.com/rss/index.xml
 // https://www.wired.com/feed/rss
 // https://www.politico.com/rss
+// https://www.technologyreview.com/feed
 
 // Edit this list to change Yumon's news sources. These are RSS 2.0 feeds.
 pub const SOURCES: &[Source] = &[
@@ -30,21 +33,25 @@ pub const SOURCES: &[Source] = &[
     //     name: "NASA",
     //     url: "https://www.nasa.gov/feed/",
     // },
-    Source {
-        name: "Hacker News",
-        url: "https://news.ycombinator.com/rss",
-    },
     // Source {
-    //     name: "The Verge",
-    //     url: "https://www.theverge.com/rss/index.xml",
+    //     name: "Hacker News",
+    //     url: "https://news.ycombinator.com/rss",
+    // },
+    // // Source {
+    // //     name: "The Verge",
+    // //     url: "https://www.theverge.com/rss/index.xml",
+    // // },
+    // Source {
+    //     name: "Wired",
+    //     url: "https://www.wired.com/feed/rss",
+    // },
+    // Source {
+    //     name: "Politico",
+    //     url: "https://rss.politico.com/politics-news.xml",
     // },
     Source {
-        name: "Wired",
-        url: "https://www.wired.com/feed/rss",
-    },
-    Source {
-        name: "Politico",
-        url: "https://rss.politico.com/politics-news.xml",
+        name: "MIT",
+        url: "https://www.technologyreview.com/feed",
     },
 ];
 
@@ -53,6 +60,8 @@ pub struct Article {
     pub title: String,
     pub link: String,
     pub published: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -107,6 +116,7 @@ pub fn latest_article(xml: &str) -> Result<Option<Article>> {
             Some(Article {
                 title,
                 link,
+                description: String::new(),
                 published: DateTime::parse_from_rfc2822(item.published.trim())
                     .ok()
                     .map(|d| d.with_timezone(&Utc)),
@@ -157,13 +167,17 @@ pub fn load_history(path: &Path) -> Result<Vec<Entry>> {
 }
 
 pub fn save_history(path: &Path, history: &[Entry]) -> Result<()> {
+    save_json(path, history)
+}
+
+pub fn save_json(path: &Path, value: &(impl Serialize + ?Sized)) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
     let mut temporary = path.as_os_str().to_os_string();
     temporary.push(".tmp");
     let temporary = std::path::PathBuf::from(temporary);
-    std::fs::write(&temporary, serde_json::to_vec_pretty(history)?)?;
+    std::fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
     std::fs::rename(&temporary, path)
         .with_context(|| format!("Could not save history to {}", path.display()))
 }
@@ -202,6 +216,7 @@ mod tests {
     fn duplicate_detection_uses_article_link() {
         let article = Article {
             title: "News".into(),
+            description: String::new(),
             link: "https://example.com/news".into(),
             published: None,
         };
@@ -228,6 +243,7 @@ mod tests {
                 source: "Test".into(),
                 article: Article {
                     title: format!("News {n}"),
+                    description: String::new(),
                     link: format!("https://example.com/{n}"),
                     published: None,
                 },

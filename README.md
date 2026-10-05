@@ -35,7 +35,7 @@ You may need clang for chat_web.
 - `cargo run --release --bin chat_ui` to get started chatting
 - `cargo run --release --bin yumon_world` to start a Yumon World simulation
 - `cargo run --release --bin yumon_universe -- --checkpoint <language-checkpoint> --seed 42 --theme suburban|urban` to explore a procedural neighborhood or downtown (Windows, desktop feature)
-- `cargo run --release --bin yumon_rss -- --checkpoint <language-checkpoint>` for a transparent desktop news companion (desktop feature)
+- `cargo run --release --bin yumon_rss -- --checkpoint <language-checkpoint>` for a desktop Product Hunt companion (desktop feature)
 - `cargo run --release --bin endless_data` TUI to answer endless questions in order to generate some data
 - `cargo run --release --bin train_bpe` train your tokenizer on your data
 
@@ -44,13 +44,21 @@ You may need clang for chat_web.
 ### Yumon RSS
 
 Yumon RSS sits in the bottom-left desktop corner in a transparent, always-on-top
-window. It checks BBC World, Guardian Science, and NASA on launch and every
-15 minutes after each check completes. Each check takes at most the newest article
-from each source, skips links already in history, and asks the local Yumon model
-for a short reaction to the headline. It reads titles only, not article bodies.
-There are no emotes or chat input; scroll through the news and comments, click a
-headline to open it in your browser, drag the header to move the window, or use
-the refresh and close buttons.
+window. It loads Product Hunt's public daily Atom feed and caches the product
+list on disk. No API token is needed. Yumon reacts to one product description
+on launch, then another every five minutes after each comment completes. Each
+card shows the product, its feed description (usually a short tagline), and
+Yumon's comment. This covers products available in the public feed, rather than
+every submission or full product-page description.
+
+The snapshot is reused for the rest of the local calendar day, including after
+restarting. At the first turn after the date changes, a new snapshot is fetched.
+Submission dates are not used to filter products: a product may be featured later
+than its submission. Refresh reloads the feed to pick up new arrivals while
+preserving the comment queue and five-minute timer. Once the queue is exhausted,
+Yumon waits for a refresh or the next day. Scroll through the products and
+comments, click a product to open it in your browser, or drag the header to move
+the window.
 
 ```sh
 cargo run --release --bin yumon_rss -- --checkpoint <language-checkpoint> --architecture moe
@@ -59,16 +67,20 @@ cargo run --release --bin yumon_rss -- --check-feeds
 
 The default checkpoint matches `chat_ui` and `yumon_universe`. Use
 `--architecture moe|xlstm|encoder-decoder` to match your **Language-stage**
-checkpoint. Long headlines are shortened for the model's context window while
-the complete title remains visible. Comments come from the local model and may
+checkpoint. Long descriptions are shortened for the model's context window while
+the complete feed description remains visible. Comments come from the local model and may
 be imperfect.
 
 The latest 200 entries are saved in the platform's local application data folder
 (`%LOCALAPPDATA%\Yumon\YumonRSS\data\history.json` on Windows). Use
-`--history <path>` to choose a different JSON file. Unreadable history files
-produce an error rather than being overwritten. Feed failures appear in the
-window and are retried on the next check. Edit `SOURCES` in `src/bin/rss/mod.rs`
-to change the hardcoded RSS 2.0 feed links.
+`--history <path>` to choose a different JSON file. The daily snapshot and completed
+product IDs are saved in `producthunt-cache.json` beside history; use `--cache <path>`
+to override it. Restarting resumes the queue without repeating completed products
+from that snapshot. `--check-feeds` prints cached products and descriptions without
+loading a model or window (and fetches them if no current cache exists).
+Unreadable history or cache files produce an error rather than being overwritten.
+Feed failures appear in the window and retry at the next turn; an existing cache
+for today can still be used if a manual refresh fails.
 
 ```sh
 cargo test --bin yumon_rss

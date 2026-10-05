@@ -32,6 +32,7 @@
   time { margin-left: auto; white-space: nowrap; }
   .headline { display: block; text-align: left; width: 100%; padding: 0; font-size: 14px; font-weight: 550; line-height: 1.45; color: #e2eee7; border-radius: 2px; overflow-wrap: anywhere; }
   .headline:hover { background: none; color: #b8edcb; }
+  .description { margin: 7px 0 0; font-size: 12px; line-height: 1.5; color: #92aa9a; overflow-wrap: anywhere; }
   .comment { border-left: 2px solid #83bd99; margin: 11px 0 0; padding: 1px 0 1px 10px; }
   .comment small { font-size: 10px; color: #9dd8b3; }
   .comment p { margin: 4px 0 0; font-size: 13px; line-height: 1.55; color: #c4d8ca; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -41,13 +42,13 @@
 </style>
 </head>
 <body>
-<section id="shell" aria-label="Yumon RSS news companion">
+<section id="shell" aria-label="Yumon Product Hunt companion">
   <header id="drag"><span class="live" aria-hidden="true"></span><h1>yumon <span>rss</span></h1>
-    <div class="controls"><button class="control" id="refresh" aria-label="Check for news now" title="Check for news now" disabled>↻</button><button class="control" id="close" aria-label="Close Yumon RSS" title="Close">×</button></div>
+    <div class="controls"><button class="control" id="refresh" aria-label="Refresh today's products" title="Refresh today's products" disabled>↻</button><button class="control" id="close" aria-label="Close Yumon RSS" title="Close">×</button></div>
   </header>
-  <p id="tagline">A little news. A little Yumon.</p>
-  <main id="history" aria-label="Headlines and Yumon's comments"><div id="empty"><strong>The world has stories.</strong><p>Yumon will pick up the latest headlines and share a thought here.</p></div></main>
-  <footer><p id="status" role="status">Waking Yumon up...</p><small id="next">BBC World · Guardian Science · NASA</small></footer>
+  <p id="tagline">Fresh products. A little Yumon.</p>
+  <main id="history" aria-label="Products and Yumon's comments"><div id="empty"><strong>What will they build next?</strong><p>Yumon will read today's Product Hunt ideas and share a thought every five minutes.</p></div></main>
+  <footer><p id="status" role="status">Waking Yumon up...</p><small id="next">Product Hunt · Daily products</small></footer>
 </section>
 <script>
   const send = (type, extra = {}) => window.ipc?.postMessage(JSON.stringify({ type, ...extra }));
@@ -68,8 +69,8 @@
   };
   const updateNext = () => {
     document.getElementById('next').textContent = nextCheck
-      ? `Next check in ${Math.max(0, Math.ceil((nextCheck - Date.now()) / 60000))} min · Every 15 min`
-      : 'BBC World · Guardian Science · NASA';
+      ? `Next turn in ${Math.max(0, Math.ceil((nextCheck - Date.now()) / 60000))} min · Every 5 min`
+      : 'Product Hunt · Daily products';
   };
   window.__yumon_rss = state => {
     document.getElementById('status').textContent = state.status;
@@ -88,17 +89,19 @@
       const article = document.createElement('article');
       const meta = element('div', 'meta', '');
       meta.append(element('span', 'source', entry.source));
-      const date = new Date(entry.article.published || entry.received);
+      const date = new Date(entry.received);
       const time = element('time', '', date.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }));
       time.dateTime = date.toISOString();
       time.title = date.toLocaleString();
       meta.append(time);
       const headline = element('button', 'headline', entry.article.title);
-      headline.title = 'Open article in your browser';
+      headline.title = 'Open product in your browser';
       headline.addEventListener('click', () => send('open', { link: entry.article.link }));
       const comment = element('div', 'comment', '');
       comment.append(element('small', '', 'Yumon'), element('p', '', entry.comment));
-      article.append(meta, headline, comment);
+      article.append(meta, headline);
+      if (entry.article.description) article.append(element('p', 'description', entry.article.description));
+      article.append(comment);
       fragment.append(article);
     }
     history.replaceChildren(fragment);
