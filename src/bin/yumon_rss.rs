@@ -27,7 +27,10 @@ mod desktop {
     };
     use wry::WebViewBuilder;
     use yumon_pet::brain::{
-        bpe::TokenizerKind, model::YumonBrain, moe_model::YumonMoeBrain, samples::TrainingStage,
+        bpe::TokenizerKind,
+        model::YumonBrain,
+        moe_model::YumonMoeBrain,
+        samples::{TrainingStage, language_prompt},
         xlstm_model::YumonXLstmBrain,
     };
 
@@ -43,7 +46,7 @@ mod desktop {
     struct Args {
         #[arg(
             long,
-            default_value = "D:/models/runpod/256h_32l_4a_32len_b32_Moe_e4_k1_Language_600k"
+            default_value = "D:/models/runpod/256h_32l_4a_256len_b32_Moe_e4_k1_Language_800k"
         )]
         checkpoint: String,
         #[arg(long, value_enum, default_value = "moe")]
@@ -103,7 +106,7 @@ mod desktop {
         Chat,
     }
 
-    type Responder = Box<dyn Fn(&str, PromptKind) -> Result<String>>;
+    type Responder = Box<dyn Fn(&str, PromptKind, &[ChatMessage]) -> Result<String>>;
 
     /// Keep room for BOS, the Language separator, and at least eight reply tokens.
     /// Trim at UTF-8 boundaries and re-encode, since BPE merges can change at a cut.
@@ -151,7 +154,7 @@ mod desktop {
     }
 
     fn answer_chat(state: &mut ViewState, message: String, responder: &Responder) {
-        match responder(&message, PromptKind::Chat) {
+        match responder(&message, PromptKind::Chat, &state.chat) {
             Ok(reply) => {
                 state.chat.push(ChatMessage {
                     role: "yumon",
@@ -173,9 +176,98 @@ mod desktop {
         state.chat_busy = false;
     }
 
+    fn chat_prompt(
+        message: &str,
+        history: &[ChatMessage],
+        context: usize,
+        tokenizer: &TokenizerKind,
+    ) -> Result<String> {
+        // Reserve up to 64 reply tokens (including EOS), with room for older checkpoints.
+        let reply_tokens = (context / 4).clamp(8, 64);
+        let budget = context
+            .checked_sub(1 + tokenizer.encode(" ").len() + reply_tokens)
+            .context("Checkpoint context is too short")?;
+        let message = fit_chat_prompt(message, budget, |s| tokenizer.encode(s).len())?;
+        // Only adjacent, successful exchanges form memories. The pending current
+        // user message and failed replies never form a pair.
+        let memories = history.windows(2).filter_map(|pair| {
+            (pair[0].role == "user" && pair[1].role == "yumon")
+                .then_some((pair[0].text.as_str(), pair[1].text.as_str()))
+        });
+        language_prompt(&message, memories, tokenizer, budget)
+            .context("Checkpoint context cannot fit your message")
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn tokenizer() -> TokenizerKind {
+            TokenizerKind::Bpe(yumon_pet::brain::bpe::BpeTokenizer::load("yumon_bpe").unwrap())
+        }
+
+        fn chat(role: &'static str, text: &str) -> ChatMessage {
+            ChatMessage {
+                role,
+                text: text.into(),
+            }
+        }
+
+        #[test]
+        fn chat_memories_match_training_and_exclude_failures_and_pending_messages() {
+            let tokenizer = tokenizer();
+            let history = vec![
+                chat("user", "My favorite color is blue."),
+                chat("yumon", "I like blue too."),
+                chat("user", "A failed question."),
+                chat("error", "Could not reply: GPU unavailable"),
+                chat("user", "Remember it?"),
+                chat("yumon", "Yes, blue."),
+                chat("user", "What color?"),
+            ];
+            let prompt = chat_prompt("What color?", &history, 256, &tokenizer).unwrap();
+            assert_eq!(
+                prompt,
+                "Human: My favorite color is blue.\nYumon: I like blue too.\nHuman: Remember it?\nYumon: Yes, blue.\nHuman: What color?"
+            );
+            assert_eq!(
+                chat_prompt("What color?", &[], 256, &tokenizer).unwrap(),
+                "What color?"
+            );
+            assert_eq!(
+                chat_prompt("What color?", &history[2..4], 256, &tokenizer).unwrap(),
+                "What color?"
+            );
+            assert!(1 + tokenizer.encode(&prompt).len() + tokenizer.encode(" ").len() + 64 <= 256);
+        }
+
+        #[test]
+        fn chat_budget_keeps_recent_complete_turns_and_reserves_reply_space() {
+            let tokenizer = tokenizer();
+            let history = vec![
+                chat("user", &"An old memory with many words. ".repeat(100)),
+                chat("yumon", "An old answer."),
+                chat("user", "My favorite color is blue."),
+                chat("yumon", "I like blue too."),
+            ];
+            let prompt = chat_prompt("What color?", &history, 256, &tokenizer).unwrap();
+            assert_eq!(
+                prompt,
+                "Human: My favorite color is blue.\nYumon: I like blue too.\nHuman: What color?"
+            );
+            let long = "Hello 🐾 friend! ".repeat(200);
+            for context in [32, 256] {
+                let prompt = chat_prompt(&long, &history, context, &tokenizer).unwrap();
+                assert!(long.starts_with(&prompt));
+                assert!(
+                    1 + tokenizer.encode(&prompt).len()
+                        + tokenizer.encode(" ").len()
+                        + (context / 4).clamp(8, 64)
+                        <= context
+                );
+            }
+            assert!(chat_prompt("Hello", &history, 8, &tokenizer).is_err());
+        }
 
         #[test]
         fn long_unicode_headlines_fit_without_splitting_characters() {
@@ -210,7 +302,7 @@ mod desktop {
             let next_check = Some(Utc::now() + chrono::Duration::minutes(5));
             let mut state = ViewState {
                 entries: Vec::new(),
-                chat: Vec::new(),
+                chat: vec![chat("user", "Hello Yumon!")],
                 chat_busy: true,
                 chat_status: "Thinking".into(),
                 status: "Products waiting".into(),
@@ -218,20 +310,21 @@ mod desktop {
                 can_refresh: true,
                 next_check,
             };
-            let responder: Responder = Box::new(|text, kind| {
+            let responder: Responder = Box::new(|text, kind, history| {
                 assert!(matches!(kind, PromptKind::Chat));
                 assert_eq!(text, "Hello Yumon!");
+                assert_eq!(history[0].text, "Hello Yumon!");
                 Ok("Hello friend!".into())
             });
             answer_chat(&mut state, "Hello Yumon!".into(), &responder);
-            assert_eq!(state.chat[0].text, "Hello friend!");
-            assert_eq!(state.chat[0].role, "yumon");
+            assert_eq!(state.chat[1].text, "Hello friend!");
+            assert_eq!(state.chat[1].role, "yumon");
             assert!(!state.chat_busy);
-            let failed: Responder = Box::new(|_, _| anyhow::bail!("GPU unavailable"));
+            let failed: Responder = Box::new(|_, _, _| anyhow::bail!("GPU unavailable"));
             state.chat_busy = true;
             answer_chat(&mut state, "Try again".into(), &failed);
-            assert_eq!(state.chat[1].role, "error");
-            assert!(state.chat[1].text.contains("GPU unavailable"));
+            assert_eq!(state.chat[2].role, "error");
+            assert!(state.chat[2].text.contains("GPU unavailable"));
             assert!(!state.chat_busy);
             assert_eq!(state.next_check, next_check);
             assert_eq!(state.status, "Products waiting");
@@ -257,33 +350,30 @@ mod desktop {
                 );
                 // Check before fetching so an unusable context produces one visible error.
                 comment_prompt("idea", config.max_seq_len, &tokenizer)?;
-                Ok(Box::new(move |text: &str, kind: PromptKind| {
-                    let prompt = match kind {
-                        PromptKind::Product => {
-                            comment_prompt(text, config.max_seq_len, &tokenizer)?
-                        }
-                        PromptKind::Chat => {
-                            let overhead = 1 + tokenizer.encode(" ").len() + 8;
-                            let budget = config
-                                .max_seq_len
-                                .checked_sub(overhead)
-                                .context("Checkpoint context is too short")?;
-                            fit_chat_prompt(text, budget, |s| tokenizer.encode(s).len())?
-                        }
-                    };
-                    let generate: fn(&$model, &TokenizerKind, &str, usize, &_) -> String =
-                        $generate;
-                    let reply = generate(
-                        &brain,
-                        &tokenizer,
-                        &prompt,
-                        config.max_seq_len.min(64),
-                        &device,
-                    );
-                    let reply = reply.trim().to_owned();
-                    anyhow::ensure!(!reply.is_empty(), "Yumon returned an empty reply");
-                    Ok(reply)
-                }) as Responder)
+                Ok(Box::new(
+                    move |text: &str, kind: PromptKind, history: &[ChatMessage]| {
+                        let prompt = match kind {
+                            PromptKind::Product => {
+                                comment_prompt(text, config.max_seq_len, &tokenizer)?
+                            }
+                            PromptKind::Chat => {
+                                chat_prompt(text, history, config.max_seq_len, &tokenizer)?
+                            }
+                        };
+                        let generate: fn(&$model, &TokenizerKind, &str, usize, &_) -> String =
+                            $generate;
+                        let reply = generate(
+                            &brain,
+                            &tokenizer,
+                            &prompt,
+                            config.max_seq_len.min(64),
+                            &device,
+                        );
+                        let reply = reply.trim().to_owned();
+                        anyhow::ensure!(!reply.is_empty(), "Yumon returned an empty reply");
+                        Ok(reply)
+                    },
+                ) as Responder)
             }};
         }
         match args.architecture {
@@ -370,7 +460,7 @@ mod desktop {
                         }
                         // Put the description first: small checkpoints should spend
                         // their limited context on the idea rather than its name.
-                        match responder(&product.article.description, PromptKind::Product) {
+                        match responder(&product.article.description, PromptKind::Product, &[]) {
                             Ok(comment) => {
                                 state.entries.push(Entry {
                                     source: "Product Hunt".into(),

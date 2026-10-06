@@ -64,16 +64,20 @@ The **Chat** tab lets you send messages to the same local Yumon model. Press Ent
 to send or Shift+Enter for a new line. The product feed continues on its timer
 while you chat; sending waits briefly if Yumon is already reading a product.
 Chat stays available across tab switches and keeps the latest 200 messages for
-the current session. It is not saved when the app closes. Yumon answers the
-current message directly; earlier chat messages are displayed but are not added
-to the model prompt. Long messages are shortened to fit the checkpoint's context.
+the current session. It is not saved when the app closes. Successful earlier
+exchanges are included as natural-language memories using the same `Human:` /
+`Yumon:` format as Language training. The latest complete turns are kept in
+chronological order, dropping oldest turns to fit the checkpoint's context and
+reserve reply space. With no fitting memories, the prompt is just the current
+message. Long messages are shortened to fit; errors are excluded from memories.
 
 ```sh
 cargo run --release --bin yumon_rss -- --checkpoint <language-checkpoint> --architecture moe
 cargo run --release --bin yumon_rss -- --check-feeds
 ```
 
-The default checkpoint matches `chat_ui` and `yumon_universe`. Use
+The default checkpoint is the 256-token MoE Language run at
+`D:/models/runpod/256h_32l_4a_256len_b32_Moe_e4_k1_Language_800k`. Use
 `--architecture moe|xlstm|encoder-decoder` to match your **Language-stage**
 checkpoint. Long descriptions are shortened for the model's context window while
 the complete feed description remains visible. Comments come from the local model and may
