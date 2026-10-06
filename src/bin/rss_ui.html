@@ -53,6 +53,8 @@
   .message small { color: #9dd8b3; font-size: 10px; }
   .message p { margin: 4px 0 0; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
   #chat-form { padding: 0 14px 12px; }
+  .chat-actions { display: flex; justify-content: flex-end; padding: 0 14px 4px; }
+  #chat-clear { padding: 5px 8px; font-size: 11px; border-color: rgba(157, 216, 179, .24); }
   .composer { display: flex; align-items: flex-end; gap: 6px; }
   #chat-input { flex: 1; min-width: 0; resize: none; border: 1px solid rgba(157, 216, 179, .24); border-radius: 8px; padding: 9px; color: #e2eee7; background: rgba(0, 0, 0, .15); font: inherit; font-size: 12px; line-height: 1.5; }
   #chat-input:focus { outline: 2px solid #9dd8b3; outline-offset: 1px; }
@@ -72,6 +74,7 @@
   </nav>
   <main id="history" role="tabpanel" aria-labelledby="products-tab"><div id="empty"><strong>What will they build next?</strong><p>Yumon will read today's Product Hunt ideas and share a thought every five minutes.</p></div></main>
   <section id="chat-panel" role="tabpanel" aria-labelledby="chat-tab" hidden>
+    <div class="chat-actions"><button id="chat-clear" type="button" disabled>Clear Chat</button></div>
     <div id="chat-messages" role="log" aria-label="Conversation with Yumon" aria-live="polite"><p class="chat-empty">Say hello, ask a question, or share a business idea with Yumon.</p></div>
     <form id="chat-form">
       <div class="composer"><textarea id="chat-input" rows="2" maxlength="4096" placeholder="Say something to Yumon..." aria-label="Message to Yumon"></textarea><button id="chat-send" type="submit" disabled>Send</button></div>
@@ -88,6 +91,7 @@
   const chatMessages = document.getElementById('chat-messages');
   const chatInput = document.getElementById('chat-input');
   const chatSend = document.getElementById('chat-send');
+  const chatClear = document.getElementById('chat-clear');
   const tabs = [...document.querySelectorAll('[role="tab"]')];
   let canChat = false;
   let submitting = false;
@@ -122,6 +126,12 @@
   }
   const updateSend = () => { chatSend.disabled = !canChat || submitting || !chatInput.value.trim(); };
   chatInput.addEventListener('input', updateSend);
+  chatClear.addEventListener('click', () => {
+    if (chatClear.disabled) return;
+    chatClear.disabled = true;
+    send('clear_chat');
+    chatInput.focus();
+  });
   document.getElementById('chat-form').addEventListener('submit', event => {
     event.preventDefault();
     const message = chatInput.value.trim();
@@ -161,6 +171,7 @@
     document.getElementById('chat-status').textContent = state.busy && state.can_refresh
       ? 'Yumon is reading products. You can send your message shortly.' : state.chat_status;
     const messages = state.chat || [];
+    chatClear.disabled = !canChat || submitting || !messages.length;
     const chatFingerprint = JSON.stringify(messages);
     if (submittedMessage && chatFingerprint !== submittedChatFingerprint && messages.findLast(message => message.role === 'user')?.text === submittedMessage) {
       if (chatInput.value.trim() === submittedMessage) chatInput.value = '';
@@ -180,6 +191,8 @@
         }
         chatMessages.replaceChildren(fragment);
         if (atBottom || submittedMessage) chatMessages.scrollTop = chatMessages.scrollHeight;
+      } else {
+        chatMessages.replaceChildren(element('p', 'chat-empty', 'Say hello, ask a question, or share a business idea with Yumon.'));
       }
     }
     nextCheck = state.next_check ? new Date(state.next_check).getTime() : null;

@@ -83,6 +83,7 @@ mod desktop {
     enum WorkerRequest {
         Refresh,
         Chat(String),
+        ClearChat,
     }
 
     #[derive(Debug, Deserialize)]
@@ -94,6 +95,7 @@ mod desktop {
         Close,
         Open { link: String },
         Chat { message: String },
+        ClearChat,
     }
 
     enum RssEvent {
@@ -534,6 +536,13 @@ mod desktop {
                             break;
                         }
                     }
+                    Ok(WorkerRequest::ClearChat) => {
+                        state.chat.clear();
+                        state.chat_status = "Say hello or share an idea.".into();
+                        if !publish(&state) {
+                            return;
+                        }
+                    }
                     Err(mpsc::RecvTimeoutError::Timeout) => break,
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 }
@@ -697,6 +706,11 @@ mod desktop {
                             state.chat_status = "Yumon is thinking...".into();
                         }
                     }
+                }
+                Event::UserEvent(RssEvent::Ui(Ipc::ClearChat))
+                    if state.can_refresh && !state.busy && !state.chat_busy =>
+                {
+                    let _ = tx.try_send(WorkerRequest::ClearChat);
                 }
                 Event::UserEvent(RssEvent::Ui(Ipc::Drag)) => {
                     let _ = window.drag_window();
