@@ -97,11 +97,42 @@ cargo test --bin yumon_rss
 
 ### Training on RunPod (Docker)
 
+The next Language run uses a **256-token** context. Chat inputs include earlier
+turns from the same conversation as plain dialogue, for example:
+
+```text
+Human: My favorite color is blue.
+Yumon: I like blue too.
+Human: What color did I choose?
+```
+
+The target remains just `You chose blue.` (plus the existing EOS token). With no
+history, the input remains the original message. The latest complete turns are
+kept in chronological order; oldest turns are dropped to leave space for BOS,
+the existing Language separator, the current message, and the full reply with
+EOS. Samples whose current message and reply cannot fit are skipped. Short
+replies stay eligible at 256 tokens. Independent sentence/pair sources have no
+invented conversation history.
+
+Verify the formatting, token budgets, unchanged targets, conversation isolation,
+and a sample of the real chat corpus without a GPU training run:
+
+```sh
+cargo test --lib --no-default-features language_ -- --nocapture
+```
+
+Rebuild the Docker image to include these changes. Run directories now contain
+`256len`, so the trainer starts a new context-size run rather than resuming a
+32-token checkpoint. The existing MoE expert/top-k sweep is retained. A longer
+context increases GPU memory use; choose `--batch-size` for the pod's capacity
+when using MoE.
+
 The training path (`brain::train::run`, driven by `train-brain`) builds headless with
 `--no-default-features` - this skips the desktop/GUI feature (native window, webview,
 3D engine, gamepad) that the other bins use, so the Docker image needs no GTK/WebKit/
-udev packages. It still uses burn's `Wgpu` backend (Vulkan), so all it needs at
-runtime is `libvulkan1` + the GPU's driver.
+udev packages. Headless Linux training uses Burn's CUDA backend; desktop/local
+training retains WGPU. The Docker runtime includes CUDA's runtime compiler and
+uses the pod's NVIDIA driver.
 
 1. **Build and push the image** (from a machine with Docker and the full repo checked
    out, since the image bakes in `yumon_bpe/` and the text training data):
@@ -119,8 +150,9 @@ runtime is `libvulkan1` + the GPU's driver.
    `train-brain` and writes checkpoints to `/workspace/checkpoints/brain/<run-name>/`
    (`model.bin`, `metadata.json`, tokenizer copy, and a loss-chart PNG per stage) -
    same run configs (model sizes/epochs/stages) as `src/brain/train.rs` uses locally,
-   since the CLI's `--epochs`/`--batch-size`/`--max-articles` flags are legacy no-ops
-   for this path; edit the `runs` vec in that file to change them. Training resumes
+   configured in the training grid. MoE honors `--epochs` and `--batch-size`;
+   other architectures use the grid's duration and batch size. `--max-articles`
+   is unused for this path. Training resumes
    automatically from whatever's already in a run's checkpoint directory.
 
 4. **Pull checkpoints down** once you're happy with a run (or periodically - it saves
@@ -128,10 +160,8 @@ runtime is `libvulkan1` + the GPU's driver.
    pod/volume, or `runpodctl send`/`scp` if you've enabled SSH on the pod, to copy
    `/workspace/checkpoints/brain/` to your machine.
 
-If wgpu can't find a GPU at startup, exec into the pod and run `vulkaninfo --summary`
-to confirm the NVIDIA Vulkan ICD is visible (RunPod's nvidia-container-toolkit should
-mount it automatically given `NVIDIA_DRIVER_CAPABILITIES=graphics,compute,utility`,
-already set in the image).
+For CUDA startup failures, check `nvidia-smi` in the pod and verify that the
+host driver supports the CUDA version in the Docker runtime image.
 
 ## Sparse MoE training
 

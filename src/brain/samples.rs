@@ -807,6 +807,7 @@ pub fn prepare_paired_samples_split(
     let mut samples = Vec::new();
 
     let analyzer = EmotionAnalyzer::new();
+    let language_separator_len = tokenizer.encode(" ").len();
 
     for sent in sentences {
         if bad_words.iter().any(|&w| sent.to_lowercase().contains(w)) { continue; }
@@ -968,8 +969,10 @@ pub fn prepare_paired_samples_split(
         // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
         // if enc_input.len() + target_encoded.len() < max_seq_len / 4 { continue; }
 
-        if target_encoded.len() < max_seq_len / 10 { continue; }
-        if enc_input.len() < max_seq_len / 10 { continue; }
+        if stage == TrainingStage::Language && enc_input.len() + language_separator_len + target_labels.len() > max_seq_len { continue; }
+
+        if stage == TrainingStage::Structured && target_encoded.len() < max_seq_len / 10 { continue; }
+        if stage == TrainingStage::Structured && enc_input.len() < max_seq_len / 10 { continue; }
         if target_encoded.len() > max_seq_len { continue; }
         if enc_input.len() > max_seq_len { continue; }
         // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
@@ -1012,6 +1015,7 @@ pub fn prepare_paired_samples_split_sep(
     let mut samples = Vec::new();
 
     let analyzer = EmotionAnalyzer::new();
+    let language_separator_len = tokenizer.encode(" ").len();
 
     for sents in sentences {
         let sent_a = sents.0;
@@ -1166,8 +1170,10 @@ pub fn prepare_paired_samples_split_sep(
         // if target_encoded.len() < max_seq_len / 4 { continue; }
         // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
 
-        if target_encoded.len() < max_seq_len / 10 { continue; }
-        if enc_input.len() < max_seq_len / 10 { continue; }
+        if stage == TrainingStage::Language && enc_input.len() + language_separator_len + target_labels.len() > max_seq_len { continue; }
+
+        if stage == TrainingStage::Structured && target_encoded.len() < max_seq_len / 10 { continue; }
+        if stage == TrainingStage::Structured && enc_input.len() < max_seq_len / 10 { continue; }
         if target_encoded.len() > max_seq_len { continue; }
         if enc_input.len() > max_seq_len { continue; }
 
@@ -1193,6 +1199,27 @@ pub fn prepare_paired_samples_split_sep(
     samples
 }
 
+/// Render prior turns as plain dialogue, newest complete turns first for budgeting,
+/// then chronological in the prompt. An empty history keeps the original input.
+/// `max_input_tokens` excludes BOS, separator, and the reply (including EOS).
+pub fn language_prompt<'a>(
+    message: &str,
+    memories: impl DoubleEndedIterator<Item = (&'a str, &'a str)>,
+    tokenizer: &TokenizerKind,
+    max_input_tokens: usize,
+) -> Option<String> {
+    let mut prompt = message.to_string();
+    if tokenizer.encode(&prompt).len() > max_input_tokens { return None; }
+    let mut turns = Vec::new();
+    for (human, yumon) in memories.rev() {
+        turns.insert(0, format!("Human: {human}\nYumon: {yumon}\n"));
+        let candidate = format!("{}Human: {message}", turns.concat());
+        if tokenizer.encode(&candidate).len() > max_input_tokens { break; }
+        prompt = candidate;
+    }
+    Some(prompt)
+}
+
 pub fn prepare_paired_samples_chats(
     chats:         HandcraftedChats,
     tokenizer:     &TokenizerKind,
@@ -1208,6 +1235,7 @@ pub fn prepare_paired_samples_chats(
     let mut samples = Vec::new();
 
     let analyzer = EmotionAnalyzer::new();
+    let language_separator_len = tokenizer.encode(" ").len();
 
     for block in &chats.blocks {
         for (i, memory) in block.memories.iter().enumerate() {
@@ -1216,7 +1244,7 @@ pub fn prepare_paired_samples_chats(
             if bad_words.iter().any(|&w| sent.to_lowercase().contains(w)) { continue; }
 
             let words: Vec<&str> = sent.split_whitespace().collect();
-            if words.len() < 3 { continue; }
+            if words.is_empty() || (stage == TrainingStage::Structured && words.len() < 3) { continue; }
 
             let world = WorldContext::random(&mut rng_local);
             
@@ -1250,20 +1278,19 @@ pub fn prepare_paired_samples_chats(
             //     CardinalDir::None
             // };
 
-            // Build the memories array: all pairs in this block before the current one
-            let prior_memories: Vec<serde_json::Value> = block.memories[..i]
-                .iter()
-                .map(|m| serde_json::json!({
-                    "human": m.human,
-                    "yumon": m.bot,
-                }))
-                .collect();
-
             let (input_encoded, input_json) = match stage {
                 TrainingStage::Language => {
-                    let encoded = tokenizer.encode(sent);
-                    let json    = sent.clone();
-                    (encoded, json)
+                    // Reserve the entire unchanged reply and the causal separator.
+                    let reply_len = tokenizer.encode(&memory.bot).len();
+                    let overhead = 2 + language_separator_len; // BOS + EOS
+                    let Some(budget) = max_seq_len.checked_sub(reply_len + overhead) else { continue; };
+                    let Some(prompt) = language_prompt(
+                        sent,
+                        block.memories[..i].iter().map(|m| (m.human.as_str(), m.bot.as_str())),
+                        tokenizer,
+                        budget,
+                    ) else { continue; };
+                    (tokenizer.encode(&prompt), prompt)
                 }
                 // TrainingStage::Structured => {
                 //     let json = serde_json::to_string_pretty(&serde_json::json!({
@@ -1285,6 +1312,15 @@ pub fn prepare_paired_samples_chats(
                 //     (encoded, json)
                 // }
                 TrainingStage::Structured => {
+                    // Build the memories array: all pairs in this block before the current one
+                    let prior_memories: Vec<serde_json::Value> = block.memories[..i]
+                        .iter()
+                        .map(|m| serde_json::json!({
+                            "human": m.human,
+                            "yumon": m.bot,
+                        }))
+                        .collect();
+
                     let json = serde_json::to_string_pretty(&serde_json::json!({
                         // "scene description": "a beautiful outdoors oasis".to_string(),
                         "memories":       prior_memories,
@@ -1339,8 +1375,10 @@ pub fn prepare_paired_samples_chats(
             // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
             // if enc_input.len() + target_encoded.len() < max_seq_len / 4 { continue; } // on Language stage, you want the short ones
 
-            if target_encoded.len() < max_seq_len / 10 { continue; }
-            if enc_input.len() < max_seq_len / 10 { continue; }
+            if stage == TrainingStage::Language && enc_input.len() + language_separator_len + target_labels.len() > max_seq_len { continue; }
+
+            if stage == TrainingStage::Structured && target_encoded.len() < max_seq_len / 10 { continue; }
+            if stage == TrainingStage::Structured && enc_input.len() < max_seq_len / 10 { continue; }
             if target_encoded.len() > max_seq_len { continue; }
             if enc_input.len() > max_seq_len { continue; }
 
@@ -1359,10 +1397,121 @@ pub fn prepare_paired_samples_chats(
                 motion_dir: CardinalDir::None,
                 world,
                 target_json,
-                pair: (memory.human.clone(), memory.bot.clone()),
+                pair: (if stage == TrainingStage::Language { input_json } else { memory.human.clone() }, memory.bot.clone()),
             });
         }
     }
 
     samples
+}
+
+#[cfg(test)]
+mod language_memory_tests {
+    use super::*;
+    use crate::brain::{bpe::BpeTokenizer, mdx::{ChatBlock, Memory}};
+
+    fn tokenizer() -> TokenizerKind {
+        TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe").unwrap())
+    }
+
+    fn samples(blocks: Vec<ChatBlock>, max_len: usize) -> Vec<Sample> {
+        prepare_paired_samples_chats(
+            HandcraftedChats { blocks }, &tokenizer(), &HashMap::new(),
+            &mut StdRng::seed_from_u64(42), TrainingStage::Language, max_len,
+        )
+    }
+
+    fn turn(human: &str, bot: &str) -> Memory {
+        Memory { human: human.into(), bot: bot.into() }
+    }
+
+    #[test]
+    fn chronological_memories_keep_current_reply_and_block_boundaries() {
+        let first = turn("My favorite color is blue.", "I like blue too.");
+        let second = turn("What color did I choose?", "You chose blue.");
+        let third = turn("Can you remember it tomorrow?", "Yes, blue.");
+        let isolated = turn("This is another conversation.", "Hello again.");
+        let result = samples(vec![ChatBlock { memories: vec![first.clone(), second.clone(), third.clone()] },
+            ChatBlock { memories: vec![isolated.clone()] }], 256);
+        assert_eq!(result.len(), 4); // Short replies remain eligible at 256.
+        assert_eq!(result[0].pair.0, first.human);
+        assert_eq!(result[1].pair.0, format!("Human: {}\nYumon: {}\nHuman: {}", first.human, first.bot, second.human));
+        assert_eq!(result[2].pair.0, format!("Human: {}\nYumon: {}\nHuman: {}\nYumon: {}\nHuman: {}", first.human, first.bot, second.human, second.bot, third.human));
+        assert_eq!(result[3].pair.0, isolated.human);
+        let tok = tokenizer();
+        for (sample, reply) in result.iter().zip([first.bot, second.bot, third.bot, isolated.bot]) {
+            assert_eq!(sample.target_json, reply);
+            assert_eq!(sample.pair.1, reply);
+            let expected: Vec<_> = tok.encode(&reply).into_iter().chain([EOS_TOKEN]).collect();
+            let actual: Vec<_> = sample.target_labels.iter().copied().take_while(|&id| id != PAD_TOKEN).collect();
+            assert_eq!(actual, expected);
+            let input: Vec<_> = sample.input_ids.iter().copied().take_while(|&id| id != PAD_TOKEN).collect();
+            assert_eq!(input, std::iter::once(BOS_TOKEN).chain(tok.encode(&sample.pair.0)).collect::<Vec<_>>());
+            assert!(input.len() + tok.encode(" ").len() + actual.len() <= 256);
+            assert_eq!(sample.input_ids.len(), 256);
+            assert_eq!(sample.target_labels.len(), 256);
+        }
+        println!("Sample input:\n{}\nSample output: {}", result[2].pair.0, result[2].target_json);
+    }
+
+    #[test]
+    fn short_chat_followups_keep_their_memories() {
+        let result = samples(vec![ChatBlock { memories: vec![
+            turn("My favorite color is blue.", "I like blue too."),
+            turn("What color?", "Blue."),
+        ] }], 256);
+        assert_eq!(result.len(), 2);
+        assert!(result[1].pair.0.contains("Yumon: I like blue too."));
+        assert!(result[1].pair.0.ends_with("Human: What color?"));
+        assert_eq!(result[1].target_json, "Blue.");
+    }
+
+    #[test]
+    fn budget_retains_recent_complete_turns_and_preserves_message() {
+        let tok = tokenizer();
+        let recent = ("My favorite color is blue.", "I like blue too.");
+        let message = "What color did I choose?";
+        let expected = format!("Human: {}\nYumon: {}\nHuman: {message}", recent.0, recent.1);
+        let budget = tok.encode(&expected).len();
+        let old = "An old memory with many words. ".repeat(100);
+        let prompt = language_prompt(message, [(old.as_str(), old.as_str()), recent].into_iter(), &tok, budget).unwrap();
+        assert_eq!(prompt, expected);
+        assert_eq!(language_prompt(message, [recent].into_iter(), &tok, tok.encode(message).len()).unwrap(), message);
+        assert!(language_prompt(message, std::iter::empty(), &tok, 0).is_none());
+    }
+
+    #[test]
+    fn oversized_history_does_not_drop_the_current_training_turn() {
+        let history = turn(&"An old memory with many words. ".repeat(100), "An old answer.");
+        let current = turn("What should we do today?", "Go for a walk.");
+        let result = samples(vec![ChatBlock { memories: vec![history, current.clone()] }], 256);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].pair, (current.human, current.bot));
+    }
+
+    #[test]
+    fn short_plain_pairs_remain_eligible_and_overflow_is_rejected() {
+        let tok = tokenizer();
+        let pairs = vec![("What should we do today?".into(), "Go for a walk.".into()),
+            ("Too many words for this input. ".repeat(100), "A short reply.".into())];
+        let result = prepare_paired_samples_split_sep(pairs, &tok, &HashMap::new(),
+            &mut StdRng::seed_from_u64(42), TrainingStage::Language, 256);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].target_json, "Go for a walk.");
+    }
+
+    #[test]
+    fn real_chat_corpus_contains_memory_samples_that_fit() {
+        let chats = crate::brain::mdx::load_handcrafted_chats("archive/you_chats.txt").unwrap();
+        let result = samples(chats.blocks.into_iter().take(20).collect(), 256);
+        let tok = tokenizer();
+        assert!(!result.is_empty());
+        assert!(result.iter().any(|s| s.pair.0.contains("\nYumon: ")));
+        for sample in &result {
+            let input_len = sample.input_ids.iter().take_while(|&&id| id != PAD_TOKEN).count();
+            let reply_len = sample.target_labels.iter().take_while(|&&id| id != PAD_TOKEN).count();
+            assert!(input_len + tok.encode(" ").len() + reply_len <= 256);
+        }
+        println!("Verified {} real corpus samples", result.len());
+    }
 }

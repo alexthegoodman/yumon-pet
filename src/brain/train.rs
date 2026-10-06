@@ -39,8 +39,14 @@ use crate::brain::{
 
 // Used by the local desktop training UI (src/bin/train_ui.rs), which runs on
 // wgpu since dev machines typically have no CUDA GPU.
+#[cfg(not(all(target_os = "linux", not(feature = "desktop"))))]
 pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
+#[cfg(not(all(target_os = "linux", not(feature = "desktop"))))]
 pub type TrainRuntime = cubecl::wgpu::WgpuRuntime;
+#[cfg(all(target_os = "linux", not(feature = "desktop")))]
+pub type TrainBackend = CudaTrainBackend;
+#[cfg(all(target_os = "linux", not(feature = "desktop")))]
+pub type TrainRuntime = CudaTrainRuntime;
 // pub type TrainBackend = burn::backend::Autodiff<burn::backend::NdArray<f32>>;
 
 // Used by the headless `train-brain` CLI path (`run`, below) — this is what
@@ -305,11 +311,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 32
         // 64
     ];
-    let seq_lens:     [usize; 1] = [
-        32,
-        // 64,
-        // 128
-    ];
+    let seq_lens:     [usize; 1] = [256];
     let batch_sizes:     [usize; 1] = [
         // 2,
         // 8
@@ -506,8 +508,10 @@ pub fn run_with_architecture(
     max_articles:      usize,
     architecture: Architecture,
 ) -> Result<()> {
+    #[cfg(not(all(target_os = "linux", not(feature = "desktop"))))]
     let device = burn::backend::wgpu::WgpuDevice::default();
-    // let device = burn::backend::cuda::CudaDevice::default(); // for runpod
+    #[cfg(all(target_os = "linux", not(feature = "desktop")))]
+    let device = burn::backend::cuda::CudaDevice::default();
     let label_keywords   = build_label_keywords();
     let keyword_index    = build_keyword_index(&label_keywords);
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
@@ -1909,4 +1913,23 @@ pub fn make_progress(total: usize, epoch: usize, epochs: usize) -> ProgressBar {
     );
     pb.set_message(format!("{epoch}/{epochs}"));
     pb
+}
+
+#[cfg(test)]
+mod language_run_tests {
+    use super::*;
+
+    #[test]
+    fn training_grid_uses_256_token_language_context() {
+        for architecture in [Architecture::XLstm, Architecture::EncoderDecoder,
+            Architecture::Moe { num_experts: 4, top_k: 1 }] {
+            let runs = generate_run_configs(8, architecture);
+            assert!(!runs.is_empty());
+            for run in runs {
+                assert_eq!(run.max_seq_len, 256);
+                assert!(run.name.contains("_256len_"));
+                assert!(run.stages.iter().all(|s| s.stage == TrainingStage::Language));
+            }
+        }
+    }
 }
