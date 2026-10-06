@@ -274,6 +274,116 @@ fn append_inference_log(
     Ok(())
 }
 
+fn append_log_line(log_path: &str, line: &str) -> Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(log_path)?;
+    writeln!(file, "{line}")?;
+    Ok(())
+}
+
+/// Held-out samples for MoE validation loss: 1% of the data, capped so each
+/// evaluation stays a small fraction of 500 training batches.
+const MAX_VAL_SAMPLES: usize = 2048;
+
+/// Decoder-only layout: [prompt][separator][reply] packed into one causal
+/// sequence and padded. Targets are next tokens over the separator and reply
+/// only (PAD elsewhere). Returns token ids, targets and the supervised count.
+fn build_moe_batch(
+    samples:     &[crate::brain::samples::Sample],
+    batch_idx:   &[usize],
+    sep_tokens:  &[usize],
+    max_seq_len: usize,
+) -> (Vec<i32>, Vec<i32>, usize) {
+    let sep_len = sep_tokens.len();
+    let mut all_seq_ids: Vec<i32> = Vec::with_capacity(batch_idx.len() * max_seq_len);
+    let mut all_targets: Vec<i32> = Vec::with_capacity(batch_idx.len() * max_seq_len);
+    let mut supervised = 0usize;
+
+    for &i in batch_idx {
+        let sample = &samples[i];
+        let input_ids = &sample.input_ids;
+        let target_labels = &sample.target_labels;
+
+        let input_len = input_ids.iter().position(|&t| t == PAD_TOKEN).unwrap_or(input_ids.len())
+            .min(max_seq_len - sep_len - 1);
+        let target_len = target_labels.iter().position(|&t| t == PAD_TOKEN).unwrap_or(target_labels.len());
+
+        let mut full_seq = Vec::with_capacity(max_seq_len);
+        full_seq.extend(&input_ids[..input_len]);
+        full_seq.extend(sep_tokens);
+
+        let remaining_space = max_seq_len.saturating_sub(full_seq.len());
+        let actual_target_len = target_len.min(remaining_space);
+        full_seq.extend(&target_labels[..actual_target_len]);
+        full_seq.resize(max_seq_len, PAD_TOKEN);
+
+        // Loss only on the separator + target tokens, not the prompt.
+        let mut loss_targets = vec![PAD_TOKEN as i32; max_seq_len];
+        let start_predict_idx = input_len.saturating_sub(1);
+        let end_predict_idx = (input_len + sep_len + actual_target_len).saturating_sub(1).min(max_seq_len - 1);
+        for idx in start_predict_idx..end_predict_idx {
+            loss_targets[idx] = full_seq[idx + 1] as i32;
+        }
+        supervised += loss_targets.iter().filter(|&&t| t != PAD_TOKEN as i32).count();
+
+        all_seq_ids.extend(full_seq.iter().map(|&t| t as i32));
+        all_targets.extend(loss_targets);
+    }
+
+    (all_seq_ids, all_targets, supervised)
+}
+
+/// Mean cross-entropy per supervised (non-PAD) target. Burn 0.20's
+/// CrossEntropyLoss zeroes PAD rows but still divides by every row, which
+/// scales the loss by the fraction of positions that are supervised.
+fn masked_token_ce<B: Backend>(
+    logits:     Tensor<B, 2>,
+    targets:    Tensor<B, 1, Int>,
+    supervised: usize,
+    smoothing:  f32,
+) -> Tensor<B, 1> {
+    let [rows, _] = logits.dims();
+    let mask = targets.clone().equal_elem(PAD_TOKEN as i32).bool_not().float();
+    let log_probs = burn::tensor::activation::log_softmax(logits, 1);
+    let nll = log_probs.clone().gather(1, targets.reshape([rows, 1])).reshape([rows]).neg();
+    let per_token = if smoothing > 0.0 {
+        let uniform = log_probs.mean_dim(1).reshape([rows]).neg();
+        nll * (1.0 - smoothing as f64) + uniform * smoothing as f64
+    } else {
+        nll
+    };
+    (per_token * mask).sum() / supervised.max(1) as f64
+}
+
+/// Per-token loss over the held-out samples, without dropout or gradients.
+/// Returns the loss and the number of supervised tokens it covers.
+fn moe_validation_loss<B: Backend>(
+    model:       &YumonMoeBrain<B>,
+    samples:     &[crate::brain::samples::Sample],
+    sep_tokens:  &[usize],
+    max_seq_len: usize,
+    batch_size:  usize,
+    vocab:       usize,
+    device:      &B::Device,
+) -> Option<(f32, usize)> {
+    let mut total = 0.0f64;
+    let mut tokens = 0usize;
+    let idx: Vec<usize> = (0..samples.len()).collect();
+    for batch_idx in idx.chunks(batch_size) {
+        let (seq_ids, targets, supervised) = build_moe_batch(samples, batch_idx, sep_tokens, max_seq_len);
+        if supervised == 0 { continue; }
+        let n = batch_idx.len();
+        let tokens_t = Tensor::<B, 2, Int>::from_ints(TensorData::new(seq_ids, [n, max_seq_len]), device);
+        let targets_t = Tensor::<B, 1, Int>::from_ints(TensorData::new(targets, [n * max_seq_len]), device);
+        let logits = model.forward(tokens_t).reshape([n * max_seq_len, vocab]);
+        let loss = masked_token_ce(logits, targets_t, supervised, 0.0)
+            .into_data().convert::<f32>().to_vec::<f32>().ok()?[0];
+        total += loss as f64 * supervised as f64;
+        tokens += supervised;
+    }
+    (tokens > 0).then(|| ((total / tokens as f64) as f32, tokens))
+}
+
 /// Programmatically builds the full grid of RunConfigs to try, rather than a
 /// hand-picked list. Most combinations won't converge and will be cut short
 /// by MIN_EPOCH_LOSS_DROP, but this way we actually cover the space instead
@@ -289,8 +399,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 32,
         // 64,
         // 128,
-        256, // stretch: ~28M total / ~9.5M active params at 4 layers/8 experts
-        // 512
+        // 256,
+        512, // ~220M total / ~71M active params at 16 layers, 4 experts top-1
         // 1024
     ];
     let layer_counts: [usize; 1] = [
@@ -299,14 +409,14 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 4,
         // 8,
         // 8, // stretch: slower on iGPU - each MoE layer forces a host readback
-        // 16
-        32
+        16
+        // 32
     ];
     let head_counts:  [usize; 1] = [
         // 1,
         // 2,
-        4,
-        // 8,
+        // 4,
+        8,
         // 16,
         // 32
         // 64
@@ -323,12 +433,12 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
     // instead of the single fixed pair the CLI's --moe-experts/--moe-top-k
     // used to stamp onto every run - those two CLI flags are now unused for
     // architecture=moe (kept only for the other architectures' CLI parsing).
-    let moe_expert_configs: [(usize, usize); 4] = [
+    let moe_expert_configs: [(usize, usize); 1] = [
         // (2, 1),
         (4, 1),
-        (4, 2),
-        (8, 1),
-        (8, 2),
+        // (4, 2),
+        // (8, 1), // ~420M total at 512 wide x 16 layers
+        // (8, 2),
         // (16, 2), // stretch: doubles total params, same active params as (8,2)
     ];
     let architectures: Vec<Architecture> = if matches!(architecture, Architecture::Moe { .. }) {
@@ -423,6 +533,12 @@ fn load_stage_data(
     keyword_index: &HashMap<String, Vec<usize>>,
     max_seq_len: usize,
 ) -> Result<Vec<crate::brain::samples::Sample>> {
+    stage_data_loader(stage).load(tokenizer, keyword_index, max_seq_len)
+}
+
+/// Every source for a training stage, with the global cap and seed.
+/// Also used by `train_bpe` so the tokenizer sees the training data.
+pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
     let mut loader = DataLoader::new(stage);
     // match stage {
     //     TrainingStage::Language => {
@@ -440,7 +556,9 @@ fn load_stage_data(
         .add("data/ideas.txt",   FileKind::TxtLines, None)
         .add("archive/arena_extract.txt",   FileKind::Chats, None)
         .add("data/distillchatv1.csv",   FileKind::DistillChat, None)
-        // .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
+        // Plain text, loss on every token (cleaned extract of the simplewiki XML).
+        .add("data/wiki_extract.txt",   FileKind::Paragraphs, None)
+        .add("data/quotes.csv",   FileKind::QuotesCsv, None)
         .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
         .add("data/bible_asv.csv", FileKind::BibleCsv, None)
         // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs — proper
@@ -488,7 +606,6 @@ fn load_stage_data(
         // .total_limit(2_000_000)
         .total_limit(5_000_000)
         .seed(4815162342)
-        .load(tokenizer, keyword_index, max_seq_len)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1238,9 +1355,12 @@ pub fn run_with_architecture(
             model.config.0.training_stage = stage_cfg.stage;
             println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
 
-            let training_samples = load_stage_data(stage_cfg.stage.clone(), &tokenizer, &keyword_index, run_cfg.max_seq_len)?;
-            anyhow::ensure!(!training_samples.is_empty(), "No training samples for MoE stage");
-            println!("Training samples: {}", training_samples.len());
+            let mut training_samples = load_stage_data(stage_cfg.stage.clone(), &tokenizer, &keyword_index, run_cfg.max_seq_len)?;
+            anyhow::ensure!(training_samples.len() > 1, "Not enough training samples for MoE stage");
+            // Deduped and seed-shuffled by the loader, so the tail is a fixed held-out set.
+            let val_count = (training_samples.len() / 100).clamp(1, MAX_VAL_SAMPLES);
+            let val_samples = training_samples.split_off(training_samples.len() - val_count);
+            println!("Training samples: {}, validation samples: {}", training_samples.len(), val_samples.len());
 
             for (i, sample) in training_samples.iter().enumerate() {
                 if i >= 12 { break; }
@@ -1259,11 +1379,6 @@ pub fn run_with_architecture(
                 .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
                 .with_weight_decay(stage_cfg.weight_decay)
                 .init();
-
-            let ce_loss = CrossEntropyLossConfig::new()
-                .with_pad_tokens(Some(vec![PAD_TOKEN as usize]))
-                .with_smoothing(Some(stage_cfg.smoothing))
-                .init(&device);
 
             let mut rng = rand::thread_rng();
             use std::io::{stdout, IsTerminal};
@@ -1301,6 +1416,8 @@ pub fn run_with_architecture(
             let chart_path = format!("{}/{}_stage_{}.png", run_dir_str, run_cfg.name, stage_idx + 1);
             let mut prev_epoch_loss: Option<f32> = None;
             let mut run_should_stop = false;
+            let mut val_loss: Option<f32> = None;
+            let vocab = tokenizer.vocab_size();
 
             'epoch_loop_moe: for epoch in 0..stage_cfg.epochs {
                 state.epoch = epoch + 1;
@@ -1330,42 +1447,9 @@ pub fn run_with_architecture(
                     let current_batch_size = batch_idx.len();
                     if current_batch_size == 0 { continue; }
 
-                    let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
-                    let mut all_seq_ids: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
+                    let (all_seq_ids, all_lang_targets, supervised) = build_moe_batch(&training_samples, batch_idx, &sep_tokens, run_cfg.max_seq_len);
 
-                    for &i in batch_idx {
-                        let sample = &training_samples[i];
-                        let input_ids = &sample.input_ids;
-                        let target_labels = &sample.target_labels;
-
-                        let input_len = input_ids.iter().position(|&t| t == PAD_TOKEN).unwrap_or(input_ids.len())
-                            .min(run_cfg.max_seq_len - sep_len - 1);
-                        let target_len = target_labels.iter().position(|&t| t == PAD_TOKEN).unwrap_or(target_labels.len());
-
-                        let mut full_seq = Vec::with_capacity(run_cfg.max_seq_len);
-                        full_seq.extend(&input_ids[..input_len]);
-                        full_seq.extend(sep_tokens.iter().map(|&t| t as usize));
-
-                        let remaining_space = run_cfg.max_seq_len.saturating_sub(full_seq.len());
-                        let actual_target_len = target_len.min(remaining_space);
-                        full_seq.extend(&target_labels[..actual_target_len]);
-                        full_seq.resize(run_cfg.max_seq_len, PAD_TOKEN);
-
-                        // Loss only on the separator + target tokens, not the prompt.
-                        let mut loss_targets = vec![PAD_TOKEN as i32; run_cfg.max_seq_len];
-
-                        let start_predict_idx = input_len.saturating_sub(1);
-                        let end_predict_idx = (input_len + sep_len + actual_target_len).saturating_sub(1).min(run_cfg.max_seq_len - 1);
-
-                        for idx in start_predict_idx..end_predict_idx {
-                            loss_targets[idx] = full_seq[idx + 1] as i32;
-                        }
-
-                        all_seq_ids.extend(full_seq.iter().map(|&t| t as i32));
-                        all_lang_targets.extend(loss_targets);
-                    }
-
-                    if all_lang_targets.iter().all(|&id| id == PAD_TOKEN as i32) { continue; }
+                    if supervised == 0 { continue; }
                     let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), &device);
                     let tokens_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_seq_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
 
@@ -1379,9 +1463,8 @@ pub fn run_with_architecture(
                     let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).sum().div(non_pad_mask.sum()).into_scalar();
 
                     // Loss
-                    let vocab = tokenizer.vocab_size();
                     let logits_2d = token_logits.reshape([current_batch_size * run_cfg.max_seq_len, vocab]);
-                    let lang_loss = ce_loss.forward(logits_2d, lang_target_t);
+                    let lang_loss = masked_token_ce(logits_2d, lang_target_t, supervised, stage_cfg.smoothing);
 
                     let total_loss = lang_loss.clone() + aux_loss.clone();
                     let grads = GradientsParams::from_grads(total_loss.backward(), &model);
@@ -1419,6 +1502,8 @@ pub fn run_with_architecture(
                     // Periodic save and inference every 500 batches
                     if (batch_num + 1) % 500 == 0 {
                         let current_final_loss = epoch_loss / processed_batches as f32;
+                        let val = moe_validation_loss(&model.valid(), &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, &device);
+                        val_loss = val.map(|(loss, _)| loss);
                         let meta = MoeMetadata {
                             num_experts, top_k,
                             aux_loss_weight: model.config.aux_loss_weight,
@@ -1427,6 +1512,7 @@ pub fn run_with_architecture(
                             vocab_size:     tokenizer.vocab_size(),
                             epochs_trained: epochs_already_done + epoch,
                             final_loss:     current_final_loss,
+                            val_loss,
                             batch_size:     stage_cfg.batch_size,
                             training_stage: stage_cfg.stage.clone(),
                             embed_dim:      run_cfg.embed_dim,
@@ -1450,6 +1536,13 @@ pub fn run_with_architecture(
                         if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
                             eprintln!("⚠️  Failed to append inference log: {}", e);
                         }
+                        if let Some((loss, tokens)) = val {
+                            let line = format!("val_loss {loss:.4} over {tokens} held-out tokens");
+                            println!("{line}");
+                            if let Err(e) = append_log_line(&inference_log_path, &line) {
+                                eprintln!("⚠️  Failed to append inference log: {}", e);
+                            }
+                        }
                         if let Err(e) = state.save_chart_image(&chart_path) {
                             eprintln!("⚠️  Failed to save chart image: {}", e);
                         }
@@ -1464,17 +1557,21 @@ pub fn run_with_architecture(
                 }
                 anyhow::ensure!(processed_batches > 0, "MoE epoch contains no supervised tokens");
                 final_loss = epoch_loss / processed_batches as f32;
+                let val = moe_validation_loss(&model.valid(), &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, &device);
+                val_loss = val.map(|(loss, _)| loss);
 
+                // Early stop on held-out loss when available.
+                let stop_loss = val_loss.unwrap_or(final_loss);
                 if let Some(prev) = prev_epoch_loss {
-                    if prev - final_loss < MIN_EPOCH_LOSS_DROP {
+                    if prev - stop_loss < MIN_EPOCH_LOSS_DROP {
                         println!(
                             "\n⏹️  Epoch loss drop {:.4} < {:.4} (prev {:.4} -> {:.4}). Finishing run early.",
-                            prev - final_loss, MIN_EPOCH_LOSS_DROP, prev, final_loss,
+                            prev - stop_loss, MIN_EPOCH_LOSS_DROP, prev, stop_loss,
                         );
                         run_should_stop = true;
                     }
                 }
-                prev_epoch_loss = Some(final_loss);
+                prev_epoch_loss = Some(stop_loss);
 
                 let meta = MoeMetadata {
                             num_experts, top_k,
@@ -1484,6 +1581,7 @@ pub fn run_with_architecture(
                     vocab_size:     tokenizer.vocab_size(),
                     epochs_trained: epochs_already_done + epoch + 1,
                     final_loss,
+                    val_loss,
                     batch_size: stage_cfg.batch_size,
                     training_stage: stage_cfg.stage.clone(),
                     embed_dim: run_cfg.embed_dim,
@@ -1507,6 +1605,13 @@ pub fn run_with_architecture(
                     state.last_reply = entries[0].1.clone();
                     if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
                         eprintln!("⚠️  Failed to append inference log: {}", e);
+                    }
+                    if let Some((loss, tokens)) = val {
+                        let line = format!("val_loss {loss:.4} over {tokens} held-out tokens (epoch end)");
+                        println!("{line}");
+                        if let Err(e) = append_log_line(&inference_log_path, &line) {
+                            eprintln!("⚠️  Failed to append inference log: {}", e);
+                        }
                     }
                     if let Err(e) = state.save_chart_image(&chart_path) {
                         eprintln!("⚠️  Failed to save chart image: {}", e);
@@ -1931,5 +2036,113 @@ mod language_run_tests {
                 assert!(run.stages.iter().all(|s| s.stage == TrainingStage::Language));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod moe_loss_tests {
+    use super::*;
+    use burn::backend::Wgpu;
+    type B = Wgpu;
+
+    #[test]
+    fn moe_grid_is_220m_four_experts_top1() {
+        let runs = generate_run_configs(32, Architecture::Moe { num_experts: 4, top_k: 1 });
+        assert_eq!(runs.len(), 1);
+        let run = &runs[0];
+        assert_eq!((run.embed_dim, run.n_layers, run.attn_heads, run.ff_dim), (512, 16, 8, 2048));
+        assert!(matches!(run.architecture, Architecture::Moe { num_experts: 4, top_k: 1 }));
+        assert_eq!(run.name, "512h_16l_8a_256len_b32_Moe_e4_k1_Language");
+    }
+
+    #[test]
+    fn moe_masked_loss_averages_supervised_tokens_only() {
+        let device = Default::default();
+        let logits = Tensor::<B, 2>::from_floats(
+            [[2.0, 0.5, -1.0], [0.1, 0.2, 0.3], [-0.5, 1.5, 0.0], [3.0, -2.0, 1.0]], &device);
+        // Rows 1 and 3 are padding.
+        let targets = Tensor::<B, 1, Int>::from_ints([1, PAD_TOKEN as i32, 2, PAD_TOKEN as i32], &device);
+
+        let row_nll = |row: [f32; 3], target: usize| {
+            let max = row.iter().cloned().fold(f32::MIN, f32::max);
+            let log_sum = row.iter().map(|x| (x - max).exp()).sum::<f32>().ln() + max;
+            log_sum - row[target]
+        };
+        let expected = (row_nll([2.0, 0.5, -1.0], 1) + row_nll([-0.5, 1.5, 0.0], 2)) / 2.0;
+
+        let ours: f32 = masked_token_ce(logits.clone(), targets.clone(), 2, 0.0).into_scalar();
+        assert!((ours - expected).abs() < 1e-5, "{ours} vs {expected}");
+
+        // Burn's padded cross-entropy divides by all 4 rows, so it reads half as large here.
+        let burn: f32 = CrossEntropyLossConfig::new()
+            .with_pad_tokens(Some(vec![PAD_TOKEN]))
+            .init(&device)
+            .forward(logits, targets)
+            .into_scalar();
+        assert!((burn * 4.0 / 2.0 - expected).abs() < 1e-5, "{burn} vs {expected}");
+    }
+
+    /// Real Language data: samples, duplicates removed and tokens per source,
+    /// one source in memory at a time. Run from the repo root with:
+    /// cargo test --release --no-default-features --lib language_data_report -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn language_data_report() {
+        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe").unwrap());
+        let max_seq_len = 256;
+        let sep_len = tokenizer.encode(" ").len();
+        let reports = stage_data_loader(TrainingStage::Language)
+            .report(&tokenizer, &HashMap::new(), max_seq_len)
+            .unwrap();
+
+        println!("\n{:<40} {:>10} {:>10} {:>14} {:>14}", "source", "samples", "dupes", "prompt tok", "trained tok");
+        let (mut samples, mut dupes, mut prompt, mut trained) = (0, 0, 0, 0);
+        for r in &reports {
+            // Every sample also trains on its separator.
+            let r_trained = r.target_tokens + r.samples * sep_len;
+            println!("{:<40} {:>10} {:>10} {:>14} {:>14}", r.path, r.samples, r.duplicates, r.prompt_tokens, r_trained);
+            samples += r.samples; dupes += r.duplicates; prompt += r.prompt_tokens; trained += r_trained;
+        }
+        println!("{:<40} {:>10} {:>10} {:>14} {:>14}", "TOTAL", samples, dupes, prompt, trained);
+        println!("trained tokens / padded positions: {:.1}%", 100.0 * trained as f64 / (samples * max_seq_len) as f64);
+    }
+
+    /// Decoded wiki and quote conversations from the real files, to check that
+    /// they read like chat. Run with language_data_report's command.
+    #[test]
+    #[ignore]
+    fn language_data_samples() {
+        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe").unwrap());
+        for (path, kind, count) in [("data/wiki_extract.txt", FileKind::Paragraphs, 12), ("data/quotes.csv", FileKind::QuotesCsv, 6)] {
+            // 500 random conversations keep this to about a minute.
+            let samples = DataLoader::new(TrainingStage::Language)
+                .add(path, kind, Some(500))
+                .seed(4815162342)
+                .load(&tokenizer, &HashMap::new(), 256)
+                .unwrap();
+            println!("\n===== {path}: {} samples =====", samples.len());
+            for sample in samples.iter().take(count) {
+                println!("--- INPUT:\n{}\n--- TARGET:\n{}\n", tokenizer.decode(&sample.input_ids), tokenizer.decode(&sample.target_labels));
+            }
+        }
+    }
+
+    #[test]
+    fn language_loader_removes_exact_duplicates() {
+        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe").unwrap());
+        let dir = std::env::temp_dir().join(format!("yumon-dedupe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lines.txt");
+        std::fs::write(&path, "a platform that helps farmers grow crops\na platform that helps farmers grow crops\na tool for writers to plan stories\n").unwrap();
+
+        let samples = DataLoader::new(TrainingStage::Language)
+            .add(path.to_str().unwrap(), FileKind::TxtLines, None)
+            .add(path.to_str().unwrap(), FileKind::TxtLines, None) // same file again
+            .load(&tokenizer, &HashMap::new(), 256)
+            .unwrap();
+        assert_eq!(samples.len(), 2);
+
+        assert_eq!(dir.parent(), Some(std::env::temp_dir().as_path()));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

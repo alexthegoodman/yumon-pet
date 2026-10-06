@@ -8,11 +8,12 @@ use crate::brain::bpe::TokenizerKind;
 use crate::brain::chats::load_distilled_chats;
 use crate::brain::mdx::{load_chats_from_csv, load_chats_from_friends_csv};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::brain::mdx::{load_arena_chats, load_csv_bible_pairs, load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_specific_dict_sentences, load_txt_lines, load_txt_sentences};
+use crate::brain::mdx::{load_arena_chats, load_csv_bible_pairs, load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_quote_chats, load_quotes_csv, load_specific_dict_sentences, load_text_paragraphs, load_txt_lines, load_wiki_chats, load_txt_sentences};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::brain::pdf::load_pdfs;
 use crate::brain::samples::{Sample, TrainingStage, prepare_paired_samples_chats, prepare_paired_samples_split, prepare_paired_samples_split_sep};
+use crate::brain::PAD_TOKEN;
 
 // ── File-source descriptor ────────────────────────────────────────────────────
 
@@ -38,7 +39,14 @@ pub enum FileKind {
     PDF,
     DistillChat,
     DialogueCsv,
-    FriendsCsv
+    FriendsCsv,
+    /// One paragraph per line (wiki_extract.txt). Training: sentences become
+    /// Human/Yumon turns; article openings start with a title question.
+    /// Tokenizer corpus: whole paragraphs.
+    Paragraphs,
+    /// `quote,author,category` CSV. Training: a category request answered by
+    /// the quote. Tokenizer corpus: quote text.
+    QuotesCsv,
     // extend with WikiXml, Txt, Pdf, … as needed
 }
 
@@ -191,7 +199,7 @@ impl DataLoader {
                     sents
                 }
                 FileKind::DistillChat => {
-                    let mut chats = load_distilled_chats(&entry.path, 100_000)?;
+                    let mut chats = load_distilled_chats(&entry.path, i32::MAX)?;
 
                     // Per-file limit before sample prep to reduce load
                     if let Some(n) = entry.limit {
@@ -243,7 +251,14 @@ impl DataLoader {
 
             all.extend(sentences);
         }
-        
+
+        // Exact duplicate sentences would skew merge counts (ideas.txt repeats
+        // each line ~18 times).
+        let before = all.len();
+        let mut seen = std::collections::HashSet::new();
+        all.retain(|sentence| seen.insert(sentence.trim().to_lowercase()));
+        println!("[DataLoader] {} duplicate sentences removed", before - all.len());
+
         // 4. Global shuffle then total cap
         all.shuffle(&mut rng);
         if let Some(n) = self.total_limit {
@@ -263,145 +278,18 @@ impl DataLoader {
     ) -> anyhow::Result<Vec<Sample>> {
         let mut rng = StdRng::seed_from_u64(self.seed);
         let mut all: Vec<Sample> = Vec::new();
+        // Exact duplicates (same prompt and target tokens) across every source.
+        let mut seen = std::collections::HashSet::new();
 
         for entry in &self.entries {
-            // 1. Raw sentences from disk
-            let mut sentences = load_sentences(&entry.path, &entry.kind)?;
+            let mut samples = self.load_entry(entry, tokenizer, keyword_index, max_seq_len, &mut rng)?;
+            let before = samples.len();
+            samples.retain(|sample| seen.insert(sample_key(sample)));
             println!(
-                "[DataLoader] {:?}: {} sentences loaded",
+                "[DataLoader] {:?}: {} samples after per-file limit, {} duplicates removed",
                 entry.path,
-                sentences.len()
-            );
-
-            // Per-file limit before sample prep to reduce load
-            if let Some(n) = entry.limit {
-                sentences.shuffle(&mut rng);
-                sentences.truncate(n);
-            }
-
-            // 2. Prepare training samples
-            #[cfg(not(target_arch = "wasm32"))]
-            let mut samples = match entry.kind {
-                FileKind::QaPairs => {
-                    let mut pairs = load_qa_pairs_raw(&entry.path)?;
-
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        pairs.shuffle(&mut rng);
-                        pairs.truncate(n);
-                    }
-
-                    prepare_paired_samples_split_sep(
-                        pairs, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
-                    )
-                }
-                FileKind::BibleCsv => {
-                    let mut pairs = load_csv_bible_pairs(&entry.path)?;
-
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        pairs.shuffle(&mut rng);
-                        pairs.truncate(n);
-                    }
-
-                    prepare_paired_samples_split_sep(
-                        pairs, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
-                    )
-                }
-                FileKind::Chats => {
-                    let mut chats = load_handcrafted_chats(&entry.path)?;
-
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        chats.blocks.shuffle(&mut rng);
-                        chats.blocks.truncate(n);
-                    }
-
-                    prepare_paired_samples_chats(
-                        chats, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
-                    )
-                }
-                FileKind::DistillChat => {
-                    let mut chats = load_distilled_chats(&entry.path, 100_000)?;
-
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        chats.blocks.shuffle(&mut rng);
-                        chats.blocks.truncate(n);
-                    }
-
-                    prepare_paired_samples_chats(
-                        chats, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
-                    )
-                }
-                FileKind::DialogueCsv => {
-                    let mut chats = load_chats_from_csv(&entry.path)?;
-                    
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        chats.blocks.shuffle(&mut rng);
-                        chats.blocks.truncate(n);
-                    }
-
-                    prepare_paired_samples_chats(
-                        chats, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
-                    )
-                }
-                FileKind::FriendsCsv => {
-                    use crate::brain::mdx::load_chats_from_friends_csv;
-
-                    let mut chats = load_chats_from_friends_csv(&entry.path)?;
-                    
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        chats.blocks.shuffle(&mut rng);
-                        chats.blocks.truncate(n);
-                    }
-
-                    prepare_paired_samples_chats(
-                        chats, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
-                    )
-                }
-                FileKind::JsonChats => {
-                    let mut chats = load_arena_chats(&entry.path)?;
-
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        chats.blocks.shuffle(&mut rng);
-                        chats.blocks.truncate(n);
-                    }
-
-                    prepare_paired_samples_chats(
-                        chats, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
-                    )
-                },
-                _ => {
-                    prepare_paired_samples_split(
-                        sentences, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
-                    )
-                }
-            };
-
-            // no need to train in wasm
-            #[cfg(target_arch = "wasm32")]
-            let mut samples = match entry.kind {
-                _ => {
-                    prepare_paired_samples_split(
-                        sentences, tokenizer, keyword_index, &mut rng, self.stage, max_seq_len,
-                    )
-                }
-            };
-
-            // 3. Per-file limit (shuffle first so the truncation is random)
-            if let Some(n) = entry.limit {
-                samples.shuffle(&mut rng);
-                samples.truncate(n);
-            }
-
-            println!(
-                "[DataLoader] {:?}: {} samples after per-file limit",
-                entry.path,
-                samples.len()
+                samples.len(),
+                before - samples.len()
             );
 
             all.extend(samples);
@@ -415,6 +303,203 @@ impl DataLoader {
 
         println!("[DataLoader] total samples returned: {}", all.len());
         Ok(all)
+    }
+
+    /// Same pipeline and dedupe as `load`, one source at a time, keeping only
+    /// counts so the whole data set never has to fit in memory at once.
+    /// Ignores the total cap.
+    pub fn report(
+        self,
+        tokenizer:     &TokenizerKind,
+        keyword_index: &HashMap<std::string::String, Vec<usize>>,
+        max_seq_len:   usize,
+    ) -> anyhow::Result<Vec<SourceReport>> {
+        let mut rng = StdRng::seed_from_u64(self.seed);
+        let mut seen = std::collections::HashSet::new();
+        let mut reports = Vec::new();
+
+        for entry in &self.entries {
+            let samples = self.load_entry(entry, tokenizer, keyword_index, max_seq_len, &mut rng)?;
+            let mut report = SourceReport { path: entry.path.clone(), ..Default::default() };
+            for sample in &samples {
+                if !seen.insert(sample_key(sample)) {
+                    report.duplicates += 1;
+                    continue;
+                }
+                let active = |ids: &[usize]| ids.iter().take_while(|&&t| t != PAD_TOKEN).count();
+                report.samples += 1;
+                report.prompt_tokens += active(&sample.input_ids);
+                report.target_tokens += active(&sample.target_labels);
+            }
+            reports.push(report);
+        }
+
+        Ok(reports)
+    }
+
+    /// One source: read, apply its per-file cap, prepare samples.
+    fn load_entry(
+        &self,
+        entry:         &FileEntry,
+        tokenizer:     &TokenizerKind,
+        keyword_index: &HashMap<std::string::String, Vec<usize>>,
+        max_seq_len:   usize,
+        rng:           &mut StdRng,
+    ) -> anyhow::Result<Vec<Sample>> {
+        // 1. Raw sentences from disk
+        // Chat-built sources read their own files below.
+        let mut sentences = match entry.kind {
+            FileKind::Paragraphs | FileKind::QuotesCsv => Vec::new(),
+            _ => load_sentences(&entry.path, &entry.kind)?,
+        };
+        println!(
+            "[DataLoader] {:?}: {} sentences loaded",
+            entry.path,
+            sentences.len()
+        );
+
+        // Per-file limit before sample prep to reduce load
+        if let Some(n) = entry.limit {
+            sentences.shuffle(rng);
+            sentences.truncate(n);
+        }
+
+        // 2. Prepare training samples
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut samples = match entry.kind {
+            FileKind::QaPairs => {
+                let mut pairs = load_qa_pairs_raw(&entry.path)?;
+
+                // Per-file limit before sample prep to reduce load
+                if let Some(n) = entry.limit {
+                    pairs.shuffle(rng);
+                    pairs.truncate(n);
+                }
+
+                prepare_paired_samples_split_sep(
+                    pairs, tokenizer, keyword_index, rng, self.stage, max_seq_len,
+                )
+            }
+            FileKind::BibleCsv => {
+                let mut pairs = load_csv_bible_pairs(&entry.path)?;
+
+                // Per-file limit before sample prep to reduce load
+                if let Some(n) = entry.limit {
+                    pairs.shuffle(rng);
+                    pairs.truncate(n);
+                }
+
+                prepare_paired_samples_split_sep(
+                    pairs, tokenizer, keyword_index, rng, self.stage, max_seq_len,
+                )
+            }
+            FileKind::Chats => {
+                let mut chats = load_handcrafted_chats(&entry.path)?;
+
+                // Per-file limit before sample prep to reduce load
+                if let Some(n) = entry.limit {
+                    chats.blocks.shuffle(rng);
+                    chats.blocks.truncate(n);
+                }
+
+                prepare_paired_samples_chats(
+                    chats, tokenizer, keyword_index, rng, self.stage, max_seq_len,
+                )
+            }
+            FileKind::DistillChat => {
+                let mut chats = load_distilled_chats(&entry.path, i32::MAX)?;
+
+                // Per-file limit before sample prep to reduce load
+                if let Some(n) = entry.limit {
+                    chats.blocks.shuffle(rng);
+                    chats.blocks.truncate(n);
+                }
+
+                prepare_paired_samples_chats(
+                    chats, tokenizer, keyword_index, rng, self.stage, max_seq_len,
+                )
+            }
+            FileKind::DialogueCsv => {
+                let mut chats = load_chats_from_csv(&entry.path)?;
+                
+                // Per-file limit before sample prep to reduce load
+                if let Some(n) = entry.limit {
+                    chats.blocks.shuffle(rng);
+                    chats.blocks.truncate(n);
+                }
+
+                prepare_paired_samples_chats(
+                    chats, tokenizer, keyword_index, rng, self.stage, max_seq_len,
+                )
+            }
+            FileKind::FriendsCsv => {
+                use crate::brain::mdx::load_chats_from_friends_csv;
+
+                let mut chats = load_chats_from_friends_csv(&entry.path)?;
+                
+                // Per-file limit before sample prep to reduce load
+                if let Some(n) = entry.limit {
+                    chats.blocks.shuffle(rng);
+                    chats.blocks.truncate(n);
+                }
+
+                prepare_paired_samples_chats(
+                    chats, tokenizer, keyword_index, rng, self.stage, max_seq_len,
+                )
+            }
+            FileKind::JsonChats => {
+                let mut chats = load_arena_chats(&entry.path)?;
+
+                // Per-file limit before sample prep to reduce load
+                if let Some(n) = entry.limit {
+                    chats.blocks.shuffle(rng);
+                    chats.blocks.truncate(n);
+                }
+
+                prepare_paired_samples_chats(
+                    chats, tokenizer, keyword_index, rng, self.stage, max_seq_len,
+                )
+            },
+            FileKind::Paragraphs | FileKind::QuotesCsv => {
+                let mut chats = match entry.kind {
+                    FileKind::Paragraphs => load_wiki_chats(&entry.path)?,
+                    _ => load_quote_chats(&entry.path)?,
+                };
+
+                // Per-file limit before sample prep to reduce load
+                if let Some(n) = entry.limit {
+                    chats.blocks.shuffle(rng);
+                    chats.blocks.truncate(n);
+                }
+
+                prepare_paired_samples_chats(
+                    chats, tokenizer, keyword_index, rng, self.stage, max_seq_len,
+                )
+            }
+            _ => {
+                prepare_paired_samples_split(
+                    sentences, tokenizer, keyword_index, rng, self.stage, max_seq_len,
+                )
+            }
+        };
+
+        // no need to train in wasm
+        #[cfg(target_arch = "wasm32")]
+        let mut samples = match entry.kind {
+            _ => {
+                prepare_paired_samples_split(
+                    sentences, tokenizer, keyword_index, rng, self.stage, max_seq_len,
+                )
+            }
+        };
+
+        // 3. Per-file limit (shuffle first so the truncation is random)
+        if let Some(n) = entry.limit {
+            samples.shuffle(rng);
+            samples.truncate(n);
+        }
+
+        Ok(samples)
     }
 }
 
@@ -430,6 +515,8 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
         FileKind::Handcrafted => load_handcrafted_sentences(path),
         FileKind::Txt         => load_txt_sentences(path),
         FileKind::TxtLines    => load_txt_lines(path),
+        FileKind::Paragraphs  => load_text_paragraphs(path),
+        FileKind::QuotesCsv   => load_quotes_csv(path),
         FileKind::PDF       => {
             let paths: Vec<&str> = path.split(", ").collect();
             Ok(load_pdfs(paths))
@@ -467,6 +554,26 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
         FileKind::JsonChats       => Ok(Vec::new()),
         FileKind::DistillChat   => Ok(Vec::new())
     }
+}
+
+/// Per-source totals from `DataLoader::report`, after dedupe.
+#[derive(Debug, Default)]
+pub struct SourceReport {
+    pub path:          String,
+    pub samples:       usize,
+    pub duplicates:    usize,
+    pub prompt_tokens: usize,
+    pub target_tokens: usize,
+}
+
+/// Hash of a sample's non-padding prompt and target tokens.
+fn sample_key(sample: &Sample) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let tokens = |ids: &[usize]| ids.iter().copied().take_while(|&t| t != PAD_TOKEN).collect::<Vec<_>>();
+    tokens(&sample.input_ids).hash(&mut hasher);
+    tokens(&sample.target_labels).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Thin wrapper so the QA path stays unified in `load()`.

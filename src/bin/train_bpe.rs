@@ -1,4 +1,4 @@
-use yumon_pet::{brain::{PAD_TOKEN, bpe::{self, BpeTokenizer, TokenizerKind}, loader::{DataLoader, FileKind}, mdx::{load_arena_chats, load_dictionary_sentences, load_handcrafted_chats, load_qa_pairs, load_specific_dict_sentences, load_txt_sentences}, samples::TrainingStage, train::{build_keyword_index, build_label_keywords}}, vision::CIFAR_CLASSES};
+use yumon_pet::{brain::{PAD_TOKEN, bpe::{self, BpeTokenizer, TokenizerKind}, loader::{DataLoader, FileKind}, mdx::{load_arena_chats, load_dictionary_sentences, load_handcrafted_chats, load_qa_pairs, load_specific_dict_sentences, load_txt_sentences}, samples::TrainingStage, train::{build_keyword_index, build_label_keywords, stage_data_loader}}, vision::CIFAR_CLASSES};
 
 
 #[cfg(target_os = "windows")]
@@ -203,68 +203,13 @@ pub fn main() {
     //     }
     // }
 
-    let mut loader = DataLoader::new(TrainingStage::Language);
-    // match stage {
-    //     TrainingStage::Language => {
-    //         loader = loader
-    //             .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
-    //     }
-    //     TrainingStage::Structured => {
-    //         loader = loader
-    //             .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
-    //     }
-    // }
-
-    loader = loader
-        // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
-        // .add("data/ideas.txt",   FileKind::TxtLines, Some(25_000))
-        .add("archive/arena_extract.txt",   FileKind::Chats, Some(25_000))
-        // .add("data/distillchatv1.csv",   FileKind::DistillChat, Some(25_000))
-        // .add("data/wiki_extract.txt",   FileKind::Txt, Some(250_000))
-        .add("data/bible_bbe.csv", FileKind::BibleCsv, Some(2_500))
-        .add("data/bible_asv.csv", FileKind::BibleCsv, Some(2_500))
-        // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs — proper
-        // message/reply splits instead of BibleCsv's arbitrary mid-sentence cuts.
-        .add("archive/synthetic/bible.txt", FileKind::Chats, None)
-        .add("archive/synthetic/business.txt", FileKind::Chats, None)
-        .add("archive/synthetic/universe.txt", FileKind::Chats, None)
-        .add("archive/synthetic/world_basics.txt", FileKind::Chats, None)
-        .add("archive/synthetic/daily_life.txt", FileKind::Chats, None)
-        .add("archive/synthetic/social_life.txt", FileKind::Chats, None)
-        // // .add("data/creative_stories.txt", FileKind::Txt, Some(50_000)) // good but gets split
-        // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
-        // // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
-        // // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, Some(25_000))
-        // .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, Some(25_000))
-        // // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // // .add("archive/you_chats.txt", FileKind::Chats, None)
-        // // .add("archive/you_chats.txt", FileKind::Chats, None)
-        // // .add("archive/you_chats.txt", FileKind::Chats, None)
-        .add("archive/you_chats.txt", FileKind::Chats, None)
-        // // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        // // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        // // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        .add("archive/clean_chats.txt", FileKind::Chats, None);
-        // .add(vec![
-        //         "data/ebooks/faa-h-8083-25c.pdf".to_string(),
-        //         "data/ebooks/algor_intro.pdf".to_string(),
-        //         "data/ebooks/intro_engineer.pdf".to_string(),
-        //         "data/ebooks/meap.pdf".to_string(),
-        //         // "data/ebooks/missiles.pdf".to_string(),
-        //         "data/ebooks/os_concepts.pdf".to_string(),
-        //         "data/ebooks/real-time-embedded.pdf".to_string(),
-        //         "data/ebooks/riscv.pdf".to_string(),
-        //         "data/ebooks/rtos.pdf".to_string(),
-        //         "data/ebooks/stephen_hawking_a_brief_history_of_time.pdf".to_string(),
-        //     ].join(", "), 
-        //     FileKind::PDF, 
-        //     None
-        // );
-
-    let sentences: Vec<String> = loader.total_limit(400_000).seed(4815162342).load_sentences().expect("Couldn't get sentences");
+    // Same sources as Language-stage training (brain::train::stage_data_loader),
+    // so merges match the text the model trains on. Sentences are deduped.
+    let sentences: Vec<String> = stage_data_loader(TrainingStage::Language)
+        .total_limit(1_500_000)
+        .seed(4815162342)
+        .load_sentences()
+        .expect("Couldn't get sentences");
     let sentences: Vec<&String> = sentences.iter().collect();
 
     let mut x = 0;
@@ -304,7 +249,16 @@ pub fn main() {
     );
     let bpe = bpe.as_ref().expect("Couldn't train bpe");
 
-    bpe.save("yumon_bpe").as_ref().expect("Couldn't save bpe");
+    // Optional output directory (default yumon_bpe). A new tokenizer needs a
+    // fresh training run: checkpoints keep their own tokenizer.json.
+    let out_dir = std::env::args().nth(1).unwrap_or_else(|| "yumon_bpe".to_string());
+    bpe.save(&out_dir).as_ref().expect("Couldn't save bpe");
+    println!("💾 Saved to {out_dir}/tokenizer.json");
+
+    // Tokens per sentence over the training corpus, to compare vocab sizes.
+    let total_tokens: usize = sentences.iter().map(|s| bpe.encode_raw(s).map(|t| t.len()).unwrap_or(0)).sum();
+    let total_chars: usize = sentences.iter().map(|s| s.chars().count()).sum();
+    println!("📏 {} sentences, {} tokens, {:.2} chars/token", sentences.len(), total_tokens, total_chars as f64 / total_tokens.max(1) as f64);
 
     // // ── Diagnostic: avg sample length in chars/tokens ───────────────────────
     // // Helps size max_seq_len. These are raw pre-JSON sentences (individual

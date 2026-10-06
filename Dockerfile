@@ -86,7 +86,7 @@ COPY yumon_bpe ./yumon_bpe
 # CIFAR-100/FER2013/ebooks/images are vision-only and unused here.
 COPY data/ideas.txt data/wiki_extract.txt data/bible_bbe.csv data/bible_asv.csv \
      data/creative_stories.txt data/The-Office-Lines-V4.csv \
-     data/friends_all_episodes_clean.csv data/distillchatv1.csv ./data/
+     data/friends_all_episodes_clean.csv data/distillchatv1.csv data/quotes.csv ./data/
 COPY archive/arena_extract.txt archive/ov_chats.txt archive/you_chats.txt \
      archive/clean_chats.txt ./archive/
 COPY archive/synthetic/ ./archive/synthetic/

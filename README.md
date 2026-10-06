@@ -37,7 +37,7 @@ You may need clang for chat_web.
 - `cargo run --release --bin yumon_universe -- --checkpoint <language-checkpoint> --seed 42 --theme suburban|urban` to explore a procedural neighborhood or downtown (Windows, desktop feature)
 - `cargo run --release --bin yumon_rss -- --checkpoint <language-checkpoint>` for a desktop Product Hunt companion (desktop feature)
 - `cargo run --release --bin endless_data` TUI to answer endless questions in order to generate some data
-- `cargo run --release --bin train_bpe` train your tokenizer on your data
+- `cargo run --release --no-default-features --bin train_bpe -- [out_dir]` train the tokenizer (default `yumon_bpe/`) on the Language-stage sources, deduped. Lowercased byte-level BPE, 4096 vocab, no prefix space (so text after `,` `"` `:` decodes without extra spaces). A new tokenizer needs a fresh model run.
 
 - `trunk serve --release` for chat web (or `trunk build --release` for deployment)
 
@@ -206,6 +206,30 @@ adds [Switch-style load balancing](https://www.jmlr.org/papers/v23/21-0998.html)
 excluded. These weights are configurable in `YumonMoeBrainConfig`. Loss charts
 show language cross-entropy, while auxiliary loss and per-expert dispatched row
 counts are logged every 100 batches.
+
+The MoE grid is 512 wide, 16 layers, 8 heads, ff 2048, 4 experts top-1
+(about 220M total, 71M active parameters per token).
+
+MoE language loss is the mean over supervised (non-padding) tokens. Burn 0.20's
+`CrossEntropyLoss` masks padding but divides by every position, so runs before
+2026-10-06 logged a loss scaled down by the supervised fraction. Those numbers
+are not comparable with newer runs. 1% of samples (at most 2048) are held out.
+Validation loss is logged with each 500-batch inference snapshot and at epoch
+end, saved as `val_loss` in `metadata.json`, and used for the early stop.
+
+The data loader removes exact duplicate samples (same prompt and target
+tokens) across all sources. Every sample has a prompt. `wiki_extract.txt` (one
+paragraph per line, cleaned from the simplewiki XML) is split into sentences
+that become alternating Human/Yumon turns, one conversation per paragraph, with
+earlier turns as memories when they fit. Article openings (`'April' (Apr.) is
+...`) start with a templated question about the title. `quotes.csv` becomes a
+request built from the quote's first category tag, answered with the quote.
+distillchat is loaded in full. Per-source counts and decoded wiki/quote samples,
+without loading everything at once:
+
+```sh
+cargo test --release --no-default-features --lib language_data_ -- --ignored --nocapture --test-threads=1
+```
 
 Checkpoint directories include expert count and top-k. `model.bin`,
 `metadata.json`, and the checkpoint's own `tokenizer.json` are saved together.

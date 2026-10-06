@@ -705,6 +705,197 @@ pub fn load_txt_lines(path: &str) -> Result<Vec<String>> {
     Ok(sentences)
 }
 
+/// One paragraph per line (e.g. wiki_extract.txt). Skips leftover wiki markup
+/// (image captions, links, tables) and very short fragments.
+pub fn load_text_paragraphs(path: &str) -> Result<Vec<String>> {
+    println!("📖 Loading paragraphs: {path}");
+
+    let content = std::fs::read_to_string(path)?;
+    let mut paragraphs = Vec::new();
+
+    // Talk pages, deletion discussions and template docs are not article text.
+    const SKIP: [&str; 10] = ["(utc)", "talk)", "wp:", "help:", "user:", "<span", "&#", "}}", "template", "redirect"];
+    const ENTITIES: [(&str, &str); 5] = [("&ndash;", "-"), ("&mdash;", "-"), ("&nbsp;", " "), ("&amp;", "&"), ("&middot;", "-")];
+
+    for line in content.lines() {
+        let mut trimmed = line.trim().replace("''", "");
+        if trimmed.contains('|') || trimmed.contains("http") || trimmed.contains("[[") || trimmed.contains("{{") {
+            continue;
+        }
+        // ASCII lowercase keeps byte offsets valid for truncate below.
+        let lower = trimmed.to_ascii_lowercase();
+        if SKIP.iter().any(|s| lower.contains(s)) { continue; }
+        // Category lists (often after "References") trail the last paragraph.
+        if let Some(i) = lower.find("category:") {
+            trimmed.truncate(i);
+            let end = trimmed.trim_end().len();
+            if trimmed[..end].to_ascii_lowercase().ends_with("references") {
+                trimmed.truncate(end - "references".len());
+            }
+        }
+        for (entity, text) in ENTITIES {
+            trimmed = trimmed.replace(entity, text);
+        }
+        let trimmed = trimmed.trim().to_string();
+        if trimmed.contains('&') && trimmed.contains(';') { continue; } // other entities
+        if trimmed.split_whitespace().count() < 8 { continue; }
+        paragraphs.push(trimmed);
+    }
+
+    println!("✅ Loaded {} paragraphs", paragraphs.len());
+    Ok(paragraphs)
+}
+
+/// Splits prose into sentences after `.`, `!` or `?` when the next word starts
+/// with an uppercase letter, digit or quote. Abbreviations ("Mr.", "U.S.",
+/// "e.g.") and single initials do not end a sentence.
+pub fn split_sentences(text: &str) -> Vec<String> {
+    const ABBREVIATIONS: [&str; 14] = ["mr.", "mrs.", "ms.", "dr.", "st.", "jr.", "sr.", "vs.", "etc.", "no.", "mt.", "ft.", "approx.", "inc."];
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut sentences = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for (i, word) in words.iter().enumerate() {
+        current.push(word);
+        let trimmed = word.trim_end_matches(|c| c == '"' || c == '\'' || c == ')');
+        let ends = trimmed.ends_with('.') || trimmed.ends_with('!') || trimmed.ends_with('?');
+        let next_starts = words.get(i + 1)
+            .and_then(|w| w.trim_start_matches(|c| c == '"' || c == '\'' || c == '(').chars().next())
+            .is_some_and(|c| c.is_uppercase() || c.is_ascii_digit());
+        let body = trimmed.trim_end_matches(|c| c == '.' || c == '!' || c == '?');
+        let abbreviation = ABBREVIATIONS.contains(&trimmed.to_lowercase().as_str())
+            || body.contains('.') // U.S., e.g.
+            || (body.chars().count() == 1 && body.chars().all(char::is_uppercase)); // J. Smith
+        if (ends && next_starts && !abbreviation) || i + 1 == words.len() {
+            sentences.push(current.join(" "));
+            current.clear();
+        }
+    }
+    sentences
+}
+
+/// Pairs sentences into Human/Yumon turns. An odd last sentence joins the
+/// last reply. With an opening question, the first sentence answers it.
+fn sentence_turns(question: Option<String>, sentences: Vec<String>) -> Vec<Memory> {
+    let mut queue: std::collections::VecDeque<String> = sentences.into();
+    let mut turns = Vec::new();
+    if let Some(question) = question {
+        let Some(answer) = queue.pop_front() else { return turns; };
+        turns.push(Memory { human: question, bot: answer });
+    }
+    while queue.len() >= 2 {
+        let human = queue.pop_front().unwrap();
+        let bot = queue.pop_front().unwrap();
+        turns.push(Memory { human, bot });
+    }
+    if let (Some(rest), Some(last)) = (queue.pop_front(), turns.last_mut()) {
+        last.bot = format!("{} {rest}", last.bot);
+    }
+    turns
+}
+
+/// Stable template choice so reruns build identical samples.
+fn pick<'a>(options: &[&'a str], key: &str) -> &'a str {
+    let sum = key.bytes().fold(0usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize));
+    options[sum % options.len()]
+}
+
+/// wiki_extract.txt as conversations: each paragraph's sentences become
+/// alternating Human/Yumon turns (one block per paragraph). Article openings
+/// ("'April' (Apr.) is ...") start with a question about the title.
+pub fn load_wiki_chats(path: &str) -> Result<HandcraftedChats> {
+    println!("📖 Loading wiki chats: {path}");
+    const QUESTIONS: [&str; 6] = [
+        "tell me about {}", "what is {}?", "what do you know about {}?",
+        "can you explain {}?", "what can you tell me about {}?", "explain {} to me",
+    ];
+
+    let mut blocks = Vec::new();
+    let mut titled = 0usize;
+    for paragraph in load_text_paragraphs(path)? {
+        // Opening paragraphs quote the title once: 'April' (Apr.) is ...
+        let title = paragraph.strip_prefix('\'')
+            .and_then(|rest| rest.split_once('\''))
+            .filter(|(title, after)| !title.is_empty() && title.len() <= 60 && after.starts_with(' '))
+            .map(|(title, _)| title.to_string());
+        let text = match &title {
+            Some(title) => format!("{title}{}", &paragraph[title.len() + 2..]),
+            None => paragraph,
+        };
+        let question = title.map(|t| pick(&QUESTIONS, &t).replace("{}", &t.to_lowercase()));
+        if question.is_some() { titled += 1; }
+
+        let memories = sentence_turns(question, split_sentences(&text));
+        if !memories.is_empty() {
+            blocks.push(ChatBlock { memories });
+        }
+    }
+
+    println!("✅ Loaded {} wiki conversations ({} open with a title question)", blocks.len(), titled);
+    Ok(HandcraftedChats { blocks })
+}
+
+/// quotes.csv as one-turn conversations: a request built from the quote's
+/// first category tag, answered with the quote.
+pub fn load_quote_chats(path: &str) -> Result<HandcraftedChats> {
+    println!("📖 Loading quote chats: {path}");
+    const REQUESTS: [&str; 5] = [
+        "share a quote about {}", "tell me something wise about {}",
+        "what is a good quote about {}?", "say something about {}", "do you know a quote about {}?",
+    ];
+
+    let mut rdr = csv::ReaderBuilder::new().has_headers(true).flexible(true).from_path(path)?;
+    let headers = rdr.headers()?.clone();
+    let column = |name: &str| headers.iter().position(|h| h == name)
+        .ok_or_else(|| anyhow::anyhow!("No '{name}' column found in {path}"));
+    let (quote_idx, category_idx) = (column("quote")?, column("category")?);
+
+    let mut blocks = Vec::new();
+    for record in rdr.records() {
+        let Ok(record) = record else { continue; };
+        let Some(quote) = record.get(quote_idx).map(str::trim) else { continue; };
+        if quote.split_whitespace().count() < 3 { continue; }
+        let tag = record.get(category_idx).unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .find(|t| !t.is_empty() && !t.starts_with("attributed"));
+        let human = match tag {
+            Some(tag) => pick(&REQUESTS, quote).replace("{}", &tag.replace('-', " ")),
+            None => "share a quote".to_string(),
+        };
+        blocks.push(ChatBlock { memories: vec![Memory { human, bot: quote.to_string() }] });
+    }
+
+    println!("✅ Loaded {} quote chats", blocks.len());
+    Ok(HandcraftedChats { blocks })
+}
+
+/// Quote text from a `quote,author,category` CSV.
+pub fn load_quotes_csv(path: &str) -> Result<Vec<String>> {
+    println!("📖 Loading quotes: {path}");
+
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_path(path)?;
+    let quote_idx = rdr.headers()?
+        .iter()
+        .position(|h| h == "quote")
+        .ok_or_else(|| anyhow::anyhow!("No 'quote' column found in {path}"))?;
+
+    let mut quotes = Vec::new();
+    for record in rdr.records() {
+        let Ok(record) = record else { continue; };
+        let Some(quote) = record.get(quote_idx) else { continue; };
+        let quote = quote.trim();
+        if quote.split_whitespace().count() >= 3 {
+            quotes.push(quote.to_string());
+        }
+    }
+
+    println!("✅ Loaded {} quotes", quotes.len());
+    Ok(quotes)
+}
+
 pub fn load_qa_pairs(path: &str) -> Result<Vec<(String, String)>> {
     println!("📖 Loading QA pairs: {path}");
 
@@ -844,4 +1035,83 @@ fn extract_definition(line: &str) -> Option<String> {
         .to_string();
 
     if cleaned.is_empty() { None } else { Some(cleaned) }
+}
+#[cfg(test)]
+mod language_chat_source_tests {
+    use super::*;
+
+    fn temp_file(name: &str, content: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("yumon-chat-src-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn remove(path: &std::path::Path) {
+        let dir = path.parent().unwrap();
+        assert_eq!(dir.parent(), Some(std::env::temp_dir().as_path()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn language_sentences_split_without_breaking_abbreviations() {
+        let text = "April (Apr.) is the fourth month of the year. Mr. Smith lived in the U.S. Army base for 3 years! Did he? 2024 was a leap year. J. R. R. Tolkien wrote books.";
+        assert_eq!(split_sentences(text), vec![
+            "April (Apr.) is the fourth month of the year.",
+            "Mr. Smith lived in the U.S. Army base for 3 years!",
+            "Did he?",
+            "2024 was a leap year.",
+            "J. R. R. Tolkien wrote books.",
+        ]);
+    }
+
+    #[test]
+    fn language_wiki_paragraphs_become_titled_conversations() {
+        let path = temp_file("wiki.txt", concat!(
+            "'April' (Apr.) is the fourth month of the year in the calendar. It has thirty days in it every year. Many festivals happen in April each year.\n",
+            "April ends on the same day of the week as December every single year. This is because they are exactly 35 weeks apart. Easter is often in April too. Rain is common in many places.\n",
+            "thumb|200px|right|An April Fools' Day hoax for April 1 in Copenhagen with many words here.\n",
+            "Please discuss this request below, but keep in mind that you should not vote. --Someone (talk) 10:47, 22 November 2024 (UTC)\n",
+            "Rome &ndash; the capital of Italy &ndash; is very old. It was founded long ago by Romulus. References Category:Cities in Italy Category:Capitals\n",
+        ));
+        let chats = load_wiki_chats(path.to_str().unwrap()).unwrap();
+        remove(&path);
+
+        assert_eq!(chats.blocks.len(), 3, "markup and talk-page lines are skipped");
+        let opening = &chats.blocks[0].memories;
+        assert!(opening[0].human.contains("april"), "{:?}", opening[0].human);
+        assert_eq!(opening[0].bot, "April (Apr.) is the fourth month of the year in the calendar.");
+        assert_eq!(opening[1].human, "It has thirty days in it every year.");
+        assert_eq!(opening[1].bot, "Many festivals happen in April each year.");
+
+        let body = &chats.blocks[1].memories;
+        assert_eq!(body.len(), 2);
+        assert_eq!(body[0].human, "April ends on the same day of the week as December every single year.");
+        assert_eq!(body[1].bot, "Rain is common in many places.");
+
+        // Entities decoded, trailing categories removed.
+        let rome = &chats.blocks[2].memories;
+        assert_eq!(rome.len(), 1);
+        assert_eq!(rome[0].human, "Rome - the capital of Italy - is very old.");
+        assert_eq!(rome[0].bot, "It was founded long ago by Romulus.");
+    }
+
+    #[test]
+    fn language_quotes_answer_a_category_request() {
+        let path = temp_file("quotes.csv", concat!(
+            "quote,author,category\n",
+            "\"Be yourself; everyone else is already taken.\",Oscar Wilde,\"attributed-no-source, be-yourself, honesty\"\n",
+            "Too short,Someone,life\n",
+            "Simple words can still mean a lot.,Someone,\n",
+        ));
+        let chats = load_quote_chats(path.to_str().unwrap()).unwrap();
+        remove(&path);
+
+        assert_eq!(chats.blocks.len(), 2);
+        let first = &chats.blocks[0].memories[0];
+        assert!(first.human.contains("be yourself"), "{:?}", first.human);
+        assert_eq!(first.bot, "Be yourself; everyone else is already taken.");
+        assert_eq!(chats.blocks[1].memories[0].human, "share a quote");
+    }
 }

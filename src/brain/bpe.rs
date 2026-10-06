@@ -59,7 +59,8 @@ impl BpeTokenizer {
         println!("   Target vocab size: {vocab_size}");
 
         // ── Write corpus to a temp file (tokenizers trainer needs file paths) ──
-        let tmp_path = "tmp/yumon_bpe_corpus.txt";
+        let tmp_path = Self::CORPUS_PATH;
+        std::fs::create_dir_all("tmp")?;
         {
             let mut f = std::fs::File::create(tmp_path)
                 .context("creating temp corpus file")?;
@@ -112,7 +113,9 @@ impl BpeTokenizer {
 
         // Split on whitespace before BPE merges
         // tokenizer.with_pre_tokenizer(Whitespace::default());
-        tokenizer.with_pre_tokenizer(ByteLevel::default());
+        // No prefix space: the JSON special tokens split text into segments, and
+        // a prefix space on each one decoded "$5,000" as "$5, 000".
+        tokenizer.with_pre_tokenizer(ByteLevel::new(false, true, true));
 
         // BPE decoder — reconstructs spaces correctly
         // tokenizer.with_decoder(BPEDecoder::default());
@@ -215,6 +218,9 @@ impl BpeTokenizer {
         Ok(())
     }
 
+    /// Path of the corpus file `train` writes, under `tmp/`.
+    pub const CORPUS_PATH: &'static str = "tmp/yumon_bpe_corpus.txt";
+
     // ── Internal helpers ───────────────────────────────────────────────────────
 
     fn assert_special_token_ids(tok: &Tokenizer) -> Result<()> {
@@ -288,6 +294,25 @@ impl TokenizerKind {
             Self::Bpe(t)  => {
                 t.save(path)
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bpe_round_trip_tests {
+    use super::*;
+
+    /// Text next to the JSON special tokens must decode without added spaces.
+    #[test]
+    fn bpe_punctuation_round_trips_without_extra_spaces() {
+        let lines = [
+            "it costs $5,000 today.", "she said \"the end\" and left.",
+            "hello world, again", "what is: this?", "the moon goes around the earth",
+        ];
+        let corpus: Vec<String> = lines.iter().cycle().take(200).map(|s| s.to_string()).collect();
+        let tok = BpeTokenizer::train(corpus.iter().collect(), 300).unwrap();
+        for text in lines {
+            assert_eq!(tok.decode(&tok.encode(text).unwrap()).unwrap(), text);
         }
     }
 }

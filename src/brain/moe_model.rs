@@ -501,7 +501,11 @@ pub struct MoeMetadata {
     pub dropout_rate: f64,
     pub vocab_size: usize,
     pub epochs_trained: usize,
+    /// Per-token training loss (runs before 2026-10-06 logged it diluted by padding).
     pub final_loss: f32,
+    /// Per-token loss on the held-out split, when one was evaluated.
+    #[serde(default)]
+    pub val_loss: Option<f32>,
     pub batch_size: usize,
     pub training_stage: TrainingStage,
     pub embed_dim: usize,
@@ -740,6 +744,7 @@ mod tests {
             vocab_size: config.vocab_size,
             epochs_trained: 1,
             final_loss: 1.0,
+            val_loss: None,
             batch_size: 1,
             training_stage: config.training_stage,
             embed_dim: config.embed_dim,
