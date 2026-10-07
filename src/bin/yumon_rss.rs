@@ -46,7 +46,7 @@ mod desktop {
     struct Args {
         #[arg(
             long,
-            default_value = "D:/models/runpod/256h_32l_4a_256len_b32_Moe_e4_k1_Language_800k"
+            default_value = "D:/models/runpod/large1/512h_16l_8a_256len_b32_Moe_e4_k1_Language_1m"
         )]
         checkpoint: String,
         #[arg(long, value_enum, default_value = "moe")]
@@ -708,7 +708,7 @@ mod desktop {
                     }
                 }
                 Event::UserEvent(RssEvent::Ui(Ipc::ClearChat))
-                    if state.can_refresh && !state.busy && !state.chat_busy =>
+                    if !state.busy && !state.chat_busy =>
                 {
                     let _ = tx.try_send(WorkerRequest::ClearChat);
                 }

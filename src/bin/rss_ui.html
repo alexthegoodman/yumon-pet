@@ -167,8 +167,8 @@
   };
   window.__yumon_rss = state => {
     document.getElementById('status').textContent = state.status;
-    refresh.disabled = state.busy || state.chat_busy || !state.can_refresh;
-    canChat = state.can_refresh && !state.busy && !state.chat_busy;
+    refresh.disabled = state.busy || state.chat_busy;
+    canChat = !state.busy && !state.chat_busy;
     document.getElementById('chat-status').textContent = state.busy && state.can_refresh
       ? 'Yumon is reading products. You can send your message shortly.' : state.chat_status;
     const messages = state.chat || [];
