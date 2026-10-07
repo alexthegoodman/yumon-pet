@@ -60,6 +60,7 @@ keyword_extraction = {version = "1.5", features = ["yake"]}
 pdf-extract = "0.10.0"
 outlines-core = "0.2.14"
 walkdir = "2"
+zstd = "0.13"
 csv = "1.4.0"
 indicatif   = "0.17"     # progress bars during training
 quick-xml   = { version = "0.36", features = ["serialize"] }

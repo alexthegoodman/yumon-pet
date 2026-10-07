@@ -6,6 +6,8 @@ use rand::rngs::StdRng;
 use crate::brain::bpe::TokenizerKind;
 
 use crate::brain::chats::load_distilled_chats;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::brain::am_distill::load_am_distill_chats;
 use crate::brain::mdx::{load_chats_from_csv, load_chats_from_friends_csv};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::brain::mdx::{load_arena_chats, load_csv_bible_pairs, load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_quote_chats, load_quotes_csv, load_specific_dict_sentences, load_text_paragraphs, load_txt_lines, load_wiki_chats, load_txt_sentences};
@@ -38,6 +40,9 @@ pub enum FileKind {
     SpecificDict,
     PDF,
     DistillChat,
+    /// AM-DeepSeek-R1-Distilled `.jsonl` / `.jsonl.zst`, streamed. The per-file
+    /// limit stops reading early (the full file is ~20 GB decoded).
+    AmDistill,
     DialogueCsv,
     FriendsCsv,
     /// One paragraph per line (wiki_extract.txt). Training: sentences become
@@ -217,6 +222,20 @@ impl DataLoader {
 
                     sents
                 }
+                FileKind::AmDistill => {
+                    // Reading already stops at the limit.
+                    let chats = load_am_distill_chats(&entry.path, entry.limit)?;
+
+                    let mut sents = Vec::new();
+                    for chat in chats.blocks {
+                        for mem in chat.memories {
+                            sents.push(mem.bot);
+                            sents.push(mem.human);
+                        }
+                    }
+
+                    sents
+                }
                 FileKind::JsonChats => {
                     let mut chats = load_arena_chats(&entry.path)?;
 
@@ -349,7 +368,7 @@ impl DataLoader {
         // 1. Raw sentences from disk
         // Chat-built sources read their own files below.
         let mut sentences = match entry.kind {
-            FileKind::Paragraphs | FileKind::QuotesCsv => Vec::new(),
+            FileKind::Paragraphs | FileKind::QuotesCsv | FileKind::AmDistill => Vec::new(),
             _ => load_sentences(&entry.path, &entry.kind)?,
         };
         println!(
@@ -447,6 +466,14 @@ impl DataLoader {
                     chats, tokenizer, keyword_index, rng, self.stage, max_seq_len,
                 )
             }
+            FileKind::AmDistill => {
+                // Reading already stops at the limit.
+                let chats = load_am_distill_chats(&entry.path, entry.limit)?;
+
+                prepare_paired_samples_chats(
+                    chats, tokenizer, keyword_index, rng, self.stage, max_seq_len,
+                )
+            }
             FileKind::JsonChats => {
                 let mut chats = load_arena_chats(&entry.path)?;
 
@@ -535,6 +562,7 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
         FileKind::Chats       => Ok(Vec::new()),
         FileKind::JsonChats       => Ok(Vec::new()),
         FileKind::DistillChat   => Ok(Vec::new()),
+        FileKind::AmDistill     => Ok(Vec::new()),
         FileKind::DialogueCsv   => Ok(Vec::new()),
         FileKind::FriendsCsv    => Ok(Vec::new()),
     }

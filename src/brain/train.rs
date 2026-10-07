@@ -611,6 +611,19 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
         //     None
         // );
 
+    // AM-DeepSeek-R1-Distilled (streamed, so the file can be a partial download).
+    // Not baked into the Docker image: scripts/fetch_am_deepseek.sh pulls it onto
+    // the RunPod volume. Skipped silently when absent so local runs still work.
+    let am_path = std::env::var("YUMON_AM_PATH")
+        .unwrap_or_else(|_| "data/am_deepseek/am_0.9M.jsonl.zst".to_string());
+    if std::path::Path::new(&am_path).exists() {
+        let am_limit = std::env::var("YUMON_AM_LIMIT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(300_000);
+        loader = loader.add(am_path, FileKind::AmDistill, Some(am_limit));
+    }
+
     loader
         // .total_limit(2_000_000)
         .total_limit(5_000_000)

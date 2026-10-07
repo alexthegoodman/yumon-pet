@@ -164,6 +164,24 @@ uses the pod's NVIDIA driver.
    pod/volume, or `runpodctl send`/`scp` if you've enabled SSH on the pod, to copy
    `/workspace/checkpoints/brain/` to your machine.
 
+**AM-DeepSeek-R1-Distilled dataset (not in the image).** On start the container runs
+`scripts/fetch_am_deepseek.sh`, which curls `am_0.9M.jsonl.zst` (~3 GB, same data as the
+Kaggle upload, but Hugging Face needs no login) to
+`/workspace/data/am_deepseek/` with resume, and skips it if already there. The Rust loader
+(`brain::am_distill`, `FileKind::AmDistill`) streams the `.zst` directly - no unpacking, and
+reading stops at the limit. Each row becomes one pair: the user prompt and the first sentence
+of the final answer (reasoning dropped). English-only, plain-prose, <= 200 chars each side, so
+only ~4% of rows qualify (~37 of the 1k sample). Pod env: `AM_PREFIX_MB=<n>` fetches just the
+first n MiB (a truncated `.zst` is fine, but the head of the file is skewed toward a few
+sources), `AM_DISABLE=1` skips it, `YUMON_AM_LIMIT` caps pairs (default 300000),
+`YUMON_AM_PATH` points elsewhere. Source is CC-BY-NC-4.0. Locally, get the 1k sample with:
+
+```sh
+mkdir -p data/am_deepseek && cd data/am_deepseek
+curl -LO https://huggingface.co/datasets/a-m-team/AM-DeepSeek-R1-Distilled-1.4M/resolve/main/am_0.9M_sample_1k.jsonl.zst
+cargo test --lib am_distill
+```
+
 For CUDA startup failures, check `nvidia-smi` in the pod and verify that the
 host driver supports the CUDA version in the Docker runtime image.
 

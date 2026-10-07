@@ -71,8 +71,15 @@ RUN cargo build --release --no-default-features --bin yumon-pet
 FROM runpod/base:1.0.2-cuda1281-ubuntu2204 AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
+    ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
+
+# AM-DeepSeek-R1-Distilled is downloaded onto the network volume at container
+# start by scripts/fetch_am_deepseek.sh (resumable, skipped if already there),
+# not baked into the image. The Rust loader streams the .zst directly.
+# Optional pod env: AM_PREFIX_MB=<n> (fetch only the first n MiB), AM_DISABLE=1,
+# YUMON_AM_LIMIT=<pairs> (cap, default 300000).
+ENV YUMON_AM_PATH=/workspace/data/am_deepseek/am_0.9M.jsonl.zst
 
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
@@ -90,8 +97,11 @@ COPY data/ideas.txt data/wiki_extract.txt data/bible_bbe.csv data/bible_asv.csv 
 COPY archive/arena_extract.txt archive/ov_chats.txt archive/you_chats.txt \
      archive/clean_chats.txt ./archive/
 COPY archive/synthetic/ ./archive/synthetic/
+COPY scripts/fetch_am_deepseek.sh ./scripts/fetch_am_deepseek.sh
+# Strip CRs in case the script was checked out with Windows line endings.
+RUN sed -i 's/\r$//' scripts/fetch_am_deepseek.sh && chmod +x scripts/fetch_am_deepseek.sh
 
 # Checkpoints must land on a mounted RunPod Network Volume (not this image's
 # writable layer) so they survive the pod being stopped/terminated - mount
 # your volume at /workspace. See README.md for the full RunPod walkthrough.
-CMD ["./yumon-pet", "train-brain", "--out-dir", "/workspace/checkpoints/brain"]
+CMD ["/bin/sh", "-c", "./scripts/fetch_am_deepseek.sh; exec ./yumon-pet train-brain --out-dir /workspace/checkpoints/brain"]
