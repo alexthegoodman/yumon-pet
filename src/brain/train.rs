@@ -227,6 +227,12 @@ fn eval_prompts() -> Vec<String> {
         "How do plants grow?".to_string(),
         "Tell me about friendship.".to_string(),
         "What should I do today?".to_string(),
+        "The key was in the box. I moved it to the shelf. Where is the key?".to_string(),
+        "Mia finished before Jo. Jo finished before Lee. Who finished last?".to_string(),
+        "Copy these words in reverse order, separated by commas: pear, apple, plum.".to_string(),
+        "If the door is closed, wait; otherwise enter. The door is closed. What will you do?".to_string(),
+        "Bring me the cup. There are two cups, one blue and one red.".to_string(),
+        "Human: My favorite color is blue.\nYumon: I will remember that.\nHuman: My favorite color is now green.\nYumon: I will remember green.\nHuman: What is my favorite color?".to_string(),
     ]
 }
 
@@ -400,7 +406,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 64,
         // 128,
         // 256,
-        512, // ~220M total / ~71M active params at 16 layers, 4 experts top-1
+        1024, // ~1.32B total / ~411M active at 24 layers, 4 experts top-1
         // 1024
     ];
     let layer_counts: [usize; 1] = [
@@ -409,7 +415,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 4,
         // 8,
         // 8, // stretch: slower on iGPU - each MoE layer forces a host readback
-        16
+        24
         // 32
     ];
     let head_counts:  [usize; 1] = [
@@ -421,7 +427,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 32
         // 64
     ];
-    let seq_lens:     [usize; 1] = [256];
+    let seq_lens:     [usize; 1] = [512];
     let batch_sizes:     [usize; 1] = [
         // 2,
         // 8
@@ -569,6 +575,9 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
         .add("archive/synthetic/world_basics.txt", FileKind::Chats, None)
         .add("archive/synthetic/daily_life.txt", FileKind::Chats, None)
         .add("archive/synthetic/social_life.txt", FileKind::Chats, None)
+        .add("archive/synthetic/puzzles.txt", FileKind::Chats, None)
+        .add("archive/synthetic/commands.txt", FileKind::Chats, None)
+        .add("archive/synthetic/memory.txt", FileKind::Chats, None)
         .add("data/creative_stories.txt", FileKind::Txt, None) // good but gets split
         // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
         // // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
@@ -2025,14 +2034,14 @@ mod language_run_tests {
     use super::*;
 
     #[test]
-    fn training_grid_uses_256_token_language_context() {
+    fn training_grid_uses_512_token_language_context() {
         for architecture in [Architecture::XLstm, Architecture::EncoderDecoder,
             Architecture::Moe { num_experts: 4, top_k: 1 }] {
             let runs = generate_run_configs(8, architecture);
             assert!(!runs.is_empty());
             for run in runs {
-                assert_eq!(run.max_seq_len, 256);
-                assert!(run.name.contains("_256len_"));
+                assert_eq!(run.max_seq_len, 512);
+                assert!(run.name.contains("_512len_"));
                 assert!(run.stages.iter().all(|s| s.stage == TrainingStage::Language));
             }
         }
@@ -2046,13 +2055,14 @@ mod moe_loss_tests {
     type B = Wgpu;
 
     #[test]
-    fn moe_grid_is_220m_four_experts_top1() {
-        let runs = generate_run_configs(32, Architecture::Moe { num_experts: 4, top_k: 1 });
+    fn moe_grid_is_1024_wide_24_layers_four_experts_top1() {
+        let runs = generate_run_configs(16, Architecture::Moe { num_experts: 4, top_k: 1 });
         assert_eq!(runs.len(), 1);
         let run = &runs[0];
-        assert_eq!((run.embed_dim, run.n_layers, run.attn_heads, run.ff_dim), (512, 16, 8, 2048));
+        assert_eq!((run.embed_dim, run.n_layers, run.attn_heads, run.ff_dim), (1024, 24, 8, 4096));
         assert!(matches!(run.architecture, Architecture::Moe { num_experts: 4, top_k: 1 }));
-        assert_eq!(run.name, "512h_16l_8a_256len_b32_Moe_e4_k1_Language");
+        assert_eq!(run.stages[0].batch_size, 16);
+        assert_eq!(run.name, "1024h_24l_8a_512len_b16_Moe_e4_k1_Language");
     }
 
     #[test]

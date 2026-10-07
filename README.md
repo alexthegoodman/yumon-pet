@@ -101,7 +101,7 @@ cargo test --bin yumon_rss
 
 ### Training on RunPod (Docker)
 
-The next Language run uses a **256-token** context. Chat inputs include earlier
+The next Language run uses a **512-token** context. Chat inputs include earlier
 turns from the same conversation as plain dialogue, for example:
 
 ```text
@@ -115,7 +115,7 @@ history, the input remains the original message. The latest complete turns are
 kept in chronological order; oldest turns are dropped to leave space for BOS,
 the existing Language separator, the current message, and the full reply with
 EOS. Samples whose current message and reply cannot fit are skipped. Short
-replies stay eligible at 256 tokens. Independent sentence/pair sources have no
+replies stay eligible at 512 tokens. Independent sentence/pair sources have no
 invented conversation history.
 
 Verify the formatting, token budgets, unchanged targets, conversation isolation,
@@ -126,8 +126,8 @@ cargo test --lib --no-default-features language_ -- --nocapture
 ```
 
 Rebuild the Docker image to include these changes. Run directories now contain
-`256len`, so the trainer starts a new context-size run rather than resuming a
-32-token checkpoint. The existing MoE expert/top-k sweep is retained. A longer
+`512len`, so the trainer starts a fresh run rather than resuming an older
+checkpoint. The existing MoE expert/top-k sweep is retained. A longer
 context increases GPU memory use; choose `--batch-size` for the pod's capacity
 when using MoE.
 
@@ -176,7 +176,7 @@ cargo run --release --no-default-features --bin yumon-pet -- train-brain --archi
 This selects `Architecture::Moe` in the existing training grid. It uses the same
 stage data, AdamW, charts, periodic text generation, and checkpoint workflow.
 The grid dimensions and data sources remain in `src/brain/train.rs`. The default
-architecture remains xLSTM; `--architecture encoder-decoder` selects the dense
+architecture is MoE; `--architecture encoder-decoder` selects the dense
 encoder/decoder. The separate `train_ui` and `chat_ui` binaries still use their
 existing hardcoded models; MoE training is selected through `train-brain`.
 
@@ -207,8 +207,49 @@ excluded. These weights are configurable in `YumonMoeBrainConfig`. Loss charts
 show language cross-entropy, while auxiliary loss and per-expert dispatched row
 counts are logged every 100 batches.
 
-The MoE grid is 512 wide, 16 layers, 8 heads, ff 2048, 4 experts top-1
-(about 220M total, 71M active parameters per token).
+The MoE grid is 1024 wide, 24 layers, 8 heads, ff 4096, 512-token context,
+4 experts top-1, and default batch size 16 (overridable with `--batch-size`).
+With a 4096-token vocabulary this is about 1.32B total and 411M active parameters
+per token. FP32 weights, gradients, and Adam states alone need about 21GB;
+activations and temporary buffers add to that. Peak VRAM has not been measured
+for this configuration.
+
+### Synthetic puzzles, commands, and memory
+
+`gen_synthetic_data` asks Llama through the existing Ollama `/api/chat` endpoint
+to generate actual puzzles and answers, command-following examples, and related
+multi-turn memory conversations. Puzzles cover location tracking, ordering,
+counting, spatial relations, constraints, and invented rules. Commands cover
+exact output formats, sorting, conditionals, action plans, clarification, and
+blocked actions. Llama is instructed to check answers privately; local validation
+checks structure and text, not semantic correctness. Review answers before use.
+
+Preview the prompts without contacting the endpoint or writing files:
+
+```sh
+cargo run --no-default-features --bin gen_synthetic_data -- --preview
+```
+
+Generate a small review batch (12 pairs per topic; memory keeps complete
+conversations and may exceed the target by up to four pairs):
+
+```sh
+cargo run --release --no-default-features --bin gen_synthetic_data -- --topics puzzles,commands,memory --target 12 --seed 42
+```
+
+Use `--endpoint` or `OLLAMA_ENDPOINT` to override the default endpoint, and
+`--model` to select the served Llama model (default `llama3`). Output stays in
+`data/synthetic/{puzzles,commands,memory}.txt`; generation never moves it to
+`archive`. Independent pairs have separate blank-line-delimited chat blocks;
+memory conversations retain their related turns in one block. Progress remains
+under `data/synthetic/.state`. `--pairs-per-call` counts conversations for memory
+and independent pairs for the other topics.
+
+After review, move approved files to `archive/synthetic/`. Training and tokenizer
+training automatically include those three archived files when present, and
+never ingest their staged copies under `data/synthetic`. Rebuild the Docker image
+after approval to include them. Shape changes require a fresh model run; retain
+the current tokenizer unless you intend to retrain it and start fresh.
 
 MoE language loss is the mean over supervised (non-padding) tokens. Burn 0.20's
 `CrossEntropyLoss` masks padding but divides by every position, so runs before
