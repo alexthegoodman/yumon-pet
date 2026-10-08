@@ -2,8 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use rand::{Rng, rngs::StdRng};
-#[cfg(not(target_arch = "wasm32"))]
-use rayon::prelude::*;
+use crate::brain::loading::map_ordered;
 use serde::{Deserialize, Serialize};
 use crate::brain::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, bpe::TokenizerKind, mdx::HandcraftedChats, sentiment::EmotionAnalyzer, train::{MAX_SEQ_LEN, keyword_emote_label, matched_classes}};
 use rand::SeedableRng;
@@ -15,7 +14,7 @@ pub enum TrainingStage {
     Structured, // phase 2: sentence → JSON
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CardinalDir {
     North, South, East, West, None,
@@ -51,7 +50,7 @@ impl CardinalDir {
     }
 }
 
-// #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+// #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 // #[serde(rename_all = "lowercase")]
 // pub enum Action {
 //     // Speak, // always speaks silently, in writing 
@@ -80,13 +79,13 @@ impl CardinalDir {
 //     }
 // }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct WorldEntity {
     pub dir:  CardinalDir,
     pub dist: f32,          // normalised 0..1
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct WorldContext {
     pub obstacle: Option<WorldEntity>,
     pub resource: Option<WorldEntity>,
@@ -111,8 +110,7 @@ impl WorldContext {
     }
 
     pub fn random(rng: &mut impl rand::Rng) -> Self {
-        let mut rng = &mut rand::rngs::StdRng::from_entropy();
-        let maybe = |rng: &mut StdRng| -> Option<WorldEntity> {
+        let mut maybe = || -> Option<WorldEntity> {
             if rng.gen_bool(0.4) {
                 Some(WorldEntity {
                     dir:  CardinalDir::random(rng),
@@ -123,9 +121,9 @@ impl WorldContext {
             }
         };
         Self {
-            obstacle: maybe(rng),
-            resource: maybe(rng),
-            building: maybe(rng),
+            obstacle: maybe(),
+            resource: maybe(),
+            building: maybe(),
         }
     }
 }
@@ -486,7 +484,7 @@ impl WorldContext {
 
 // ── Action ─────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
     GoToDestination, GoHome, Follow, GetHelp, Survey, Collect, Stack, Sit,
@@ -803,17 +801,21 @@ pub fn prepare_paired_samples_split(
     println!("prepare paired samples split");
 
     let bad_words = vec!["sex", "drug", "kill", "rape", "nazi"];
-    let mut rng_local = rand::thread_rng();
-    let mut samples = Vec::new();
+    // Assign seeds in input order before dispatching work to Rayon.
+    let inputs = sentences
+        .into_iter()
+        .map(|sent| (sent, rng.r#gen::<u64>()))
+        .collect();
 
     let analyzer = EmotionAnalyzer::new();
     let language_separator_len = tokenizer.encode(" ").len();
 
-    for sent in sentences {
-        if bad_words.iter().any(|&w| sent.to_lowercase().contains(w)) { continue; }
+    map_ordered(inputs, |(sent, seed)| {
+        let mut rng_local = StdRng::seed_from_u64(seed);
+        if bad_words.iter().any(|&w| sent.to_lowercase().contains(w)) { return None; }
 
         let words: Vec<&str> = sent.split_whitespace().collect();
-        if words.len() < 3 { continue; }
+        if words.len() < 3 { return None; }
 
         let world = WorldContext::random(&mut rng_local);
         // let (action, motion_dir) = derive_action(&world);
@@ -955,7 +957,7 @@ pub fn prepare_paired_samples_split(
             }
         };
 
-        if target_encoded.is_empty() || target_encoded.len() > max_seq_len - 2 { continue; }
+        if target_encoded.is_empty() || target_encoded.len() > max_seq_len - 2 { return None; }
 
         let target_labels: Vec<usize> = target_encoded.iter().cloned()
             .chain(std::iter::once(EOS_TOKEN))
@@ -965,17 +967,17 @@ pub fn prepare_paired_samples_split(
             .chain(input_encoded.iter().cloned())
             .collect();
 
-        // if enc_input.len() > max_seq_len { continue; }
-        // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
-        // if enc_input.len() + target_encoded.len() < max_seq_len / 4 { continue; }
+        // if enc_input.len() > max_seq_len { return None; }
+        // if enc_input.len() + target_encoded.len() > max_seq_len { return None; }
+        // if enc_input.len() + target_encoded.len() < max_seq_len / 4 { return None; }
 
-        if stage == TrainingStage::Language && enc_input.len() + language_separator_len + target_labels.len() > max_seq_len { continue; }
+        if stage == TrainingStage::Language && enc_input.len() + language_separator_len + target_labels.len() > max_seq_len { return None; }
 
-        if stage == TrainingStage::Structured && target_encoded.len() < max_seq_len / 10 { continue; }
-        if stage == TrainingStage::Structured && enc_input.len() < max_seq_len / 10 { continue; }
-        if target_encoded.len() > max_seq_len { continue; }
-        if enc_input.len() > max_seq_len { continue; }
-        // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
+        if stage == TrainingStage::Structured && target_encoded.len() < max_seq_len / 10 { return None; }
+        if stage == TrainingStage::Structured && enc_input.len() < max_seq_len / 10 { return None; }
+        if target_encoded.len() > max_seq_len { return None; }
+        if enc_input.len() > max_seq_len { return None; }
+        // if enc_input.len() + target_encoded.len() > max_seq_len { return None; }
 
         let pad = |mut v: Vec<usize>| -> Vec<usize> {
             v.resize(max_seq_len, PAD_TOKEN);
@@ -985,7 +987,7 @@ pub fn prepare_paired_samples_split(
         let input_ids     = pad(enc_input);
         let target_labels = pad(target_labels);
 
-        samples.push(Sample {
+        Some(Sample {
             input_ids,
             target_labels,
             action,
@@ -993,10 +995,11 @@ pub fn prepare_paired_samples_split(
             world,
             target_json,
             pair: (sent_a, sent_b)
-        });
-    }
-
-    samples
+        })
+    })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 pub fn prepare_paired_samples_split_sep(
@@ -1011,18 +1014,22 @@ pub fn prepare_paired_samples_split_sep(
     println!("prepare paired samples split");
 
     let bad_words = vec!["sex", "drug", "kill", "rape", "nazi"];
-    let mut rng_local = rand::thread_rng();
-    let mut samples = Vec::new();
+    // Assign seeds in input order before dispatching work to Rayon.
+    let inputs = sentences
+        .into_iter()
+        .map(|sent| (sent, rng.r#gen::<u64>()))
+        .collect();
 
     let analyzer = EmotionAnalyzer::new();
     let language_separator_len = tokenizer.encode(" ").len();
 
-    for sents in sentences {
+    map_ordered(inputs, |(sents, seed)| {
+        let mut rng_local = StdRng::seed_from_u64(seed);
         let sent_a = sents.0;
         let sent_b = sents.1;
 
-        if bad_words.iter().any(|&w| sent_a.to_lowercase().contains(w)) { continue; }
-        if bad_words.iter().any(|&w| sent_b.to_lowercase().contains(w)) { continue; }
+        if bad_words.iter().any(|&w| sent_a.to_lowercase().contains(w)) { return None; }
+        if bad_words.iter().any(|&w| sent_b.to_lowercase().contains(w)) { return None; }
 
         let world = WorldContext::random(&mut rng_local);
         // let (action, motion_dir) = derive_action(&world);
@@ -1152,7 +1159,7 @@ pub fn prepare_paired_samples_split_sep(
             }
         };
 
-        if target_encoded.is_empty() || target_encoded.len() > max_seq_len - 2 { continue; }
+        if target_encoded.is_empty() || target_encoded.len() > max_seq_len - 2 { return None; }
 
         let target_labels: Vec<usize> = target_encoded.iter().cloned()
             .chain(std::iter::once(EOS_TOKEN))
@@ -1162,20 +1169,20 @@ pub fn prepare_paired_samples_split_sep(
             .chain(input_encoded.iter().cloned())
             .collect();
 
-        // if enc_input.len() > max_seq_len { continue; }
+        // if enc_input.len() > max_seq_len { return None; }
 
-        // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
-        // if enc_input.len() + target_encoded.len() < max_seq_len / 4 { continue; }
+        // if enc_input.len() + target_encoded.len() > max_seq_len { return None; }
+        // if enc_input.len() + target_encoded.len() < max_seq_len / 4 { return None; }
 
-        // if target_encoded.len() < max_seq_len / 4 { continue; }
-        // if enc_input.len() + target_encoded.len() > max_seq_len { continue; }
+        // if target_encoded.len() < max_seq_len / 4 { return None; }
+        // if enc_input.len() + target_encoded.len() > max_seq_len { return None; }
 
-        if stage == TrainingStage::Language && enc_input.len() + language_separator_len + target_labels.len() > max_seq_len { continue; }
+        if stage == TrainingStage::Language && enc_input.len() + language_separator_len + target_labels.len() > max_seq_len { return None; }
 
-        if stage == TrainingStage::Structured && target_encoded.len() < max_seq_len / 10 { continue; }
-        if stage == TrainingStage::Structured && enc_input.len() < max_seq_len / 10 { continue; }
-        if target_encoded.len() > max_seq_len { continue; }
-        if enc_input.len() > max_seq_len { continue; }
+        if stage == TrainingStage::Structured && target_encoded.len() < max_seq_len / 10 { return None; }
+        if stage == TrainingStage::Structured && enc_input.len() < max_seq_len / 10 { return None; }
+        if target_encoded.len() > max_seq_len { return None; }
+        if enc_input.len() > max_seq_len { return None; }
 
         let pad = |mut v: Vec<usize>| -> Vec<usize> {
             v.resize(max_seq_len, PAD_TOKEN);
@@ -1185,7 +1192,7 @@ pub fn prepare_paired_samples_split_sep(
         let input_ids     = pad(enc_input);
         let target_labels = pad(target_labels);
 
-        samples.push(Sample {
+        Some(Sample {
             input_ids,
             target_labels,
             action,
@@ -1193,10 +1200,11 @@ pub fn prepare_paired_samples_split_sep(
             world,
             target_json,
             pair: (sent_a, sent_b)
-        });
-    }
-
-    samples
+        })
+    })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Render prior turns as plain dialogue, newest complete turns first for budgeting,
@@ -1231,13 +1239,18 @@ pub fn prepare_paired_samples_chats(
     println!("prepare paired samples chat");
 
     let bad_words = vec!["sex", "drug", "kill", "rape", "nazi"];
-    let mut rng_local = rand::thread_rng();
-    let mut samples = Vec::new();
+    // A whole block stays together so each turn sees its chronological history.
+    let blocks = chats.blocks
+        .into_iter()
+        .map(|block| (block, rng.r#gen::<u64>()))
+        .collect();
 
     let analyzer = EmotionAnalyzer::new();
     let language_separator_len = tokenizer.encode(" ").len();
 
-    for block in &chats.blocks {
+    map_ordered(blocks, |(block, seed)| {
+        let mut rng_local = StdRng::seed_from_u64(seed);
+        let mut samples = Vec::new();
         for (i, memory) in block.memories.iter().enumerate() {
             let sent = &memory.human;
 
@@ -1400,9 +1413,11 @@ pub fn prepare_paired_samples_chats(
                 pair: (if stage == TrainingStage::Language { input_json } else { memory.human.clone() }, memory.bot.clone()),
             });
         }
-    }
-
-    samples
+        samples
+    })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 #[cfg(test)]
@@ -1513,5 +1528,154 @@ mod language_memory_tests {
             assert!(input_len + tok.encode(" ").len() + reply_len <= 256);
         }
         println!("Verified {} real corpus samples", result.len());
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod parallel_sample_tests {
+    use super::*;
+    use crate::brain::mdx::{ChatBlock, Memory};
+    use rayon::ThreadPoolBuilder;
+
+    fn tokenizer() -> TokenizerKind {
+        let ascii: String = (32u8..=126).map(char::from).chain(['\n']).collect();
+        TokenizerKind::Char(crate::brain::Tokenizer::build_from_text(&ascii, 256))
+    }
+
+    #[test]
+    fn every_preparation_path_is_seeded_and_ordered_in_both_stages() {
+        let tokenizer = tokenizer();
+        let keywords = HashMap::new();
+        let pairs: Vec<_> = (0..96).map(|i| (
+            format!("Please tell me something interesting about the bright moon and the stars in the sky tonight number {i}"),
+            "The moon orbits our planet and the stars shine brightly in the sky every clear night.".to_string(),
+        )).collect();
+        for stage in [TrainingStage::Language, TrainingStage::Structured] {
+            for path in 0..3 {
+                let prepare = |threads, seed| {
+                    ThreadPoolBuilder::new()
+                        .num_threads(threads)
+                        .build()
+                        .unwrap()
+                        .install(|| {
+                            let mut rng = StdRng::seed_from_u64(seed);
+                            match path {
+                                0 => prepare_paired_samples_split(
+                                    pairs.iter().map(|(a, b)| format!("{a} {b}")).collect(),
+                                    &tokenizer,
+                                    &keywords,
+                                    &mut rng,
+                                    stage,
+                                    512,
+                                ),
+                                1 => prepare_paired_samples_split_sep(
+                                    pairs.clone(),
+                                    &tokenizer,
+                                    &keywords,
+                                    &mut rng,
+                                    stage,
+                                    512,
+                                ),
+                                _ => prepare_paired_samples_chats(
+                                    HandcraftedChats {
+                                        blocks: pairs
+                                            .chunks(2)
+                                            .map(|pairs| ChatBlock {
+                                                memories: pairs
+                                                    .iter()
+                                                    .map(|(human, bot)| Memory {
+                                                        human: human.clone(),
+                                                        bot: bot.clone(),
+                                                    })
+                                                    .collect(),
+                                            })
+                                            .collect(),
+                                    },
+                                    &tokenizer,
+                                    &keywords,
+                                    &mut rng,
+                                    stage,
+                                    512,
+                                ),
+                            }
+                        })
+                };
+                let serial = prepare(1, 42);
+                assert!(!serial.is_empty(), "stage {stage:?}, path {path}");
+                // Compare every field, including actions, world entities and floats.
+                assert_eq!(format!("{serial:?}"), format!("{:?}", prepare(4, 42)));
+                assert_ne!(format!("{serial:?}"), format!("{:?}", prepare(4, 43)));
+                assert!(
+                    serial
+                        .iter()
+                        .all(|s| s.input_ids.len() == 512 && s.target_labels.len() == 512)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_chat_blocks_keep_history_local_and_retain_short_followups() {
+        let tokenizer = tokenizer();
+        let blocks = vec![
+            ChatBlock {
+                memories: vec![
+                    Memory {
+                        human: "Tell me about the moon".into(),
+                        bot: "The moon orbits the Earth.".into(),
+                    },
+                    Memory {
+                        human: "Why?".into(),
+                        bot: "Gravity holds it in orbit.".into(),
+                    },
+                ],
+            },
+            ChatBlock {
+                memories: vec![Memory {
+                    human: "Hello".into(),
+                    bot: "Welcome to the garden.".into(),
+                }],
+            },
+        ];
+        let samples = prepare_paired_samples_chats(
+            HandcraftedChats { blocks },
+            &tokenizer,
+            &HashMap::new(),
+            &mut StdRng::seed_from_u64(7),
+            TrainingStage::Language,
+            256,
+        );
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples[0].pair.0, "Tell me about the moon");
+        assert_eq!(
+            samples[1].pair.0,
+            "Human: Tell me about the moon\nYumon: The moon orbits the Earth.\nHuman: Why?"
+        );
+        assert_eq!(samples[2].pair.0, "Hello");
+        let reply = tokenizer.encode("Gravity holds it in orbit.");
+        assert_eq!(samples[1].target_labels[..reply.len()], reply);
+        assert_eq!(samples[1].target_labels[reply.len()], EOS_TOKEN);
+    }
+
+    #[test]
+    fn filtering_preserves_the_order_of_surviving_inputs() {
+        let tokenizer = tokenizer();
+        let sentences = vec![
+            "The moon shines brightly above the garden tonight".into(),
+            "short".into(),
+            "These drug references should be filtered from the corpus".into(),
+            "The stars shine brightly above the forest tonight".into(),
+        ];
+        let samples = prepare_paired_samples_split(
+            sentences,
+            &tokenizer,
+            &HashMap::new(),
+            &mut StdRng::seed_from_u64(9),
+            TrainingStage::Language,
+            256,
+        );
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].pair.0, "The moon shines brightly");
+        assert_eq!(samples[1].pair.0, "The stars shine brightly");
     }
 }

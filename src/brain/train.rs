@@ -405,8 +405,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 32,
         // 64,
         // 128,
-        // 256, // small, local smoke testing
-        512 // 220M ideal
+        256, // smaller, maybe good seq length of 256
+        // 512 // 220M ideal
         // 1024, // ~1.32B total / ~411M active at 24 layers, 4 experts top-1
         // 1024
     ];
@@ -416,7 +416,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 4,
         // 8,
         // 8, // stretch: slower on iGPU - each MoE layer forces a host readback
-        16
+        16 // discovered minimum (runpod)
         // 24
         // 32
     ];
@@ -544,6 +544,12 @@ fn load_stage_data(
     keyword_index: &HashMap<String, Vec<usize>>,
     max_seq_len: usize,
 ) -> Result<Vec<crate::brain::samples::Sample>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(path) = std::env::var_os("YUMON_SAMPLE_CACHE").filter(|path| !path.is_empty()) {
+        let path = std::path::PathBuf::from(path);
+        println!("[SampleCache] loading prepared samples from {}", path.display());
+        return crate::brain::sample_cache::load_cache(&path, tokenizer, stage, max_seq_len);
+    }
     stage_data_loader(stage).load(tokenizer, keyword_index, max_seq_len)
 }
 

@@ -99,91 +99,88 @@ cargo test --bin yumon_rss
 ```
 
 
-### Training on RunPod (Docker)
+### Prepare samples once, then train on RunPod (Docker)
 
-The next Language run uses a **512-token** context. Chat inputs include earlier
-turns from the same conversation as plain dialogue, for example:
-
-```text
-Human: My favorite color is blue.
-Yumon: I like blue too.
-Human: What color did I choose?
-```
-
-The target remains just `You chose blue.` (plus the existing EOS token). With no
-history, the input remains the original message. The latest complete turns are
-kept in chronological order; oldest turns are dropped to leave space for BOS,
-the existing Language separator, the current message, and the full reply with
-EOS. Samples whose current message and reply cannot fit are skipped. Short
-replies stay eligible at 512 tokens. Independent sentence/pair sources have no
-invented conversation history.
-
-Verify the formatting, token budgets, unchanged targets, conversation isolation,
-and a sample of the real chat corpus without a GPU training run:
+Build the prepared sample cache locally using the same sources, deduplication,
+limits and shuffle as training. The current training grid uses the Language
+stage with a **256-token** context. The cache contains the final token IDs,
+labels, actions, world contexts, replies and conversation histories in one
+compressed binary file; RunPod only decompresses and deserializes it.
 
 ```sh
-cargo test --lib --no-default-features language_ -- --nocapture
+cargo run --release --no-default-features --bin cache_samples -- --max-seq-len 256
+cargo run --release --no-default-features --bin cache_samples -- --inspect
 ```
 
-Rebuild the Docker image to include these changes. Run directories now contain
-`512len`, so the trainer starts a fresh run rather than resuming an older
-checkpoint. The existing MoE expert/top-k sweep is retained. A longer
-context increases GPU memory use; choose `--batch-size` for the pod's capacity
-when using MoE.
+The output is `training-cache/samples.bin` (ignored by Git, included in Docker).
+The default tokenizer is `yumon_bpe/`; use `--tokenizer <directory>` to select
+another one and copy that same tokenizer into `yumon_bpe/` before deploying.
+The builder refuses to overwrite an existing snapshot. For a rebuild, remove
+the old cache explicitly or use `--output <new-file>` and replace the deployed
+cache after verifying it. `--stage structured`, `--seed <n>` and `--limit <n>`
+are available. Each file stores one stage and context length, matching the
+current single-stage training grid. A different stage or context needs its own
+snapshot and a matching `YUMON_SAMPLE_CACHE` path.
 
-The training path (`brain::train::run`, driven by `train-brain`) builds headless with
-`--no-default-features` - this skips the desktop/GUI feature (native window, webview,
-3D engine, gamepad) that the other bins use, so the Docker image needs no GTK/WebKit/
-udev packages. Headless Linux training uses Burn's CUDA backend; desktop/local
-training retains WGPU. The Docker runtime includes CUDA's runtime compiler and
-uses the pod's NVIDIA driver.
+Chat inputs include earlier turns from the same block as chronological
+`Human:` / `Yumon:` dialogue. Oldest complete turns are dropped to fit the
+context and preserve the full reply. The cache saves the resulting samples
+exactly; it does not rebuild conversation history at training time.
 
-1. **Build and push the image** (from a machine with Docker and the full repo checked
-   out, since the image bakes in `yumon_bpe/` and the text training data):
+To use a cache for local training:
 
-   ```
+```powershell
+$env:YUMON_SAMPLE_CACHE = "training-cache/samples.bin"
+cargo run --release --bin yumon-pet -- train-brain
+```
+
+```sh
+YUMON_SAMPLE_CACHE=training-cache/samples.bin cargo run --release --no-default-features --bin yumon-pet -- train-brain
+```
+
+Without `YUMON_SAMPLE_CACHE`, local training still prepares the raw sources.
+With it set, a missing, damaged, or incompatible cache fails explicitly. The
+header checks the format version, tokenizer fingerprint, training stage and
+context length. Rebuild the cache after changing the tokenizer, source data,
+source limits, seed, sample preparation, or context length. Cached generated
+worlds/actions stay fixed across training launches; epoch shuffling still runs.
+
+AM-DeepSeek data is optional at **local cache creation** time. If
+`data/am_deepseek/am_0.9M.jsonl.zst` exists, it is included with the usual usable-pair
+cap (default 300000). Set `YUMON_AM_PATH` and `YUMON_AM_LIMIT` before running
+`cache_samples` to choose another local file or cap. Truncated downloads remain
+supported. The container no longer downloads this corpus; whatever was included
+locally is already in the snapshot.
+
+1. Build and push after the cache has been generated:
+
+   ```sh
    docker build -t alexthegoodman/yumon-brain:latest .
    docker push alexthegoodman/yumon-brain:latest
    ```
 
-2. **Create a RunPod Network Volume** (Storage → Network Volumes) sized for your
-   checkpoints, in the same region as the pod you'll launch.
+   Docker copies `yumon_bpe/` and `training-cache/samples.bin`, and excludes raw
+   corpora from the build context. The build fails if the finished cache is absent.
+   Compilation uses `--no-default-features`; the runtime uses Burn's CUDA backend.
 
-3. **Launch a GPU Pod** from your custom image (`<registry>/yumon-brain:latest`),
-   attaching the Network Volume at `/workspace`. The container's default command runs
-   `train-brain` and writes checkpoints to `/workspace/checkpoints/brain/<run-name>/`
-   (`model.bin`, `metadata.json`, tokenizer copy, and a loss-chart PNG per stage) -
-   same run configs (model sizes/epochs/stages) as `src/brain/train.rs` uses locally,
-   configured in the training grid. MoE honors `--epochs` and `--batch-size`;
-   other architectures use the grid's duration and batch size. `--max-articles`
-   is unused for this path. Training resumes
-   automatically from whatever's already in a run's checkpoint directory.
+2. Create a RunPod Network Volume for checkpoints and attach it at `/workspace`.
 
-4. **Pull checkpoints down** once you're happy with a run (or periodically - it saves
-   every epoch and every 500 batches): easiest is the RunPod web File Manager on the
-   pod/volume, or `runpodctl send`/`scp` if you've enabled SSH on the pod, to copy
-   `/workspace/checkpoints/brain/` to your machine.
+3. Launch a GPU pod from the image. The default command starts `train-brain`
+   with `YUMON_SAMPLE_CACHE=/app/training-cache/samples.bin` and saves checkpoints
+   under `/workspace/checkpoints/brain/<run-name>/`. It resumes existing checkpoints.
+   MoE honors `--epochs` and `--batch-size`; model dimensions and context come from
+   the grid in `src/brain/train.rs`.
 
-**AM-DeepSeek-R1-Distilled dataset (not in the image).** On start the container runs
-`scripts/fetch_am_deepseek.sh`, which curls `am_0.9M.jsonl.zst` (~3 GB, same data as the
-Kaggle upload, but Hugging Face needs no login) to
-`/workspace/data/am_deepseek/` with resume, and skips it if already there. The Rust loader
-(`brain::am_distill`, `FileKind::AmDistill`) streams the `.zst` directly - no unpacking, and
-reading stops at the limit. Each row becomes one pair: the user prompt and the first sentence
-of the final answer (reasoning dropped). English-only, plain-prose, <= 200 chars each side, so
-only ~4% of rows qualify (~37 of the 1k sample). Pod env: `AM_PREFIX_MB=<n>` fetches just the
-first n MiB (a truncated `.zst` is fine, but the head of the file is skewed toward a few
-sources), `AM_DISABLE=1` skips it, `YUMON_AM_LIMIT` caps pairs (default 300000),
-`YUMON_AM_PATH` points elsewhere. Source is CC-BY-NC-4.0. Locally, get the 1k sample with:
+4. Download checkpoints from the volume with the RunPod File Manager, `runpodctl`
+   or SCP. Verify that the host driver supports the Docker image's CUDA version
+   if CUDA startup fails.
+
+Loader/cache checks without a GPU or the repository tokenizer:
 
 ```sh
-mkdir -p data/am_deepseek && cd data/am_deepseek
-curl -LO https://huggingface.co/datasets/a-m-team/AM-DeepSeek-R1-Distilled-1.4M/resolve/main/am_0.9M_sample_1k.jsonl.zst
-cargo test --lib am_distill
+cargo test --lib --no-default-features sample_cache
+cargo test --lib --no-default-features loading_tests
 ```
-
-For CUDA startup failures, check `nvidia-smi` in the pod and verify that the
-host driver supports the CUDA version in the Docker runtime image.
 
 ## Sparse MoE training
 
