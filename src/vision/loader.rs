@@ -5,6 +5,8 @@ use anyhow::Result;
 use burn::{prelude::*, tensor::TensorData};
 #[cfg(not(target_arch = "wasm32"))]
 use image::imageops::FilterType;
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
 
 use crate::vision::IMG_SIZE;
 
@@ -16,16 +18,15 @@ pub fn load_image_tensor<B: Backend>(path: &str, device: &B::Device) -> Result<T
         .to_rgb8();
 
     let mut flat = vec![0.0f32; 3 * IMG_SIZE * IMG_SIZE];
-    for (i, pixel) in img.pixels().enumerate() {
-        let [r, g, b] = pixel.0;
-        flat[0 * IMG_SIZE * IMG_SIZE + i] = r as f32 / 255.0 * 2.0 - 1.0;
-        flat[1 * IMG_SIZE * IMG_SIZE + i] = g as f32 / 255.0 * 2.0 - 1.0;
-        flat[2 * IMG_SIZE * IMG_SIZE + i] = b as f32 / 255.0 * 2.0 - 1.0;
-    }
+    let plane_size = IMG_SIZE * IMG_SIZE;
+    flat.par_chunks_mut(plane_size)
+        .enumerate()
+        .for_each(|(channel, plane)| {
+            for (value, pixel) in plane.iter_mut().zip(img.pixels()) {
+                *value = pixel.0[channel] as f32 / 255.0 * 2.0 - 1.0;
+            }
+        });
 
-    let t = Tensor::<B, 4>::from_floats(
-        TensorData::new(flat, [1, 3, IMG_SIZE, IMG_SIZE]),
-        device,
-    );
+    let t = Tensor::<B, 4>::from_floats(TensorData::new(flat, [1, 3, IMG_SIZE, IMG_SIZE]), device);
     Ok(t)
 }

@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use rand::{seq::SliceRandom, SeedableRng};
 use rand::rngs::StdRng;
+use rand::Rng;
+use crate::brain::loading::map_ordered;
 
 use crate::brain::bpe::TokenizerKind;
 
@@ -102,173 +104,183 @@ impl DataLoader {
         let mut rng = StdRng::seed_from_u64(self.seed);
         let mut all: Vec<String> = Vec::new();
 
-        for entry in &self.entries {
-            // 1. Raw sentences from disk
+        let batches = map_ordered(
+            self.entries
+                .iter()
+                .zip(source_seeds(self.seed, self.entries.len()))
+                .collect(),
+            |(entry, seed)| -> anyhow::Result<Vec<String>> {
+                let mut rng = StdRng::seed_from_u64(seed);
+                // 1. Raw sentences from disk
 
-            // // Per-file limit before sample prep to reduce load
-            // if let Some(n) = entry.limit {
-            //     sentences.shuffle(&mut rng);
-            //     sentences.truncate(n);
-            // }
+                // // Per-file limit before sample prep to reduce load
+                // if let Some(n) = entry.limit {
+                //     sentences.shuffle(&mut rng);
+                //     sentences.truncate(n);
+                // }
 
-            let mut sentences = match entry.kind {
-                FileKind::QaPairs => {
-                    let mut pairs = load_qa_pairs_raw(&entry.path)?;
+                let sentences = match entry.kind {
+                    FileKind::QaPairs => {
+                        let mut pairs = load_qa_pairs_raw(&entry.path)?;
 
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        pairs.shuffle(&mut rng);
-                        pairs.truncate(n);
-                    }
-
-                    let mut sents = Vec::new();
-                    for pair in pairs {
-                        sents.push(pair.0);
-                        sents.push(pair.1);
-                    }
-
-                    sents
-                }
-                FileKind::BibleCsv => {
-                    let mut pairs = load_csv_bible_pairs(&entry.path)?;
-
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        pairs.shuffle(&mut rng);
-                        pairs.truncate(n);
-                    }
-
-                    let mut sents = Vec::new();
-                    for pair in pairs {
-                        sents.push(pair.0);
-                        sents.push(pair.1);
-                    }
-
-                    sents
-                }
-                FileKind::Chats => {
-                    let mut chats = load_handcrafted_chats(&entry.path)?;
-
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        chats.blocks.shuffle(&mut rng);
-                        chats.blocks.truncate(n);
-                    }
-
-                    let mut sents = Vec::new();
-                    for chat in chats.blocks {
-                        for mem in chat.memories {
-                            sents.push(mem.bot);
-                            sents.push(mem.human);
+                        // Per-file limit before sample prep to reduce load
+                        if let Some(n) = entry.limit {
+                            pairs.shuffle(&mut rng);
+                            pairs.truncate(n);
                         }
-                    }
 
-                    sents
-                }
-                FileKind::DialogueCsv => {
-                    let mut chats = load_chats_from_csv(&entry.path)?;
-
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        chats.blocks.shuffle(&mut rng);
-                        chats.blocks.truncate(n);
-                    }
-
-                    let mut sents = Vec::new();
-                    for chat in chats.blocks {
-                        for mem in chat.memories {
-                            sents.push(mem.bot);
-                            sents.push(mem.human);
+                        let mut sents = Vec::new();
+                        for pair in pairs {
+                            sents.push(pair.0);
+                            sents.push(pair.1);
                         }
+
+                        sents
                     }
+                    FileKind::BibleCsv => {
+                        let mut pairs = load_csv_bible_pairs(&entry.path)?;
 
-                    sents
-                }
-                FileKind::FriendsCsv => {
-                    let mut chats = load_chats_from_friends_csv(&entry.path)?;
-
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        chats.blocks.shuffle(&mut rng);
-                        chats.blocks.truncate(n);
-                    }
-
-                    let mut sents = Vec::new();
-                    for chat in chats.blocks {
-                        for mem in chat.memories {
-                            sents.push(mem.bot);
-                            sents.push(mem.human);
+                        // Per-file limit before sample prep to reduce load
+                        if let Some(n) = entry.limit {
+                            pairs.shuffle(&mut rng);
+                            pairs.truncate(n);
                         }
-                    }
 
-                    sents
-                }
-                FileKind::DistillChat => {
-                    let mut chats = load_distilled_chats(&entry.path, i32::MAX)?;
-
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        chats.blocks.shuffle(&mut rng);
-                        chats.blocks.truncate(n);
-                    }
-
-                    let mut sents = Vec::new();
-                    for chat in chats.blocks {
-                        for mem in chat.memories {
-                            sents.push(mem.bot);
-                            sents.push(mem.human);
+                        let mut sents = Vec::new();
+                        for pair in pairs {
+                            sents.push(pair.0);
+                            sents.push(pair.1);
                         }
+
+                        sents
                     }
+                    FileKind::Chats => {
+                        let mut chats = load_handcrafted_chats(&entry.path)?;
 
-                    sents
-                }
-                FileKind::AmDistill => {
-                    // Reading already stops at the limit.
-                    let chats = load_am_distill_chats(&entry.path, entry.limit)?;
-
-                    let mut sents = Vec::new();
-                    for chat in chats.blocks {
-                        for mem in chat.memories {
-                            sents.push(mem.bot);
-                            sents.push(mem.human);
+                        // Per-file limit before sample prep to reduce load
+                        if let Some(n) = entry.limit {
+                            chats.blocks.shuffle(&mut rng);
+                            chats.blocks.truncate(n);
                         }
-                    }
 
-                    sents
-                }
-                FileKind::JsonChats => {
-                    let mut chats = load_arena_chats(&entry.path)?;
-
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        chats.blocks.shuffle(&mut rng);
-                        chats.blocks.truncate(n);
-                    }
-
-                    let mut sents = Vec::new();
-                    for chat in chats.blocks {
-                        for mem in chat.memories {
-                            sents.push(mem.bot);
-                            sents.push(mem.human);
+                        let mut sents = Vec::new();
+                        for chat in chats.blocks {
+                            for mem in chat.memories {
+                                sents.push(mem.bot);
+                                sents.push(mem.human);
+                            }
                         }
+
+                        sents
                     }
+                    FileKind::DialogueCsv => {
+                        let mut chats = load_chats_from_csv(&entry.path)?;
 
-                    sents
-                },
-                _ => {
-                    let mut pairs = load_sentences(&entry.path, &entry.kind)?;
+                        // Per-file limit before sample prep to reduce load
+                        if let Some(n) = entry.limit {
+                            chats.blocks.shuffle(&mut rng);
+                            chats.blocks.truncate(n);
+                        }
 
-                    // Per-file limit before sample prep to reduce load
-                    if let Some(n) = entry.limit {
-                        pairs.shuffle(&mut rng);
-                        pairs.truncate(n);
+                        let mut sents = Vec::new();
+                        for chat in chats.blocks {
+                            for mem in chat.memories {
+                                sents.push(mem.bot);
+                                sents.push(mem.human);
+                            }
+                        }
+
+                        sents
                     }
-                    
-                    pairs
-                }
-            };
+                    FileKind::FriendsCsv => {
+                        let mut chats = load_chats_from_friends_csv(&entry.path)?;
 
-            all.extend(sentences);
+                        // Per-file limit before sample prep to reduce load
+                        if let Some(n) = entry.limit {
+                            chats.blocks.shuffle(&mut rng);
+                            chats.blocks.truncate(n);
+                        }
+
+                        let mut sents = Vec::new();
+                        for chat in chats.blocks {
+                            for mem in chat.memories {
+                                sents.push(mem.bot);
+                                sents.push(mem.human);
+                            }
+                        }
+
+                        sents
+                    }
+                    FileKind::DistillChat => {
+                        let mut chats = load_distilled_chats(&entry.path, i32::MAX)?;
+
+                        // Per-file limit before sample prep to reduce load
+                        if let Some(n) = entry.limit {
+                            chats.blocks.shuffle(&mut rng);
+                            chats.blocks.truncate(n);
+                        }
+
+                        let mut sents = Vec::new();
+                        for chat in chats.blocks {
+                            for mem in chat.memories {
+                                sents.push(mem.bot);
+                                sents.push(mem.human);
+                            }
+                        }
+
+                        sents
+                    }
+                    FileKind::AmDistill => {
+                        // Reading already stops at the limit.
+                        let chats = load_am_distill_chats(&entry.path, entry.limit)?;
+
+                        let mut sents = Vec::new();
+                        for chat in chats.blocks {
+                            for mem in chat.memories {
+                                sents.push(mem.bot);
+                                sents.push(mem.human);
+                            }
+                        }
+
+                        sents
+                    }
+                    FileKind::JsonChats => {
+                        let mut chats = load_arena_chats(&entry.path)?;
+
+                        // Per-file limit before sample prep to reduce load
+                        if let Some(n) = entry.limit {
+                            chats.blocks.shuffle(&mut rng);
+                            chats.blocks.truncate(n);
+                        }
+
+                        let mut sents = Vec::new();
+                        for chat in chats.blocks {
+                            for mem in chat.memories {
+                                sents.push(mem.bot);
+                                sents.push(mem.human);
+                            }
+                        }
+
+                        sents
+                    }
+                    _ => {
+                        let mut pairs = load_sentences(&entry.path, &entry.kind)?;
+
+                        // Per-file limit before sample prep to reduce load
+                        if let Some(n) = entry.limit {
+                            pairs.shuffle(&mut rng);
+                            pairs.truncate(n);
+                        }
+
+                        pairs
+                    }
+                };
+
+                Ok(sentences)
+            },
+        );
+        for sentences in batches {
+            all.extend(sentences?);
         }
 
         // Exact duplicate sentences would skew merge counts (ideas.txt repeats
@@ -276,7 +288,10 @@ impl DataLoader {
         let before = all.len();
         let mut seen = std::collections::HashSet::new();
         all.retain(|sentence| seen.insert(sentence.trim().to_lowercase()));
-        println!("[DataLoader] {} duplicate sentences removed", before - all.len());
+        println!(
+            "[DataLoader] {} duplicate sentences removed",
+            before - all.len()
+        );
 
         // 4. Global shuffle then total cap
         all.shuffle(&mut rng);
@@ -291,17 +306,34 @@ impl DataLoader {
     /// Load, prepare, merge, shuffle, and cap all samples.
     pub fn load(
         self,
-        tokenizer:     &TokenizerKind,
+        tokenizer: &TokenizerKind,
         keyword_index: &HashMap<std::string::String, Vec<usize>>,
-        max_seq_len:   usize,
+        max_seq_len: usize,
     ) -> anyhow::Result<Vec<Sample>> {
         let mut rng = StdRng::seed_from_u64(self.seed);
         let mut all: Vec<Sample> = Vec::new();
         // Exact duplicates (same prompt and target tokens) across every source.
         let mut seen = std::collections::HashSet::new();
 
-        for entry in &self.entries {
-            let mut samples = self.load_entry(entry, tokenizer, keyword_index, max_seq_len, &mut rng)?;
+        // Indexed collection preserves source priority for deduplication. Each source
+        // gets its own RNG, so scheduling does not affect per-file selection.
+        let batches = map_ordered(
+            self.entries
+                .iter()
+                .zip(source_seeds(self.seed, self.entries.len()))
+                .collect(),
+            |(entry, seed)| {
+                self.load_entry(
+                    entry,
+                    tokenizer,
+                    keyword_index,
+                    max_seq_len,
+                    &mut StdRng::seed_from_u64(seed),
+                )
+            },
+        );
+        for (entry, samples) in self.entries.iter().zip(batches) {
+            let mut samples = samples?;
             let before = samples.len();
             samples.retain(|sample| seen.insert(sample_key(sample)));
             println!(
@@ -329,17 +361,29 @@ impl DataLoader {
     /// Ignores the total cap.
     pub fn report(
         self,
-        tokenizer:     &TokenizerKind,
+        tokenizer: &TokenizerKind,
         keyword_index: &HashMap<std::string::String, Vec<usize>>,
-        max_seq_len:   usize,
+        max_seq_len: usize,
     ) -> anyhow::Result<Vec<SourceReport>> {
-        let mut rng = StdRng::seed_from_u64(self.seed);
         let mut seen = std::collections::HashSet::new();
         let mut reports = Vec::new();
 
-        for entry in &self.entries {
-            let samples = self.load_entry(entry, tokenizer, keyword_index, max_seq_len, &mut rng)?;
-            let mut report = SourceReport { path: entry.path.clone(), ..Default::default() };
+        for (entry, seed) in self
+            .entries
+            .iter()
+            .zip(source_seeds(self.seed, self.entries.len()))
+        {
+            let samples = self.load_entry(
+                entry,
+                tokenizer,
+                keyword_index,
+                max_seq_len,
+                &mut StdRng::seed_from_u64(seed),
+            )?;
+            let mut report = SourceReport {
+                path: entry.path.clone(),
+                ..Default::default()
+            };
             for sample in &samples {
                 if !seen.insert(sample_key(sample)) {
                     report.duplicates += 1;
@@ -608,4 +652,9 @@ fn sample_key(sample: &Sample) -> u64 {
 #[cfg(not(target_arch = "wasm32"))]
 fn load_qa_pairs_raw(path: &str) -> anyhow::Result<Vec<(String, String)>> {
     load_qa_pairs(path)
+}
+/// Stable source RNGs shared by loading and memory-bounded reporting.
+fn source_seeds(seed: u64, count: usize) -> Vec<u64> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    (0..count).map(|_| rng.r#gen()).collect()
 }

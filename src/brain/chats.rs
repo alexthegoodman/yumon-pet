@@ -1,52 +1,55 @@
 use anyhow::{Context, Result};
+use crate::brain::loading::map_batches;
 
 use crate::brain::mdx::{ChatBlock, HandcraftedChats, Memory};
  
 pub fn load_distilled_chats(dict_path: &str, soft_limit: i32) -> Result<HandcraftedChats> {
     println!("📖 Loading distilled: {dict_path}");
- 
+
     let content = std::fs::read_to_string(dict_path)
         .with_context(|| format!("Failed to read file: {dict_path}"))?;
- 
+
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(true)
         .from_reader(content.as_bytes());
- 
+
     // Find the index of the "conversations" column
     let headers = rdr.headers()?.clone();
     let conv_idx = headers
         .iter()
         .position(|h| h == "conversations")
         .context("No 'conversations' column found in CSV")?;
- 
-    let mut blocks = Vec::new();
-    let mut x = 0;
-    for result in rdr.records() {
+
+    // Preserve the legacy soft cap (including the record at soft_limit + 1).
+    let records = rdr
+        .records()
+        .filter(|record| match record {
+            Ok(record) => record.get(conv_idx).is_some(),
+            Err(_) => true,
+        })
+        .take((i64::from(soft_limit).max(-1) + 2) as usize);
+    let parsed = map_batches(records, |result| -> Result<Option<ChatBlock>> {
         let record = result?;
-        let raw = match record.get(conv_idx) {
-            Some(v) => v,
-            None => continue,
+        let Some(raw) = record.get(conv_idx) else {
+            return Ok(None);
         };
- 
         let memories = parse_conversations(raw);
-        if !memories.is_empty() {
-            blocks.push(ChatBlock { memories });
-        }
+        Ok((!memories.is_empty()).then_some(ChatBlock { memories }))
+    });
+    let blocks: Vec<_> = parsed
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
-        if (x > soft_limit) {
-            break;
-        }
-
-        x = x + 1;
-    }
- 
     println!(
         "✅ Loaded {} blocks ({} memories total)",
         blocks.len(),
         blocks.iter().map(|b| b.memories.len()).sum::<usize>()
     );
- 
+
     Ok(HandcraftedChats { blocks })
 }
  

@@ -70,18 +70,32 @@ pub fn save_sentence_pairs_to_file(training_samples: Vec<Sample>, output_path: &
 
 /// Returns a vector of clean sentences, up to `max_articles` articles processed.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn load_wiki_sentences(xml_path: &str, max_articles: usize, split_count: usize) -> Result<Vec<String>> {
+pub fn load_wiki_sentences(
+    xml_path: &str,
+    max_articles: usize,
+    split_count: usize,
+) -> Result<Vec<String>> {
     println!("📖 Parsing SimpleWiki XML: {xml_path}");
 
-    let file   = std::fs::File::open(xml_path)?;
+    let file = std::fs::File::open(xml_path)?;
     let reader = std::io::BufReader::new(file);
     let mut xml = Reader::from_reader(reader);
     xml.config_mut().trim_text(true);
 
-    let mut sentences    = Vec::new();
+    let mut sentences = Vec::new();
+    let mut pending_text = Vec::new();
+    let mut pending_bytes = 0usize;
+    let parse_text = |raw: String| {
+        let cleaned = strip_wiki_markup(&raw);
+        split_sentences_chunked(&cleaned)
+            .into_iter()
+            .filter(|s| is_good_sentence(s))
+            .map(|s| clean_sentence(&s))
+            .collect::<Vec<_>>()
+    };
     // let mut in_text      = false;
-    let mut buf          = Vec::new();
-    let mut articles     = 0usize;
+    let mut buf = Vec::new();
+    let mut articles = 0usize;
 
     // loop {
     //     match xml.read_event_into(&mut buf) {
@@ -121,7 +135,7 @@ pub fn load_wiki_sentences(xml_path: &str, max_articles: usize, split_count: usi
     // }
 
     // 1. Update the loop to track if we are inside an actual article page
-    let mut in_page = false; 
+    let mut in_page = false;
     let mut in_text = false;
 
     loop {
@@ -133,20 +147,25 @@ pub fn load_wiki_sentences(xml_path: &str, max_articles: usize, split_count: usi
             },
             Ok(Event::Text(ref e)) if in_text => {
                 let raw = e.unescape().unwrap_or_default();
-                
+
                 // SKIP: If the text starts with #REDIRECT, it's not an article
-                if raw.to_uppercase().starts_with("#REDIRECT") { 
-                    in_text = false; 
-                    continue; 
+                if raw.to_uppercase().starts_with("#REDIRECT") {
+                    in_text = false;
+                    continue;
                 }
 
-                let cleaned = strip_wiki_markup(&raw);
-                let split = split_sentences_chunked(&cleaned);
-                
-                for s in split {
-                    if is_good_sentence(&s) {
-                        sentences.push(clean_sentence(&s));
-                    }
+                pending_bytes += raw.len();
+                pending_text.push(raw.into_owned());
+                if pending_text.len() >= 128 || pending_bytes >= 1 << 20 {
+                    sentences.extend(
+                        crate::brain::loading::map_ordered(
+                            std::mem::take(&mut pending_text),
+                            &parse_text,
+                        )
+                        .into_iter()
+                        .flatten(),
+                    );
+                    pending_bytes = 0;
                 }
                 // Don't set in_text = false here; let the End event do it
             }
@@ -154,9 +173,13 @@ pub fn load_wiki_sentences(xml_path: &str, max_articles: usize, split_count: usi
                 b"page" => {
                     in_page = false;
                     articles += 1;
-                    if articles % 1000 == 0 { println!("Loading articles..."); }
-                    if max_articles > 0 && articles >= max_articles { break; }
-                },
+                    if articles % 1000 == 0 {
+                        println!("Loading articles...");
+                    }
+                    if max_articles > 0 && articles >= max_articles {
+                        break;
+                    }
+                }
                 b"text" => in_text = false,
                 _ => {}
             },
@@ -166,7 +189,17 @@ pub fn load_wiki_sentences(xml_path: &str, max_articles: usize, split_count: usi
         buf.clear();
     }
 
-    println!("✅ Loaded {} sentences from {} articles", sentences.len(), articles);
+    sentences.extend(
+        crate::brain::loading::map_ordered(pending_text, parse_text)
+            .into_iter()
+            .flatten(),
+    );
+
+    println!(
+        "✅ Loaded {} sentences from {} articles",
+        sentences.len(),
+        articles
+    );
     Ok(sentences)
 }
 

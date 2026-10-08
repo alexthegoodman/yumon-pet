@@ -19,6 +19,8 @@
 
 use anyhow::{Result, Context};
 #[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use image::{imageops::FilterType, DynamicImage};
 use std::path::{Path, PathBuf};
 
@@ -40,7 +42,7 @@ impl FerDataset {
     /// Load a split directory (e.g. "data/fer2013-archive/train").
     pub fn load(split_dir: &str) -> Result<Self> {
         let base = Path::new(split_dir);
-        let mut records = Vec::new();
+        let mut paths = Vec::new();
 
         for (idx, name) in EMOTE_NAMES.iter().enumerate() {
             let class_dir = base.join(name);
@@ -49,21 +51,38 @@ impl FerDataset {
                 continue;
             }
 
-            let entries = std::fs::read_dir(&class_dir)
-                .with_context(|| format!("reading {:?}", class_dir))?;
+            let entries =
+                std::fs::read_dir(&class_dir).with_context(|| format!("reading {:?}", class_dir))?;
 
             for entry in entries.flatten() {
                 let path = entry.path();
-                if !is_image(&path) { continue; }
-
-                match load_fer_image(&path) {
-                    Ok(pixels) => records.push(FerRecord { emote_idx: idx, pixels }),
-                    Err(e)     => eprintln!("⚠️  skip {:?}: {e}", path),
+                if !is_image(&path) {
+                    continue;
                 }
+
+                paths.push((idx, path));
             }
         }
 
-        println!("📦 FER2013 loaded: {} records from {}", records.len(), split_dir);
+        let records: Vec<_> = paths
+            .into_par_iter()
+            .filter_map(|(idx, path)| match load_fer_image(&path) {
+                Ok(pixels) => Some(FerRecord {
+                    emote_idx: idx,
+                    pixels,
+                }),
+                Err(e) => {
+                    eprintln!("skip {:?}: {e}", path);
+                    None
+                }
+            })
+            .collect();
+
+        println!(
+            "📦 FER2013 loaded: {} records from {}",
+            records.len(),
+            split_dir
+        );
         Ok(Self { records })
     }
 

@@ -15,6 +15,7 @@ use std::io::{BufRead, BufReader, Read};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use crate::brain::loading::map_ordered;
 
 use crate::brain::mdx::{ChatBlock, HandcraftedChats, Memory};
 use crate::brain::train::MAX_SEQ_LEN_CHARS;
@@ -114,27 +115,40 @@ fn memory_from_line(line: &str) -> Option<Memory> {
 pub fn memories_from_reader(reader: impl Read, limit: Option<usize>) -> (Vec<Memory>, usize) {
     let mut reader = BufReader::with_capacity(1 << 20, reader);
     let mut memories = Vec::new();
-    let mut buf = Vec::new();
     let mut lines = 0usize;
+    let mut ended = false;
 
-    loop {
-        if limit.is_some_and(|n| memories.len() >= n) {
-            break;
-        }
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(e) => {
-                // A truncated .zst (partial download) surfaces here. Keep what we have.
-                println!("⚠️  stream ended early after {lines} lines: {e}");
-                break;
+    while !ended && !limit.is_some_and(|n| memories.len() >= n) {
+        // Never read more lines than the remaining usable-pair cap. This
+        // preserves early stopping even when every line is usable.
+        let batch_size = limit.map_or(1024, |n| (n - memories.len()).min(1024));
+        let mut batch = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            let mut buf = Vec::new();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) => {
+                    ended = true;
+                    break;
+                }
+                Ok(_) => {
+                    lines += 1;
+                    batch.push(buf);
+                }
+                Err(e) => {
+                    // Keep completed lines from truncated downloads.
+                    println!("stream ended early after {lines} lines: {e}");
+                    ended = true;
+                    break;
+                }
             }
         }
-        lines += 1;
-        if let Some(m) = memory_from_line(&String::from_utf8_lossy(&buf)) {
-            memories.push(m);
-        }
+        memories.extend(
+            map_ordered(batch, |buf| {
+                memory_from_line(&String::from_utf8_lossy(&buf))
+            })
+            .into_iter()
+            .flatten(),
+        );
     }
     (memories, lines)
 }
@@ -153,7 +167,7 @@ pub fn load_am_distill_chats(path: &str, limit: Option<usize>) -> Result<Handcra
     println!("✅ AM distill: {} usable pairs from {} lines", memories.len(), lines);
 
     // One memory per block: the conversations are independent single turns.
-    let blocks = memories.into_iter().map(|m| ChatBlock { memories: vec![m] }).collect();
+    let blocks = map_ordered(memories, |m| ChatBlock { memories: vec![m] });
     Ok(HandcraftedChats { blocks })
 }
 
@@ -163,6 +177,55 @@ mod tests {
 
     const SAMPLE_ZST: &str = "data/am_deepseek/am_0.9M_sample_1k.jsonl.zst";
     const SAMPLE_RAW: &str = "data/am_deepseek/am_0.9M_sample_1k.jsonl";
+
+    #[test]
+    fn batched_stream_preserves_order_and_exact_early_stop() {
+        let mut data = String::new();
+        for i in 0..2051 {
+            if i % 7 == 0 {
+                data.push_str("not json\n");
+            }
+            data.push_str(&format!("{{\"messages\":[{{\"role\":\"user\",\"content\":\"Question number {i}?\"}},{{\"role\":\"assistant\",\"content\":\"<think>x</think>This is a useful answer.\"}}]}}\n"));
+        }
+        for threads in [1, 4] {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let (memories, lines) = memories_from_reader(data.as_bytes(), Some(1030));
+                    assert_eq!(memories.len(), 1030);
+                    assert_eq!(lines, 1030 + (1029 / 7 + 1));
+                    for (i, memory) in memories.iter().enumerate() {
+                        assert_eq!(memory.human, format!("Question number {i}?"));
+                    }
+                    let (memories, lines) = memories_from_reader(data.as_bytes(), Some(0));
+                    assert!(memories.is_empty());
+                    assert_eq!(lines, 0);
+                });
+        }
+    }
+
+    #[test]
+    fn completed_batch_survives_reader_failure() {
+        struct FailingReader(Option<Vec<u8>>);
+        impl Read for FailingReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                match self.0.take() {
+                    Some(data) => {
+                        buf[..data.len()].copy_from_slice(&data);
+                        Ok(data.len())
+                    }
+                    None => Err(std::io::Error::other("truncated stream")),
+                }
+            }
+        }
+        let line = b"{\"messages\":[{\"role\":\"user\",\"content\":\"Say hello please\"},{\"role\":\"assistant\",\"content\":\"<think>x</think>Hello there, friend!\"}]}\n";
+        let (memories, lines) = memories_from_reader(FailingReader(Some(line.to_vec())), None);
+        assert_eq!(lines, 1);
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].bot, "Hello there, friend!");
+    }
 
     #[test]
     fn parses_synthetic_line() {

@@ -10,6 +10,8 @@
 ///   std  = [0.2675, 0.2565, 0.2761]
 
 use anyhow::Result;
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::Read;
 
@@ -39,27 +41,33 @@ impl CifarDataset {
         f.read_to_end(&mut raw)?;
 
         let n = raw.len() / RECORD_BYTES;
-        let mut records = Vec::with_capacity(n);
+        #[cfg(not(target_arch = "wasm32"))]
+        let chunks = raw.par_chunks_exact(RECORD_BYTES);
+        #[cfg(target_arch = "wasm32")]
+        let chunks = raw.chunks_exact(RECORD_BYTES);
+        let records = chunks
+            .map(|record| {
+                let coarse_label = record[0];
+                let fine_label = record[1];
+                let pixel_bytes = &record[2..];
 
-        for i in 0..n {
-            let base = i * RECORD_BYTES;
-            let coarse_label = raw[base];
-            let fine_label   = raw[base + 1];
-
-            let pixel_bytes = &raw[base + 2..base + RECORD_BYTES];
-
-            // CIFAR stores pixels as [R plane 1024 bytes][G plane 1024][B plane 1024]
-            // We want CHW float normalized
-            let mut pixels = vec![0.0f32; 3 * 32 * 32];
-            for c in 0..3 {
-                for hw in 0..1024 {
-                    let raw_val = pixel_bytes[c * 1024 + hw] as f32 / 255.0;
-                    pixels[c * 1024 + hw] = (raw_val - MEAN[c]) / STD[c];
+                // CIFAR stores pixels as [R plane 1024 bytes][G plane 1024][B plane 1024]
+                // We want CHW float normalized
+                let mut pixels = vec![0.0f32; 3 * 32 * 32];
+                for c in 0..3 {
+                    for hw in 0..1024 {
+                        let raw_val = pixel_bytes[c * 1024 + hw] as f32 / 255.0;
+                        pixels[c * 1024 + hw] = (raw_val - MEAN[c]) / STD[c];
+                    }
                 }
-            }
 
-            records.push(CifarRecord { coarse_label, fine_label, pixels });
-        }
+                CifarRecord {
+                    coarse_label,
+                    fine_label,
+                    pixels,
+                }
+            })
+            .collect();
 
         println!("📦 CIFAR-100 loaded: {} records from {}", n, path);
         Ok(Self { records })

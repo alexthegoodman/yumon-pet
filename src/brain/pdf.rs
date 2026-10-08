@@ -82,16 +82,12 @@ use rand::Rng; // Add this for random range generation
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_pdfs(paths: Vec<&str>) -> Vec<String> {
-    let mut all_samples = Vec::new();
-
-    for path in paths {
-        let mut ebooks = load_pdf_ebook_sentences(&path);
-        let mut ebooks = ebooks.as_ref().expect("Couldn't get ebook");
-
-        all_samples.extend(ebooks.clone());
-    }
-
-    all_samples
+    crate::brain::loading::map_ordered(paths, |path| {
+        load_pdf_ebook_sentences(path).expect("Couldn't get ebook")
+    })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 #[cfg(not(target_arch = "wasm32"))]

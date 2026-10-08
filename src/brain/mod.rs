@@ -15,6 +15,9 @@ pub mod samples;
 pub mod keywords;
 pub mod fixer;
 pub mod loader;
+mod loading;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod loading_tests;
 pub mod flash_attn;
 pub mod classic_attn;
 pub mod sentiment;

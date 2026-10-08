@@ -1,20 +1,21 @@
 use crate::brain::wiki::is_good_sentence;
 use anyhow::Result;
+use crate::brain::loading::{map_batches, map_ordered};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_mdx_sentences(mdx_dir: &str) -> Result<Vec<String>> {
     println!("📖 Scanning MDX directory: {mdx_dir}");
 
-    let mut sentences = Vec::new();
-    let mut files_loaded = 0usize;
-
-    for entry in walkdir::WalkDir::new(mdx_dir)
+    let paths: Vec<_> = walkdir::WalkDir::new(mdx_dir)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("mdx"))
-    {
-        let path = entry.path();
-        let content = std::fs::read_to_string(path)?;
+        .map(|entry| entry.into_path())
+        .collect();
+    let files_loaded = paths.len();
+    let sentences: Vec<_> = map_ordered(paths, |path| -> Result<Vec<String>> {
+        let mut sentences = Vec::new();
+        let content = std::fs::read_to_string(&path)?;
 
         for line in content.lines() {
             let trimmed = line.trim().replace("<br />", "");
@@ -23,19 +24,26 @@ pub fn load_mdx_sentences(mdx_dir: &str) -> Result<Vec<String>> {
             }
         }
 
-        files_loaded += 1;
-        if files_loaded % 100 == 0 {
-            println!("  … {files_loaded} files, {} sentences so far", sentences.len());
-        }
-    }
+        Ok(sentences)
+    })
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?
+    .into_iter()
+    .flatten()
+    .collect();
 
     let mut final_sentences = Vec::new();
 
-    for sents in sentences.chunks(2) { // appropriate length, decent connections
+    for sents in sentences.chunks(2) {
+        // appropriate length, decent connections
         final_sentences.push(sents.join(" "));
     }
 
-    println!("✅ Loaded {} sentences from {} MDX files", final_sentences.len(), files_loaded);
+    println!(
+        "✅ Loaded {} sentences from {} MDX files",
+        final_sentences.len(),
+        files_loaded
+    );
     Ok(final_sentences)
 }
 
@@ -43,16 +51,16 @@ pub fn load_mdx_sentences(mdx_dir: &str) -> Result<Vec<String>> {
 pub fn load_notion_sentences(notion_dir: &str) -> Result<Vec<String>> {
     println!("📖 Scanning Notion directory: {notion_dir}");
 
-    let mut sentences = Vec::new();
-    let mut files_loaded = 0usize;
-
-    for entry in walkdir::WalkDir::new(notion_dir)
+    let paths: Vec<_> = walkdir::WalkDir::new(notion_dir)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("md"))
-    {
-        let path = entry.path();
-        let content = std::fs::read_to_string(path)?;
+        .map(|entry| entry.into_path())
+        .collect();
+    let files_loaded = paths.len();
+    let sentences: Vec<_> = map_ordered(paths, |path| -> Result<Vec<String>> {
+        let mut sentences = Vec::new();
+        let content = std::fs::read_to_string(&path)?;
 
         for line in content.lines() {
             let trimmed = line.trim();
@@ -64,13 +72,19 @@ pub fn load_notion_sentences(notion_dir: &str) -> Result<Vec<String>> {
             }
         }
 
-        files_loaded += 1;
-        if files_loaded % 100 == 0 {
-            println!("  … {files_loaded} files, {} sentences so far", sentences.len());
-        }
-    }
+        Ok(sentences)
+    })
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?
+    .into_iter()
+    .flatten()
+    .collect();
 
-    println!("✅ Loaded {} sentences from {} Notion files", sentences.len(), files_loaded);
+    println!(
+        "✅ Loaded {} sentences from {} Notion files",
+        sentences.len(),
+        files_loaded
+    );
     Ok(sentences)
 }
 
@@ -86,33 +100,20 @@ pub fn load_csv_quotes(csv_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading quotes CSV: {csv_path}");
 
     let mut rdr = csv::Reader::from_path(csv_path)?;
-    let mut quotes = Vec::new();
-
-    let mut count = 0;
-
-    for result in rdr.records() {
-        let record = result?;
-
-        let text   = record.get(0).unwrap_or("").trim().to_string();
-        let author = record.get(1).unwrap_or("").trim().to_string();
-        let tags   = record
-            .get(2)
-            .unwrap_or("")
-            .split(',')
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect::<Vec<_>>();
-
-        if text.is_empty() {
-            continue;
-        }
-
-        quotes.push(text);
-
-        count = count + 1;
-
-        if count > 100_000 { break; }
-    }
+    let quotes: Vec<_> = map_batches(
+        rdr.records()
+            .filter(|record| match record {
+                Ok(record) => !record.get(0).unwrap_or("").trim().is_empty(),
+                Err(_) => true,
+            })
+            .take(100001),
+        |record| -> Result<String> {
+            let record = record?;
+            Ok(record.get(0).unwrap_or("").trim().to_string())
+        },
+    )
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
 
     println!("✅ Loaded {} quotes from {csv_path}", quotes.len());
     Ok(quotes)
@@ -123,24 +124,21 @@ pub fn load_csv_qna(csv_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading qna CSV: {csv_path}");
 
     let mut rdr = csv::Reader::from_path(csv_path)?;
-    let mut quotes = Vec::new();
+    let quotes: Vec<_> = map_batches(rdr.records().take(10001), |record| -> Result<String> {
+        let record = record?;
+        Ok(format!(
+            "{} {}",
+            record.get(0).unwrap_or("").trim(),
+            record.get(1).unwrap_or("").trim()
+        ))
+    })
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
 
-    let mut count = 0;
-
-    for result in rdr.records() {
-        let record = result?;
-
-        let question   = record.get(0).unwrap_or("").trim().to_string();
-        let answer = record.get(1).unwrap_or("").trim().to_string();
-
-        quotes.push(question + " " + &answer);
-
-        count = count + 1;
-
-        if count > 10_000 { break; }
-    }
-
-    println!("✅ Loaded {} questions and answers from {csv_path}", quotes.len());
+    println!(
+        "✅ Loaded {} questions and answers from {csv_path}",
+        quotes.len()
+    );
     Ok(quotes)
 }
 
@@ -183,25 +181,26 @@ pub fn load_csv_bible_pairs(bible_path: &str) -> Result<Vec<(String, String)>> {
     println!("📖 Loading bible CSV: {bible_path}");
 
     let mut rdr = csv::Reader::from_path(bible_path)?;
-    let mut verses = Vec::new();
 
-    for result in rdr.records() {
+    let verses: Vec<_> = map_batches(rdr.records(), |result| -> Result<Option<String>> {
         let record = result?;
         let verse = record.get(4).unwrap_or("").trim().to_string();
 
         if verse.is_empty() {
-            continue;
+            return Ok(None);
         }
 
-        verses.push(verse);
-    }
+        Ok(Some(verse))
+    })
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?
+    .into_iter()
+    .flatten()
+    .collect();
 
-    let mut pairs = Vec::new();
-    let mut i = 0;
-    while i + 1 < verses.len() {
-        pairs.push((verses[i].clone(), verses[i + 1].clone()));
-        i += 2;
-    }
+    let pairs = map_batches(verses.chunks_exact(2), |pair| {
+        (pair[0].clone(), pair[1].clone())
+    });
 
     println!("✅ Loaded {} verse pairs from {bible_path}", pairs.len());
     Ok(pairs)
@@ -211,30 +210,36 @@ pub fn load_dictionary_sentences(dict_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading dictionary: {dict_path}");
 
     let content = std::fs::read_to_string(dict_path)?;
-    let mut sentences = Vec::new();
 
-    for line in content.lines() {
+    let sentences: Vec<_> = map_batches(content.lines(), |line| {
         let trimmed = line.trim();
 
         // Skip empty lines or very short lines
         if trimmed.len() < 10 {
-            continue;
+            return None;
         }
 
         // Skip lines that are just a single letter (section headers like "A")
-        if trimmed.chars().all(|c| c.is_alphabetic() || c.is_whitespace())
+        if trimmed
+            .chars()
+            .all(|c| c.is_alphabetic() || c.is_whitespace())
             && trimmed.split_whitespace().count() <= 1
         {
-            continue;
+            return None;
         }
 
         // Try to extract a clean definition sentence
         // if let Some(sentence) = extract_definition(trimmed) {
-            if is_good_sentence(&trimmed) {
-                sentences.push(trimmed.to_string());
-            }
+        if is_good_sentence(&trimmed) {
+            return Some(trimmed.to_string());
+        }
         // }
-    }
+
+        None
+    })
+    .into_iter()
+    .flatten()
+    .collect();
 
     println!("✅ Loaded {} dictionary sentences", sentences.len());
     Ok(sentences)
@@ -245,22 +250,12 @@ pub fn load_csv_words(csv_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading words CSV: {csv_path}");
 
     let mut rdr = csv::Reader::from_path(csv_path)?;
-    let mut words = Vec::new();
-
-    let mut count = 0;
-
-    for result in rdr.records() {
-        let record = result?;
-
-        let word_count   = record.get(0).unwrap_or("").trim().to_string();
-        let word = record.get(1).unwrap_or("").trim().to_string();
-
-        words.push(word);
-
-        count = count + 1;
-
-        if count > 10_000 { break; }
-    }
+    let words: Vec<_> = map_batches(rdr.records().take(10001), |record| -> Result<String> {
+        let record = record?;
+        Ok(record.get(1).unwrap_or("").trim().to_string())
+    })
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
 
     println!("✅ Loaded {} words from {csv_path}", words.len());
     Ok(words)
@@ -276,34 +271,43 @@ pub fn contains_word(trimmed: &str, selected_words: &Vec<String>) -> bool {
     contains_word
 }
 
-pub fn load_specific_dict_sentences(dict_path: &str, selected_words: &Vec<String>) -> Result<Vec<String>> {
+pub fn load_specific_dict_sentences(
+    dict_path: &str,
+    selected_words: &Vec<String>,
+) -> Result<Vec<String>> {
     println!("📖 Loading dictionary: {dict_path}");
 
     let content = std::fs::read_to_string(dict_path)?;
-    let mut sentences = Vec::new();
 
-    for line in content.lines() {
+    let sentences: Vec<_> = map_batches(content.lines(), |line| {
         let trimmed = line.trim();
 
         // Skip empty lines or very short lines
         if trimmed.len() < 10 {
-            continue;
+            return None;
         }
 
         // Skip lines that are just a single letter (section headers like "A")
-        if trimmed.chars().all(|c| c.is_alphabetic() || c.is_whitespace())
+        if trimmed
+            .chars()
+            .all(|c| c.is_alphabetic() || c.is_whitespace())
             && trimmed.split_whitespace().count() <= 1
         {
-            continue;
+            return None;
         }
 
         // Try to extract a clean definition sentence
         // if let Some(sentence) = extract_definition(trimmed) {
-            if is_good_sentence(&trimmed) && contains_word(trimmed, &selected_words) {
-                sentences.push(trimmed.to_string());
-            }
+        if is_good_sentence(&trimmed) && contains_word(trimmed, &selected_words) {
+            return Some(trimmed.to_string());
+        }
         // }
-    }
+
+        None
+    })
+    .into_iter()
+    .flatten()
+    .collect();
 
     println!("✅ Loaded {} dictionary sentences", sentences.len());
     Ok(sentences)
@@ -314,15 +318,19 @@ pub fn load_handcrafted_sentences(dict_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading handcrafted: {dict_path}");
 
     let content = std::fs::read_to_string(dict_path)?;
-    let mut sentences = Vec::new();
 
-    for line in content.lines() {
+    let sentences: Vec<_> = map_batches(content.lines(), |line| {
         let trimmed = line.trim().replace("<br />", "");
 
-         if is_good_sentence(&trimmed) {
-            sentences.push(trimmed.to_string());
+        if is_good_sentence(&trimmed) {
+            return Some(trimmed.to_string());
         }
-    }
+
+        None
+    })
+    .into_iter()
+    .flatten()
+    .collect();
 
     // let mut final_sentences = Vec::new();
 
@@ -355,7 +363,7 @@ pub fn load_handcrafted_chats(dict_path: &str) -> Result<HandcraftedChats> {
 
     let content = std::fs::read_to_string(dict_path)?;
 
-    let mut blocks = Vec::new();
+    let mut raw_blocks = Vec::new();
     let mut current_block: Vec<String> = Vec::new();
 
     for line in content.lines() {
@@ -363,8 +371,7 @@ pub fn load_handcrafted_chats(dict_path: &str) -> Result<HandcraftedChats> {
 
         if trimmed.is_empty() {
             if !current_block.is_empty() {
-                blocks.push(parse_block(&current_block));
-                current_block.clear();
+                raw_blocks.push(std::mem::take(&mut current_block));
             }
         } else {
             current_block.push(trimmed.to_string());
@@ -373,8 +380,10 @@ pub fn load_handcrafted_chats(dict_path: &str) -> Result<HandcraftedChats> {
 
     // Handle trailing block with no final blank line
     if !current_block.is_empty() {
-        blocks.push(parse_block(&current_block));
+        raw_blocks.push(current_block);
     }
+
+    let blocks = map_ordered(raw_blocks, |lines| parse_block(&lines));
 
     println!(
         "✅ Loaded {} blocks ({} memories total)",
@@ -430,26 +439,23 @@ pub fn load_chats_from_csv(csv_path: &str) -> Result<HandcraftedChats> {
         scene_lines.entry(key).or_default().push(line);
     }
 
-    let blocks: Vec<ChatBlock> = scene_order
-        .iter()
-        .map(|key| {
-            let lines = &scene_lines[key];
-            let memories = lines
-                .chunks(2)
-                .filter_map(|pair| {
-                    if pair.len() == 2 {
-                        Some(Memory {
-                            human: pair[0].clone(),
-                            bot: pair[1].clone(),
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            ChatBlock { memories }
-        })
-        .collect();
+    let blocks: Vec<ChatBlock> = map_ordered(scene_order, |key| {
+        let lines = &scene_lines[&key];
+        let memories = lines
+            .chunks(2)
+            .filter_map(|pair| {
+                if pair.len() == 2 {
+                    Some(Memory {
+                        human: pair[0].clone(),
+                        bot: pair[1].clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        ChatBlock { memories }
+    });
 
     println!(
         "✅ Loaded {} blocks ({} memories total)",
@@ -476,11 +482,11 @@ pub fn load_chats_from_friends_csv(csv_path: &str) -> Result<HandcraftedChats> {
             .with_context(|| format!("Missing column: {name}"))
     };
 
-    let ci_type     = col("type")?;
-    let ci_speaker  = col("speaker")?;
+    let ci_type = col("type")?;
+    let ci_speaker = col("speaker")?;
     let ci_dialogue = col("dialogue_clean")?;
-    let ci_season   = col("season")?;
-    let ci_episode  = col("episode")?;
+    let ci_season = col("season")?;
+    let ci_episode = col("episode")?;
 
     // Each entry is (season, episode, scene_index, lines)
     let mut scene_order: Vec<(u32, u32, u32)> = Vec::new();
@@ -534,26 +540,23 @@ pub fn load_chats_from_friends_csv(csv_path: &str) -> Result<HandcraftedChats> {
         }
     }
 
-    let blocks: Vec<ChatBlock> = scene_order
-        .iter()
-        .map(|key| {
-            let lines = scene_lines.get(key).map(Vec::as_slice).unwrap_or(&[]);
-            let memories = lines
-                .chunks(2)
-                .filter_map(|pair| {
-                    if pair.len() == 2 {
-                        Some(Memory {
-                            human: pair[0].clone(),
-                            bot: pair[1].clone(),
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            ChatBlock { memories }
-        })
-        .collect();
+    let blocks: Vec<ChatBlock> = map_ordered(scene_order, |key| {
+        let lines = scene_lines.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+        let memories = lines
+            .chunks(2)
+            .filter_map(|pair| {
+                if pair.len() == 2 {
+                    Some(Memory {
+                        human: pair[0].clone(),
+                        bot: pair[1].clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        ChatBlock { memories }
+    });
 
     println!(
         "✅ Loaded {} blocks ({} memories total)",
@@ -612,25 +615,32 @@ pub fn load_arena_chats(path: &str) -> Result<HandcraftedChats> {
     println!("📖 Loading arena JSONL: {path}");
 
     let content = std::fs::read_to_string(path)?;
-    let mut blocks = Vec::new();
-
-    for line in content.lines() {
+    let parsed = map_batches(content.lines(), |line| -> Result<Option<ChatBlock>> {
         let trimmed = line.trim();
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
 
         let entry: ArenaEntry = serde_json::from_str(trimmed)?;
 
         // Pick the winning conversation, or fall back to conversation_a
         let convo = match entry.winner.as_str() {
             "model_b" => &entry.conversation_b,
-            _         => &entry.conversation_a,
+            _ => &entry.conversation_a,
         };
 
         let memories = extract_memories(convo);
         if !memories.is_empty() {
-            blocks.push(ChatBlock { memories });
+            return Ok(Some(ChatBlock { memories }));
         }
-    }
+        Ok(None)
+    });
+    let blocks: Vec<_> = parsed
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
     println!(
         "✅ Loaded {} blocks ({} memories total)",
@@ -673,17 +683,21 @@ pub fn load_txt_sentences(path: &str) -> Result<Vec<String>> {
     println!("📖 Loading txt: {path}");
 
     let content = std::fs::read_to_string(path)?;
-    let mut sentences = Vec::new();
-
-    for line in content.lines() {
+    let sentences: Vec<_> = map_batches(content.lines(), |line| {
+        let mut sentences = Vec::new();
         let trimmed = line.trim();
 
         for sent in trimmed.split(".") {
-            if is_good_sentence(&sent) && sent.len() > 15 { // have a nice sensible minimum length
+            if is_good_sentence(&sent) && sent.len() > 15 {
+                // have a nice sensible minimum length
                 sentences.push(sent.to_string());
             }
         }
-    }
+        sentences
+    })
+    .into_iter()
+    .flatten()
+    .collect();
 
     println!("✅ Loaded {} txt sentences", sentences.len());
     Ok(sentences)
@@ -693,13 +707,15 @@ pub fn load_txt_lines(path: &str) -> Result<Vec<String>> {
     println!("📖 Loading txt: {path}");
 
     let content = std::fs::read_to_string(path)?;
-    let mut sentences = Vec::new();
 
-    for line in content.lines() {
+    let sentences: Vec<_> = map_batches(content.lines(), |line| {
         let trimmed = line.trim().replace("\"", "");
 
-        sentences.push(trimmed.to_string());
-    }
+        Some(trimmed.to_string())
+    })
+    .into_iter()
+    .flatten()
+    .collect();
 
     println!("✅ Loaded {} txt lines", sentences.len());
     Ok(sentences)
@@ -711,20 +727,33 @@ pub fn load_text_paragraphs(path: &str) -> Result<Vec<String>> {
     println!("📖 Loading paragraphs: {path}");
 
     let content = std::fs::read_to_string(path)?;
-    let mut paragraphs = Vec::new();
 
     // Talk pages, deletion discussions and template docs are not article text.
-    const SKIP: [&str; 10] = ["(utc)", "talk)", "wp:", "help:", "user:", "<span", "&#", "}}", "template", "redirect"];
-    const ENTITIES: [(&str, &str); 5] = [("&ndash;", "-"), ("&mdash;", "-"), ("&nbsp;", " "), ("&amp;", "&"), ("&middot;", "-")];
+    const SKIP: [&str; 10] = [
+        "(utc)", "talk)", "wp:", "help:", "user:", "<span", "&#", "}}", "template", "redirect",
+    ];
+    const ENTITIES: [(&str, &str); 5] = [
+        ("&ndash;", "-"),
+        ("&mdash;", "-"),
+        ("&nbsp;", " "),
+        ("&amp;", "&"),
+        ("&middot;", "-"),
+    ];
 
-    for line in content.lines() {
+    let paragraphs: Vec<_> = map_batches(content.lines(), |line| {
         let mut trimmed = line.trim().replace("''", "");
-        if trimmed.contains('|') || trimmed.contains("http") || trimmed.contains("[[") || trimmed.contains("{{") {
-            continue;
+        if trimmed.contains('|')
+            || trimmed.contains("http")
+            || trimmed.contains("[[")
+            || trimmed.contains("{{")
+        {
+            return None;
         }
         // ASCII lowercase keeps byte offsets valid for truncate below.
         let lower = trimmed.to_ascii_lowercase();
-        if SKIP.iter().any(|s| lower.contains(s)) { continue; }
+        if SKIP.iter().any(|s| lower.contains(s)) {
+            return None;
+        }
         // Category lists (often after "References") trail the last paragraph.
         if let Some(i) = lower.find("category:") {
             trimmed.truncate(i);
@@ -737,10 +766,17 @@ pub fn load_text_paragraphs(path: &str) -> Result<Vec<String>> {
             trimmed = trimmed.replace(entity, text);
         }
         let trimmed = trimmed.trim().to_string();
-        if trimmed.contains('&') && trimmed.contains(';') { continue; } // other entities
-        if trimmed.split_whitespace().count() < 8 { continue; }
-        paragraphs.push(trimmed);
-    }
+        if trimmed.contains('&') && trimmed.contains(';') {
+            return None;
+        } // other entities
+        if trimmed.split_whitespace().count() < 8 {
+            return None;
+        }
+        Some(trimmed)
+    })
+    .into_iter()
+    .flatten()
+    .collect();
 
     println!("✅ Loaded {} paragraphs", paragraphs.len());
     Ok(paragraphs)
@@ -805,32 +841,44 @@ fn pick<'a>(options: &[&'a str], key: &str) -> &'a str {
 pub fn load_wiki_chats(path: &str) -> Result<HandcraftedChats> {
     println!("📖 Loading wiki chats: {path}");
     const QUESTIONS: [&str; 6] = [
-        "tell me about {}", "what is {}?", "what do you know about {}?",
-        "can you explain {}?", "what can you tell me about {}?", "explain {} to me",
+        "tell me about {}",
+        "what is {}?",
+        "what do you know about {}?",
+        "can you explain {}?",
+        "what can you tell me about {}?",
+        "explain {} to me",
     ];
 
-    let mut blocks = Vec::new();
-    let mut titled = 0usize;
-    for paragraph in load_text_paragraphs(path)? {
+    let parsed = map_ordered(load_text_paragraphs(path)?, |paragraph| {
         // Opening paragraphs quote the title once: 'April' (Apr.) is ...
-        let title = paragraph.strip_prefix('\'')
+        let title = paragraph
+            .strip_prefix('\'')
             .and_then(|rest| rest.split_once('\''))
-            .filter(|(title, after)| !title.is_empty() && title.len() <= 60 && after.starts_with(' '))
+            .filter(|(title, after)| {
+                !title.is_empty() && title.len() <= 60 && after.starts_with(' ')
+            })
             .map(|(title, _)| title.to_string());
         let text = match &title {
             Some(title) => format!("{title}{}", &paragraph[title.len() + 2..]),
             None => paragraph,
         };
         let question = title.map(|t| pick(&QUESTIONS, &t).replace("{}", &t.to_lowercase()));
-        if question.is_some() { titled += 1; }
+        let titled = usize::from(question.is_some());
 
         let memories = sentence_turns(question, split_sentences(&text));
-        if !memories.is_empty() {
-            blocks.push(ChatBlock { memories });
-        }
-    }
+        (
+            (!memories.is_empty()).then_some(ChatBlock { memories }),
+            titled,
+        )
+    });
+    let titled: usize = parsed.iter().map(|(_, titled)| titled).sum();
+    let blocks: Vec<_> = parsed.into_iter().filter_map(|(block, _)| block).collect();
 
-    println!("✅ Loaded {} wiki conversations ({} open with a title question)", blocks.len(), titled);
+    println!(
+        "✅ Loaded {} wiki conversations ({} open with a title question)",
+        blocks.len(),
+        titled
+    );
     Ok(HandcraftedChats { blocks })
 }
 
@@ -839,22 +887,39 @@ pub fn load_wiki_chats(path: &str) -> Result<HandcraftedChats> {
 pub fn load_quote_chats(path: &str) -> Result<HandcraftedChats> {
     println!("📖 Loading quote chats: {path}");
     const REQUESTS: [&str; 5] = [
-        "share a quote about {}", "tell me something wise about {}",
-        "what is a good quote about {}?", "say something about {}", "do you know a quote about {}?",
+        "share a quote about {}",
+        "tell me something wise about {}",
+        "what is a good quote about {}?",
+        "say something about {}",
+        "do you know a quote about {}?",
     ];
 
-    let mut rdr = csv::ReaderBuilder::new().has_headers(true).flexible(true).from_path(path)?;
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_path(path)?;
     let headers = rdr.headers()?.clone();
-    let column = |name: &str| headers.iter().position(|h| h == name)
-        .ok_or_else(|| anyhow::anyhow!("No '{name}' column found in {path}"));
+    let column = |name: &str| {
+        headers
+            .iter()
+            .position(|h| h == name)
+            .ok_or_else(|| anyhow::anyhow!("No '{name}' column found in {path}"))
+    };
     let (quote_idx, category_idx) = (column("quote")?, column("category")?);
 
-    let mut blocks = Vec::new();
-    for record in rdr.records() {
-        let Ok(record) = record else { continue; };
-        let Some(quote) = record.get(quote_idx).map(str::trim) else { continue; };
-        if quote.split_whitespace().count() < 3 { continue; }
-        let tag = record.get(category_idx).unwrap_or("")
+    let blocks: Vec<_> = map_batches(rdr.records(), |record| {
+        let Ok(record) = record else {
+            return None;
+        };
+        let Some(quote) = record.get(quote_idx).map(str::trim) else {
+            return None;
+        };
+        if quote.split_whitespace().count() < 3 {
+            return None;
+        }
+        let tag = record
+            .get(category_idx)
+            .unwrap_or("")
             .split(',')
             .map(str::trim)
             .find(|t| !t.is_empty() && !t.starts_with("attributed"));
@@ -862,8 +927,16 @@ pub fn load_quote_chats(path: &str) -> Result<HandcraftedChats> {
             Some(tag) => pick(&REQUESTS, quote).replace("{}", &tag.replace('-', " ")),
             None => "share a quote".to_string(),
         };
-        blocks.push(ChatBlock { memories: vec![Memory { human, bot: quote.to_string() }] });
-    }
+        Some(ChatBlock {
+            memories: vec![Memory {
+                human,
+                bot: quote.to_string(),
+            }],
+        })
+    })
+    .into_iter()
+    .flatten()
+    .collect();
 
     println!("✅ Loaded {} quote chats", blocks.len());
     Ok(HandcraftedChats { blocks })
@@ -877,20 +950,29 @@ pub fn load_quotes_csv(path: &str) -> Result<Vec<String>> {
         .has_headers(true)
         .flexible(true)
         .from_path(path)?;
-    let quote_idx = rdr.headers()?
+    let quote_idx = rdr
+        .headers()?
         .iter()
         .position(|h| h == "quote")
         .ok_or_else(|| anyhow::anyhow!("No 'quote' column found in {path}"))?;
 
-    let mut quotes = Vec::new();
-    for record in rdr.records() {
-        let Ok(record) = record else { continue; };
-        let Some(quote) = record.get(quote_idx) else { continue; };
+    let quotes: Vec<_> = map_batches(rdr.records(), |record| {
+        let Ok(record) = record else {
+            return None;
+        };
+        let Some(quote) = record.get(quote_idx) else {
+            return None;
+        };
         let quote = quote.trim();
         if quote.split_whitespace().count() >= 3 {
-            quotes.push(quote.to_string());
+            return Some(quote.to_string());
         }
-    }
+
+        None
+    })
+    .into_iter()
+    .flatten()
+    .collect();
 
     println!("✅ Loaded {} quotes", quotes.len());
     Ok(quotes)
@@ -900,7 +982,7 @@ pub fn load_qa_pairs(path: &str) -> Result<Vec<(String, String)>> {
     println!("📖 Loading QA pairs: {path}");
 
     let content = std::fs::read_to_string(path)?;
-    
+
     // 1. Collect non-empty, trimmed lines
     let lines: Vec<String> = content
         .lines()
@@ -908,20 +990,23 @@ pub fn load_qa_pairs(path: &str) -> Result<Vec<(String, String)>> {
         .filter(|l| !l.is_empty())
         .collect();
 
-    let mut pairs = Vec::new();
-
     // 2. Iterate through lines in steps of 2
-    for chunk in lines.chunks(2) {
+    let pairs: Vec<_> = map_batches(lines.chunks(2), |chunk| {
         if chunk.len() == 2 {
             let question = chunk[0].clone();
             let answer = chunk[1].clone();
-            
+
             // You can still apply your "is_good" logic here
             if is_good_sentence(&(question.clone() + &answer)) {
-                pairs.push((question, answer));
+                return Some((question, answer));
             }
         }
-    }
+
+        None
+    })
+    .into_iter()
+    .flatten()
+    .collect();
 
     println!("✅ Loaded {} QA pairs", pairs.len());
     Ok(pairs)
@@ -931,7 +1016,7 @@ pub fn load_qa_singles(path: &str) -> Result<Vec<String>> {
     println!("📖 Loading QA singles: {path}");
 
     let content = std::fs::read_to_string(path)?;
-    
+
     // 1. Collect non-empty, trimmed lines
     let lines: Vec<String> = content
         .lines()
@@ -939,20 +1024,23 @@ pub fn load_qa_singles(path: &str) -> Result<Vec<String>> {
         .filter(|l| !l.is_empty())
         .collect();
 
-    let mut pairs = Vec::new();
-
     // 2. Iterate through lines in steps of 2
-    for chunk in lines.chunks(2) {
+    let pairs: Vec<_> = map_batches(lines.chunks(2), |chunk| {
         if chunk.len() == 2 {
             let question = chunk[0].clone();
             let answer = chunk[1].clone();
-            
+
             // You can still apply your "is_good" logic here
             if is_good_sentence(&question) && is_good_sentence(&answer) {
-                pairs.push(question + " " + &answer);
+                return Some(question + " " + &answer);
             }
         }
-    }
+
+        None
+    })
+    .into_iter()
+    .flatten()
+    .collect();
 
     println!("✅ Loaded {} QA singles", pairs.len());
     Ok(pairs)
