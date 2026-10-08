@@ -405,8 +405,9 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 32,
         // 64,
         // 128,
-        // 256,
-        1024, // ~1.32B total / ~411M active at 24 layers, 4 experts top-1
+        // 256, // small, local smoke testing
+        512 // 220M ideal
+        // 1024, // ~1.32B total / ~411M active at 24 layers, 4 experts top-1
         // 1024
     ];
     let layer_counts: [usize; 1] = [
@@ -415,7 +416,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 4,
         // 8,
         // 8, // stretch: slower on iGPU - each MoE layer forces a host readback
-        24
+        16
+        // 24
         // 32
     ];
     let head_counts:  [usize; 1] = [
@@ -427,7 +429,10 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 32
         // 64
     ];
-    let seq_lens:     [usize; 1] = [512];
+    let seq_lens:     [usize; 1] = [
+        256, // good for memories and conversation
+        // 512 // good starting seq length for code
+    ];
     let batch_sizes:     [usize; 1] = [
         // 2,
         // 8

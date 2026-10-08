@@ -241,11 +241,11 @@ pub fn main() {
     // sentences.extend(wiki_sentences);
         
     let bpe = BpeTokenizer::train(
-        sentences.clone(),
+        sentences,
         // 1024 // puts more effort into spelling
-        4096 // max size on my igpu at 128 batch size
+        // 4096 // max size on my igpu at 128 batch size
         // 8192
-        // 16384 // doesnt seem to help at all (can do at 16 batch size)
+        16384 // doesnt seem to help at all (can do at 16 batch size)
     );
     let bpe = bpe.as_ref().expect("Couldn't train bpe");
 
@@ -255,10 +255,10 @@ pub fn main() {
     bpe.save(&out_dir).as_ref().expect("Couldn't save bpe");
     println!("💾 Saved to {out_dir}/tokenizer.json");
 
-    // Tokens per sentence over the training corpus, to compare vocab sizes.
-    let total_tokens: usize = sentences.iter().map(|s| bpe.encode_raw(s).map(|t| t.len()).unwrap_or(0)).sum();
-    let total_chars: usize = sentences.iter().map(|s| s.chars().count()).sum();
-    println!("📏 {} sentences, {} tokens, {:.2} chars/token", sentences.len(), total_tokens, total_chars as f64 / total_tokens.max(1) as f64);
+    // // Tokens per sentence over the training corpus, to compare vocab sizes.
+    // let total_tokens: usize = sentences.iter().map(|s| bpe.encode_raw(s).map(|t| t.len()).unwrap_or(0)).sum();
+    // let total_chars: usize = sentences.iter().map(|s| s.chars().count()).sum();
+    // println!("📏 {} sentences, {} tokens, {:.2} chars/token", sentences.len(), total_tokens, total_chars as f64 / total_tokens.max(1) as f64);
 
     // // ── Diagnostic: avg sample length in chars/tokens ───────────────────────
     // // Helps size max_seq_len. These are raw pre-JSON sentences (individual

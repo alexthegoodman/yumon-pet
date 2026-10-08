@@ -46,7 +46,8 @@ mod desktop {
     struct Args {
         #[arg(
             long,
-            default_value = "D:/models/runpod/large1/512h_16l_8a_256len_b32_Moe_e4_k1_Language_1m"
+            // default_value = "D:/models/runpod/large1/512h_16l_8a_256len_b32_Moe_e4_k1_Language_1m"
+            default_value = "D:/models/runpod/large3/1024h_24l_8a_512len_b16_Moe_e4_k1_Language_inference_1m"
         )]
         checkpoint: String,
         #[arg(long, value_enum, default_value = "moe")]

@@ -74,9 +74,9 @@ enum Command {
         // #[arg(long, default_value_t = 1)] // requires lr adjustments, little gain?
         // #[arg(long, default_value_t = 2)] 
         // #[arg(long, default_value_t = 4)]
-        // #[arg(long, default_value_t = 8)] // best for loss
-        #[arg(long, default_value_t = 16)]
+        #[arg(long, default_value_t = 8)] // best for loss (lighter) (consider at 16k vocab)
         // #[arg(long, default_value_t = 16)]
+        // #[arg(long, default_value_t = 32)] // runpod
         // #[arg(long, default_value_t = 256)] // too large even with 128 hidden state on iGPU
         // #[arg(long, default_value_t = 128)]
         // #[arg(long, default_value_t = 64)]
