@@ -22,7 +22,7 @@ use burn_cubecl::{
     BoolElement, CubeBackend, CubeRuntime, FloatElement, IntElement,
     kernel::into_contiguous, ops::numeric::empty_device, tensor::CubeTensor,
 };
-use cubecl::prelude::*;
+use cubecl::prelude::{CubeCount, CubeDim, ScalarArg};
 
 use super::kernel::{causal_bwd_dkdv, causal_bwd_dq, causal_fwd};
 
