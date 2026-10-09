@@ -543,7 +543,7 @@ impl<B: Backend> YumonBrain<B> {
                 .reshape([vocab_size]);
 
             // no masking — pure model output
-            let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
+            let logits_vec: Vec<f32> = last_logits.to_data().convert::<f32>().to_vec().unwrap();
             let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
 
             if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }

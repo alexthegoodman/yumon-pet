@@ -1,6 +1,7 @@
 // kernel.rs - CubeCL causal FlashAttention (forward + two-pass backward)
 //
-// Tensors are contiguous [batch*heads, seq, dim] f32. Self-attention only
+// Tensors are contiguous [batch*heads, seq, dim] FP32 or BF16.
+// Storage uses F; shared tiles, accumulators, LSE and delta stay FP32. Self-attention only
 // (seq_q == seq_k) and always causal: query row i sees keys 0..=i.
 //
 // Launch config for every kernel:
@@ -32,11 +33,11 @@
 use cubecl::prelude::*;
 
 #[cube(launch)]
-pub fn causal_fwd(
-    q:     &Tensor<f32>,
-    k:     &Tensor<f32>,
-    v:     &Tensor<f32>,
-    out:   &mut Tensor<f32>,
+pub fn causal_fwd<F: Float>(
+    q:     &Tensor<F>,
+    k:     &Tensor<F>,
+    v:     &Tensor<F>,
+    out:   &mut Tensor<F>,
     lse:   &mut Tensor<f32>, // [bh, seq], log-sum-exp of the scaled scores
     scale: f32,
     seq:   usize,
@@ -60,7 +61,7 @@ pub fn causal_fwd(
     #[unroll]
     for d in 0..dim {
         let mut x = f32::from_int(0);
-        if live { x = q[base + row * dim + d]; }
+        if live { x = f32::cast_from(q[base + row * dim + d]); }
         q_r[d] = x * scale;
         acc[d] = f32::from_int(0);
     }
@@ -76,8 +77,8 @@ pub fn causal_fwd(
             let mut kx = f32::from_int(0);
             let mut vx = f32::from_int(0);
             if k_row < seq {
-                kx = k[base + k_row * dim + d];
-                vx = v[base + k_row * dim + d];
+                kx = f32::cast_from(k[base + k_row * dim + d]);
+                vx = f32::cast_from(v[base + k_row * dim + d]);
             }
             k_s[t * dim + d] = kx;
             v_s[t * dim + d] = vx;
@@ -128,22 +129,22 @@ pub fn causal_fwd(
         let inv = 1.0_f32 / l;
         #[unroll]
         for d in 0..dim {
-            out[base + row * dim + d] = acc[d] * inv;
+            out[base + row * dim + d] = F::cast_from(acc[d] * inv);
         }
         lse[bh * seq + row] = m + Log::ln(l);
     }
 }
 
 #[cube(launch)]
-pub fn causal_bwd_dq(
-    q:     &Tensor<f32>,
-    k:     &Tensor<f32>,
-    v:     &Tensor<f32>,
-    out:   &Tensor<f32>,
-    d_out: &Tensor<f32>,
+pub fn causal_bwd_dq<F: Float>(
+    q:     &Tensor<F>,
+    k:     &Tensor<F>,
+    v:     &Tensor<F>,
+    out:   &Tensor<F>,
+    d_out: &Tensor<F>,
     lse:   &Tensor<f32>,
     delta: &mut Tensor<f32>, // [bh, seq], written here, read by causal_bwd_dkdv
-    d_q:   &mut Tensor<f32>,
+    d_q:   &mut Tensor<F>,
     scale: f32,
     seq:   usize,
     #[comptime] block: usize,
@@ -170,9 +171,9 @@ pub fn causal_bwd_dq(
         let mut qx = f32::from_int(0);
         let mut gx = f32::from_int(0);
         if live {
-            qx = q[base + row * dim + d];
-            gx = d_out[base + row * dim + d];
-            delta_r += gx * out[base + row * dim + d];
+            qx = f32::cast_from(q[base + row * dim + d]);
+            gx = f32::cast_from(d_out[base + row * dim + d]);
+            delta_r += gx * f32::cast_from(out[base + row * dim + d]);
         }
         q_r[d]  = qx;
         do_r[d] = gx;
@@ -190,8 +191,8 @@ pub fn causal_bwd_dq(
             let mut kx = f32::from_int(0);
             let mut vx = f32::from_int(0);
             if k_row < seq {
-                kx = k[base + k_row * dim + d];
-                vx = v[base + k_row * dim + d];
+                kx = f32::cast_from(k[base + k_row * dim + d]);
+                vx = f32::cast_from(v[base + k_row * dim + d]);
             }
             k_s[t * dim + d] = kx;
             v_s[t * dim + d] = vx;
@@ -223,21 +224,21 @@ pub fn causal_bwd_dq(
     if live {
         #[unroll]
         for d in 0..dim {
-            d_q[base + row * dim + d] = dq[d] * scale;
+            d_q[base + row * dim + d] = F::cast_from(dq[d] * scale);
         }
     }
 }
 
 #[cube(launch)]
-pub fn causal_bwd_dkdv(
-    q:     &Tensor<f32>,
-    k:     &Tensor<f32>,
-    v:     &Tensor<f32>,
-    d_out: &Tensor<f32>,
+pub fn causal_bwd_dkdv<F: Float>(
+    q:     &Tensor<F>,
+    k:     &Tensor<F>,
+    v:     &Tensor<F>,
+    d_out: &Tensor<F>,
     lse:   &Tensor<f32>,
     delta: &Tensor<f32>,
-    d_k:   &mut Tensor<f32>,
-    d_v:   &mut Tensor<f32>,
+    d_k:   &mut Tensor<F>,
+    d_v:   &mut Tensor<F>,
     scale: f32,
     seq:   usize,
     tiles: usize, // ceil(seq / block)
@@ -264,8 +265,8 @@ pub fn causal_bwd_dkdv(
         let mut kx = f32::from_int(0);
         let mut vx = f32::from_int(0);
         if live {
-            kx = k[base + col * dim + d];
-            vx = v[base + col * dim + d];
+            kx = f32::cast_from(k[base + col * dim + d]);
+            vx = f32::cast_from(v[base + col * dim + d]);
         }
         k_r[d] = kx;
         v_r[d] = vx;
@@ -281,8 +282,8 @@ pub fn causal_bwd_dkdv(
             let mut qx = f32::from_int(0);
             let mut gx = f32::from_int(0);
             if q_row < seq {
-                qx = q[base + q_row * dim + d];
-                gx = d_out[base + q_row * dim + d];
+                qx = f32::cast_from(q[base + q_row * dim + d]);
+                gx = f32::cast_from(d_out[base + q_row * dim + d]);
             }
             q_s[t * dim + d]  = qx;
             do_s[t * dim + d] = gx;
@@ -316,8 +317,8 @@ pub fn causal_bwd_dkdv(
     if live {
         #[unroll]
         for d in 0..dim {
-            d_k[base + col * dim + d] = dk[d] * scale;
-            d_v[base + col * dim + d] = dv[d];
+            d_k[base + col * dim + d] = F::cast_from(dk[d] * scale);
+            d_v[base + col * dim + d] = F::cast_from(dv[d]);
         }
     }
 }

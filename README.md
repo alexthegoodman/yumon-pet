@@ -197,7 +197,45 @@ SwiGLU MLP, same data, batches, loss, validation and checkpoint layout as MoE
 `Autodiff<CubeBackend<_>, BalancedCheckpointing>` without burn-fusion.
 Batches must be right-padded (the attention op is causal only, no key mask).
 
-Measured on a UHD 770 (wgpu), seq 256, batch 32, 8 heads:
+RunPod/headless Linux training now defaults to **BF16** on CUDA (A40, RTX 4090,
+H100). Model parameters, activations, gradients, and AdamW moments use BF16;
+there are no FP32 master weights. Local WGPU training remains FP32. The optional
+`cuda-training` Cargo feature selects the same CUDA/BF16 path on other native
+hosts, including for compile checks.
+
+The custom attention kernels accept BF16 Q/K/V, outputs, and gradients, while
+shared tiles, arithmetic accumulators, softmax log-sum-exp, and backward delta
+remain FP32. Final loss and entropy reporting reductions also use FP32; metric
+counts use integers. RoPE angles are constructed on the CPU at higher precision
+and the tables are uploaded in the backend's float dtype. Burn may use FP32
+accumulation internally in its own kernels. This is a dtype change, not an
+integration of Dao's FlashAttention-3 or a rewrite using Tensor Core attention.
+No speedup or convergence equivalence has been measured.
+
+Existing FP32 model checkpoints load into the CUDA backend as BF16. Checkpoints
+keep the existing full-precision serialization format for compatibility; saving
+does not recover precision already lost during BF16 training. As before,
+optimizer state is reinitialized on resume. Pure BF16 optimizer updates can round
+away small weight changes, so watch validation loss and accuracy as learning
+rates decrease.
+
+Decoder-only and MoE reports include `top3` (current batch) and `avg_top3`
+(supervised-token-weighted average within the current epoch), displayed as
+percentages. A prediction is correct when the target next token is among the
+three largest logits. Padding and masked prompt targets are excluded, matching
+the loss mask; tied logits prefer lower token IDs. The metric uses rank counting,
+avoiding Burn 0.20's full-vocabulary sort for `topk`. Validation logs include
+`val_top3`. The terminal shows an accuracy chart, and chart saves also write a
+companion `*.top3.csv` with `step,top3_accuracy` (fractions from 0 to 1).
+
+Small CUDA correctness checks (forward/backward against FP32, a decoder optimizer
+step and checkpoint round trip, and top-3 masking/ties), without profiling:
+
+```sh
+cargo test --release --no-default-features --features cuda-training --lib cuda_bf16_ -- --ignored --nocapture --test-threads=1
+```
+
+Historical FP32 measurements on a UHD 770 (wgpu), seq 256, batch 32, 8 heads:
 
 | | stored after forward | step |
 |---|---|---|
@@ -207,7 +245,8 @@ Measured on a UHD 770 (wgpu), seq 256, batch 32, 8 heads:
 
 Current RunPod grid: 1024 wide, 24 layers, 32 heads (head dim 32), ~436M
 parameters, batch 32 (Dockerfile `--batch-size 32`; the CLI default stays 8),
-LR 2e-4 -> 2e-5. Estimated peak ~28 GiB, scaled from the 256-wide probe below.
+LR 2e-4 -> 2e-5. The previous FP32 peak estimate was ~28 GiB, scaled from the
+256-wide probe below; BF16 peak memory has not been measured.
 
 Balanced checkpointing only recomputes memory-bound ops; matmul outputs and
 the [tokens, vocab] logits are still stored. Probe (one variant per process):

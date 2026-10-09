@@ -92,110 +92,131 @@ struct Layout {
 fn layout<R: CubeRuntime>(q: &CubeTensor<R>) -> Layout {
     let [batch, heads, seq, dim] = q.shape.dims::<4>();
     assert!(seq > 0 && dim > 0, "flash attention: empty input");
-    assert_eq!(q.dtype, burn::tensor::DType::F32, "flash attention kernels are f32 only");
+    assert!(matches!(q.dtype, burn::tensor::DType::F32 | burn::tensor::DType::BF16), "flash attention supports FP32 and BF16");
     let block = block_for_dim(dim, q.client.properties().hardware.max_shared_memory_size);
     assert!(block <= q.client.properties().hardware.max_units_per_cube as usize);
     Layout { bh: batch * heads, seq, dim, block, tiles: seq.div_ceil(block) }
+}
+
+fn launch_fwd<R: CubeRuntime, E: FloatElement>(
+    q: CubeTensor<R>, k: CubeTensor<R>, v: CubeTensor<R>,
+) -> (CubeTensor<R>, CubeTensor<R>) {
+    let (q, k, v) = (into_contiguous(q), into_contiguous(k), into_contiguous(v));
+    let shape = q.shape.clone();
+    let [batch, heads, seq, _] = shape.dims::<4>();
+    let n = layout(&q);
+    let out = empty_device::<R, E>(q.client.clone(), q.device.clone(), shape);
+    let lse = empty_device::<R, f32>(q.client.clone(), q.device.clone(), [batch, heads, seq].into());
+
+    causal_fwd::launch::<E, R>(
+        &q.client,
+        CubeCount::Static(n.bh as u32, n.tiles as u32, 1),
+        CubeDim::new_1d(n.block as u32),
+        q.as_tensor_arg(1),
+        k.as_tensor_arg(1),
+        v.as_tensor_arg(1),
+        out.as_tensor_arg(1),
+        lse.as_tensor_arg(1),
+        ScalarArg::new((n.dim as f32).sqrt().recip()),
+        ScalarArg::new(n.seq),
+        n.block,
+        n.dim,
+        n.block * n.dim,
+    )
+    .expect("flash attention forward launch");
+
+    (out, lse)
+}
+
+fn launch_bwd<R: CubeRuntime, E: FloatElement>(
+    q: CubeTensor<R>, k: CubeTensor<R>, v: CubeTensor<R>,
+    out: CubeTensor<R>, lse: CubeTensor<R>, d_out: CubeTensor<R>,
+) -> (CubeTensor<R>, CubeTensor<R>, CubeTensor<R>) {
+    let (q, k, v) = (into_contiguous(q), into_contiguous(k), into_contiguous(v));
+    let (out, lse, d_out) = (into_contiguous(out), into_contiguous(lse), into_contiguous(d_out));
+    let n = layout(&q);
+    let client = q.client.clone();
+    let device = q.device.clone();
+    let scale = (n.dim as f32).sqrt().recip();
+    let delta = empty_device::<R, f32>(client.clone(), device.clone(), lse.shape.clone());
+    let d_q = empty_device::<R, E>(client.clone(), device.clone(), q.shape.clone());
+    let d_k = empty_device::<R, E>(client.clone(), device.clone(), q.shape.clone());
+    let d_v = empty_device::<R, E>(client.clone(), device.clone(), q.shape.clone());
+    let count = CubeCount::Static(n.bh as u32, n.tiles as u32, 1);
+
+    // Same stream: delta is complete before causal_bwd_dkdv reads it.
+    causal_bwd_dq::launch::<E, R>(
+        &client,
+        count.clone(),
+        CubeDim::new_1d(n.block as u32),
+        q.as_tensor_arg(1),
+        k.as_tensor_arg(1),
+        v.as_tensor_arg(1),
+        out.as_tensor_arg(1),
+        d_out.as_tensor_arg(1),
+        lse.as_tensor_arg(1),
+        delta.as_tensor_arg(1),
+        d_q.as_tensor_arg(1),
+        ScalarArg::new(scale),
+        ScalarArg::new(n.seq),
+        n.block,
+        n.dim,
+        n.block * n.dim,
+    )
+    .expect("flash attention dQ launch");
+
+    causal_bwd_dkdv::launch::<E, R>(
+        &client,
+        count,
+        CubeDim::new_1d(n.block as u32),
+        q.as_tensor_arg(1),
+        k.as_tensor_arg(1),
+        v.as_tensor_arg(1),
+        d_out.as_tensor_arg(1),
+        lse.as_tensor_arg(1),
+        delta.as_tensor_arg(1),
+        d_k.as_tensor_arg(1),
+        d_v.as_tensor_arg(1),
+        ScalarArg::new(scale),
+        ScalarArg::new(n.seq),
+        ScalarArg::new(n.tiles),
+        n.block,
+        n.dim,
+        n.block * n.dim,
+    )
+    .expect("flash attention dK/dV launch");
+
+    (d_q, d_k, d_v)
 }
 
 impl<R: CubeRuntime, F: FloatElement, I: IntElement, BT: BoolElement> FlashAttentionKernels
     for CubeBackend<R, F, I, BT>
 {
     fn causal_flash_fwd(
-        q: FloatTensor<Self>,
-        k: FloatTensor<Self>,
-        v: FloatTensor<Self>,
+        q: FloatTensor<Self>, k: FloatTensor<Self>, v: FloatTensor<Self>,
     ) -> (FloatTensor<Self>, FloatTensor<Self>) {
-        let (q, k, v) = (into_contiguous(q), into_contiguous(k), into_contiguous(v));
-        let shape = q.shape.clone();
-        let [batch, heads, seq, _] = shape.dims::<4>();
-        let n = layout(&q);
-        let out = empty_device::<R, f32>(q.client.clone(), q.device.clone(), shape);
-        let lse = empty_device::<R, f32>(q.client.clone(), q.device.clone(), [batch, heads, seq].into());
-
-        causal_fwd::launch::<R>(
-            &q.client,
-            CubeCount::Static(n.bh as u32, n.tiles as u32, 1),
-            CubeDim::new_1d(n.block as u32),
-            q.as_tensor_arg(1),
-            k.as_tensor_arg(1),
-            v.as_tensor_arg(1),
-            out.as_tensor_arg(1),
-            lse.as_tensor_arg(1),
-            ScalarArg::new((n.dim as f32).sqrt().recip()),
-            ScalarArg::new(n.seq),
-            n.block,
-            n.dim,
-            n.block * n.dim,
-        )
-        .expect("flash attention forward launch");
-
-        (out, lse)
+        assert_eq!(q.dtype, k.dtype, "flash attention: q/k dtype mismatch");
+        assert_eq!(q.dtype, v.dtype, "flash attention: q/v dtype mismatch");
+        match q.dtype {
+            burn::tensor::DType::F32 => launch_fwd::<R, f32>(q, k, v),
+            burn::tensor::DType::BF16 => launch_fwd::<R, burn::tensor::bf16>(q, k, v),
+            dtype => panic!("flash attention: unsupported dtype {dtype:?}"),
+        }
     }
 
     fn causal_flash_bwd(
-        q: FloatTensor<Self>,
-        k: FloatTensor<Self>,
-        v: FloatTensor<Self>,
-        out: FloatTensor<Self>,
-        lse: FloatTensor<Self>,
-        d_out: FloatTensor<Self>,
+        q: FloatTensor<Self>, k: FloatTensor<Self>, v: FloatTensor<Self>,
+        out: FloatTensor<Self>, lse: FloatTensor<Self>, d_out: FloatTensor<Self>,
     ) -> (FloatTensor<Self>, FloatTensor<Self>, FloatTensor<Self>) {
-        let (q, k, v) = (into_contiguous(q), into_contiguous(k), into_contiguous(v));
-        let (out, lse, d_out) = (into_contiguous(out), into_contiguous(lse), into_contiguous(d_out));
-        let n = layout(&q);
-        let client = q.client.clone();
-        let device = q.device.clone();
-        let scale = (n.dim as f32).sqrt().recip();
-        let delta = empty_device::<R, f32>(client.clone(), device.clone(), lse.shape.clone());
-        let d_q = empty_device::<R, f32>(client.clone(), device.clone(), q.shape.clone());
-        let d_k = empty_device::<R, f32>(client.clone(), device.clone(), q.shape.clone());
-        let d_v = empty_device::<R, f32>(client.clone(), device.clone(), q.shape.clone());
-        let count = CubeCount::Static(n.bh as u32, n.tiles as u32, 1);
-
-        // Same stream: delta is complete before causal_bwd_dkdv reads it.
-        causal_bwd_dq::launch::<R>(
-            &client,
-            count.clone(),
-            CubeDim::new_1d(n.block as u32),
-            q.as_tensor_arg(1),
-            k.as_tensor_arg(1),
-            v.as_tensor_arg(1),
-            out.as_tensor_arg(1),
-            d_out.as_tensor_arg(1),
-            lse.as_tensor_arg(1),
-            delta.as_tensor_arg(1),
-            d_q.as_tensor_arg(1),
-            ScalarArg::new(scale),
-            ScalarArg::new(n.seq),
-            n.block,
-            n.dim,
-            n.block * n.dim,
-        )
-        .expect("flash attention dQ launch");
-
-        causal_bwd_dkdv::launch::<R>(
-            &client,
-            count,
-            CubeDim::new_1d(n.block as u32),
-            q.as_tensor_arg(1),
-            k.as_tensor_arg(1),
-            v.as_tensor_arg(1),
-            d_out.as_tensor_arg(1),
-            lse.as_tensor_arg(1),
-            delta.as_tensor_arg(1),
-            d_k.as_tensor_arg(1),
-            d_v.as_tensor_arg(1),
-            ScalarArg::new(scale),
-            ScalarArg::new(n.seq),
-            ScalarArg::new(n.tiles),
-            n.block,
-            n.dim,
-            n.block * n.dim,
-        )
-        .expect("flash attention dK/dV launch");
-
-        (d_q, d_k, d_v)
+        for tensor in [&k, &v, &out, &d_out] {
+            assert_eq!(q.dtype, tensor.dtype, "flash attention: backward dtype mismatch");
+        }
+        assert_eq!(lse.dtype, burn::tensor::DType::F32);
+        match q.dtype {
+            burn::tensor::DType::F32 => launch_bwd::<R, f32>(q, k, v, out, lse, d_out),
+            burn::tensor::DType::BF16 => launch_bwd::<R, burn::tensor::bf16>(q, k, v, out, lse, d_out),
+            dtype => panic!("flash attention: unsupported dtype {dtype:?}"),
+        }
     }
 }
 

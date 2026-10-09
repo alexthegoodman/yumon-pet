@@ -311,7 +311,7 @@ pub(crate) fn generate_causal<B: Backend>(
             .slice([0..1, current_len - 1..current_len, 0..vocab_size])
             .reshape([vocab_size]);
 
-        let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
+        let logits_vec: Vec<f32> = last_logits.to_data().convert::<f32>().to_vec().unwrap();
         let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
 
         if next_token == EOS_TOKEN || next_token == PAD_TOKEN {
@@ -452,7 +452,79 @@ mod tests {
     }
 
     fn values<B: Backend, const D: usize>(t: Tensor<B, D>) -> Vec<f32> {
-        t.into_data().to_vec().unwrap()
+        t.into_data().convert::<f32>().to_vec().unwrap()
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA GPU with native BF16 support; no profiling"]
+    fn cuda_bf16_flash_forward_backward_matches_fp32() {
+        use burn::tensor::{DType, FloatDType};
+        type AD = crate::brain::train::CudaTrainBackend;
+        let device = Default::default();
+        for seq in [1, 37, 70] {
+            let random = || Tensor::<AD, 4>::random(
+                [1, 2, seq, 16], Distribution::Normal(0.0, 0.5), &device,
+            );
+            let (q, k, v, w) = (random(), random(), random(), random());
+            assert_eq!(q.dtype(), DType::BF16);
+            let run = |flash: bool| {
+                // The FP32 reference uses the same BF16-rounded inputs.
+                let dtype = if flash { FloatDType::BF16 } else { FloatDType::F32 };
+                let (q, k, v) = (
+                    q.clone().cast(dtype).require_grad(),
+                    k.clone().cast(dtype).require_grad(),
+                    v.clone().cast(dtype).require_grad(),
+                );
+                let out = if flash {
+                    causal_flash_attention(q.clone(), k.clone(), v.clone())
+                } else {
+                    naive_causal(q.clone(), k.clone(), v.clone())
+                };
+                let grads = (out.clone() * w.clone().cast(dtype))
+                    .cast(FloatDType::F32).sum().backward();
+                let dq = q.grad(&grads).unwrap();
+                let dk = k.grad(&grads).unwrap();
+                let dv = v.grad(&grads).unwrap();
+                if flash {
+                    for tensor in [&out.clone().inner(), &dq, &dk, &dv] {
+                        assert_eq!(tensor.dtype(), DType::BF16);
+                    }
+                }
+                (values(out), values(dq), values(dk), values(dv))
+            };
+            let (out, dq, dk, dv) = run(true);
+            let (reference, rq, rk, rv) = run(false);
+            assert_close(out, reference, 0.02, "BF16 output");
+            assert_close(dq, rq, 0.03, "BF16 dQ");
+            assert_close(dk, rk, 0.03, "BF16 dK");
+            assert_close(dv, rv, 0.03, "BF16 dV");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA GPU with native BF16 support; no profiling"]
+    fn cuda_bf16_decoder_optimizer_and_checkpoint() {
+        use burn::tensor::{DType, FloatDType};
+        type AD = crate::brain::train::CudaTrainBackend;
+        let device = Default::default();
+        let config = tiny_config();
+        let model: YumonDecBrain<AD> = config.init(&device);
+        let before = values(model.token_head.weight.val());
+        let logits = model.forward(Tensor::from_ints([[1, 4, 5, 6]], &device));
+        assert_eq!(logits.dtype(), DType::BF16);
+        let loss = logits.cast(FloatDType::F32).square().mean();
+        let grads = GradientsParams::from_grads(loss.backward(), &model);
+        let updated = AdamWConfig::new().init().step(0.01, model, grads);
+        assert_eq!(updated.token_head.weight.val().dtype(), DType::BF16);
+        assert_ne!(before, values(updated.token_head.weight.val()));
+        let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+        let bytes = recorder.record(updated.clone().into_record(), ()).unwrap();
+        let record = recorder.load(bytes, &device).unwrap();
+        let loaded: YumonDecBrain<AD> = config.init(&device).load_record(record);
+        assert_eq!(loaded.token_head.weight.val().dtype(), DType::BF16);
+        let tokens = || Tensor::from_ints([[1, 4, 5]], &device);
+        assert_close(values(updated.valid().forward(tokens())),
+            values(loaded.valid().forward(tokens())), 0.0, "BF16 checkpoint");
     }
 
     /// Kernel vs matmul+softmax reference: output and dQ/dK/dV, including

@@ -26,6 +26,8 @@ required-features = ["desktop"]
 # headless training (e.g. in a RunPod/Docker container) - disable with
 # `--no-default-features` there to skip needing GTK/WebKit/udev dev packages.
 default = ["desktop"]
+# Also select the RunPod CUDA/BF16 training backend on non-Linux hosts.
+cuda-training = []
 desktop = [
     "dep:tao", "dep:wry", "dep:gilrs", "dep:ab_glyph",
     "dep:three-d", "dep:three-d-asset",

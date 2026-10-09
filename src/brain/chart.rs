@@ -12,6 +12,10 @@ pub struct TrainingState {
     pub global_step: usize,
     pub entropy: f32,
     pub entropy_history: Vec<(f64, f64)>,
+    /// Fractions in [0, 1]; unavailable for the legacy training paths.
+    pub top3_accuracy: Option<f64>,
+    pub avg_top3_accuracy: Option<f64>,
+    pub top3_history: Vec<(f64, f64)>,
     pub last_reply: String,
 }
 
@@ -31,19 +35,25 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),   // stats bar
-            Constraint::Min(10),     // chart
+            Constraint::Min(10),     // loss chart
+            Constraint::Length(9), // top-3 accuracy
         ])
         .split(frame.area());
 
     // ── Top bar: epoch / batch / lr / loss ──────────────────────────────────
+    let top3 = match (state.top3_accuracy, state.avg_top3_accuracy) {
+        (Some(batch), Some(avg)) => format!(" | Top-3: {:.2}% (epoch {:.2}%)", batch * 100.0, avg * 100.0),
+        _ => String::new(),
+    };
     let stats = format!(
-        " Epoch {}/{} │ Batch {}/{} │ LR {:.2e} │ Loss {:.4} │ Avg {:.4} | Entropy: {:.4} | Last Reply: {:?}",
+        " Epoch {}/{} │ Batch {}/{} │ LR {:.2e} │ Loss {:.4} │ Avg {:.4} | Entropy: {:.4} {} | Last Reply: {:?}",
         state.epoch, state.total_epochs,
         state.batch, state.total_batches,
         state.current_lr,
         state.current_loss,
         state.avg_loss,
         state.entropy,
+        top3,
         state.last_reply,
     );
     let para = Paragraph::new(stats)
@@ -98,6 +108,14 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
                 .labels(["0".to_string(), format!("{:.3}", max_loss)]),
         );
     frame.render_widget(chart, chunks[1]);
+    let accuracy = Dataset::default().name("top-3")
+        .marker(symbols::Marker::Braille).graph_type(GraphType::Line)
+        .style(Style::default().fg(Color::Blue)).data(&state.top3_history);
+    let chart = Chart::new(vec![accuracy])
+        .block(Block::default().title("Top-3 token accuracy").borders(Borders::ALL))
+        .x_axis(Axis::default().bounds([0.0, n]))
+        .y_axis(Axis::default().bounds([0.0, 1.0]).labels(["0%", "50%", "100%"]));
+    frame.render_widget(chart, chunks[2]);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -163,6 +181,16 @@ impl TrainingState {
         self.draw_line(&mut img, &self.lr_history, green, to_x, to_y_lr);
 
         img.save(path)?;
+        if !self.top3_history.is_empty() {
+            use std::io::Write;
+            let csv_path = std::path::Path::new(path).with_extension("top3.csv");
+            let mut csv = std::io::BufWriter::new(std::fs::File::create(csv_path)?);
+            writeln!(csv, "step,top3_accuracy")?;
+            for (step, accuracy) in &self.top3_history {
+                writeln!(csv, "{step},{accuracy}")?;
+            }
+            csv.flush()?;
+        }
         Ok(())
     }
     fn draw_line<FX, FY>(&self, img: &mut RgbImage, data: &[(f64, f64)], color: Rgb<u8>, to_x: FX, to_y: FY)

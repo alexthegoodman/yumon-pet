@@ -46,24 +46,26 @@ use crate::brain::{
 // flash attention op in flash_attn/backend.rs applies, and use Burn's
 // BalancedCheckpointing: memory-bound ops (elementwise, norms, activations,
 // reshapes) are recomputed during backward instead of stored.
-#[cfg(not(all(target_os = "linux", not(feature = "desktop"))))]
+#[cfg(not(any(feature = "cuda-training", all(target_os = "linux", not(feature = "desktop")))))]
 pub type TrainBackend = burn::backend::Autodiff<
     burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>,
     burn::backend::autodiff::checkpoint::strategy::BalancedCheckpointing,
 >;
-#[cfg(not(all(target_os = "linux", not(feature = "desktop"))))]
+#[cfg(not(any(feature = "cuda-training", all(target_os = "linux", not(feature = "desktop")))))]
 pub type TrainRuntime = cubecl::wgpu::WgpuRuntime;
-#[cfg(all(target_os = "linux", not(feature = "desktop")))]
+#[cfg(any(feature = "cuda-training", all(target_os = "linux", not(feature = "desktop"))))]
 pub type TrainBackend = CudaTrainBackend;
-#[cfg(all(target_os = "linux", not(feature = "desktop")))]
+#[cfg(any(feature = "cuda-training", all(target_os = "linux", not(feature = "desktop"))))]
 pub type TrainRuntime = CudaTrainRuntime;
 // pub type TrainBackend = burn::backend::Autodiff<burn::backend::NdArray<f32>>;
 
 // Used by the headless `train-brain` CLI path (`run`, below) — this is what
 // RunPod/Docker actually runs. CUDA talks to the driver directly and needs no
 // Vulkan/GL adapter, unlike wgpu, which RunPod's driver stack doesn't expose.
+// CUDA defaults to BF16, including model parameters, gradients and AdamW moments.
+// Attention accumulators and reporting/loss reductions remain FP32.
 pub type CudaTrainBackend = burn::backend::Autodiff<
-    burn_cubecl::CubeBackend<cubecl::cuda::CudaRuntime, f32, i32, u8>,
+    burn_cubecl::CubeBackend<cubecl::cuda::CudaRuntime, burn::tensor::bf16, i32, u8>,
     burn::backend::autodiff::checkpoint::strategy::BalancedCheckpointing,
 >;
 pub type CudaTrainRuntime = cubecl::cuda::CudaRuntime;
@@ -352,6 +354,23 @@ fn build_moe_batch(
     (all_seq_ids, all_targets, supervised)
 }
 
+/// Number of supervised targets among the three highest logits. Softmax preserves
+/// their order, so no probability tensor or full vocabulary sort is needed.
+/// Ties prefer the lower token ID. Integer reductions avoid BF16 count rounding.
+fn top3_correct<B: Backend>(logits: Tensor<B, 2>, targets: Tensor<B, 1, Int>) -> usize {
+    let [rows, vocab] = logits.dims();
+    let logits = logits.detach();
+    let targets = targets.reshape([rows, 1]);
+    let target_scores = logits.clone().gather(1, targets.clone());
+    let ids = Tensor::<B, 1, Int>::arange(0..vocab as i64, &logits.device()).reshape([1, vocab]);
+    let precedes = logits.clone().greater(target_scores.clone()).bool_or(
+        logits.equal(target_scores).bool_and(ids.lower(targets.clone())),
+    );
+    precedes.int().sum_dim(1).lower_elem(3)
+        .bool_and(targets.not_equal_elem(PAD_TOKEN as i32))
+        .int().sum().into_scalar().elem::<i64>() as usize
+}
+
 /// Mean cross-entropy per supervised (non-PAD) target. Burn 0.20's
 /// CrossEntropyLoss zeroes PAD rows but still divides by every row, which
 /// scales the loss by the fraction of positions that are supervised.
@@ -371,11 +390,11 @@ fn masked_token_ce<B: Backend>(
     } else {
         nll
     };
-    (per_token * mask).sum() / supervised.max(1) as f64
+    (per_token * mask).cast(burn::tensor::FloatDType::F32).sum() / supervised.max(1) as f64
 }
 
 /// Per-token loss over the held-out samples, without dropout or gradients.
-/// Returns the loss and the number of supervised tokens it covers.
+/// Returns loss, top-3 accuracy, and the number of supervised tokens covered.
 fn causal_validation_loss<B: Backend, M: CausalLm<B>>(
     model:       &M,
     samples:     &[crate::brain::samples::Sample],
@@ -384,8 +403,9 @@ fn causal_validation_loss<B: Backend, M: CausalLm<B>>(
     batch_size:  usize,
     vocab:       usize,
     device:      &B::Device,
-) -> Option<(f32, usize)> {
+) -> Option<(f32, f64, usize)> {
     let mut total = 0.0f64;
+    let mut correct = 0usize;
     let mut tokens = 0usize;
     let idx: Vec<usize> = (0..samples.len()).collect();
     for batch_idx in idx.chunks(batch_size) {
@@ -395,12 +415,13 @@ fn causal_validation_loss<B: Backend, M: CausalLm<B>>(
         let tokens_t = Tensor::<B, 2, Int>::from_ints(TensorData::new(seq_ids, [n, max_seq_len]), device);
         let targets_t = Tensor::<B, 1, Int>::from_ints(TensorData::new(targets, [n * max_seq_len]), device);
         let logits = model.logits(tokens_t).reshape([n * max_seq_len, vocab]);
+        correct += top3_correct(logits.clone(), targets_t.clone());
         let loss = masked_token_ce(logits, targets_t, supervised, 0.0)
             .into_data().convert::<f32>().to_vec::<f32>().ok()?[0];
         total += loss as f64 * supervised as f64;
         tokens += supervised;
     }
-    (tokens > 0).then(|| ((total / tokens as f64) as f32, tokens))
+    (tokens > 0).then(|| ((total / tokens as f64) as f32, correct as f64 / tokens as f64, tokens))
 }
 
 // ─── Shared causal-LM training loop (MoE and dense decoder-only) ─────────────
@@ -645,6 +666,9 @@ where
             global_step: 0,
             entropy: 0.0,
             entropy_history: vec![],
+            top3_accuracy: None,
+            avg_top3_accuracy: None,
+            top3_history: vec![],
             last_reply: String::new()
         };
 
@@ -668,6 +692,8 @@ where
             let num_batches = idx.len().div_ceil(stage_cfg.batch_size);
             let mut epoch_loss = 0.0f32;
             let mut processed_batches = 0usize;
+            let mut epoch_top3_correct = 0usize;
+            let mut epoch_supervised = 0usize;
 
             for batch_num in 0..num_batches {
                 let current_lr = {
@@ -690,6 +716,13 @@ where
                 let tokens_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_seq_ids, [current_batch_size, run_cfg.max_seq_len]), device);
 
                 let (token_logits, aux_loss) = model.forward_train(tokens_t.clone());
+                let correct = top3_correct(
+                    token_logits.clone().inner().reshape([current_batch_size * run_cfg.max_seq_len, vocab]),
+                    lang_target_t.clone().inner(),
+                );
+                epoch_top3_correct += correct;
+                epoch_supervised += supervised;
+                let top3 = correct as f64 / supervised as f64;
 
                 // Entropy, on detached logits so none of its [batch, seq, vocab]
                 // intermediates join the autodiff graph.
@@ -697,21 +730,25 @@ where
                 let log_probs = (probs.clone() + 1e-10).log();
                 let token_entropy = (probs * log_probs).sum_dim(2).neg().squeeze_dim::<2>(2);
                 let non_pad_mask = tokens_t.clone().equal_elem(PAD_TOKEN as u32).bool_not().float();
-                let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).sum().div(non_pad_mask.sum()).into_scalar();
+                let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).cast(burn::tensor::FloatDType::F32).sum()
+                    .div(non_pad_mask.cast(burn::tensor::FloatDType::F32).sum())
+                    .into_data().convert::<f32>().to_vec::<f32>().unwrap()[0];
 
                 // Loss
                 let logits_2d = token_logits.reshape([current_batch_size * run_cfg.max_seq_len, vocab]);
                 let lang_loss = masked_token_ce(logits_2d, lang_target_t, supervised, stage_cfg.smoothing);
 
-                let total_loss = lang_loss.clone() + aux_loss;
+                let total_loss = lang_loss.clone() + aux_loss.cast(burn::tensor::FloatDType::F32);
                 let grads = GradientsParams::from_grads(total_loss.backward(), &model);
                 model = optimizer.step(current_lr, model, grads);
 
-                let loss_val: f32 = lang_loss.inner().to_data().to_vec::<f32>().unwrap()[0];
+                let loss_val: f32 = lang_loss.inner().to_data().convert::<f32>().to_vec::<f32>().unwrap()[0];
                 epoch_loss += loss_val;
                 processed_batches += 1;
 
                 state.entropy = entropy_val;
+                state.top3_accuracy = Some(top3);
+                state.avg_top3_accuracy = Some(epoch_top3_correct as f64 / epoch_supervised as f64);
                 state.current_loss = loss_val;
                 state.avg_loss = epoch_loss / processed_batches as f32;
                 state.batch = batch_num + 1;
@@ -721,14 +758,16 @@ where
                 state.avg_loss_history.push((state.global_step as f64, state.avg_loss as f64));
                 state.entropy_history.push((state.global_step as f64, entropy_val as f64));
                 state.lr_history.push((state.global_step as f64, current_lr));
+                state.top3_history.push((state.global_step as f64, top3));
 
                 if let Some(term) = terminal.as_mut() {
                     term.draw(|frame| render(frame, &state))?;
                 } else if state.global_step % 50 == 0 || batch_num + 1 == num_batches {
                     println!(
-                        "epoch {}/{} batch {}/{} loss {:.4} avg {:.4} lr {:.2e} entropy {:.4}",
+                        "epoch {}/{} batch {}/{} loss {:.4} avg {:.4} lr {:.2e} entropy {:.4} top3 {:.2}% avg_top3 {:.2}%",
                         state.epoch, state.total_epochs, state.batch, state.total_batches,
                         state.current_loss, state.avg_loss, state.current_lr, state.entropy,
+                        100.0 * top3, 100.0 * state.avg_top3_accuracy.unwrap(),
                     );
                 }
 
@@ -736,7 +775,7 @@ where
                 if (batch_num + 1) % 500 == 0 {
                     let inference_model = model.valid();
                     let val = causal_validation_loss(&inference_model, &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, device);
-                    val_loss = val.map(|(loss, _)| loss);
+                    val_loss = val.map(|(loss, _, _)| loss);
                     model.save_run(run_dir_str, tokenizer, &RunProgress {
                         run_cfg,
                         epochs_trained: epochs_already_done + epoch,
@@ -751,8 +790,8 @@ where
                     if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
                         eprintln!("⚠️  Failed to append inference log: {}", e);
                     }
-                    if let Some((loss, tokens)) = val {
-                        let line = format!("val_loss {loss:.4} over {tokens} held-out tokens");
+                    if let Some((loss, top3, tokens)) = val {
+                        let line = format!("val_loss {loss:.4} val_top3 {:.2}% over {tokens} held-out tokens", top3 * 100.0);
                         println!("{line}");
                         if let Err(e) = append_log_line(&inference_log_path, &line) {
                             eprintln!("⚠️  Failed to append inference log: {}", e);
@@ -773,7 +812,7 @@ where
             final_loss = epoch_loss / processed_batches as f32;
             let inference_model = model.valid();
             let val = causal_validation_loss(&inference_model, &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, device);
-            val_loss = val.map(|(loss, _)| loss);
+            val_loss = val.map(|(loss, _, _)| loss);
 
             // Early stop on held-out loss when available.
             let stop_loss = val_loss.unwrap_or(final_loss);
@@ -802,8 +841,8 @@ where
             if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
                 eprintln!("⚠️  Failed to append inference log: {}", e);
             }
-            if let Some((loss, tokens)) = val {
-                let line = format!("val_loss {loss:.4} over {tokens} held-out tokens (epoch end)");
+            if let Some((loss, top3, tokens)) = val {
+                let line = format!("val_loss {loss:.4} val_top3 {:.2}% over {tokens} held-out tokens (epoch end)", top3 * 100.0);
                 println!("{line}");
                 if let Err(e) = append_log_line(&inference_log_path, &line) {
                     eprintln!("⚠️  Failed to append inference log: {}", e);
@@ -1110,10 +1149,14 @@ pub fn run_with_architecture(
     max_articles:      usize,
     architecture: Architecture,
 ) -> Result<()> {
-    #[cfg(not(all(target_os = "linux", not(feature = "desktop"))))]
+    #[cfg(not(any(feature = "cuda-training", all(target_os = "linux", not(feature = "desktop")))))]
     let device = burn::backend::wgpu::WgpuDevice::default();
-    #[cfg(all(target_os = "linux", not(feature = "desktop")))]
+    #[cfg(any(feature = "cuda-training", all(target_os = "linux", not(feature = "desktop"))))]
     let device = burn::backend::cuda::CudaDevice::default();
+    #[cfg(any(feature = "cuda-training", all(target_os = "linux", not(feature = "desktop"))))]
+    println!("Training precision: BF16 parameters, activations, gradients and optimizer moments; FP32 attention accumulation and final loss/metric reductions.");
+    #[cfg(not(any(feature = "cuda-training", all(target_os = "linux", not(feature = "desktop")))))]
+    println!("Training precision: FP32 (local WGPU backend).");
     let label_keywords   = build_label_keywords();
     let keyword_index    = build_keyword_index(&label_keywords);
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
@@ -1251,6 +1294,9 @@ pub fn run_with_architecture(
                 global_step: 0,
                 entropy: 0.0,
                 entropy_history: vec![],
+                top3_accuracy: None,
+                avg_top3_accuracy: None,
+                top3_history: vec![],
                 last_reply: String::new()
             };
 
@@ -1332,7 +1378,9 @@ pub fn run_with_architecture(
                     let log_probs = (probs.clone() + 1e-10).log();
                     let token_entropy = (probs * log_probs).sum_dim(2).neg().squeeze::<2>();
                     let non_pad_mask = dec_t.clone().equal_elem(PAD_TOKEN as u32).bool_not().float();
-                    let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).sum().div(non_pad_mask.sum()).into_scalar();
+                    let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).cast(burn::tensor::FloatDType::F32).sum()
+                    .div(non_pad_mask.cast(burn::tensor::FloatDType::F32).sum())
+                    .into_data().convert::<f32>().to_vec::<f32>().unwrap()[0];
 
                     // Loss
                     let vocab = tokenizer.vocab_size();
@@ -1342,7 +1390,7 @@ pub fn run_with_architecture(
                     let grads = GradientsParams::from_grads(lang_loss.backward(), &model);
                     model = optimizer.step(current_lr, model, grads);
 
-                    let loss_val: f32 = lang_loss.clone().inner().to_data().to_vec::<f32>().unwrap()[0];
+                    let loss_val: f32 = lang_loss.clone().inner().to_data().convert::<f32>().to_vec::<f32>().unwrap()[0];
                     epoch_loss += loss_val;
 
                     state.entropy = entropy_val;
@@ -1588,6 +1636,9 @@ pub fn run_with_architecture(
                 global_step: 0,
                 entropy: 0.0,
                 entropy_history: vec![],
+                top3_accuracy: None,
+                avg_top3_accuracy: None,
+                top3_history: vec![],
                 last_reply: String::new()
             };
 
@@ -1667,7 +1718,9 @@ pub fn run_with_architecture(
                     let log_probs = (probs.clone() + 1e-10).log();
                     let token_entropy = (probs * log_probs).sum_dim(2).neg().squeeze::<2>();
                     let non_pad_mask = tokens_t.clone().equal_elem(PAD_TOKEN as u32).bool_not().float();
-                    let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).sum().div(non_pad_mask.sum()).into_scalar();
+                    let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).cast(burn::tensor::FloatDType::F32).sum()
+                    .div(non_pad_mask.cast(burn::tensor::FloatDType::F32).sum())
+                    .into_data().convert::<f32>().to_vec::<f32>().unwrap()[0];
 
                     // Loss
                     let vocab = tokenizer.vocab_size();
@@ -1677,7 +1730,7 @@ pub fn run_with_architecture(
                     let grads = GradientsParams::from_grads(lang_loss.backward(), &model);
                     model = optimizer.step(current_lr, model, grads);
 
-                    let loss_val: f32 = lang_loss.clone().inner().to_data().to_vec::<f32>().unwrap()[0];
+                    let loss_val: f32 = lang_loss.clone().inner().to_data().convert::<f32>().to_vec::<f32>().unwrap()[0];
                     epoch_loss += loss_val;
 
                     state.entropy = entropy_val;
@@ -1887,6 +1940,37 @@ mod moe_loss_tests {
     use super::*;
     use burn::backend::Wgpu;
     type B = Wgpu;
+
+    fn check_top3<B: Backend>() {
+        let device = Default::default();
+        let logits = Tensor::<B, 2>::from_floats([
+            [0.0, 5.0, 4.0, 3.0, 2.0], // target 1: first
+            [0.0, 5.0, 4.0, 3.0, 2.0], // target 3: third
+            [0.0, 5.0, 4.0, 3.0, 2.0], // target 4: fourth
+            [5.0, 4.0, 3.0, 2.0, 1.0], // padding: excluded even though first
+            [1.0, 1.0, 1.0, 1.0, 1.0], // tie: ID 2 is third
+            [1.0, 1.0, 1.0, 1.0, 1.0], // tie: ID 3 is fourth
+        ], &device);
+        let targets = Tensor::<B, 1, Int>::from_ints([1, 3, 4, PAD_TOKEN as i32, 2, 3], &device);
+        assert_eq!(top3_correct(logits.clone(), targets), 3);
+        let padding = Tensor::<B, 1, Int>::full([6], PAD_TOKEN as i32, &device);
+        assert_eq!(top3_correct(logits, padding), 0);
+        // A vocabulary smaller than k still includes every supervised target.
+        let small = Tensor::<B, 2>::from_floats([[2.0, 1.0]], &device);
+        assert_eq!(top3_correct(small, Tensor::from_ints([1], &device)), 1);
+    }
+
+    #[test]
+    fn top3_accuracy_masks_padding_and_breaks_ties() {
+        // Match the unfused backend used by the actual training loop.
+        check_top3::<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>();
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA GPU with native BF16 support; no profiling"]
+    fn cuda_bf16_top3_accuracy() {
+        check_top3::<<CudaTrainBackend as AutodiffBackend>::InnerBackend>();
+    }
 
     #[test]
     fn moe_grid_is_1024_wide_24_layers_four_experts_top1() {

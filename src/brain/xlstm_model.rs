@@ -323,7 +323,7 @@ impl<B: Backend> YumonXLstmBrain<B> {
                 .slice([0..1, current_len - 1..current_len, 0..vocab_size])
                 .reshape([vocab_size]);
 
-            let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
+            let logits_vec: Vec<f32> = last_logits.to_data().convert::<f32>().to_vec().unwrap();
             let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
 
             if next_token == EOS_TOKEN || next_token == PAD_TOKEN { break; }
@@ -494,7 +494,11 @@ fn sample_top_k(logits: &[f32], k: usize, temperature: f32, rng: &mut impl rand:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brain::train::TrainBackend;
+    // These tests explicitly select WGPU, independently of the RunPod backend.
+    type TrainBackend = burn::backend::Autodiff<
+        burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>,
+        burn::backend::autodiff::checkpoint::strategy::BalancedCheckpointing,
+    >;
     use burn::optim::GradientsParams;
 
     #[test]
