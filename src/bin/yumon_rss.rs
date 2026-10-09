@@ -28,6 +28,7 @@ mod desktop {
     use wry::WebViewBuilder;
     use yumon_pet::brain::{
         bpe::TokenizerKind,
+        decoder_model::YumonDecBrain,
         model::YumonBrain,
         moe_model::YumonMoeBrain,
         samples::{TrainingStage, language_prompt},
@@ -36,6 +37,7 @@ mod desktop {
 
     #[derive(Clone, Copy, ValueEnum)]
     enum Architecture {
+        DecoderOnly,
         Moe,
         Xlstm,
         EncoderDecoder,
@@ -47,10 +49,10 @@ mod desktop {
         #[arg(
             long,
             // default_value = "D:/models/runpod/large1/512h_16l_8a_256len_b32_Moe_e4_k1_Language_1m"
-            default_value = "D:/models/runpod/medium1/brain_cp1/256h_16l_8a_256len_b8_Moe_e4_k1_Language"
+            default_value = "D:/models/runpod/run1024h/1024h_24l_32a_256len_b16_DecoderOnly_Language_200k"
         )]
         checkpoint: String,
-        #[arg(long, value_enum, default_value = "moe")]
+        #[arg(long, value_enum, default_value = "decoder-only")]
         architecture: Architecture,
         /// JSON history location (defaults to YumonRSS's local application data).
         #[arg(long)]
@@ -380,6 +382,11 @@ mod desktop {
             }};
         }
         match args.architecture {
+            // The decoder's custom FlashAttention ops require an unfused backend.
+            Architecture::DecoderOnly => load!(
+                YumonDecBrain<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>,
+                |b, t, p, n, d| b.generate_unmasked_parsed(t, p, n, d).raw_output
+            ),
             Architecture::Moe => load!(YumonMoeBrain<Wgpu>, |b, t, p, n, d| b
                 .generate_unmasked_parsed(t, p, n, d)
                 .raw_output),
