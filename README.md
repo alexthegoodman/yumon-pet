@@ -205,6 +205,10 @@ Measured on a UHD 770 (wgpu), seq 256, batch 32, 8 heads:
 | attention only, naive vs flash, head dim 64 | 257 vs 64 MiB | 164 vs 287 ms |
 | 256w 16L model, no checkpointing vs balanced | 4614 vs 3701 MiB | 37.2 vs 39.6 s |
 
+Current RunPod grid: 1024 wide, 24 layers, 32 heads (head dim 32), ~436M
+parameters, batch 32 (Dockerfile `--batch-size 32`; the CLI default stays 8),
+LR 2e-4 -> 2e-5. Estimated peak ~28 GiB, scaled from the 256-wide probe below.
+
 Balanced checkpointing only recomputes memory-bound ops; matmul outputs and
 the [tokens, vocab] logits are still stored. Probe (one variant per process):
 

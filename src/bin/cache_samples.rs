@@ -70,6 +70,14 @@ fn main() -> Result<()> {
     let samples = loader
         .load(&tokenizer, &keyword_index, args.max_seq_len)
         .context("preparing samples from the configured training sources")?;
+
+    // debug print — first samples
+    for (i, sample) in samples.iter().enumerate() {
+        if i >= 50 { break; }
+        println!("input: {}", tokenizer.decode(&sample.input_ids));
+        println!("target: {}", tokenizer.decode(&sample.target_labels));
+    }
+
     let metadata = sample_cache::write_cache(
         &args.output,
         &tokenizer,

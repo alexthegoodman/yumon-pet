@@ -786,6 +786,7 @@ pub fn load_text_paragraphs(path: &str) -> Result<Vec<String>> {
 /// with an uppercase letter, digit or quote. Abbreviations ("Mr.", "U.S.",
 /// "e.g.") and single initials do not end a sentence.
 pub fn split_sentences(text: &str) -> Vec<String> {
+    const MAX_QUOTED_WORDS: usize = 60;
     const ABBREVIATIONS: [&str; 14] = ["mr.", "mrs.", "ms.", "dr.", "st.", "jr.", "sr.", "vs.", "etc.", "no.", "mt.", "ft.", "approx.", "inc."];
     let words: Vec<&str> = text.split_whitespace().collect();
     let mut sentences = Vec::new();
@@ -801,7 +802,13 @@ pub fn split_sentences(text: &str) -> Vec<String> {
         let abbreviation = ABBREVIATIONS.contains(&trimmed.to_lowercase().as_str())
             || body.contains('.') // U.S., e.g.
             || (body.chars().count() == 1 && body.chars().all(char::is_uppercase)); // J. Smith
-        if (ends && next_starts && !abbreviation) || i + 1 == words.len() {
+        // Keep quoted speech whole ("Welcome, traveler. You came."), unless an
+        // unmatched quote would swallow the rest of the text.
+        let open_quote = current.iter().map(|w| w.matches('"').count()).sum::<usize>() % 2 == 1
+            || current.iter().map(|w| w.matches('“').count()).sum::<usize>()
+                > current.iter().map(|w| w.matches('”').count()).sum::<usize>();
+        let in_quote = open_quote && current.len() < MAX_QUOTED_WORDS;
+        if (ends && next_starts && !abbreviation && !in_quote) || i + 1 == words.len() {
             sentences.push(current.join(" "));
             current.clear();
         }
@@ -939,6 +946,56 @@ pub fn load_quote_chats(path: &str) -> Result<HandcraftedChats> {
     .collect();
 
     println!("✅ Loaded {} quote chats", blocks.len());
+    Ok(HandcraftedChats { blocks })
+}
+
+/// Whole stories from a file of `===== STORY N =====` sections (separator
+/// rows of `=` between them), each story's lines joined into one text.
+pub fn load_story_texts(path: &str) -> Result<Vec<String>> {
+    println!("📖 Loading stories: {path}");
+    let content = std::fs::read_to_string(path)?;
+    let mut stories = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for line in content.lines().map(str::trim) {
+        if line.starts_with("=====") {
+            if !current.is_empty() {
+                stories.push(current.join(" "));
+                current.clear();
+            }
+        } else if !line.is_empty() {
+            current.push(line);
+        }
+    }
+    if !current.is_empty() {
+        stories.push(current.join(" "));
+    }
+    Ok(stories)
+}
+
+/// creative_stories.txt as conversations, one block per story: a story
+/// request answered by the first sentence, then whole sentences alternate as
+/// Human/Yumon turns (like the wiki paragraphs), so each reply continues the
+/// story with the earlier turns as history.
+pub fn load_story_chats(path: &str) -> Result<HandcraftedChats> {
+    const REQUESTS: [&str; 6] = [
+        "tell me a story",
+        "can you tell me a story?",
+        "I'd love to hear a story",
+        "tell me a short story",
+        "do you know a good story?",
+        "make up a story for me",
+    ];
+    let blocks: Vec<_> = map_ordered(load_story_texts(path)?, |story| {
+        let sentences = split_sentences(&story);
+        let request = pick(&REQUESTS, sentences.first()?).to_string();
+        let memories = sentence_turns(Some(request), sentences);
+        (!memories.is_empty()).then_some(ChatBlock { memories })
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+
+    println!("✅ Loaded {} story conversations", blocks.len());
     Ok(HandcraftedChats { blocks })
 }
 
@@ -1152,6 +1209,41 @@ mod language_chat_source_tests {
             "2024 was a leap year.",
             "J. R. R. Tolkien wrote books.",
         ]);
+    }
+
+    #[test]
+    fn language_stories_become_one_conversation_per_story() {
+        let path = temp_file("stories.txt", concat!(
+            "\n===== STORY 1 =====\n",
+            "In the town of Willowbrook lived Mr. Gray, a painter.\n\n",
+            "One morning he heard a tap. \"Who is there?\" he asked.\n",
+            "Nobody answered. He opened the door.\n",
+            "==========================================\n\n",
+            "===== STORY 2 =====\n",
+            "The robot woke up at 3.5 hours past midnight. It was alone.\n",
+        ));
+        let chats = load_story_chats(path.to_str().unwrap()).unwrap();
+        remove(&path);
+
+        assert_eq!(chats.blocks.len(), 2);
+        let first = &chats.blocks[0].memories;
+        // Request answered by the whole first sentence; abbreviations survive.
+        assert!(first[0].human.contains("story"));
+        assert_eq!(first[0].bot, "In the town of Willowbrook lived Mr. Gray, a painter.");
+        assert_eq!(first[1].human, "One morning he heard a tap.");
+        assert_eq!(first[1].bot, "\"Who is there?\" he asked.");
+        // Quoted speech spanning sentences stays in one turn.
+        assert_eq!(
+            split_sentences("A voice said: \"Welcome, traveler. You chose this path.\" Then it was gone."),
+            vec!["A voice said: \"Welcome, traveler. You chose this path.\"", "Then it was gone."],
+        );
+        // Odd last sentence joins the last reply instead of being cut.
+        assert_eq!(first[2].human, "Nobody answered.");
+        assert_eq!(first[2].bot, "He opened the door.");
+        assert_eq!(first.len(), 3);
+        let second = &chats.blocks[1].memories;
+        assert_eq!(second[0].bot, "The robot woke up at 3.5 hours past midnight. It was alone.");
+        assert!(chats.blocks.iter().flat_map(|b| &b.memories).all(|m| !m.human.contains("=====") && !m.bot.contains("=====")));
     }
 
     #[test]

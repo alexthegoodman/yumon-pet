@@ -93,4 +93,4 @@ RUN test -s "$YUMON_SAMPLE_CACHE"
 # Checkpoints must land on a mounted RunPod Network Volume (not this image's
 # writable layer) so they survive the pod being stopped/terminated - mount
 # your volume at /workspace. See README.md for the full RunPod walkthrough.
-CMD ["./yumon-pet", "train-brain", "--out-dir", "/workspace/checkpoints/brain"]
+CMD ["./yumon-pet", "train-brain", "--out-dir", "/workspace/checkpoints/brain", "--batch-size", "16"]

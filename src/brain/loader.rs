@@ -12,7 +12,7 @@ use crate::brain::chats::load_distilled_chats;
 use crate::brain::am_distill::load_am_distill_chats;
 use crate::brain::mdx::{load_chats_from_csv, load_chats_from_friends_csv};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::brain::mdx::{load_arena_chats, load_csv_bible_pairs, load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_quote_chats, load_quotes_csv, load_specific_dict_sentences, load_text_paragraphs, load_txt_lines, load_wiki_chats, load_txt_sentences};
+use crate::brain::mdx::{load_arena_chats, load_csv_bible_pairs, load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_quote_chats, load_quotes_csv, load_story_chats, load_story_texts, load_specific_dict_sentences, load_text_paragraphs, load_txt_lines, load_wiki_chats, load_txt_sentences};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::brain::pdf::load_pdfs;
@@ -54,6 +54,10 @@ pub enum FileKind {
     /// `quote,author,category` CSV. Training: a category request answered by
     /// the quote. Tokenizer corpus: quote text.
     QuotesCsv,
+    /// `===== STORY N =====` sections (creative_stories.txt). Training: one
+    /// conversation per story, whole sentences as Human/Yumon turns after a
+    /// story request. Tokenizer corpus: whole stories.
+    Stories,
     // extend with WikiXml, Txt, Pdf, … as needed
 }
 
@@ -412,7 +416,7 @@ impl DataLoader {
         // 1. Raw sentences from disk
         // Chat-built sources read their own files below.
         let mut sentences = match entry.kind {
-            FileKind::Paragraphs | FileKind::QuotesCsv | FileKind::AmDistill => Vec::new(),
+            FileKind::Paragraphs | FileKind::QuotesCsv | FileKind::Stories | FileKind::AmDistill => Vec::new(),
             _ => load_sentences(&entry.path, &entry.kind)?,
         };
         println!(
@@ -531,9 +535,10 @@ impl DataLoader {
                     chats, tokenizer, keyword_index, rng, self.stage, max_seq_len,
                 )
             },
-            FileKind::Paragraphs | FileKind::QuotesCsv => {
+            FileKind::Paragraphs | FileKind::QuotesCsv | FileKind::Stories => {
                 let mut chats = match entry.kind {
                     FileKind::Paragraphs => load_wiki_chats(&entry.path)?,
+                    FileKind::Stories => load_story_chats(&entry.path)?,
                     _ => load_quote_chats(&entry.path)?,
                 };
 
@@ -588,6 +593,7 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
         FileKind::TxtLines    => load_txt_lines(path),
         FileKind::Paragraphs  => load_text_paragraphs(path),
         FileKind::QuotesCsv   => load_quotes_csv(path),
+        FileKind::Stories     => load_story_texts(path),
         FileKind::PDF       => {
             let paths: Vec<&str> = path.split(", ").collect();
             Ok(load_pdfs(paths))

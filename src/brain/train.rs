@@ -847,14 +847,19 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
     // batch 256 was already too large at 128 hidden on this hardware), not by
     // data volume. Reduce this matrix, don't reduce the dataset, if a sweep
     // runs too slow.
+    // Dense decoder-only RunPod run: 1024 wide x 24 layers x 32 heads (head
+    // dim 32, the flash kernel's fastest measured width), ~436M params, batch
+    // 32 x 256 tokens (Dockerfile). Estimated peak ~28 GiB: weights + grads +
+    // AdamW 6.5 GiB, stored activations 18.3 GiB, logits/CE 3.2 GiB - scaled
+    // from training_memory_probe at 256 wide on wgpu, so confirm on the pod.
     let sizes:       [usize; 1] = [
         // 32,
         // 64,
         // 128,
         // 256, // smaller, maybe good seq length of 256
-        512 // 220M ideal
+        // 512 // 220M ideal
         // 1024, // ~1.32B total / ~411M active at 24 layers, 4 experts top-1
-        // 1024
+        1024, // dense: ~436M at 24 layers
     ];
     let layer_counts: [usize; 1] = [
         // 1,
@@ -871,8 +876,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 2,
         // 4,
         // 8,
-        16,
-        // 32
+        // 16,
+        32, // head dim 32 at 1024 wide
         // 64
     ];
     let seq_lens:     [usize; 1] = [
@@ -928,7 +933,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                 let (first_lr, last_lr) = match architecture {
                                     // Architecture::Moe { .. } => (3e-4, 3e-5),
                                     Architecture::Moe { .. } => (1e-4, 1e-5),
-                                    Architecture::DecoderOnly    => (3e-4, 3e-5),
+                                    // 24 layers, no warmup, 8k tokens/step: below the usual 3e-4.
+                                    Architecture::DecoderOnly    => (2e-4, 2e-5),
                                     Architecture::EncoderDecoder => (1e-3, 1e-4),
                                     // xLSTM's exponential gating is more sensitive to a hot LR
                                     // than plain attention softmax — starting below DecoderOnly's
@@ -1020,8 +1026,8 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
         .add("archive/arena_extract.txt",   FileKind::Chats, None)
         .add("data/distillchatv1.csv",   FileKind::DistillChat, None)
         // Plain text, loss on every token (cleaned extract of the simplewiki XML).
-        .add("data/wiki_extract.txt",   FileKind::Paragraphs, None)
-        .add("data/quotes.csv",   FileKind::QuotesCsv, None)
+        // .add("data/wiki_extract.txt",   FileKind::Paragraphs, None) // too dense
+        // .add("data/quotes.csv",   FileKind::QuotesCsv, None) // only 5 prompts used. maybe better used without prompts
         .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
         .add("data/bible_asv.csv", FileKind::BibleCsv, None)
         // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs — proper
@@ -1035,7 +1041,7 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
         .add("archive/synthetic/puzzles.txt", FileKind::Chats, None)
         .add("archive/synthetic/commands.txt", FileKind::Chats, None)
         .add("archive/synthetic/memory.txt", FileKind::Chats, None)
-        .add("data/creative_stories.txt", FileKind::Txt, None) // good but gets split
+        .add("data/creative_stories.txt", FileKind::Stories, None)
         // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
         // // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
         // // .add("archive/ov_chats.txt", FileKind::Chats, None)
@@ -1951,7 +1957,7 @@ mod moe_loss_tests {
     #[ignore]
     fn language_data_samples() {
         let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe").unwrap());
-        for (path, kind, count) in [("data/wiki_extract.txt", FileKind::Paragraphs, 12), ("data/quotes.csv", FileKind::QuotesCsv, 6)] {
+        for (path, kind, count) in [("data/wiki_extract.txt", FileKind::Paragraphs, 12), ("data/quotes.csv", FileKind::QuotesCsv, 6), ("data/creative_stories.txt", FileKind::Stories, 8)] {
             // 500 random conversations keep this to about a minute.
             let samples = DataLoader::new(TrainingStage::Language)
                 .add(path, kind, Some(500))
