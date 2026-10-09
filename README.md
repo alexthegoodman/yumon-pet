@@ -99,7 +99,132 @@ cargo test --bin yumon_rss
 ```
 
 
-### Prepare samples once, then train on RunPod (Docker)
+## Yumon Code: raw Rust pretraining on RunPod
+
+Yumon Code recursively reads `.rs` files from a folder you choose and prepares
+one compressed, pre-chunked `.bin` cache. There are no prompts or captions:
+inputs are `[BOS] code`, targets are `code [EOS]`, and every code token plus EOS
+contributes to next-token loss. **Model training runs only on RunPod.** Local
+commands below prepare data or validate it without initializing a model or GPU.
+
+Run commands from `yumon-pet/`. Both preparation and training read
+[`configs/yumon-code.json`](configs/yumon-code.json):
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `source` | `../rust-code` | Recursive Rust source folder; used only during preparation |
+| `cache` | `training-cache/code.bin` | Single prepared sample file |
+| `tokenizer` | `yumon_code_bpe` | Dedicated case-preserving byte-level BPE tokenizer |
+| `max_seq_len` | `512` | Input/target length, including room for BOS/EOS |
+| `exclude_dirs` | `.git`, `target`, `node_modules` | Directory names skipped during traversal |
+| `vocab_size` | `16384` | Requested vocabulary size when creating the tokenizer |
+| `embed_dim`, `n_layers`, `attn_heads`, `ff_dim` | `512`, `16`, `16`, `2048` | Dense decoder-only model dimensions |
+| `batch_size`, `epochs` | `8`, `15` | Batch size and epochs per invocation |
+| `first_lr`, `last_lr` | `0.0002`, `0.00002` | Learning-rate range |
+| `validation_fraction`, `seed` | `0.01`, `4815162342` | Deterministic file-level holdout and cache shuffle |
+| `out_dir` | `/workspace/checkpoints/yumon-code` | RunPod checkpoint root |
+
+Paths are relative to the working directory. Set `source` in the JSON (Windows
+paths can use forward slashes), or override it for preparation with `--source`.
+For the first cache, create the dedicated tokenizer and prepare samples:
+
+```powershell
+cargo run --release --no-default-features --bin cache_samples -- --code-config configs/yumon-code.json --train-code-tokenizer
+```
+
+`--train-code-tokenizer` fits only the CPU BPE vocabulary; it does **not** train
+the neural model. It refuses to overwrite an existing tokenizer. The Pet
+tokenizer lowercases text and must not be used for Rust. On subsequent cache
+builds, omit this flag to reuse the code tokenizer.
+
+Cache preparation prints the first **50 prepared chunks** (or all chunks if
+fewer exist), with source filenames, target token counts and decoded code. Use
+`--preview-samples 100` to print more or `--preview-samples 0` to disable previews.
+`--inspect` remains a metadata-only operation.
+
+Preparation parses Rust and makes **one complete struct or function per sample**,
+including its attributes and doc comments. It visits inline modules and extracts
+complete methods with their original `impl` or trait header and a closing brace.
+Trait methods without bodies, imports, standalone constants, enums and macro
+bodies are not selected. Macros are not expanded. Samples preserve the selected
+source text, including case, whitespace, comments and strings; method wrappers
+add newlines around the intact method. Samples are syntax-complete snippets,
+not standalone programs with every dependency or trait member included.
+
+An item must fit within `max_seq_len - 1` source tokens. **Oversized items are
+skipped, never split or truncated.** Preparation reports counts and the context
+length needed for skipped items (with up to five source locations per file).
+Increase `max_seq_len` and rebuild to include larger functions or structs.
+Short items are padded; files are never concatenated. Exact duplicate files
+are removed, and symlinks are not followed. Invalid Rust syntax, invalid UTF-8
+or a tokenizer that cannot round-trip selected source bytes fails explicitly.
+
+Caches built with the earlier token-window chunker must be rebuilt; training
+rejects them. Archive the old `.bin`, then rerun the preparation command with
+the existing tokenizer (omit `--train-code-tokenizer`). The 50-sample preview
+includes source filenames and line numbers for reviewing the new boundaries.
+
+Inspect the cache header or validate the complete cache locally:
+
+```sh
+cargo run --release --no-default-features --bin cache_samples -- --code-config configs/yumon-code.json --inspect
+cargo run --release --no-default-features --bin train_code -- --config configs/yumon-code.json --check
+```
+
+`--check` verifies context length, tokenizer fingerprint, raw-code objective,
+corpus digest and the train/validation split. Training requires at least two
+distinct nonempty files; all chunks from a held-out file stay in validation.
+The cache loads into host RAM before training; it is not memory-mapped or
+streamed batch by batch. No source scanning or tokenization occurs on RunPod.
+
+To increase context, change `max_seq_len` (for example, `512` to `1024`) in the
+shared JSON and rebuild the cache with the existing tokenizer. Archive the old
+cache first: preparation refuses to overwrite it. Keep the default cache and
+tokenizer paths for the Docker workflow below. A context mismatch is an error,
+never silent truncation. Longer contexts use a different checkpoint directory;
+this does not extend an existing checkpoint automatically. Adjust `batch_size`
+for available GPU memory; the defaults have not been measured on RunPod yet.
+
+After preparation and `--check`, build and push the dedicated code image:
+
+```sh
+docker build -t alexthegoodman/yumon-code:latest .
+docker push alexthegoodman/yumon-code:latest
+```
+
+The default image includes `train_code`, the code tokenizer,
+`training-cache/code.bin` and the JSON config. Its build-time check performs
+no model training.
+Attach a RunPod network volume at `/workspace` and launch that image. Its
+default command is:
+
+```sh
+./train_code --config configs/yumon-code.json
+```
+
+Actual training requires a headless Linux build and the
+[`RUNPOD_POD_ID` variable supplied by RunPod](https://docs.runpod.io/pods/templates/environment-variables).
+It uses CUDA/BF16, saves checkpoints under `out_dir`, and resumes compatible
+model weights. As in the existing trainer, optimizer state and the within-epoch
+position are not restored. Code runs honor the configured epoch count without
+the Pet grid's automatic loss-drop early stop.
+
+For alternate local artifacts, Docker accepts `CODE_CACHE`, `CODE_TOKENIZER`
+and `CODE_CONFIG` build arguments. These change the build inputs, not the
+container destinations: the deployed config must still reference
+`training-cache/code.bin` and `yumon_code_bpe`, or explicitly mounted paths.
+Pet build, cache-copy and startup instructions are commented out in the
+Dockerfile. The active default builds and launches only Yumon Code.
+
+CPU acceptance checks: `cargo test --no-default-features --lib code_corpus`.
+The tests use tiny synthetic sources and a fixture tokenizer, with no neural
+model training. The RunPod GPU run and Docker image build remain unverified.
+
+### Prepare Pet samples once, then train on RunPod (Docker)
+
+The Pet workflow below is retained for reference. Its Docker instructions are
+disabled: restore the commented Pet lines and disable the active Code lines
+before using this section to build a Pet image.
 
 Build the prepared sample cache locally using the same sources, deduplication,
 limits and shuffle as training. The current training grid uses the Language

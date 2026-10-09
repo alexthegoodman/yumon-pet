@@ -11,6 +11,6 @@ index.html
 # Prepared samples replace raw training corpora in the runtime image.
 data/
 archive/
-# Include only the finished default cache, not temporary or alternate snapshots.
+# Include finished binary snapshots, but no temporary cache files.
 training-cache/*
-!training-cache/samples.bin
+!training-cache/*.bin

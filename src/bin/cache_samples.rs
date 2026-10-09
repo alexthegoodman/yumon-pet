@@ -21,6 +21,15 @@ enum Stage {
 #[derive(Parser)]
 #[command(about = "Prepare training samples locally for cached Docker/RunPod training")]
 struct Args {
+    /// Raw Rust preparation using the same JSON configuration as train-code.
+    #[arg(long, conflicts_with_all = ["output", "tokenizer", "stage", "max_seq_len", "seed"])]
+    code_config: Option<std::path::PathBuf>,
+    /// Override the Rust source folder in --code-config.
+    #[arg(long, requires = "code_config")]
+    source: Option<std::path::PathBuf>,
+    /// Create a new case-preserving code tokenizer before caching (CPU only).
+    #[arg(long, requires = "code_config")]
+    train_code_tokenizer: bool,
     #[arg(long, default_value = "training-cache/samples.bin")]
     output: std::path::PathBuf,
     #[arg(long, default_value = "yumon_bpe")]
@@ -35,6 +44,9 @@ struct Args {
     /// Optional cap after the usual merge, shuffle, and deduplication.
     #[arg(long)]
     limit: Option<usize>,
+    /// Number of prepared samples to print (0 disables previews).
+    #[arg(long, default_value_t = 50)]
+    preview_samples: usize,
     /// Print metadata for an existing output file without loading corpora or a tokenizer.
     #[arg(long)]
     inspect: bool,
@@ -43,6 +55,35 @@ struct Args {
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(path) = &args.code_config {
+        use yumon_pet::brain::code_corpus;
+        let mut config = code_corpus::CodeConfig::load(path)?;
+        if let Some(source) = args.source { config.source = source; }
+        if args.inspect {
+            println!("{}", serde_json::to_string_pretty(&sample_cache::read_metadata(&config.cache)?)?);
+            return Ok(());
+        }
+        anyhow::ensure!(!config.cache.exists(), "{} already exists; choose a new cache path in the config", config.cache.display());
+        let files = code_corpus::rust_files(&config)?;
+        if args.train_code_tokenizer {
+            code_corpus::train_tokenizer(&files, config.vocab_size, &config.tokenizer)?;
+        }
+        let tokenizer = code_corpus::load_tokenizer(&config.tokenizer)?;
+        let samples = code_corpus::prepare(&config, &files, &tokenizer, args.limit)?;
+        for (i, sample) in samples.iter().take(args.preview_samples).enumerate() {
+            let tokens = sample.target_labels.iter()
+                .filter(|&&id| id != yumon_pet::brain::PAD_TOKEN).count();
+            println!("\n=== Code sample {} / {} | {} ({}) | {} target tokens (including EOS) ===",
+                i + 1, samples.len(), sample.pair.0, sample.pair.1, tokens);
+            println!("[BOS]\n{}\n[EOS]", tokenizer.decode(&sample.target_labels));
+        }
+        let metadata = sample_cache::write_cache_with_objective(&config.cache, &tokenizer,
+            TrainingStage::Language, config.max_seq_len, config.seed, &samples,
+            sample_cache::CacheObjective::RawCode)?;
+        println!("{}", serde_json::to_string_pretty(&metadata)?);
+        println!("Cached Rust code to {}", config.cache.display());
+        return Ok(());
+    }
     if args.inspect {
         println!(
             "{}",
@@ -71,9 +112,7 @@ fn main() -> Result<()> {
         .load(&tokenizer, &keyword_index, args.max_seq_len)
         .context("preparing samples from the configured training sources")?;
 
-    // debug print — first samples
-    for (i, sample) in samples.iter().enumerate() {
-        if i >= 50 { break; }
+    for sample in samples.iter().take(args.preview_samples) {
         println!("input: {}", tokenizer.decode(&sample.input_ids));
         println!("target: {}", tokenizer.decode(&sample.target_labels));
     }

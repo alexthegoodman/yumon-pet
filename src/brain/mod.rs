@@ -14,6 +14,8 @@ pub mod pdf;
 pub mod samples;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod sample_cache;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod code_corpus;
 pub mod keywords;
 pub mod fixer;
 pub mod loader;

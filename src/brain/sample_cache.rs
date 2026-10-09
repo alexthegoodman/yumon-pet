@@ -22,9 +22,22 @@ const MAGIC: &[u8; 8] = b"YUMONSMP";
 const FORMAT_VERSION: u32 = 1;
 const BUFFER_SIZE: usize = 1 << 20;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheObjective {
+    #[default]
+    PromptReply,
+    RawCode,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CacheMetadata {
     pub version: u32,
+    #[serde(default)]
+    pub objective: CacheObjective,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<String>,
     pub stage: TrainingStage,
     pub max_seq_len: usize,
     pub tokenizer_sha256: String,
@@ -122,6 +135,33 @@ fn validate_sample(sample: &Sample, max_seq_len: usize, vocab_size: usize) -> Re
     Ok(())
 }
 
+fn code_digest(samples: &[Sample]) -> String {
+    let mut digest = Sha256::new();
+    for sample in samples {
+        digest.update((sample.pair.0.len() as u64).to_le_bytes());
+        digest.update(sample.pair.0.as_bytes());
+        for ids in [&sample.input_ids, &sample.target_labels] {
+            digest.update((ids.len() as u64).to_le_bytes());
+            for &id in ids { digest.update((id as u64).to_le_bytes()); }
+        }
+    }
+    format!("{digest:x}", digest = digest.finalize())
+}
+
+fn validate_code_sample(sample: &Sample) -> Result<()> {
+    use super::{BOS_TOKEN, EOS_TOKEN};
+    let end = sample.target_labels.iter().position(|&t| t == PAD_TOKEN)
+        .unwrap_or(sample.target_labels.len());
+    ensure!(end >= 2 && sample.input_ids[0] == BOS_TOKEN
+        && sample.target_labels[end - 1] == EOS_TOKEN
+        && sample.input_ids[1..end] == sample.target_labels[..end - 1]
+        && sample.target_labels[..end - 1].iter().all(|&id| id > 3)
+        && sample.input_ids[end..].iter().all(|&id| id == PAD_TOKEN)
+        && sample.target_labels[end..].iter().all(|&id| id == PAD_TOKEN)
+        && !sample.pair.0.is_empty(), "invalid shifted raw-code sample");
+    Ok(())
+}
+
 struct TemporaryFile(PathBuf);
 impl Drop for TemporaryFile {
     fn drop(&mut self) {
@@ -138,6 +178,13 @@ pub fn write_cache(
     max_seq_len: usize,
     seed: u64,
     samples: &[Sample],
+) -> Result<CacheMetadata> {
+    write_cache_with_objective(path, tokenizer, stage, max_seq_len, seed, samples, CacheObjective::PromptReply)
+}
+
+pub fn write_cache_with_objective(
+    path: &Path, tokenizer: &TokenizerKind, stage: TrainingStage,
+    max_seq_len: usize, seed: u64, samples: &[Sample], objective: CacheObjective,
 ) -> Result<CacheMetadata> {
     ensure!(max_seq_len >= 2, "context length must be at least 2");
     ensure!(
@@ -160,7 +207,11 @@ pub fn write_cache(
         .create_new(true)
         .open(&temporary.0)?;
     let metadata = CacheMetadata {
-        version: FORMAT_VERSION,
+        // Old binaries must refuse raw-code caches: their batcher uses prompt masking.
+        version: if objective == CacheObjective::RawCode { 2 } else { FORMAT_VERSION },
+        objective,
+        corpus_sha256: (objective == CacheObjective::RawCode).then(|| code_digest(samples)),
+        preparation: (objective == CacheObjective::RawCode).then(|| "rust-items-v1".to_owned()),
         stage,
         max_seq_len,
         tokenizer_sha256: tokenizer_fingerprint(tokenizer)?,
@@ -178,6 +229,7 @@ pub fn write_cache(
     for (index, sample) in samples.iter().enumerate() {
         validate_sample(sample, max_seq_len, tokenizer.vocab_size())
             .with_context(|| format!("sample {index}"))?;
+        if objective == CacheObjective::RawCode { validate_code_sample(sample)?; }
         bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .with_little_endian()
@@ -210,8 +262,10 @@ fn read_header(reader: &mut impl Read) -> Result<CacheMetadata> {
     let mut header = vec![0; length];
     reader.read_exact(&mut header)?;
     let metadata: CacheMetadata = serde_json::from_slice(&header)?;
+    ensure!(metadata.objective != CacheObjective::RawCode ||
+        (metadata.version == 2 && metadata.corpus_sha256.is_some()), "raw-code cache requires version 2 and a corpus digest");
     ensure!(
-        metadata.version == FORMAT_VERSION,
+        metadata.version == FORMAT_VERSION || metadata.version == 2,
         "unsupported sample cache version {}; rebuild locally",
         metadata.version
     );
@@ -230,9 +284,21 @@ pub fn load_cache(
     stage: TrainingStage,
     max_seq_len: usize,
 ) -> Result<Vec<Sample>> {
+    load_cache_with_objective(path, tokenizer, stage, max_seq_len, CacheObjective::PromptReply)
+}
+
+pub fn load_cache_with_objective(
+    path: &Path, tokenizer: &TokenizerKind, stage: TrainingStage,
+    max_seq_len: usize, objective: CacheObjective,
+) -> Result<Vec<Sample>> {
     let mut file =
         File::open(path).with_context(|| format!("opening sample cache {}", path.display()))?;
     let metadata = read_header(&mut file)?;
+    ensure!(metadata.objective == objective, "cache objective {:?} does not match {:?}", metadata.objective, objective);
+    if objective == CacheObjective::RawCode {
+        ensure!(metadata.preparation.as_deref() == Some("rust-items-v1"),
+            "code cache uses old chunking; rebuild with cache_samples to use complete Rust items");
+    }
     ensure!(
         metadata.stage == stage,
         "cache stage {:?} does not match {:?}; rebuild locally",
@@ -265,9 +331,13 @@ pub fn load_cache(
         let sample = stored.into_sample(max_seq_len)?;
         validate_sample(&sample, max_seq_len, tokenizer.vocab_size())
             .with_context(|| format!("cached sample {index}"))?;
+        if objective == CacheObjective::RawCode { validate_code_sample(&sample)?; }
         samples.push(sample);
     }
     let mut trailing = [0; 1];
+    if objective == CacheObjective::RawCode {
+        ensure!(metadata.corpus_sha256.as_deref() == Some(code_digest(&samples).as_str()), "cache corpus digest mismatch");
+    }
     ensure!(
         reader.read(&mut trailing)? == 0,
         "unexpected extra data in sample cache"
@@ -413,7 +483,10 @@ mod tests {
         std::fs::write(fixture.path(), b"NOTCACHE").unwrap();
         assert!(read_metadata(&fixture.path()).is_err());
         let header = serde_json::to_vec(&CacheMetadata {
-            version: FORMAT_VERSION + 1,
+            version: 99,
+            objective: CacheObjective::PromptReply,
+            corpus_sha256: None,
+            preparation: None,
             stage: TrainingStage::Language,
             max_seq_len: 128,
             tokenizer_sha256: String::new(),

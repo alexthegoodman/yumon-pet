@@ -6,7 +6,7 @@
 # Built with `--no-default-features` so the "desktop" feature (tao/wry/gilrs/
 # three-d - native window + webview + 3D engine + gamepad, used by the
 # desktop/world/chat UI bins) is skipped entirely. Training only needs the
-# CLI bin (src/main.rs), which never touches any of that, so we avoid having
+# Code CLI (src/bin/train_code.rs), which never touches any of that, so we avoid having
 # to install GTK/WebKit/udev dev packages just to compile them.
 ########################################
 FROM rust:1-bookworm AS builder
@@ -35,7 +35,9 @@ COPY src ./src
 ARG CUDARC_CUDA_VERSION=12080
 ENV CUDARC_CUDA_VERSION=${CUDARC_CUDA_VERSION}
 
-RUN cargo build --release --no-default-features --bin yumon-pet
+# Pet training (disabled):
+# RUN cargo build --release --no-default-features --bin yumon-pet
+RUN cargo build --release --no-default-features --bin train_code
 
 ########################################
 # Runtime: training uses burn's CUDA backend, which talks to the CUDA driver
@@ -76,21 +78,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Precompute this file locally with the cache_samples binary before building.
 # Runtime training uses only the snapshot; no corpus download or tokenization.
-ENV YUMON_SAMPLE_CACHE=/app/training-cache/samples.bin
+# Pet cache (disabled; Code reads its cache path from the JSON config):
+# ENV YUMON_SAMPLE_CACHE=/app/training-cache/samples.bin
 
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 ENV RUST_BACKTRACE=1
 
 WORKDIR /app
-COPY --from=builder /build/target/release/yumon-pet ./yumon-pet
-COPY yumon_bpe ./yumon_bpe
 
-COPY training-cache/ ./training-cache/
+# The default image trains Yumon Code. No Pet binary or cache is included.
+# Config paths must match the destinations below (or point at mounted volume files).
+COPY --from=builder /build/target/release/train_code ./train_code
+ARG CODE_TOKENIZER=yumon_code_bpe
+ARG CODE_CACHE=training-cache/code.bin
+ARG CODE_CONFIG=configs/yumon-code.json
+COPY ${CODE_TOKENIZER}/ ./yumon_code_bpe/
+COPY ${CODE_CACHE} ./training-cache/code.bin
+COPY ${CODE_CONFIG} ./configs/yumon-code.json
+RUN ./train_code --config configs/yumon-code.json --check
+CMD ["./train_code", "--config", "configs/yumon-code.json"]
+
+# Pet training (disabled; restore together with the Pet build and ENV above):
+# COPY --from=builder /build/target/release/yumon-pet ./yumon-pet
+# COPY yumon_bpe ./yumon_bpe
+
+# COPY training-cache/samples.bin ./training-cache/samples.bin
 # Catch a missing local preparation step at image build time.
-RUN test -s "$YUMON_SAMPLE_CACHE"
+# RUN test -s "$YUMON_SAMPLE_CACHE"
 
 # Checkpoints must land on a mounted RunPod Network Volume (not this image's
 # writable layer) so they survive the pod being stopped/terminated - mount
 # your volume at /workspace. See README.md for the full RunPod walkthrough.
-CMD ["./yumon-pet", "train-brain", "--out-dir", "/workspace/checkpoints/brain", "--batch-size", "16"]
+# CMD ["./yumon-pet", "train-brain", "--out-dir", "/workspace/checkpoints/brain", "--batch-size", "16"]

@@ -49,7 +49,8 @@ mod desktop {
         #[arg(
             long,
             // default_value = "D:/models/runpod/large1/512h_16l_8a_256len_b32_Moe_e4_k1_Language_1m"
-            default_value = "D:/models/runpod/run1024h/1024h_24l_32a_256len_b16_DecoderOnly_Language_200k"
+            // default_value = "D:/models/runpod/run1024h/1024h_24l_32a_256len_b16_DecoderOnly_Language_200k"
+            default_value = "D:/models/runpod/bf16-1/1024h_24l_32a_256len_b16_DecoderOnly_Language_bf16_150k"
         )]
         checkpoint: String,
         #[arg(long, value_enum, default_value = "decoder-only")]

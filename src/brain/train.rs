@@ -224,6 +224,54 @@ pub struct RunConfig {
     pub stages: Vec<StageConfig>,
 }
 
+/// Yumon Code is prepared locally but model training is restricted to RunPod.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool) -> Result<()> {
+    use crate::brain::{code_corpus, sample_cache::{self, CacheObjective}};
+    config.validate()?;
+    // if !check_only {
+    //     anyhow::ensure!(cfg!(all(target_os = "linux", not(feature = "desktop")))
+    //         && std::env::var_os("RUNPOD_POD_ID").is_some(),
+    //         "train-code requires a headless Linux build on RunPod; --check only validates the cache locally");
+    // }
+    let tokenizer = code_corpus::load_tokenizer(&config.tokenizer)?;
+    let metadata = sample_cache::read_metadata(&config.cache)?;
+    anyhow::ensure!(metadata.seed == config.seed, "cache seed differs from config; rebuild the cache or restore the seed");
+    let samples = sample_cache::load_cache_with_objective(&config.cache, &tokenizer,
+        TrainingStage::Language, config.max_seq_len, CacheObjective::RawCode)?;
+    let prepared = code_corpus::split_validation(samples, config)?;
+    println!("Yumon Code: {} training chunks, {} validation chunks; context {}",
+        prepared.0.len(), prepared.1.len(), config.max_seq_len);
+    if check_only { return Ok(()); }
+    #[cfg(any(feature = "cuda-training", all(target_os = "linux", not(feature = "desktop"))))]
+    {
+        let run = RunConfig {
+            name: format!("code_{}h_{}l_{}a_{}ff_{}len_b{}_DecoderOnly_bf16", config.embed_dim,
+                config.n_layers, config.attn_heads, config.ff_dim, config.max_seq_len, config.batch_size),
+            embed_dim: config.embed_dim, hidden_units: config.embed_dim,
+            n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
+            max_seq_len: config.max_seq_len, architecture: Architecture::DecoderOnly,
+            stages: vec![StageConfig { stage: TrainingStage::Language, loss_threshold: 0.0,
+                epochs: config.epochs, batch_size: config.batch_size, first_lr: config.first_lr,
+                last_lr: config.last_lr, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 }],
+        };
+        let run_dir = config.out_dir.join(&run.name);
+        std::fs::create_dir_all(&run_dir)?;
+        // Preserve the effective config and cache identity alongside checkpoints.
+        let identity = serde_json::json!({"config": config, "cache": metadata});
+        let identity_path = run_dir.join("code-config.json");
+        if identity_path.exists() {
+            let previous: serde_json::Value = serde_json::from_slice(&std::fs::read(&identity_path)?)?;
+            anyhow::ensure!(previous["cache"] == identity["cache"], "checkpoint cache identity differs; use a new out_dir");
+        }
+        std::fs::write(identity_path, serde_json::to_vec_pretty(&identity)?)?;
+        let device = burn::backend::cuda::CudaDevice::default();
+        train_causal_lm::<YumonDecBrain<TrainBackend>>(&run, &run_dir, &tokenizer,
+            &HashMap::new(), &[], &device, Some(prepared))?;
+    }
+    Ok(())
+}
+
 /// A run is abandoned (rather than run to its full epoch count) if one epoch
 /// fails to drop the average loss by at least this much versus the previous
 /// epoch. Most grid-searched configs never converge at all, so this is what
@@ -314,6 +362,7 @@ fn build_moe_batch(
     batch_idx:   &[usize],
     sep_tokens:  &[usize],
     max_seq_len: usize,
+    raw_code: bool,
 ) -> (Vec<i32>, Vec<i32>, usize) {
     let sep_len = sep_tokens.len();
     let mut all_seq_ids: Vec<i32> = Vec::with_capacity(batch_idx.len() * max_seq_len);
@@ -322,6 +371,15 @@ fn build_moe_batch(
 
     for &i in batch_idx {
         let sample = &samples[i];
+        // Raw-code caches already contain shifted next-token targets.
+        if raw_code {
+            assert_eq!(sample.input_ids.len(), max_seq_len);
+            assert_eq!(sample.target_labels.len(), max_seq_len);
+            supervised += sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count();
+            all_seq_ids.extend(sample.input_ids.iter().map(|&t| t as i32));
+            all_targets.extend(sample.target_labels.iter().map(|&t| t as i32));
+            continue;
+        }
         let input_ids = &sample.input_ids;
         let target_labels = &sample.target_labels;
 
@@ -403,13 +461,14 @@ fn causal_validation_loss<B: Backend, M: CausalLm<B>>(
     batch_size:  usize,
     vocab:       usize,
     device:      &B::Device,
+    raw_code: bool,
 ) -> Option<(f32, f64, usize)> {
     let mut total = 0.0f64;
     let mut correct = 0usize;
     let mut tokens = 0usize;
     let idx: Vec<usize> = (0..samples.len()).collect();
     for batch_idx in idx.chunks(batch_size) {
-        let (seq_ids, targets, supervised) = build_moe_batch(samples, batch_idx, sep_tokens, max_seq_len);
+        let (seq_ids, targets, supervised) = build_moe_batch(samples, batch_idx, sep_tokens, max_seq_len, raw_code);
         if supervised == 0 { continue; }
         let n = batch_idx.len();
         let tokens_t = Tensor::<B, 2, Int>::from_ints(TensorData::new(seq_ids, [n, max_seq_len]), device);
@@ -605,11 +664,13 @@ fn train_causal_lm<M>(
     keyword_index: &HashMap<String, Vec<usize>>,
     prompts:       &[String],
     device:        &<TrainBackend as Backend>::Device,
+    mut prepared_code: Option<(Vec<crate::brain::samples::Sample>, Vec<crate::brain::samples::Sample>)>,
 ) -> Result<()>
 where
     M: CausalLmTrain,
     M::InnerModule: CausalLm<InnerBackend>,
 {
+    let raw_code = prepared_code.is_some();
     let run_dir_str = run_dir.to_str().unwrap();
     let (mut model, mut epochs_already_done) = M::init_or_resume(run_cfg, tokenizer, run_dir, device)?;
 
@@ -617,11 +678,15 @@ where
         model.set_stage(stage_cfg.stage);
         println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
 
-        let mut training_samples = load_stage_data(stage_cfg.stage.clone(), tokenizer, keyword_index, run_cfg.max_seq_len)?;
-        anyhow::ensure!(training_samples.len() > 1, "Not enough training samples for stage");
-        // Deduped and seed-shuffled by the loader, so the tail is a fixed held-out set.
-        let val_count = (training_samples.len() / 100).clamp(1, MAX_VAL_SAMPLES);
-        let val_samples = training_samples.split_off(training_samples.len() - val_count);
+        let (training_samples, val_samples) = if let Some(prepared) = prepared_code.take() {
+            prepared
+        } else {
+            let mut samples = load_stage_data(stage_cfg.stage, tokenizer, keyword_index, run_cfg.max_seq_len)?;
+            anyhow::ensure!(samples.len() > 1, "Not enough training samples for stage");
+            let count = (samples.len() / 100).clamp(1, MAX_VAL_SAMPLES);
+            let validation = samples.split_off(samples.len() - count);
+            (samples, validation)
+        };
         println!("Training samples: {}, validation samples: {}", training_samples.len(), val_samples.len());
 
         for (i, sample) in training_samples.iter().enumerate() {
@@ -682,7 +747,7 @@ where
 
         // Decoder-only style: [prompt][separator][reply] packed into one causal sequence
         let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { " " };
-        let sep_tokens = tokenizer.encode(sep_text);
+        let sep_tokens = if raw_code { Vec::new() } else { tokenizer.encode(sep_text) };
         anyhow::ensure!(sep_tokens.len() + 2 <= run_cfg.max_seq_len, "Sequence too short for separator and reply");
 
         'epoch_loop: for epoch in 0..stage_cfg.epochs {
@@ -709,7 +774,7 @@ where
                 let current_batch_size = batch_idx.len();
                 if current_batch_size == 0 { continue; }
 
-                let (all_seq_ids, all_lang_targets, supervised) = build_moe_batch(&training_samples, batch_idx, &sep_tokens, run_cfg.max_seq_len);
+                let (all_seq_ids, all_lang_targets, supervised) = build_moe_batch(&training_samples, batch_idx, &sep_tokens, run_cfg.max_seq_len, raw_code);
 
                 if supervised == 0 { continue; }
                 let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), device);
@@ -774,7 +839,7 @@ where
                 // Periodic save and inference every 500 batches
                 if (batch_num + 1) % 500 == 0 {
                     let inference_model = model.valid();
-                    let val = causal_validation_loss(&inference_model, &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, device);
+                    let val = causal_validation_loss(&inference_model, &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, device, raw_code);
                     val_loss = val.map(|(loss, _, _)| loss);
                     model.save_run(run_dir_str, tokenizer, &RunProgress {
                         run_cfg,
@@ -786,7 +851,7 @@ where
                     })?;
 
                     let entries = run_eval_prompts(&inference_model, tokenizer, prompts, stage_cfg.stage, run_cfg.max_seq_len, device);
-                    state.last_reply = entries[0].1.clone();
+                    state.last_reply = entries.first().map(|entry| entry.1.clone()).unwrap_or_default();
                     if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
                         eprintln!("⚠️  Failed to append inference log: {}", e);
                     }
@@ -811,13 +876,13 @@ where
             anyhow::ensure!(processed_batches > 0, "epoch contains no supervised tokens");
             final_loss = epoch_loss / processed_batches as f32;
             let inference_model = model.valid();
-            let val = causal_validation_loss(&inference_model, &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, device);
+            let val = causal_validation_loss(&inference_model, &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, device, raw_code);
             val_loss = val.map(|(loss, _, _)| loss);
 
             // Early stop on held-out loss when available.
             let stop_loss = val_loss.unwrap_or(final_loss);
             if let Some(prev) = prev_epoch_loss {
-                if prev - stop_loss < MIN_EPOCH_LOSS_DROP {
+                if !raw_code && prev - stop_loss < MIN_EPOCH_LOSS_DROP {
                     println!(
                         "\n⏹️  Epoch loss drop {:.4} < {:.4} (prev {:.4} -> {:.4}). Finishing run early.",
                         prev - stop_loss, MIN_EPOCH_LOSS_DROP, prev, stop_loss,
@@ -837,7 +902,7 @@ where
             })?;
 
             let entries = run_eval_prompts(&inference_model, tokenizer, prompts, stage_cfg.stage, run_cfg.max_seq_len, device);
-            state.last_reply = entries[0].1.clone();
+            state.last_reply = entries.first().map(|entry| entry.1.clone()).unwrap_or_default();
             if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
                 eprintln!("⚠️  Failed to append inference log: {}", e);
             }
@@ -1866,11 +1931,11 @@ pub fn run_with_architecture(
         } // Architecture::XLstm
 
         Architecture::Moe { .. } => {
-            train_causal_lm::<YumonMoeBrain<TrainBackend>>(&run_cfg, &run_dir, &tokenizer, &keyword_index, &prompts, &device)?;
+            train_causal_lm::<YumonMoeBrain<TrainBackend>>(&run_cfg, &run_dir, &tokenizer, &keyword_index, &prompts, &device, None)?;
         }
 
         Architecture::DecoderOnly => {
-            train_causal_lm::<YumonDecBrain<TrainBackend>>(&run_cfg, &run_dir, &tokenizer, &keyword_index, &prompts, &device)?;
+            train_causal_lm::<YumonDecBrain<TrainBackend>>(&run_cfg, &run_dir, &tokenizer, &keyword_index, &prompts, &device, None)?;
         }
 
         } // match run_cfg.architecture
