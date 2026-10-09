@@ -49,7 +49,7 @@ enum Command {
     /// Train a brain variant using the configured data and model grid
     TrainBrain {
         /// Model architecture for the training grid.
-        #[arg(long, default_value = "moe", value_parser = ["xlstm", "encoder-decoder", "moe"])]
+        #[arg(long, default_value = "decoder-only", value_parser = ["decoder-only", "xlstm", "encoder-decoder", "moe"])]
         architecture: String,
         /// Unused when architecture=moe - generate_run_configs sweeps its own
         /// num_experts/top_k matrix instead of a single fixed pair.
@@ -135,6 +135,7 @@ fn main() -> Result<()> {
         Command::TrainBrain { wiki_xml, vision_checkpoint, out_dir, epochs, batch_size, max_articles, architecture, moe_experts, moe_top_k } => {
             println!("🧠 Training Brain...");
             let architecture = match architecture.as_str() {
+                "decoder-only" => brain::train::Architecture::DecoderOnly,
                 "moe" => brain::train::Architecture::Moe { num_experts: moe_experts, top_k: moe_top_k },
                 "encoder-decoder" => brain::train::Architecture::EncoderDecoder,
                 _ => brain::train::Architecture::XLstm,

@@ -16,8 +16,10 @@ use rand::SeedableRng;
 
 use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, CL_ID, CR_ID, TokenizerKind}, chart::{TrainingState}, loader::{DataLoader, FileKind}, samples::{TrainingStage, WorldContext, prepare_paired_samples_split, prepare_paired_samples_split_sep}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 
-// #[cfg(not(target_arch = "wasm32"))]
-// use crate::brain::{decoder_model::{BrainDecMetadata, YumonDecBrain, YumonDecBrainConfig}};
+use crate::brain::{
+    decoder_model::{DecMetadata, YumonDecBrain, YumonDecBrainConfig},
+    flash_attn::backend::FlashAttention,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::brain::{chart::render};
@@ -39,8 +41,16 @@ use crate::brain::{
 
 // Used by the local desktop training UI (src/bin/train_ui.rs), which runs on
 // wgpu since dev machines typically have no CUDA GPU.
+//
+// Both training backends are plain CubeBackend (no burn-fusion) so the custom
+// flash attention op in flash_attn/backend.rs applies, and use Burn's
+// BalancedCheckpointing: memory-bound ops (elementwise, norms, activations,
+// reshapes) are recomputed during backward instead of stored.
 #[cfg(not(all(target_os = "linux", not(feature = "desktop"))))]
-pub type TrainBackend = burn::backend::Autodiff<burn::backend::Wgpu>;
+pub type TrainBackend = burn::backend::Autodiff<
+    burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>,
+    burn::backend::autodiff::checkpoint::strategy::BalancedCheckpointing,
+>;
 #[cfg(not(all(target_os = "linux", not(feature = "desktop"))))]
 pub type TrainRuntime = cubecl::wgpu::WgpuRuntime;
 #[cfg(all(target_os = "linux", not(feature = "desktop")))]
@@ -52,7 +62,10 @@ pub type TrainRuntime = CudaTrainRuntime;
 // Used by the headless `train-brain` CLI path (`run`, below) — this is what
 // RunPod/Docker actually runs. CUDA talks to the driver directly and needs no
 // Vulkan/GL adapter, unlike wgpu, which RunPod's driver stack doesn't expose.
-pub type CudaTrainBackend = burn::backend::Autodiff<burn_cubecl::CubeBackend<cubecl::cuda::CudaRuntime, f32, i32, u8>>;
+pub type CudaTrainBackend = burn::backend::Autodiff<
+    burn_cubecl::CubeBackend<cubecl::cuda::CudaRuntime, f32, i32, u8>,
+    burn::backend::autodiff::checkpoint::strategy::BalancedCheckpointing,
+>;
 pub type CudaTrainRuntime = cubecl::cuda::CudaRuntime;
 
 // Max sequence length during training (tokens)
@@ -363,8 +376,8 @@ fn masked_token_ce<B: Backend>(
 
 /// Per-token loss over the held-out samples, without dropout or gradients.
 /// Returns the loss and the number of supervised tokens it covers.
-fn moe_validation_loss<B: Backend>(
-    model:       &YumonMoeBrain<B>,
+fn causal_validation_loss<B: Backend, M: CausalLm<B>>(
+    model:       &M,
     samples:     &[crate::brain::samples::Sample],
     sep_tokens:  &[usize],
     max_seq_len: usize,
@@ -381,13 +394,446 @@ fn moe_validation_loss<B: Backend>(
         let n = batch_idx.len();
         let tokens_t = Tensor::<B, 2, Int>::from_ints(TensorData::new(seq_ids, [n, max_seq_len]), device);
         let targets_t = Tensor::<B, 1, Int>::from_ints(TensorData::new(targets, [n * max_seq_len]), device);
-        let logits = model.forward(tokens_t).reshape([n * max_seq_len, vocab]);
+        let logits = model.logits(tokens_t).reshape([n * max_seq_len, vocab]);
         let loss = masked_token_ce(logits, targets_t, supervised, 0.0)
             .into_data().convert::<f32>().to_vec::<f32>().ok()?[0];
         total += loss as f64 * supervised as f64;
         tokens += supervised;
     }
     (tokens > 0).then(|| ((total / tokens as f64) as f32, tokens))
+}
+
+// ─── Shared causal-LM training loop (MoE and dense decoder-only) ─────────────
+
+type InnerBackend = <TrainBackend as AutodiffBackend>::InnerBackend;
+
+/// What validation and qualitative eval need from a decoder-only model.
+trait CausalLm<B: Backend> {
+    fn logits(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3>;
+    fn generate(&self, tokenizer: &TokenizerKind, prompt: &str, max_tokens: usize, device: &B::Device) -> GenerationResult;
+}
+
+/// Progress stamped into a checkpoint's metadata.json.
+struct RunProgress<'a> {
+    run_cfg:        &'a RunConfig,
+    epochs_trained: usize,
+    final_loss:     f32,
+    val_loss:       Option<f32>,
+    batch_size:     usize,
+    stage:          TrainingStage,
+}
+
+/// Architecture-specific hooks for `train_causal_lm`.
+trait CausalLmTrain: AutodiffModule<TrainBackend> + Sized {
+    /// Fresh model, or the run directory's checkpoint plus its epochs trained.
+    fn init_or_resume(run_cfg: &RunConfig, tokenizer: &TokenizerKind, run_dir: &std::path::Path, device: &<TrainBackend as Backend>::Device) -> Result<(Self, usize)>;
+    fn set_stage(&mut self, stage: TrainingStage);
+    /// Logits and the weighted auxiliary loss (zero for dense models).
+    fn forward_train(&self, tokens: Tensor<TrainBackend, 2, Int>) -> (Tensor<TrainBackend, 3>, Tensor<TrainBackend, 1>);
+    fn save_run(&self, dir: &str, tokenizer: &TokenizerKind, progress: &RunProgress) -> Result<()>;
+}
+
+fn ensure_same_tokenizer(current: &TokenizerKind, saved: &TokenizerKind) -> Result<()> {
+    let json = |t: &TokenizerKind| -> Result<serde_json::Value> {
+        match t {
+            TokenizerKind::Bpe(t) => Ok(serde_json::from_str(&t.inner.to_string(false).map_err(|e| anyhow::anyhow!("{e}"))?)?),
+            _ => anyhow::bail!("causal LM checkpoints require a BPE tokenizer"),
+        }
+    };
+    anyhow::ensure!(json(current)? == json(saved)?, "checkpoint tokenizer differs from training tokenizer");
+    Ok(())
+}
+
+impl<B: Backend> CausalLm<B> for YumonMoeBrain<B> {
+    fn logits(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> { self.forward(tokens) }
+    fn generate(&self, tokenizer: &TokenizerKind, prompt: &str, max_tokens: usize, device: &B::Device) -> GenerationResult {
+        self.generate_unmasked_parsed(tokenizer, prompt, max_tokens, device)
+    }
+}
+
+impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
+    fn init_or_resume(run_cfg: &RunConfig, tokenizer: &TokenizerKind, run_dir: &std::path::Path, device: &<TrainBackend as Backend>::Device) -> Result<(Self, usize)> {
+        let Architecture::Moe { num_experts, top_k } = run_cfg.architecture else { unreachable!() };
+        let config = YumonMoeBrainConfig::new(tokenizer.vocab_size(), run_cfg.stages[0].stage)
+            .with_embed_dim(run_cfg.embed_dim).with_hidden_units(run_cfg.hidden_units)
+            .with_n_layers(run_cfg.n_layers).with_attn_heads(run_cfg.attn_heads)
+            .with_ff_dim(run_cfg.ff_dim).with_max_seq_len(run_cfg.max_seq_len)
+            .with_num_experts(num_experts).with_top_k(top_k);
+        println!("MoE: {} experts, top-{}; FFN parameters/layer: {} total, {} active/token (excluding router).",
+            num_experts, top_k, 3 * run_cfg.embed_dim * run_cfg.ff_dim * num_experts,
+            3 * run_cfg.embed_dim * run_cfg.ff_dim * top_k);
+        if !run_dir.join("model.bin").exists() {
+            return Ok((config.init(device), 0));
+        }
+        let (m, checkpoint_tokenizer, saved) = Self::load(run_dir.to_str().unwrap(), device)?;
+        anyhow::ensure!(saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
+            && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
+            && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
+            && saved.num_experts == num_experts && saved.top_k == top_k,
+            "MoE checkpoint configuration differs from requested run");
+        ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
+        let meta: MoeMetadata = serde_json::from_str(&std::fs::read_to_string(run_dir.join("metadata.json"))?)?;
+        Ok((m, meta.epochs_trained))
+    }
+    fn set_stage(&mut self, stage: TrainingStage) { self.config.0.training_stage = stage; }
+    fn forward_train(&self, tokens: Tensor<TrainBackend, 2, Int>) -> (Tensor<TrainBackend, 3>, Tensor<TrainBackend, 1>) {
+        let (logits, aux, _expert_counts) = self.forward_with_aux(tokens);
+        (logits, aux)
+    }
+    fn save_run(&self, dir: &str, tokenizer: &TokenizerKind, p: &RunProgress) -> Result<()> {
+        let meta = MoeMetadata {
+            num_experts:     self.config.num_experts,
+            top_k:           self.config.top_k,
+            aux_loss_weight: self.config.aux_loss_weight,
+            z_loss_weight:   self.config.z_loss_weight,
+            dropout_rate:    self.config.dropout_rate,
+            vocab_size:      tokenizer.vocab_size(),
+            epochs_trained:  p.epochs_trained,
+            final_loss:      p.final_loss,
+            val_loss:        p.val_loss,
+            batch_size:      p.batch_size,
+            training_stage:  p.stage,
+            embed_dim:       p.run_cfg.embed_dim,
+            hidden_units:    p.run_cfg.hidden_units,
+            n_layers:        p.run_cfg.n_layers,
+            attn_heads:      p.run_cfg.attn_heads,
+            ff_dim:          p.run_cfg.ff_dim,
+            max_seq_len:     p.run_cfg.max_seq_len,
+        };
+        self.save(dir, tokenizer, &meta)
+    }
+}
+
+impl<B: FlashAttention> CausalLm<B> for YumonDecBrain<B> {
+    fn logits(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> { self.forward(tokens) }
+    fn generate(&self, tokenizer: &TokenizerKind, prompt: &str, max_tokens: usize, device: &B::Device) -> GenerationResult {
+        self.generate_unmasked_parsed(tokenizer, prompt, max_tokens, device)
+    }
+}
+
+impl CausalLmTrain for YumonDecBrain<TrainBackend> {
+    fn init_or_resume(run_cfg: &RunConfig, tokenizer: &TokenizerKind, run_dir: &std::path::Path, device: &<TrainBackend as Backend>::Device) -> Result<(Self, usize)> {
+        let config = YumonDecBrainConfig::new(tokenizer.vocab_size(), run_cfg.stages[0].stage)
+            .with_embed_dim(run_cfg.embed_dim).with_hidden_units(run_cfg.hidden_units)
+            .with_n_layers(run_cfg.n_layers).with_attn_heads(run_cfg.attn_heads)
+            .with_ff_dim(run_cfg.ff_dim).with_max_seq_len(run_cfg.max_seq_len);
+        println!("Decoder-only: {:.1}M parameters, flash attention, BalancedCheckpointing.",
+            config.param_count() as f64 / 1e6);
+        if !run_dir.join("model.bin").exists() {
+            return Ok((config.init(device), 0));
+        }
+        let (m, checkpoint_tokenizer, saved) = Self::load(run_dir.to_str().unwrap(), device)?;
+        anyhow::ensure!(saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
+            && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
+            && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len,
+            "decoder checkpoint configuration differs from requested run");
+        ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
+        let meta: DecMetadata = serde_json::from_str(&std::fs::read_to_string(run_dir.join("metadata.json"))?)?;
+        Ok((m, meta.epochs_trained))
+    }
+    fn set_stage(&mut self, stage: TrainingStage) { self.config.0.training_stage = stage; }
+    fn forward_train(&self, tokens: Tensor<TrainBackend, 2, Int>) -> (Tensor<TrainBackend, 3>, Tensor<TrainBackend, 1>) {
+        let device = tokens.device();
+        (self.forward(tokens), Tensor::zeros([1], &device))
+    }
+    fn save_run(&self, dir: &str, tokenizer: &TokenizerKind, p: &RunProgress) -> Result<()> {
+        let meta = DecMetadata {
+            dropout_rate:   self.config.dropout_rate,
+            vocab_size:     tokenizer.vocab_size(),
+            epochs_trained: p.epochs_trained,
+            final_loss:     p.final_loss,
+            val_loss:       p.val_loss,
+            batch_size:     p.batch_size,
+            training_stage: p.stage,
+            embed_dim:      p.run_cfg.embed_dim,
+            hidden_units:   p.run_cfg.hidden_units,
+            n_layers:       p.run_cfg.n_layers,
+            attn_heads:     p.run_cfg.attn_heads,
+            ff_dim:         p.run_cfg.ff_dim,
+            max_seq_len:    p.run_cfg.max_seq_len,
+        };
+        self.save(dir, tokenizer, &meta)
+    }
+}
+
+/// Qualitative eval: every prompt through the inference model.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_eval_prompts<M: CausalLm<InnerBackend>>(
+    model:       &M,
+    tokenizer:   &TokenizerKind,
+    prompts:     &[String],
+    stage:       TrainingStage,
+    max_seq_len: usize,
+    device:      &<TrainBackend as Backend>::Device,
+) -> Vec<(String, String)> {
+    prompts.iter().map(|p| {
+        let prompt = build_inference_prompt(stage, p);
+        let result = model.generate(tokenizer, &prompt, max_seq_len, device);
+        let reply = if stage == TrainingStage::Structured { result.reply } else { result.raw_output };
+        (p.clone(), reply)
+    }).collect()
+}
+
+/// [prompt][separator][reply] causal-LM training for one run: stages, epochs,
+/// linear LR decay, held-out validation, periodic checkpoints and eval prompts.
+#[cfg(not(target_arch = "wasm32"))]
+fn train_causal_lm<M>(
+    run_cfg:       &RunConfig,
+    run_dir:       &std::path::Path,
+    tokenizer:     &TokenizerKind,
+    keyword_index: &HashMap<String, Vec<usize>>,
+    prompts:       &[String],
+    device:        &<TrainBackend as Backend>::Device,
+) -> Result<()>
+where
+    M: CausalLmTrain,
+    M::InnerModule: CausalLm<InnerBackend>,
+{
+    let run_dir_str = run_dir.to_str().unwrap();
+    let (mut model, mut epochs_already_done) = M::init_or_resume(run_cfg, tokenizer, run_dir, device)?;
+
+    'stage_loop: for (stage_idx, stage_cfg) in run_cfg.stages.iter().enumerate() {
+        model.set_stage(stage_cfg.stage);
+        println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
+
+        let mut training_samples = load_stage_data(stage_cfg.stage.clone(), tokenizer, keyword_index, run_cfg.max_seq_len)?;
+        anyhow::ensure!(training_samples.len() > 1, "Not enough training samples for stage");
+        // Deduped and seed-shuffled by the loader, so the tail is a fixed held-out set.
+        let val_count = (training_samples.len() / 100).clamp(1, MAX_VAL_SAMPLES);
+        let val_samples = training_samples.split_off(training_samples.len() - val_count);
+        println!("Training samples: {}, validation samples: {}", training_samples.len(), val_samples.len());
+
+        for (i, sample) in training_samples.iter().enumerate() {
+            if i >= 12 { break; }
+            println!("INPUT:  {:?}", tokenizer.decode(&sample.input_ids));
+            println!("TARGET: {:?}", tokenizer.decode(&sample.target_labels));
+            println!("input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
+            println!("target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
+        }
+
+        let mut optimizer = AdamWConfig::new()
+            .with_epsilon(stage_cfg.epsilon)
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
+            .with_weight_decay(stage_cfg.weight_decay)
+            .init();
+
+        let mut rng = rand::thread_rng();
+        use std::io::{stdout, IsTerminal};
+        let mut terminal = if stdout().is_terminal() {
+            let backend = CrosstermBackend::new(stdout());
+            Some(Terminal::with_options(
+                backend,
+                TerminalOptions { viewport: Viewport::Inline(46) },
+            )?)
+        } else {
+            None
+        };
+
+        anyhow::ensure!(stage_cfg.batch_size > 0, "batch size must be positive");
+        let total_batches = training_samples.len().div_ceil(stage_cfg.batch_size);
+        let mut state = TrainingState {
+            loss_history: vec![],
+            avg_loss_history: vec![],
+            current_loss: 0.0,
+            avg_loss: 0.0,
+            epoch: 0,
+            total_epochs: stage_cfg.epochs,
+            batch: 0,
+            total_batches: total_batches,
+            current_lr: stage_cfg.first_lr,
+            lr_history: vec![],
+            global_step: 0,
+            entropy: 0.0,
+            entropy_history: vec![],
+            last_reply: String::new()
+        };
+
+        let mut final_loss = 0.0f32;
+        let inference_log_path = format!("{}/{}_inference_log.txt", run_dir_str, run_cfg.name);
+        let chart_path = format!("{}/{}_stage_{}.png", run_dir_str, run_cfg.name, stage_idx + 1);
+        let mut prev_epoch_loss: Option<f32> = None;
+        let mut run_should_stop = false;
+        let mut val_loss: Option<f32>;
+        let vocab = tokenizer.vocab_size();
+
+        // Decoder-only style: [prompt][separator][reply] packed into one causal sequence
+        let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { " " };
+        let sep_tokens = tokenizer.encode(sep_text);
+        anyhow::ensure!(sep_tokens.len() + 2 <= run_cfg.max_seq_len, "Sequence too short for separator and reply");
+
+        'epoch_loop: for epoch in 0..stage_cfg.epochs {
+            state.epoch = epoch + 1;
+            let mut idx: Vec<usize> = (0..training_samples.len()).collect();
+            idx.shuffle(&mut rng);
+            let num_batches = idx.len().div_ceil(stage_cfg.batch_size);
+            let mut epoch_loss = 0.0f32;
+            let mut processed_batches = 0usize;
+
+            for batch_num in 0..num_batches {
+                let current_lr = {
+                    let total_steps = stage_cfg.epochs * num_batches;
+                    let step = epoch * num_batches + batch_num;
+                    let t = step as f64 / total_steps as f64;
+                    stage_cfg.first_lr * (1.0 - t) + stage_cfg.last_lr * t
+                };
+
+                let batch_start = batch_num * stage_cfg.batch_size;
+                let batch_end = (batch_start + stage_cfg.batch_size).min(training_samples.len());
+                let batch_idx = &idx[batch_start..batch_end];
+                let current_batch_size = batch_idx.len();
+                if current_batch_size == 0 { continue; }
+
+                let (all_seq_ids, all_lang_targets, supervised) = build_moe_batch(&training_samples, batch_idx, &sep_tokens, run_cfg.max_seq_len);
+
+                if supervised == 0 { continue; }
+                let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), device);
+                let tokens_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_seq_ids, [current_batch_size, run_cfg.max_seq_len]), device);
+
+                let (token_logits, aux_loss) = model.forward_train(tokens_t.clone());
+
+                // Entropy, on detached logits so none of its [batch, seq, vocab]
+                // intermediates join the autodiff graph.
+                let probs = burn::tensor::activation::softmax(token_logits.clone().detach(), 2);
+                let log_probs = (probs.clone() + 1e-10).log();
+                let token_entropy = (probs * log_probs).sum_dim(2).neg().squeeze_dim::<2>(2);
+                let non_pad_mask = tokens_t.clone().equal_elem(PAD_TOKEN as u32).bool_not().float();
+                let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).sum().div(non_pad_mask.sum()).into_scalar();
+
+                // Loss
+                let logits_2d = token_logits.reshape([current_batch_size * run_cfg.max_seq_len, vocab]);
+                let lang_loss = masked_token_ce(logits_2d, lang_target_t, supervised, stage_cfg.smoothing);
+
+                let total_loss = lang_loss.clone() + aux_loss;
+                let grads = GradientsParams::from_grads(total_loss.backward(), &model);
+                model = optimizer.step(current_lr, model, grads);
+
+                let loss_val: f32 = lang_loss.inner().to_data().to_vec::<f32>().unwrap()[0];
+                epoch_loss += loss_val;
+                processed_batches += 1;
+
+                state.entropy = entropy_val;
+                state.current_loss = loss_val;
+                state.avg_loss = epoch_loss / processed_batches as f32;
+                state.batch = batch_num + 1;
+                state.current_lr = current_lr;
+                state.global_step += 1;
+                state.loss_history.push((state.global_step as f64, loss_val as f64));
+                state.avg_loss_history.push((state.global_step as f64, state.avg_loss as f64));
+                state.entropy_history.push((state.global_step as f64, entropy_val as f64));
+                state.lr_history.push((state.global_step as f64, current_lr));
+
+                if let Some(term) = terminal.as_mut() {
+                    term.draw(|frame| render(frame, &state))?;
+                } else if state.global_step % 50 == 0 || batch_num + 1 == num_batches {
+                    println!(
+                        "epoch {}/{} batch {}/{} loss {:.4} avg {:.4} lr {:.2e} entropy {:.4}",
+                        state.epoch, state.total_epochs, state.batch, state.total_batches,
+                        state.current_loss, state.avg_loss, state.current_lr, state.entropy,
+                    );
+                }
+
+                // Periodic save and inference every 500 batches
+                if (batch_num + 1) % 500 == 0 {
+                    let inference_model = model.valid();
+                    let val = causal_validation_loss(&inference_model, &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, device);
+                    val_loss = val.map(|(loss, _)| loss);
+                    model.save_run(run_dir_str, tokenizer, &RunProgress {
+                        run_cfg,
+                        epochs_trained: epochs_already_done + epoch,
+                        final_loss:     epoch_loss / processed_batches as f32,
+                        val_loss,
+                        batch_size:     stage_cfg.batch_size,
+                        stage:          stage_cfg.stage,
+                    })?;
+
+                    let entries = run_eval_prompts(&inference_model, tokenizer, prompts, stage_cfg.stage, run_cfg.max_seq_len, device);
+                    state.last_reply = entries[0].1.clone();
+                    if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
+                        eprintln!("⚠️  Failed to append inference log: {}", e);
+                    }
+                    if let Some((loss, tokens)) = val {
+                        let line = format!("val_loss {loss:.4} over {tokens} held-out tokens");
+                        println!("{line}");
+                        if let Err(e) = append_log_line(&inference_log_path, &line) {
+                            eprintln!("⚠️  Failed to append inference log: {}", e);
+                        }
+                    }
+                    if let Err(e) = state.save_chart_image(&chart_path) {
+                        eprintln!("⚠️  Failed to save chart image: {}", e);
+                    }
+                }
+
+                // Loss Threshold Exit
+                if state.avg_loss < stage_cfg.loss_threshold {
+                    println!("\n🎯 Loss Threshold Reached: {:.4} < {:.4}. Ending Stage.", state.avg_loss, stage_cfg.loss_threshold);
+                    break;
+                }
+            }
+            anyhow::ensure!(processed_batches > 0, "epoch contains no supervised tokens");
+            final_loss = epoch_loss / processed_batches as f32;
+            let inference_model = model.valid();
+            let val = causal_validation_loss(&inference_model, &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, device);
+            val_loss = val.map(|(loss, _)| loss);
+
+            // Early stop on held-out loss when available.
+            let stop_loss = val_loss.unwrap_or(final_loss);
+            if let Some(prev) = prev_epoch_loss {
+                if prev - stop_loss < MIN_EPOCH_LOSS_DROP {
+                    println!(
+                        "\n⏹️  Epoch loss drop {:.4} < {:.4} (prev {:.4} -> {:.4}). Finishing run early.",
+                        prev - stop_loss, MIN_EPOCH_LOSS_DROP, prev, stop_loss,
+                    );
+                    run_should_stop = true;
+                }
+            }
+            prev_epoch_loss = Some(stop_loss);
+
+            model.save_run(run_dir_str, tokenizer, &RunProgress {
+                run_cfg,
+                epochs_trained: epochs_already_done + epoch + 1,
+                final_loss,
+                val_loss,
+                batch_size: stage_cfg.batch_size,
+                stage:      stage_cfg.stage,
+            })?;
+
+            let entries = run_eval_prompts(&inference_model, tokenizer, prompts, stage_cfg.stage, run_cfg.max_seq_len, device);
+            state.last_reply = entries[0].1.clone();
+            if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
+                eprintln!("⚠️  Failed to append inference log: {}", e);
+            }
+            if let Some((loss, tokens)) = val {
+                let line = format!("val_loss {loss:.4} over {tokens} held-out tokens (epoch end)");
+                println!("{line}");
+                if let Err(e) = append_log_line(&inference_log_path, &line) {
+                    eprintln!("⚠️  Failed to append inference log: {}", e);
+                }
+            }
+            if let Err(e) = state.save_chart_image(&chart_path) {
+                eprintln!("⚠️  Failed to save chart image: {}", e);
+            }
+
+            if run_should_stop || final_loss < stage_cfg.loss_threshold { break 'epoch_loop; }
+        }
+        epochs_already_done += state.epoch;
+        if let Some(term) = terminal.as_mut() {
+            term.clear()?;
+        }
+
+        if let Err(e) = state.save_chart_image(&chart_path) {
+            eprintln!("⚠️  Failed to save chart image: {}", e);
+        } else {
+            println!("📊 Chart saved to {}", chart_path);
+        }
+
+        println!("✅ Stage complete. Final loss: {:.4}", final_loss);
+
+        if run_should_stop {
+            println!("⏹️  Run {} finished early, skipping remaining stages.", run_cfg.name);
+            break 'stage_loop;
+        }
+    }
+    Ok(())
 }
 
 /// Programmatically builds the full grid of RunConfigs to try, rather than a
@@ -405,8 +851,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 32,
         // 64,
         // 128,
-        256, // smaller, maybe good seq length of 256
-        // 512 // 220M ideal
+        // 256, // smaller, maybe good seq length of 256
+        512 // 220M ideal
         // 1024, // ~1.32B total / ~411M active at 24 layers, 4 experts top-1
         // 1024
     ];
@@ -416,16 +862,16 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 4,
         // 8,
         // 8, // stretch: slower on iGPU - each MoE layer forces a host readback
-        16 // discovered minimum (runpod)
-        // 24
+        // 16 // discovered minimum (runpod)
+        24
         // 32
     ];
     let head_counts:  [usize; 1] = [
         // 1,
         // 2,
         // 4,
-        8,
-        // 16,
+        // 8,
+        16,
         // 32
         // 64
     ];
@@ -436,7 +882,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
     let batch_sizes:     [usize; 1] = [
         // 2,
         // 8
-        if matches!(architecture, Architecture::Moe { .. }) { batch_size_option } else { 16 }
+        if matches!(architecture, Architecture::Moe { .. } | Architecture::DecoderOnly) { batch_size_option } else { 16 }
         // 32
         // 64
     ];
@@ -671,11 +1117,12 @@ pub fn run_with_architecture(
     // MIN_EPOCH_LOSS_DROP cuts non-converging configs short, so covering the whole
     // space is affordable.
     let prompts = eval_prompts();
-    if matches!(architecture, Architecture::Moe { .. }) {
+    let causal_lm = matches!(architecture, Architecture::Moe { .. } | Architecture::DecoderOnly);
+    if causal_lm {
         anyhow::ensure!(batch_size > 0 && epochs > 0, "batch size and epochs must be positive");
     }
     let mut runs = generate_run_configs(batch_size, architecture);
-    if matches!(architecture, Architecture::Moe { .. }) {
+    if causal_lm {
         // num_experts/top_k are per-run (see generate_run_configs' own sweep),
         // so only epochs/batch_size - the training-duration knobs, not capacity
         // knobs - get stamped on uniformly here.
@@ -1359,657 +1806,14 @@ pub fn run_with_architecture(
 
         } // Architecture::XLstm
 
-        Architecture::Moe { num_experts, top_k } => {
-
-        let config = YumonMoeBrainConfig::new(tokenizer.vocab_size(), run_cfg.stages[0].stage)
-            .with_embed_dim(run_cfg.embed_dim).with_hidden_units(run_cfg.hidden_units)
-            .with_n_layers(run_cfg.n_layers).with_attn_heads(run_cfg.attn_heads)
-            .with_ff_dim(run_cfg.ff_dim).with_max_seq_len(run_cfg.max_seq_len)
-            .with_num_experts(num_experts).with_top_k(top_k);
-        println!("MoE: {} experts, top-{}; FFN parameters/layer: {} total, {} active/token (excluding router).",
-            num_experts, top_k, 3 * run_cfg.embed_dim * run_cfg.ff_dim * num_experts,
-            3 * run_cfg.embed_dim * run_cfg.ff_dim * top_k);
-        let (mut model, mut epochs_already_done) = if run_dir.join("model.bin").exists() {
-            let (m, checkpoint_tokenizer, saved) = YumonMoeBrain::<TrainBackend>::load(run_dir_str, &device)?;
-            anyhow::ensure!(saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
-                && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
-                && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
-                && saved.num_experts == num_experts && saved.top_k == top_k,
-                "MoE checkpoint configuration differs from requested run");
-            let current_json = match &tokenizer { TokenizerKind::Bpe(t) => t.inner.to_string(false).map_err(|e| anyhow::anyhow!("{e}"))?, _ => unreachable!() };
-            let saved_json = match &checkpoint_tokenizer { TokenizerKind::Bpe(t) => t.inner.to_string(false).map_err(|e| anyhow::anyhow!("{e}"))?, _ => unreachable!() };
-            anyhow::ensure!(serde_json::from_str::<serde_json::Value>(&current_json)? == serde_json::from_str::<serde_json::Value>(&saved_json)?,
-                "MoE checkpoint tokenizer differs from training tokenizer");
-            let meta: MoeMetadata = serde_json::from_str(&std::fs::read_to_string(run_dir.join("metadata.json"))?)?;
-            (m, meta.epochs_trained)
-        } else { (config.init(&device), 0) };
-
-        'stage_loop_moe: for (stage_idx, stage_cfg) in run_cfg.stages.iter().enumerate() {
-            model.config.0.training_stage = stage_cfg.stage;
-            println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
-
-            let mut training_samples = load_stage_data(stage_cfg.stage.clone(), &tokenizer, &keyword_index, run_cfg.max_seq_len)?;
-            anyhow::ensure!(training_samples.len() > 1, "Not enough training samples for MoE stage");
-            // Deduped and seed-shuffled by the loader, so the tail is a fixed held-out set.
-            let val_count = (training_samples.len() / 100).clamp(1, MAX_VAL_SAMPLES);
-            let val_samples = training_samples.split_off(training_samples.len() - val_count);
-            println!("Training samples: {}, validation samples: {}", training_samples.len(), val_samples.len());
-
-            for (i, sample) in training_samples.iter().enumerate() {
-                if i >= 12 { break; }
-                println!("INPUT:  {:?}", tokenizer.decode(&sample.input_ids));
-                println!("TARGET: {:?}", tokenizer.decode(
-                    &sample.target_labels.iter()
-                        .map(|&t| if t == PAD_TOKEN { PAD_TOKEN } else { t })
-                        .collect::<Vec<_>>()
-                ));
-                println!("input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
-                println!("target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
-            }
-
-            let mut optimizer = AdamWConfig::new()
-                .with_epsilon(stage_cfg.epsilon)
-                .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
-                .with_weight_decay(stage_cfg.weight_decay)
-                .init();
-
-            let mut rng = rand::thread_rng();
-            use std::io::{stdout, IsTerminal};
-            let mut terminal = if stdout().is_terminal() {
-                let backend = CrosstermBackend::new(stdout());
-                Some(Terminal::with_options(
-                    backend,
-                    TerminalOptions { viewport: Viewport::Inline(46) },
-                )?)
-            } else {
-                None
-            };
-
-            anyhow::ensure!(stage_cfg.batch_size > 0, "batch size must be positive");
-            let total_batches = training_samples.len().div_ceil(stage_cfg.batch_size);
-            let mut state = TrainingState {
-                loss_history: vec![],
-                avg_loss_history: vec![],
-                current_loss: 0.0,
-                avg_loss: 0.0,
-                epoch: 0,
-                total_epochs: stage_cfg.epochs,
-                batch: 0,
-                total_batches: total_batches,
-                current_lr: stage_cfg.first_lr,
-                lr_history: vec![],
-                global_step: 0,
-                entropy: 0.0,
-                entropy_history: vec![],
-                last_reply: String::new()
-            };
-
-            let mut final_loss = 0.0f32;
-            let inference_log_path = format!("{}/{}_inference_log.txt", run_dir_str, run_cfg.name);
-            let chart_path = format!("{}/{}_stage_{}.png", run_dir_str, run_cfg.name, stage_idx + 1);
-            let mut prev_epoch_loss: Option<f32> = None;
-            let mut run_should_stop = false;
-            let mut val_loss: Option<f32> = None;
-            let vocab = tokenizer.vocab_size();
-
-            'epoch_loop_moe: for epoch in 0..stage_cfg.epochs {
-                state.epoch = epoch + 1;
-                let mut idx: Vec<usize> = (0..training_samples.len()).collect();
-                idx.shuffle(&mut rng);
-                let num_batches = idx.len().div_ceil(stage_cfg.batch_size);
-                let mut epoch_loss = 0.0f32;
-                let mut processed_batches = 0usize;
-
-                // Decoder-only style: [prompt][separator][reply] packed into one causal sequence
-                let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { " " };
-                let sep_tokens = tokenizer.encode(sep_text);
-                let sep_len = sep_tokens.len();
-                anyhow::ensure!(sep_len + 2 <= run_cfg.max_seq_len, "Sequence too short for separator and reply");
-
-                for batch_num in 0..num_batches {
-                    let current_lr = {
-                        let total_steps = stage_cfg.epochs * num_batches;
-                        let step = epoch * num_batches + batch_num;
-                        let t = step as f64 / total_steps as f64;
-                        (stage_cfg.first_lr * (1.0 - t) + stage_cfg.last_lr * t)
-                    };
-
-                    let batch_start = batch_num * stage_cfg.batch_size;
-                    let batch_end = (batch_start + stage_cfg.batch_size).min(training_samples.len());
-                    let batch_idx = &idx[batch_start..batch_end];
-                    let current_batch_size = batch_idx.len();
-                    if current_batch_size == 0 { continue; }
-
-                    let (all_seq_ids, all_lang_targets, supervised) = build_moe_batch(&training_samples, batch_idx, &sep_tokens, run_cfg.max_seq_len);
-
-                    if supervised == 0 { continue; }
-                    let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), &device);
-                    let tokens_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_seq_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
-
-                    let (token_logits, aux_loss, expert_counts) = model.forward_with_aux(tokens_t.clone());
-
-                    // Entropy
-                    let probs = burn::tensor::activation::softmax(token_logits.clone(), 2);
-                    let log_probs = (probs.clone() + 1e-10).log();
-                    let token_entropy = (probs * log_probs).sum_dim(2).neg().squeeze_dim::<2>(2);
-                    let non_pad_mask = tokens_t.clone().equal_elem(PAD_TOKEN as u32).bool_not().float();
-                    let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).sum().div(non_pad_mask.sum()).into_scalar();
-
-                    // Loss
-                    let logits_2d = token_logits.reshape([current_batch_size * run_cfg.max_seq_len, vocab]);
-                    let lang_loss = masked_token_ce(logits_2d, lang_target_t, supervised, stage_cfg.smoothing);
-
-                    let total_loss = lang_loss.clone() + aux_loss.clone();
-                    let grads = GradientsParams::from_grads(total_loss.backward(), &model);
-                    model = optimizer.step(current_lr, model, grads);
-
-                    let loss_val: f32 = lang_loss.clone().inner().to_data().to_vec::<f32>().unwrap()[0];
-                    epoch_loss += loss_val;
-                    processed_batches += 1;
-
-                    state.entropy = entropy_val;
-                    state.current_loss = loss_val;
-                    state.avg_loss = epoch_loss / processed_batches as f32;
-                    state.batch = batch_num + 1;
-                    state.current_lr = current_lr;
-                    state.global_step += 1;
-                    state.loss_history.push((state.global_step as f64, loss_val as f64));
-                    state.avg_loss_history.push((state.global_step as f64, state.avg_loss as f64));
-                    state.entropy_history.push((state.global_step as f64, entropy_val as f64));
-                    state.lr_history.push((state.global_step as f64, current_lr));
-
-                    if let Some(term) = terminal.as_mut() {
-                        term.draw(|frame| render(frame, &state))?;
-                    } else if state.global_step % 50 == 0 || batch_num + 1 == num_batches {
-                        println!(
-                            "epoch {}/{} batch {}/{} loss {:.4} avg {:.4} lr {:.2e} entropy {:.4}",
-                            state.epoch, state.total_epochs, state.batch, state.total_batches,
-                            state.current_loss, state.avg_loss, state.current_lr, state.entropy,
-                        );
-                    }
-
-                    // if batch_num % 100 == 0 {
-                    //     println!("MoE auxiliary loss {:.5}; dispatched rows per layer/expert: {:?}", aux_loss.into_scalar(), expert_counts);
-                    // }
-
-                    // Periodic save and inference every 500 batches
-                    if (batch_num + 1) % 500 == 0 {
-                        let current_final_loss = epoch_loss / processed_batches as f32;
-                        let val = moe_validation_loss(&model.valid(), &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, &device);
-                        val_loss = val.map(|(loss, _)| loss);
-                        let meta = MoeMetadata {
-                            num_experts, top_k,
-                            aux_loss_weight: model.config.aux_loss_weight,
-                            z_loss_weight: model.config.z_loss_weight,
-                            dropout_rate: model.config.dropout_rate,
-                            vocab_size:     tokenizer.vocab_size(),
-                            epochs_trained: epochs_already_done + epoch,
-                            final_loss:     current_final_loss,
-                            val_loss,
-                            batch_size:     stage_cfg.batch_size,
-                            training_stage: stage_cfg.stage.clone(),
-                            embed_dim:      run_cfg.embed_dim,
-                            hidden_units:   run_cfg.hidden_units,
-                            n_layers:       run_cfg.n_layers,
-                            attn_heads:     run_cfg.attn_heads,
-                            ff_dim:         run_cfg.ff_dim,
-                            max_seq_len:    run_cfg.max_seq_len,
-                        };
-                        model.save(run_dir_str, &tokenizer, &meta)?;
-
-                        let inference_model = model.valid();
-                        let mut entries = Vec::with_capacity(prompts.len());
-                        for p in &prompts {
-                            let prompt = build_inference_prompt(stage_cfg.stage, p);
-                            let result = inference_model.generate_unmasked_parsed(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
-                            let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
-                            entries.push((p.clone(), reply));
-                        }
-                        state.last_reply = entries[0].1.clone();
-                        if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
-                            eprintln!("⚠️  Failed to append inference log: {}", e);
-                        }
-                        if let Some((loss, tokens)) = val {
-                            let line = format!("val_loss {loss:.4} over {tokens} held-out tokens");
-                            println!("{line}");
-                            if let Err(e) = append_log_line(&inference_log_path, &line) {
-                                eprintln!("⚠️  Failed to append inference log: {}", e);
-                            }
-                        }
-                        if let Err(e) = state.save_chart_image(&chart_path) {
-                            eprintln!("⚠️  Failed to save chart image: {}", e);
-                        }
-                    }
-
-                    // Loss Threshold Exit
-                    if state.avg_loss < stage_cfg.loss_threshold {
-                        println!("\n🎯 Loss Threshold Reached: {:.4} < {:.4}. Ending Stage.", state.avg_loss, stage_cfg.loss_threshold);
-                        final_loss = state.avg_loss;
-                        break;
-                    }
-                }
-                anyhow::ensure!(processed_batches > 0, "MoE epoch contains no supervised tokens");
-                final_loss = epoch_loss / processed_batches as f32;
-                let val = moe_validation_loss(&model.valid(), &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, &device);
-                val_loss = val.map(|(loss, _)| loss);
-
-                // Early stop on held-out loss when available.
-                let stop_loss = val_loss.unwrap_or(final_loss);
-                if let Some(prev) = prev_epoch_loss {
-                    if prev - stop_loss < MIN_EPOCH_LOSS_DROP {
-                        println!(
-                            "\n⏹️  Epoch loss drop {:.4} < {:.4} (prev {:.4} -> {:.4}). Finishing run early.",
-                            prev - stop_loss, MIN_EPOCH_LOSS_DROP, prev, stop_loss,
-                        );
-                        run_should_stop = true;
-                    }
-                }
-                prev_epoch_loss = Some(stop_loss);
-
-                let meta = MoeMetadata {
-                            num_experts, top_k,
-                            aux_loss_weight: model.config.aux_loss_weight,
-                            z_loss_weight: model.config.z_loss_weight,
-                            dropout_rate: model.config.dropout_rate,
-                    vocab_size:     tokenizer.vocab_size(),
-                    epochs_trained: epochs_already_done + epoch + 1,
-                    final_loss,
-                    val_loss,
-                    batch_size: stage_cfg.batch_size,
-                    training_stage: stage_cfg.stage.clone(),
-                    embed_dim: run_cfg.embed_dim,
-                    hidden_units: run_cfg.hidden_units,
-                    n_layers: run_cfg.n_layers,
-                    attn_heads: run_cfg.attn_heads,
-                    ff_dim: run_cfg.ff_dim,
-                    max_seq_len: run_cfg.max_seq_len,
-                };
-                model.save(run_dir_str, &tokenizer, &meta)?;
-
-                {
-                    let inference_model = model.valid();
-                    let mut entries = Vec::with_capacity(prompts.len());
-                    for p in &prompts {
-                        let prompt = build_inference_prompt(stage_cfg.stage, p);
-                        let result = inference_model.generate_unmasked_parsed(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
-                        let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
-                        entries.push((p.clone(), reply));
-                    }
-                    state.last_reply = entries[0].1.clone();
-                    if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
-                        eprintln!("⚠️  Failed to append inference log: {}", e);
-                    }
-                    if let Some((loss, tokens)) = val {
-                        let line = format!("val_loss {loss:.4} over {tokens} held-out tokens (epoch end)");
-                        println!("{line}");
-                        if let Err(e) = append_log_line(&inference_log_path, &line) {
-                            eprintln!("⚠️  Failed to append inference log: {}", e);
-                        }
-                    }
-                    if let Err(e) = state.save_chart_image(&chart_path) {
-                        eprintln!("⚠️  Failed to save chart image: {}", e);
-                    }
-                }
-
-                if run_should_stop || final_loss < stage_cfg.loss_threshold { break 'epoch_loop_moe; }
-            }
-            epochs_already_done += state.epoch;
-            if let Some(term) = terminal.as_mut() {
-                term.clear()?;
-            }
-
-            if let Err(e) = state.save_chart_image(&chart_path) {
-                eprintln!("⚠️  Failed to save chart image: {}", e);
-            } else {
-                println!("📊 Chart saved to {}", chart_path);
-            }
-
-            println!("✅ Stage complete. Final loss: {:.4}", final_loss);
-
-            if run_should_stop {
-                println!("⏹️  Run {} finished early, skipping remaining stages.", run_cfg.name);
-                break 'stage_loop_moe;
-            }
+        Architecture::Moe { .. } => {
+            train_causal_lm::<YumonMoeBrain<TrainBackend>>(&run_cfg, &run_dir, &tokenizer, &keyword_index, &prompts, &device)?;
         }
 
-        } // Architecture::Moe
+        Architecture::DecoderOnly => {
+            train_causal_lm::<YumonDecBrain<TrainBackend>>(&run_cfg, &run_dir, &tokenizer, &keyword_index, &prompts, &device)?;
+        }
 
-        // Architecture::DecoderOnly => {
-
-        // let (mut model, mut epochs_already_done) = if std::path::Path::new(run_dir_str).join("model.bin").exists() {
-        //     match YumonDecBrain::<TrainBackend>::load(run_dir_str, &device) {
-        //         Ok((m, _tok, _config)) => {
-        //             let meta_json = std::fs::read_to_string(std::path::Path::new(run_dir_str).join("metadata.json"))?;
-        //             let meta: BrainDecMetadata = serde_json::from_str(&meta_json)?;
-        //             println!("▶️  Resuming run {} from checkpoint ({} epochs done, loss={:.4})",
-        //                      run_cfg.name, meta.epochs_trained, meta.final_loss);
-        //             (m, meta.epochs_trained)
-        //         }
-        //         Err(_) => {
-        //             let config = YumonDecBrainConfig {
-        //                 vocab_size: tokenizer.vocab_size(),
-        //                 embed_dim: run_cfg.embed_dim,
-        //                 hidden_units: run_cfg.hidden_units,
-        //                 n_layers: run_cfg.n_layers,
-        //                 attn_heads: run_cfg.attn_heads,
-        //                 ff_dim: run_cfg.ff_dim,
-        //                 max_seq_len: run_cfg.max_seq_len,
-        //                 training_stage: run_cfg.stages.get(0).expect("Couldn't get stage").stage,
-        //                 dropout_rate: 0.05,
-        //             };
-        //             (config.init(&device), 0)
-        //         }
-        //     }
-        // } else {
-        //     println!("🆕 Starting fresh run: {}", run_cfg.name);
-        //     let config = YumonDecBrainConfig {
-        //         vocab_size: tokenizer.vocab_size(),
-        //         embed_dim: run_cfg.embed_dim,
-        //         hidden_units: run_cfg.hidden_units,
-        //         n_layers: run_cfg.n_layers,
-        //         attn_heads: run_cfg.attn_heads,
-        //         ff_dim: run_cfg.ff_dim,
-        //         max_seq_len: run_cfg.max_seq_len,
-        //         training_stage: run_cfg.stages.get(0).expect("Couldn't get stage").stage,
-        //         dropout_rate: 0.05,
-        //     };
-        //     (config.init(&device), 0)
-        // };
-
-        // 'stage_loop_dec: for (stage_idx, stage_cfg) in run_cfg.stages.iter().enumerate() {
-        //     println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
-
-        //     let training_samples = load_stage_data(stage_cfg.stage.clone(), &tokenizer, &keyword_index, run_cfg.max_seq_len)?;
-        //     println!("Training samples: {}", training_samples.len());
-
-        //     // debug print — first 12 samples
-        //     for (i, sample) in training_samples.iter().enumerate() {
-        //         if i >= 12 { break; }
-        //         println!("INPUT:  {:?}", tokenizer.decode(&sample.input_ids));
-        //         println!("TARGET: {:?}", tokenizer.decode(
-        //             &sample.target_labels.iter()
-        //                 .map(|&t| if t == PAD_TOKEN { PAD_TOKEN } else { t })
-        //                 .collect::<Vec<_>>()
-        //         ));
-        //         println!("input_len:     {}", sample.input_ids.iter().filter(|&&t| t != PAD_TOKEN).count());
-        //         println!("target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
-        //     }
-
-        //     let mut optimizer = AdamWConfig::new()
-        //         .with_epsilon(stage_cfg.epsilon)
-        //         .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
-        //         .with_weight_decay(stage_cfg.weight_decay)
-        //         .init();
-
-        //     let ce_loss = CrossEntropyLossConfig::new()
-        //         .with_pad_tokens(Some(vec![PAD_TOKEN as usize]))
-        //         .with_smoothing(Some(stage_cfg.smoothing))
-        //         .init(&device);
-
-        //     let mut rng = rand::thread_rng();
-        //     use std::io::{stdout, IsTerminal};
-        //     let mut terminal = if stdout().is_terminal() {
-        //         let backend = CrosstermBackend::new(stdout());
-        //         Some(Terminal::with_options(
-        //             backend,
-        //             TerminalOptions { viewport: Viewport::Inline(46) },
-        //         )?)
-        //     } else {
-        //         None
-        //     };
-
-        //     let total_batches = training_samples.len() / stage_cfg.batch_size;
-        //     let mut state = TrainingState {
-        //         loss_history: vec![],
-        //         avg_loss_history: vec![],
-        //         current_loss: 0.0,
-        //         avg_loss: 0.0,
-        //         epoch: 0,
-        //         total_epochs: stage_cfg.epochs,
-        //         batch: 0,
-        //         total_batches: total_batches,
-        //         current_lr: stage_cfg.first_lr,
-        //         lr_history: vec![],
-        //         global_step: 0,
-        //         entropy: 0.0,
-        //         entropy_history: vec![],
-        //         last_reply: String::new()
-        //     };
-
-        //     let mut final_loss = 0.0f32;
-        //     let inference_log_path = format!("{}/{}_inference_log.txt", run_dir_str, run_cfg.name);
-        //     let chart_path = format!("{}/{}_stage_{}.png", run_dir_str, run_cfg.name, stage_idx + 1);
-        //     let mut prev_epoch_loss: Option<f32> = None;
-        //     let mut run_should_stop = false;
-
-        //     'epoch_loop_dec: for epoch in 0..stage_cfg.epochs {
-        //         state.epoch = epoch + 1;
-        //         let mut idx: Vec<usize> = (0..training_samples.len()).collect();
-        //         idx.shuffle(&mut rng);
-        //         let num_batches = idx.len().max(1) / stage_cfg.batch_size;
-        //         let mut epoch_loss = 0.0f32;
-
-        //         // --- Decoder-only style: [prompt][separator][reply] packed into one causal sequence
-        //         let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { " " };
-        //         let sep_tokens = tokenizer.encode(sep_text);
-        //         let sep_len = sep_tokens.len();
-
-        //         for batch_num in 0..num_batches {
-        //             let current_lr = {
-        //                 let total_steps = stage_cfg.epochs * num_batches;
-        //                 let step = epoch * num_batches + batch_num;
-        //                 let t = step as f64 / total_steps as f64;
-        //                 (stage_cfg.first_lr * (1.0 - t) + stage_cfg.last_lr * t)
-        //             };
-
-        //             let batch_start = batch_num * stage_cfg.batch_size;
-        //             let batch_end = (batch_start + stage_cfg.batch_size).min(training_samples.len());
-        //             let batch_idx = &idx[batch_start..batch_end];
-        //             let current_batch_size = batch_idx.len();
-        //             if current_batch_size == 0 { continue; }
-
-        //             let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
-        //             let mut all_seq_ids: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
-
-        //             for &i in batch_idx {
-        //                 let sample = &training_samples[i];
-        //                 let input_ids = &sample.input_ids;
-        //                 let target_labels = &sample.target_labels;
-
-        //                 // Find actual length of input (up to PAD)
-        //                 let input_len = input_ids.iter().position(|&t| t == PAD_TOKEN).unwrap_or(run_cfg.max_seq_len);
-        //                 let target_len = target_labels.iter().position(|&t| t == PAD_TOKEN).unwrap_or(run_cfg.max_seq_len);
-
-        //                 // Construct single sequence: [Input] [Separator] [Target]
-        //                 let mut full_seq = Vec::with_capacity(run_cfg.max_seq_len);
-        //                 full_seq.extend(&input_ids[..input_len]);
-        //                 full_seq.extend(sep_tokens.iter().map(|&t| t as usize));
-
-        //                 let remaining_space = run_cfg.max_seq_len.saturating_sub(full_seq.len());
-        //                 let actual_target_len = target_len.min(remaining_space);
-        //                 full_seq.extend(&target_labels[..actual_target_len]);
-        //                 full_seq.resize(run_cfg.max_seq_len, PAD_TOKEN);
-
-        //                 // Targets for loss: shifted left by 1. We only want loss on the
-        //                 // separator + target tokens, not the prompt tokens.
-        //                 let mut loss_targets = vec![PAD_TOKEN as i32; run_cfg.max_seq_len];
-
-        //                 let start_predict_idx = input_len.saturating_sub(1);
-        //                 let end_predict_idx = (input_len + sep_len + actual_target_len).saturating_sub(1).min(run_cfg.max_seq_len - 1);
-
-        //                 for idx in start_predict_idx..end_predict_idx {
-        //                     loss_targets[idx] = full_seq[idx + 1] as i32;
-        //                 }
-
-        //                 all_seq_ids.extend(full_seq.iter().map(|&t| t as i32));
-        //                 all_lang_targets.extend(loss_targets);
-        //             }
-
-        //             let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), &device);
-        //             let tokens_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_seq_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
-
-        //             let token_logits = model.forward::<TrainRuntime>(tokens_t.clone());
-
-        //             // Entropy
-        //             let probs = burn::tensor::activation::softmax(token_logits.clone(), 2);
-        //             let log_probs = (probs.clone() + 1e-10).log();
-        //             let token_entropy = (probs * log_probs).sum_dim(2).neg().squeeze::<2>();
-        //             let non_pad_mask = tokens_t.clone().equal_elem(PAD_TOKEN as u32).bool_not().float();
-        //             let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).sum().div(non_pad_mask.sum()).into_scalar();
-
-        //             // Loss
-        //             let vocab = tokenizer.vocab_size();
-        //             let logits_2d = token_logits.reshape([current_batch_size * run_cfg.max_seq_len, vocab]);
-        //             let lang_loss = ce_loss.forward(logits_2d, lang_target_t);
-
-        //             let grads = GradientsParams::from_grads(lang_loss.backward(), &model);
-        //             model = optimizer.step(current_lr, model, grads);
-
-        //             let loss_val: f32 = lang_loss.clone().inner().to_data().to_vec::<f32>().unwrap()[0];
-        //             epoch_loss += loss_val;
-
-        //             state.entropy = entropy_val;
-        //             state.current_loss = loss_val;
-        //             state.avg_loss = epoch_loss / (batch_num + 1) as f32;
-        //             state.batch = batch_num + 1;
-        //             state.current_lr = current_lr;
-        //             state.global_step += 1;
-        //             state.loss_history.push((state.global_step as f64, loss_val as f64));
-        //             state.avg_loss_history.push((state.global_step as f64, state.avg_loss as f64));
-        //             state.entropy_history.push((state.global_step as f64, entropy_val as f64));
-        //             state.lr_history.push((state.global_step as f64, current_lr));
-
-        //             if let Some(term) = terminal.as_mut() {
-        //                 term.draw(|frame| render(frame, &state))?;
-        //             } else if state.global_step % 50 == 0 || batch_num + 1 == num_batches {
-        //                 println!(
-        //                     "epoch {}/{} batch {}/{} loss {:.4} avg {:.4} lr {:.2e} entropy {:.4}",
-        //                     state.epoch, state.total_epochs, state.batch, state.total_batches,
-        //                     state.current_loss, state.avg_loss, state.current_lr, state.entropy,
-        //                 );
-        //             }
-
-        //             // Periodic save and inference every 500 batches
-        //             if (batch_num + 1) % 500 == 0 {
-        //                 let current_final_loss = epoch_loss / (batch_num + 1) as f32;
-        //                 let meta = BrainDecMetadata {
-        //                     vocab_size:     tokenizer.vocab_size(),
-        //                     epochs_trained: epochs_already_done + epoch, // Partial epoch progress
-        //                     final_loss:     current_final_loss,
-        //                     batch_size:     stage_cfg.batch_size,
-        //                     training_stage: stage_cfg.stage.clone(),
-        //                     embed_dim:      run_cfg.embed_dim,
-        //                     hidden_units:   run_cfg.hidden_units,
-        //                     n_layers:       run_cfg.n_layers,
-        //                     attn_heads:     run_cfg.attn_heads,
-        //                     ff_dim:         run_cfg.ff_dim,
-        //                     max_seq_len:    run_cfg.max_seq_len,
-        //                 };
-        //                 model.save(run_dir_str, &tokenizer, &meta)?;
-
-        //                 // Periodic inference — 5 prompts, logged (appended) and the
-        //                 // loss chart re-saved (overwritten) right away.
-        //                 let inference_model = model.valid();
-        //                 let mut entries = Vec::with_capacity(prompts.len());
-        //                 for p in &prompts {
-        //                     let prompt = build_inference_prompt(stage_cfg.stage, p);
-        //                     let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
-        //                     let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
-        //                     entries.push((p.clone(), reply));
-        //                 }
-        //                 state.last_reply = entries[0].1.clone();
-        //                 if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
-        //                     eprintln!("⚠️  Failed to append inference log: {}", e);
-        //                 }
-        //                 if let Err(e) = state.save_chart_image(&chart_path) {
-        //                     eprintln!("⚠️  Failed to save chart image: {}", e);
-        //                 }
-        //             }
-
-        //             // Loss Threshold Exit
-        //             if state.avg_loss < stage_cfg.loss_threshold {
-        //                 println!("\n🎯 Loss Threshold Reached: {:.4} < {:.4}. Ending Stage.", state.avg_loss, stage_cfg.loss_threshold);
-        //                 final_loss = state.avg_loss;
-        //                 break 'epoch_loop_dec;
-        //             }
-        //         }
-        //         final_loss = epoch_loss / num_batches.max(1) as f32;
-
-        //         // Automatic run-finish: if this epoch didn't drop avg loss by at
-        //         // least MIN_EPOCH_LOSS_DROP versus the previous epoch, this config
-        //         // isn't converging fast enough to be worth the remaining epochs —
-        //         // finish the run here and move on to the next RunConfig.
-        //         if let Some(prev) = prev_epoch_loss {
-        //             if prev - final_loss < MIN_EPOCH_LOSS_DROP {
-        //                 println!(
-        //                     "\n⏹️  Epoch loss drop {:.4} < {:.4} (prev {:.4} -> {:.4}). Finishing run early.",
-        //                     prev - final_loss, MIN_EPOCH_LOSS_DROP, prev, final_loss,
-        //                 );
-        //                 run_should_stop = true;
-        //             }
-        //         }
-        //         prev_epoch_loss = Some(final_loss);
-
-        //         // Save checkpoint after each epoch
-        //         let meta = BrainDecMetadata {
-        //             vocab_size:     tokenizer.vocab_size(),
-        //             epochs_trained: epochs_already_done + epoch + 1,
-        //             final_loss,
-        //             batch_size: stage_cfg.batch_size,
-        //             training_stage: stage_cfg.stage.clone(),
-        //             embed_dim: run_cfg.embed_dim,
-        //             hidden_units: run_cfg.hidden_units,
-        //             n_layers: run_cfg.n_layers,
-        //             attn_heads: run_cfg.attn_heads,
-        //             ff_dim: run_cfg.ff_dim,
-        //             max_seq_len: run_cfg.max_seq_len,
-        //         };
-        //         model.save(run_dir_str, &tokenizer, &meta)?;
-
-        //         // periodic inference — same 5-prompt log + chart save as above
-        //         {
-        //             let inference_model = model.valid();
-        //             let mut entries = Vec::with_capacity(prompts.len());
-        //             for p in &prompts {
-        //                 let prompt = build_inference_prompt(stage_cfg.stage, p);
-        //                 let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
-        //                 let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
-        //                 entries.push((p.clone(), reply));
-        //             }
-        //             state.last_reply = entries[0].1.clone();
-        //             if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
-        //                 eprintln!("⚠️  Failed to append inference log: {}", e);
-        //             }
-        //             if let Err(e) = state.save_chart_image(&chart_path) {
-        //                 eprintln!("⚠️  Failed to save chart image: {}", e);
-        //             }
-        //         }
-
-        //         if run_should_stop { break 'epoch_loop_dec; }
-        //     }
-        //     epochs_already_done += state.epoch;
-        //     if let Some(term) = terminal.as_mut() {
-        //         term.clear()?;
-        //     }
-
-        //     // Final chart save as a safety net (the periodic saves above already
-        //     // keep this path current throughout training).
-        //     if let Err(e) = state.save_chart_image(&chart_path) {
-        //         eprintln!("⚠️  Failed to save chart image: {}", e);
-        //     } else {
-        //         println!("📊 Chart saved to {}", chart_path);
-        //     }
-
-        //     println!("✅ Stage complete. Final loss: {:.4}", final_loss);
-
-        //     if run_should_stop {
-        //         println!("⏹️  Run {} finished early, skipping remaining stages.", run_cfg.name);
-        //         break 'stage_loop_dec;
-        //     }
-        // }
-
-        // } // Architecture::DecoderOnly
-        _ => {},
         } // match run_cfg.architecture
     }
 
@@ -2178,5 +1982,149 @@ mod moe_loss_tests {
 
         assert_eq!(dir.parent(), Some(std::env::temp_dir().as_path()));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// Training-step memory and time on the local wgpu adapter. One variant per
+/// process so the memory pool starts empty. Example (repo root):
+/// YUMON_PROBE=dec-balanced PROBE_WIDTH=256 PROBE_LAYERS=16 PROBE_BATCH=32 \
+///   cargo test --release --lib training_memory_probe -- --ignored --nocapture
+/// Variants: dec-balanced, dec-plain, moe-balanced, moe-fusion (the previous
+/// setup: fusion wgpu, no checkpointing), attn-flash-{balanced,plain},
+/// attn-naive-{balanced,plain} (attention alone at the model's shape).
+#[cfg(test)]
+mod memory_probe_tests {
+    use super::*;
+    use burn::backend::autodiff::{Autodiff, checkpoint::strategy::{BalancedCheckpointing, NoCheckpointing}};
+    use burn_cubecl::CubeBackend;
+    use cubecl::{Runtime, wgpu::{WgpuDevice, WgpuRuntime}};
+
+    type Inner = CubeBackend<WgpuRuntime, f32, i32, u32>;
+
+    fn env(name: &str, default: usize) -> usize {
+        std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    }
+
+    struct Shape { width: usize, layers: usize, heads: usize, seq: usize, batch: usize, steps: usize, vocab: usize }
+
+    const MIB: f64 = 1024.0 * 1024.0;
+
+    /// Runs `steps` forward+backward passes; reports activation bytes held at
+    /// the end of forward and pool growth (peak working set incl. fragmentation).
+    fn measure<AD: AutodiffBackend<Device = WgpuDevice>>(label: &str, s: &Shape, mut step: impl FnMut(usize) -> Tensor<AD, 1>) {
+        let device = WgpuDevice::default();
+        let client = WgpuRuntime::client(&device);
+        AD::sync(&device).unwrap();
+        client.memory_cleanup();
+        let base = client.memory_usage();
+        let (mut held, mut times, mut fwd_times) = (0u64, vec![], vec![]);
+        for i in 0..s.steps {
+            AD::sync(&device).unwrap();
+            let start = std::time::Instant::now();
+            let loss = step(i);
+            AD::sync(&device).unwrap();
+            fwd_times.push(start.elapsed());
+            held = held.max(client.memory_usage().bytes_in_use.saturating_sub(base.bytes_in_use));
+            let grads = loss.backward();
+            drop(grads);
+            AD::sync(&device).unwrap();
+            times.push(start.elapsed());
+        }
+        let peak = client.memory_usage().bytes_reserved.saturating_sub(base.bytes_reserved);
+        let warm = &times[times.len().min(2)..];
+        let avg = warm.iter().sum::<std::time::Duration>() / warm.len().max(1) as u32;
+        let warm_fwd = &fwd_times[fwd_times.len().min(2)..];
+        let avg_fwd = warm_fwd.iter().sum::<std::time::Duration>() / warm_fwd.len().max(1) as u32;
+        println!(
+            "PROBE {label} width={} layers={} heads={} seq={} batch={} | params+inputs in use {:.0} MiB | held after forward {:.0} MiB | pool growth {:.0} MiB | step {:.0} ms, forward {:.0} ms (avg of {} after warmup)",
+            s.width, s.layers, s.heads, s.seq, s.batch,
+            base.bytes_in_use as f64 / MIB, held as f64 / MIB, peak as f64 / MIB,
+            avg.as_secs_f64() * 1e3, avg_fwd.as_secs_f64() * 1e3, warm.len(),
+        );
+    }
+
+    fn tokens<AD: Backend>(s: &Shape, step: usize, device: &AD::Device) -> (Tensor<AD, 2, Int>, Tensor<AD, 1, Int>) {
+        // Full-length rows (no padding): the worst case for memory.
+        let ids: Vec<i32> = (0..s.batch * s.seq).map(|i| 3 + ((i * 7919 + step * 104729) % (s.vocab - 3)) as i32).collect();
+        let mut targets = ids.clone();
+        targets.rotate_left(1);
+        (
+            Tensor::from_ints(TensorData::new(ids, [s.batch, s.seq]), device),
+            Tensor::from_ints(TensorData::new(targets, [s.batch * s.seq]), device),
+        )
+    }
+
+    fn lm_loss<AD: Backend>(logits: Tensor<AD, 3>, targets: Tensor<AD, 1, Int>, s: &Shape) -> Tensor<AD, 1> {
+        masked_token_ce(logits.reshape([s.batch * s.seq, s.vocab]), targets, s.batch * s.seq, 0.0)
+    }
+
+    fn dec<AD: AutodiffBackend<Device = WgpuDevice> + FlashAttention>(label: &str, s: &Shape) {
+        let device = WgpuDevice::default();
+        let config = YumonDecBrainConfig::new(s.vocab, TrainingStage::Language)
+            .with_embed_dim(s.width).with_hidden_units(s.width).with_n_layers(s.layers)
+            .with_attn_heads(s.heads).with_ff_dim(4 * s.width).with_max_seq_len(s.seq);
+        println!("{label}: {:.1}M parameters", config.param_count() as f64 / 1e6);
+        let model: YumonDecBrain<AD> = config.init(&device);
+        measure::<AD>(label, s, |i| {
+            let (x, y) = tokens::<AD>(s, i, &device);
+            lm_loss(model.forward(x), y, s)
+        });
+    }
+
+    fn moe<AD: AutodiffBackend<Device = WgpuDevice>>(label: &str, s: &Shape) {
+        let device = WgpuDevice::default();
+        let config = YumonMoeBrainConfig::new(s.vocab, TrainingStage::Language)
+            .with_embed_dim(s.width).with_hidden_units(s.width).with_n_layers(s.layers)
+            .with_attn_heads(s.heads).with_ff_dim(4 * s.width).with_max_seq_len(s.seq)
+            .with_num_experts(4).with_top_k(1);
+        let model: YumonMoeBrain<AD> = config.init(&device);
+        println!("{label}: {:.1}M parameters", model.num_params() as f64 / 1e6);
+        measure::<AD>(label, s, |i| {
+            let (x, y) = tokens::<AD>(s, i, &device);
+            let (logits, aux, _) = model.forward_with_aux(x);
+            lm_loss(logits, y, s) + aux
+        });
+    }
+
+    fn attn<AD: AutodiffBackend<Device = WgpuDevice> + FlashAttention>(label: &str, flash: bool, s: &Shape) {
+        let device = WgpuDevice::default();
+        let hd = s.width / s.heads;
+        let max_shared = WgpuRuntime::client(&device).properties().hardware.max_shared_memory_size;
+        println!("{label}: head dim {hd}, shared memory {max_shared} B, {} rows per tile",
+            crate::brain::flash_attn::backend::block_for_dim(hd, max_shared));
+        measure::<AD>(label, s, |_| {
+            let rand = || Tensor::<AD, 4>::random([s.batch, s.heads, s.seq, hd], burn::tensor::Distribution::Normal(0.0, 1.0), &device).require_grad();
+            let (q, k, v) = (rand(), rand(), rand());
+            let out = if flash {
+                crate::brain::flash_attn::backend::causal_flash_attention(q, k, v)
+            } else {
+                let future = Tensor::<AD, 2>::ones([s.seq, s.seq], &device).triu(1).bool().unsqueeze::<4>();
+                let scores = q.matmul(k.transpose()) / (hd as f64).sqrt();
+                burn::tensor::activation::softmax(scores.mask_fill(future, -1e9), 3).matmul(v)
+            };
+            out.powf_scalar(2.0).mean().reshape([1])
+        });
+    }
+
+    #[test]
+    #[ignore]
+    fn training_memory_probe() {
+        let s = Shape {
+            width: env("PROBE_WIDTH", 256), layers: env("PROBE_LAYERS", 16), heads: env("PROBE_HEADS", 8),
+            seq: env("PROBE_SEQ", 256), batch: env("PROBE_BATCH", 32), steps: env("PROBE_STEPS", 5),
+            vocab: env("PROBE_VOCAB", 16384),
+        };
+        let variant = std::env::var("YUMON_PROBE").unwrap_or_else(|_| "dec-balanced".into());
+        match variant.as_str() {
+            "dec-balanced" => dec::<Autodiff<Inner, BalancedCheckpointing>>(&variant, &s),
+            "dec-plain" => dec::<Autodiff<Inner, NoCheckpointing>>(&variant, &s),
+            "moe-balanced" => moe::<Autodiff<Inner, BalancedCheckpointing>>(&variant, &s),
+            "moe-fusion" => moe::<Autodiff<burn::backend::Wgpu>>(&variant, &s),
+            "attn-flash-balanced" => attn::<Autodiff<Inner, BalancedCheckpointing>>(&variant, true, &s),
+            "attn-flash-plain" => attn::<Autodiff<Inner, NoCheckpointing>>(&variant, true, &s),
+            "attn-naive-balanced" => attn::<Autodiff<Inner, BalancedCheckpointing>>(&variant, false, &s),
+            "attn-naive-plain" => attn::<Autodiff<Inner, NoCheckpointing>>(&variant, false, &s),
+            other => panic!("unknown YUMON_PROBE {other}"),
+        }
     }
 }

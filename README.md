@@ -168,8 +168,9 @@ locally is already in the snapshot.
 3. Launch a GPU pod from the image. The default command starts `train-brain`
    with `YUMON_SAMPLE_CACHE=/app/training-cache/samples.bin` and saves checkpoints
    under `/workspace/checkpoints/brain/<run-name>/`. It resumes existing checkpoints.
-   MoE honors `--epochs` and `--batch-size`; model dimensions and context come from
-   the grid in `src/brain/train.rs`.
+   It trains the dense decoder-only model by default (`--architecture decoder-only`).
+   Decoder-only and MoE honor `--epochs` and `--batch-size`; model dimensions and
+   context come from the grid in `src/brain/train.rs`.
 
 4. Download checkpoints from the volume with the RunPod File Manager, `runpodctl`
    or SCP. Verify that the host driver supports the Docker image's CUDA version
@@ -182,6 +183,40 @@ cargo test --lib --no-default-features sample_cache
 cargo test --lib --no-default-features loading_tests
 ```
 
+## Decoder-only training (default)
+
+```sh
+cargo run --release --no-default-features --bin yumon-pet -- train-brain --batch-size 32 --epochs 15
+```
+
+`YumonDecBrain` (`src/brain/decoder_model.rs`): dense pre-norm decoder, RoPE,
+SwiGLU MLP, same data, batches, loss, validation and checkpoint layout as MoE
+(`metadata.json` is `DecMetadata`). Attention is the causal FlashAttention op in
+`src/brain/flash_attn/` (CubeCL kernels, Burn autodiff backward), so no
+[seq, seq] scores are stored. Both training backends are
+`Autodiff<CubeBackend<_>, BalancedCheckpointing>` without burn-fusion.
+Batches must be right-padded (the attention op is causal only, no key mask).
+
+Measured on a UHD 770 (wgpu), seq 256, batch 32, 8 heads:
+
+| | stored after forward | step |
+|---|---|---|
+| attention only, naive vs flash, head dim 32 | 225 vs 32 MiB | 159 vs 64 ms |
+| attention only, naive vs flash, head dim 64 | 257 vs 64 MiB | 164 vs 287 ms |
+| 256w 16L model, no checkpointing vs balanced | 4614 vs 3701 MiB | 37.2 vs 39.6 s |
+
+Balanced checkpointing only recomputes memory-bound ops; matmul outputs and
+the [tokens, vocab] logits are still stored. Probe (one variant per process):
+
+```sh
+YUMON_PROBE=dec-balanced PROBE_WIDTH=256 PROBE_LAYERS=16 PROBE_BATCH=32 cargo test --release --lib training_memory_probe -- --ignored --nocapture
+cargo test --lib decoder_model -- --test-threads=1
+```
+
+If a run panics with `matmul_naive ... Cube count too big`, delete
+`target/autotune` (the matmul autotune key ignores batch size; Burn's
+`RotaryEncoding`, still used by MoE, hits it at batch*heads*seq >= 65536).
+
 ## Sparse MoE training
 
 ```sh
@@ -191,7 +226,7 @@ cargo run --release --no-default-features --bin yumon-pet -- train-brain --archi
 This selects `Architecture::Moe` in the existing training grid. It uses the same
 stage data, AdamW, charts, periodic text generation, and checkpoint workflow.
 The grid dimensions and data sources remain in `src/brain/train.rs`. The default
-architecture is MoE; `--architecture encoder-decoder` selects the dense
+architecture is decoder-only; `--architecture encoder-decoder` selects the dense
 encoder/decoder. The separate `train_ui` and `chat_ui` binaries still use their
 existing hardcoded models; MoE training is selected through `train-brain`.
 

@@ -1,236 +1,323 @@
-// kernel.rs — CubeCL FlashAttention forward + backward kernels
+// kernel.rs - CubeCL causal FlashAttention (forward + two-pass backward)
 //
-// Fixes applied vs previous version:
-//   - return; → terminate!()
-//   - CUBE_POS_LOCAL_X → UNIT_POS_X
-//   - F: Float → f32 concrete type (sidesteps CubeElement + log issues cleanly)
-//   - All indices and loop vars are u32 throughout
-//   - log(x) via cubecl's free function, not F::log
+// Tensors are contiguous [batch*heads, seq, dim] f32. Self-attention only
+// (seq_q == seq_k) and always causal: query row i sees keys 0..=i.
+//
+// Launch config for every kernel:
+//   cube_count = (batch * heads, ceil(seq / block), 1)
+//   cube_dim   = (block, 1, 1) - one unit per row of the tile
+//
+// K/V (forward, dQ) or Q/dO (dK/dV) tiles are staged in shared memory, so
+// `block * dim` floats per tile must fit twice in the shared budget (see
+// `block_for_dim` in backend.rs). Every unit reads the same tile row at the
+// same time (a broadcast). The unit's own row and its accumulators live in
+// `dim`-wide local arrays; every `dim` loop is unrolled so those stay in
+// registers. Measured on a UHD 770 (dim 32, seq 256): rolled loops 420 ms per
+// layer forward+backward, unrolled 65 ms. Staging the own row in shared
+// memory instead was slower (182 ms, 199 ms with padded rows).
+//
+// Units past the end of the sequence still load tiles and hit every
+// sync_cube(); they skip the math and the writes.
+//
+// The backward is split so every unit owns the rows it writes:
+//   causal_bwd_dq   - one unit per query row: delta = rowsum(dO * O), dQ
+//   causal_bwd_dkdv - one unit per key row:   dK, dV
+// No atomics, no zero-initialized outputs.
+//
+// CubeCL note: `let mut x = 0.0_f32` (or f32::NEG_INFINITY) expands to a
+// constant that can't be reassigned, so mutable scalars start from
+// f32::from_int(0) / f32::min_value(). min_value() also stands in for -inf
+// as the masked score: exp(min_value - m) underflows to exactly 0.
 
 use cubecl::prelude::*;
 
-// ── Forward kernel ────────────────────────────────────────────────────────────
-//
-// Launch config:
-//   cube_count = (batch * heads, num_q_tiles, 1)
-//   cube_dim   = (block_q, 1, 1)  — one unit per q-row in tile
-//
-// Tensors are flat [batch*heads, seq, d] row-major.
-
 #[cube(launch)]
-pub fn flash_attn_forward(
-    q:       &Tensor<f32>,
-    k:       &Tensor<f32>,
-    v:       &Tensor<f32>,
-    out:     &mut Tensor<f32>,
-    lse:     &mut Tensor<f32>,   // log-sum-exp saved for backward [bh, seq_q]
-    scale:   f32,
-    seq_q:   usize,
-    seq_k:   usize,
-    d_k:     usize,
-    d_v:     usize,
-    block_q: usize,
-    block_k: usize,
+pub fn causal_fwd(
+    q:     &Tensor<f32>,
+    k:     &Tensor<f32>,
+    v:     &Tensor<f32>,
+    out:   &mut Tensor<f32>,
+    lse:   &mut Tensor<f32>, // [bh, seq], log-sum-exp of the scaled scores
+    scale: f32,
+    seq:   usize,
+    #[comptime] block: usize,
+    #[comptime] dim:   usize,
+    #[comptime] tile:  usize, // block * dim
 ) {
-    let bh     = CUBE_POS_X as usize;         // which (batch * head)
-    let tile_q = CUBE_POS_Y as usize;         // which Q tile along seq_q
-    let tid    = UNIT_POS_X as usize;         // thread index within cube = row in tile
+    let bh     = CUBE_POS_X as usize;
+    let q_tile = CUBE_POS_Y as usize;
+    let t      = UNIT_POS_X as usize;
+    let row    = q_tile * block + t;
+    let live   = row < seq;
+    let base   = bh * seq * dim;
 
-    let q_row  = tile_q * block_q + tid;
-    if q_row >= seq_q { terminate!(); }
+    let mut k_s = SharedMemory::<f32>::new(tile);
+    let mut v_s = SharedMemory::<f32>::new(tile);
+    let mut q_r = Array::<f32>::new(dim);
+    let mut acc = Array::<f32>::new(dim);
+    let mut s   = Array::<f32>::new(block);
 
-    // Base offsets for this thread's Q row and output row
-    let q_base   = bh * seq_q * d_k + q_row * d_k;
-    let out_base = bh * seq_q * d_v + q_row * d_v;
-
-    // Online softmax state — lives in registers per thread
-    let mut m_i = f32::NEG_INFINITY;
-    let mut l_i = 0.0_f32;
-
-    // Zero output accumulator
-    let mut d: usize = 0;
-    while d < d_v {
-        out[out_base + d] = 0.0_f32;
-        d += 1;
+    #[unroll]
+    for d in 0..dim {
+        let mut x = f32::from_int(0);
+        if live { x = q[base + row * dim + d]; }
+        q_r[d] = x * scale;
+        acc[d] = f32::from_int(0);
     }
 
-    let num_k_tiles = (seq_k + block_k - 1) / block_k;
+    let mut m = f32::min_value();
+    let mut l = f32::from_int(0);
 
-    // ── Tile loop over K/V ───────────────────────────────────────────────────
-    let mut tile_k: usize = 0;
-    while tile_k < num_k_tiles {
-        let k_start = tile_k * block_k;
-        let k_end   = {
-            let e = k_start + block_k;
-            if e < seq_k { e } else { seq_k }
-        };
-
-        // ── Pass 1: find new running max over this K tile ────────────────────
-        let mut m_new = m_i;
-        let mut kj = k_start;
-        while kj < k_end {
-            let k_base = bh * seq_k * d_k + kj * d_k;
-            let mut dot = 0.0_f32;
-            let mut d2: usize = 0;
-            while d2 < d_k {
-                dot += q[q_base + d2] * k[k_base + d2];
-                d2 += 1;
+    // Causal: key tiles past this query tile are fully masked, skip them.
+    for kt in 0..q_tile + 1 {
+        let k_row = kt * block + t;
+        #[unroll]
+        for d in 0..dim {
+            let mut kx = f32::from_int(0);
+            let mut vx = f32::from_int(0);
+            if k_row < seq {
+                kx = k[base + k_row * dim + d];
+                vx = v[base + k_row * dim + d];
             }
-            dot *= scale;
-            if dot > m_new { m_new = dot; }
-            kj += 1;
+            k_s[t * dim + d] = kx;
+            v_s[t * dim + d] = vx;
         }
+        sync_cube();
 
-        // ── Online softmax correction ────────────────────────────────────────
-        let exp_diff = Exp::exp(m_i - m_new);
-        l_i *= exp_diff;
-
-        let mut d3: usize = 0;
-        while d3 < d_v {
-            out[out_base + d3] *= exp_diff;
-            d3 += 1;
-        }
-
-        // ── Pass 2: accumulate exp(score - m_new) * V ───────────────────────
-        let mut kj2 = k_start;
-        while kj2 < k_end {
-            let k_base = bh * seq_k * d_k + kj2 * d_k;
-            let v_base = bh * seq_k * d_v + kj2 * d_v;
-
-            let mut dot = 0.0_f32;
-            let mut d4: usize = 0;
-            while d4 < d_k {
-                dot += q[q_base + d4] * k[k_base + d4];
-                d4 += 1;
+        if live {
+            // Every processed tile holds at least key kt*block <= row, so
+            // tile_max is a real score and m leaves min_value after the first
+            // tile. Masked scores stay at min_value, so exp(score - m_new) == 0.
+            let mut tile_max = f32::min_value();
+            for j in 0..block {
+                let mut score = f32::min_value();
+                if kt * block + j <= row {
+                    let mut dot = f32::from_int(0);
+                    #[unroll]
+                    for d in 0..dim {
+                        dot += q_r[d] * k_s[j * dim + d];
+                    }
+                    score = dot;
+                }
+                s[j] = score;
+                if score > tile_max { tile_max = score; }
             }
-            dot *= scale;
 
-            let exp_s = Exp::exp(dot - m_new);
-            l_i += exp_s;
-
-            let mut d5: usize = 0;
-            while d5 < d_v {
-                out[out_base + d5] += exp_s * v[v_base + d5];
-                d5 += 1;
+            let mut m_new = m;
+            if tile_max > m_new { m_new = tile_max; }
+            let correction = Exp::exp(m - m_new);
+            l *= correction;
+            #[unroll]
+            for d in 0..dim {
+                acc[d] *= correction;
             }
-            kj2 += 1;
+            for j in 0..block {
+                let p = Exp::exp(s[j] - m_new);
+                l += p;
+                #[unroll]
+                for d in 0..dim {
+                    acc[d] += p * v_s[j * dim + d];
+                }
+            }
+            m = m_new;
         }
-
-        m_i = m_new;
-        tile_k += 1;
+        sync_cube();
     }
 
-    // ── Normalize and write LSE ──────────────────────────────────────────────
-    let l_inv = 1.0_f32 / l_i;
-    let mut d6: usize = 0;
-    while d6 < d_v {
-        out[out_base + d6] *= l_inv;
-        d6 += 1;
+    if live {
+        let inv = 1.0_f32 / l;
+        #[unroll]
+        for d in 0..dim {
+            out[base + row * dim + d] = acc[d] * inv;
+        }
+        lse[bh * seq + row] = m + Log::ln(l);
     }
-
-    // LSE = m + log(l) — sufficient statistic for backward recomputation
-    lse[bh * seq_q + q_row] = m_i + Log::ln(l_i);
 }
 
-// ── Backward kernel ───────────────────────────────────────────────────────────
-
 #[cube(launch)]
-pub fn flash_attn_backward(
-    q:       &Tensor<f32>,
-    k:       &Tensor<f32>,
-    v:       &Tensor<f32>,
-    out:     &Tensor<f32>,
-    d_out:   &Tensor<f32>,
-    lse:     &Tensor<f32>,
-    d_q:     &mut Tensor<f32>,
-    d_k:     &mut Tensor<f32>,
-    d_v:     &mut Tensor<f32>,
-    scale:   f32,
-    seq_q:   usize,
-    seq_k:   usize,
-    d_k_dim: usize,
-    d_v_dim: usize,
-    block_q: usize,
-    block_k: usize,
+pub fn causal_bwd_dq(
+    q:     &Tensor<f32>,
+    k:     &Tensor<f32>,
+    v:     &Tensor<f32>,
+    out:   &Tensor<f32>,
+    d_out: &Tensor<f32>,
+    lse:   &Tensor<f32>,
+    delta: &mut Tensor<f32>, // [bh, seq], written here, read by causal_bwd_dkdv
+    d_q:   &mut Tensor<f32>,
+    scale: f32,
+    seq:   usize,
+    #[comptime] block: usize,
+    #[comptime] dim:   usize,
+    #[comptime] tile:  usize,
 ) {
-    let bh    = CUBE_POS_X as usize;
-    let tid   = UNIT_POS_X as usize;
+    let bh     = CUBE_POS_X as usize;
+    let q_tile = CUBE_POS_Y as usize;
+    let t      = UNIT_POS_X as usize;
+    let row    = q_tile * block + t;
+    let live   = row < seq;
+    let base   = bh * seq * dim;
 
-    let q_row = CUBE_POS_Y as usize * block_q + tid;
-    if q_row >= seq_q { terminate!(); }
+    let mut k_s  = SharedMemory::<f32>::new(tile);
+    let mut v_s  = SharedMemory::<f32>::new(tile);
+    let mut q_r  = Array::<f32>::new(dim);
+    let mut do_r = Array::<f32>::new(dim);
+    let mut dq   = Array::<f32>::new(dim);
 
-    let o_base  = bh * seq_q * d_v_dim + q_row * d_v_dim;
-    let q_base  = bh * seq_q * d_k_dim + q_row * d_k_dim;
-
-    // ── δ = rowsum(dO ⊙ O) ──────────────────────────────────────────────────
-    let mut delta = 0.0_f32;
-    let mut d: usize = 0;
-    while d < d_v_dim {
-        delta += d_out[o_base + d] * out[o_base + d];
-        d += 1;
+    let mut delta_r = f32::from_int(0);
+    let mut lse_r = f32::from_int(0);
+    #[unroll]
+    for d in 0..dim {
+        let mut qx = f32::from_int(0);
+        let mut gx = f32::from_int(0);
+        if live {
+            qx = q[base + row * dim + d];
+            gx = d_out[base + row * dim + d];
+            delta_r += gx * out[base + row * dim + d];
+        }
+        q_r[d]  = qx;
+        do_r[d] = gx;
+        dq[d]   = f32::from_int(0);
+    }
+    if live {
+        lse_r = lse[bh * seq + row];
+        delta[bh * seq + row] = delta_r;
     }
 
-    let lse_qi = lse[bh * seq_q + q_row];
-    let num_k_tiles = (seq_k + block_k - 1) / block_k;
-
-    let mut tile_k: usize = 0;
-    while tile_k < num_k_tiles {
-        let k_start = tile_k * block_k;
-        let k_end   = {
-            let e = k_start + block_k;
-            if e < seq_k { e } else { seq_k }
-        };
-
-        let mut kj = k_start;
-        while kj < k_end {
-            let k_base = bh * seq_k * d_k_dim + kj * d_k_dim;
-            let v_base = bh * seq_k * d_v_dim + kj * d_v_dim;
-
-            // Recompute p_ij from saved LSE — no N×N matrix needed
-            let mut dot = 0.0_f32;
-            let mut d2: usize = 0;
-            while d2 < d_k_dim {
-                dot += q[q_base + d2] * k[k_base + d2];
-                d2 += 1;
+    for kt in 0..q_tile + 1 {
+        let k_row = kt * block + t;
+        #[unroll]
+        for d in 0..dim {
+            let mut kx = f32::from_int(0);
+            let mut vx = f32::from_int(0);
+            if k_row < seq {
+                kx = k[base + k_row * dim + d];
+                vx = v[base + k_row * dim + d];
             }
-            let p_ij = Exp::exp(dot * scale - lse_qi);
-
-            // dV += p_ij * dO
-            // Note: requires atomic adds for correctness when multiple q_rows
-            // write to the same kj. Safe here when block_q == 1 or with
-            // a thread-per-kj decomposition. See comment in ops.rs.
-            let mut d3: usize = 0;
-            while d3 < d_v_dim {
-                d_v[v_base + d3] += p_ij * d_out[o_base + d3];
-                d3 += 1;
-            }
-
-            // dp = dot(dO, V_j)
-            let mut dp = 0.0_f32;
-            let mut d4: usize = 0;
-            while d4 < d_v_dim {
-                dp += d_out[o_base + d4] * v[v_base + d4];
-                d4 += 1;
-            }
-
-            let ds = p_ij * (dp - delta) * scale;
-
-            // dQ += ds * K_j
-            let mut d5: usize = 0;
-            while d5 < d_k_dim {
-                d_q[q_base + d5] += ds * k[k_base + d5];
-                d5 += 1;
-            }
-
-            // dK_j += ds * Q
-            let mut d6: usize = 0;
-            while d6 < d_k_dim {
-                d_k[k_base + d6] += ds * q[q_base + d6];
-                d6 += 1;
-            }
-
-            kj += 1;
+            k_s[t * dim + d] = kx;
+            v_s[t * dim + d] = vx;
         }
-        tile_k += 1;
+        sync_cube();
+
+        if live {
+            for j in 0..block {
+                if kt * block + j <= row {
+                    let mut dot = f32::from_int(0);
+                    let mut dp = f32::from_int(0);
+                    #[unroll]
+                    for d in 0..dim {
+                        dot += q_r[d] * k_s[j * dim + d];
+                        dp  += do_r[d] * v_s[j * dim + d];
+                    }
+                    let p  = Exp::exp(dot * scale - lse_r);
+                    let ds = p * (dp - delta_r);
+                    #[unroll]
+                    for d in 0..dim {
+                        dq[d] += ds * k_s[j * dim + d];
+                    }
+                }
+            }
+        }
+        sync_cube();
+    }
+
+    if live {
+        #[unroll]
+        for d in 0..dim {
+            d_q[base + row * dim + d] = dq[d] * scale;
+        }
+    }
+}
+
+#[cube(launch)]
+pub fn causal_bwd_dkdv(
+    q:     &Tensor<f32>,
+    k:     &Tensor<f32>,
+    v:     &Tensor<f32>,
+    d_out: &Tensor<f32>,
+    lse:   &Tensor<f32>,
+    delta: &Tensor<f32>,
+    d_k:   &mut Tensor<f32>,
+    d_v:   &mut Tensor<f32>,
+    scale: f32,
+    seq:   usize,
+    tiles: usize, // ceil(seq / block)
+    #[comptime] block: usize,
+    #[comptime] dim:   usize,
+    #[comptime] tile:  usize,
+) {
+    let bh     = CUBE_POS_X as usize;
+    let k_tile = CUBE_POS_Y as usize;
+    let t      = UNIT_POS_X as usize;
+    let col    = k_tile * block + t;
+    let live   = col < seq;
+    let base   = bh * seq * dim;
+
+    let mut q_s  = SharedMemory::<f32>::new(tile);
+    let mut do_s = SharedMemory::<f32>::new(tile);
+    let mut k_r  = Array::<f32>::new(dim);
+    let mut v_r  = Array::<f32>::new(dim);
+    let mut dk   = Array::<f32>::new(dim);
+    let mut dv   = Array::<f32>::new(dim);
+
+    #[unroll]
+    for d in 0..dim {
+        let mut kx = f32::from_int(0);
+        let mut vx = f32::from_int(0);
+        if live {
+            kx = k[base + col * dim + d];
+            vx = v[base + col * dim + d];
+        }
+        k_r[d] = kx;
+        v_r[d] = vx;
+        dk[d]  = f32::from_int(0);
+        dv[d]  = f32::from_int(0);
+    }
+
+    // Causal: only query tiles at or after this key tile see these keys.
+    for qt in k_tile..tiles {
+        let q_row = qt * block + t;
+        #[unroll]
+        for d in 0..dim {
+            let mut qx = f32::from_int(0);
+            let mut gx = f32::from_int(0);
+            if q_row < seq {
+                qx = q[base + q_row * dim + d];
+                gx = d_out[base + q_row * dim + d];
+            }
+            q_s[t * dim + d]  = qx;
+            do_s[t * dim + d] = gx;
+        }
+        sync_cube();
+
+        if live {
+            for i in 0..block {
+                let r = qt * block + i;
+                if r >= col && r < seq {
+                    let mut dot = f32::from_int(0);
+                    let mut dp = f32::from_int(0);
+                    #[unroll]
+                    for d in 0..dim {
+                        dot += k_r[d] * q_s[i * dim + d];
+                        dp  += v_r[d] * do_s[i * dim + d];
+                    }
+                    let p  = Exp::exp(dot * scale - lse[bh * seq + r]);
+                    let ds = p * (dp - delta[bh * seq + r]);
+                    #[unroll]
+                    for d in 0..dim {
+                        dv[d] += p * do_s[i * dim + d];
+                        dk[d] += ds * q_s[i * dim + d];
+                    }
+                }
+            }
+        }
+        sync_cube();
+    }
+
+    if live {
+        #[unroll]
+        for d in 0..dim {
+            d_k[base + col * dim + d] = dk[d] * scale;
+            d_v[base + col * dim + d] = dv[d];
+        }
     }
 }

@@ -3,10 +3,10 @@
 //! Activations/weights stay on device. Benchmark the synchronization overhead.
 use super::{
     bpe::{BpeTokenizer, TokenizerKind},
-    fixer::fix_json_syntax,
-    model::{GenerationResult, MLP, MLPConfig, RMSNorm, RMSNormConfig, TEMPERATURE, TOP_K},
-    samples::{Action, CardinalDir, TrainingStage},
-    tokenizer::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN},
+    decoder_model::generate_causal,
+    model::{GenerationResult, MLP, MLPConfig, RMSNorm, RMSNormConfig},
+    samples::TrainingStage,
+    tokenizer::PAD_TOKEN,
 };
 use anyhow::Result;
 use burn::{
@@ -308,121 +308,15 @@ impl<B: Backend> YumonMoeBrain<B> {
         max_tokens: usize,
         device: &B::Device,
     ) -> GenerationResult {
-        let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
-        if !seed_text.is_empty() {
-            dec_ids.extend(tokenizer.encode(seed_text).iter().map(|&t| t as usize));
-        }
-
-        let sep_text = if self.config.training_stage == TrainingStage::Structured {
-            "\n---\n"
-        } else {
-            " "
-        };
-        let sep_tokens = tokenizer.encode(sep_text);
-        dec_ids.extend(sep_tokens.iter().map(|&t| t as usize));
-
-        let prompt_len = dec_ids.len();
-        let mut rng = rand::thread_rng();
-
-        for _ in 0..max_tokens {
-            let current_len = dec_ids.len();
-            if current_len >= self.config.max_seq_len {
-                break;
-            }
-
-            let dec_tokens_t = Tensor::<B, 2, Int>::from_ints(
-                TensorData::new(
-                    dec_ids.iter().map(|&t| t as i32).collect::<Vec<_>>(),
-                    [1, current_len],
-                ),
-                device,
-            );
-
-            let token_logits = self.forward(dec_tokens_t);
-
-            let vocab_size = tokenizer.vocab_size();
-            let last_logits = token_logits
-                .slice([0..1, current_len - 1..current_len, 0..vocab_size])
-                .reshape([vocab_size]);
-
-            let logits_vec: Vec<f32> = last_logits.to_data().to_vec().unwrap();
-            let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
-
-            if next_token == EOS_TOKEN || next_token == PAD_TOKEN {
-                break;
-            }
-            dec_ids.push(next_token);
-        }
-
-        let raw_output = tokenizer.decode(&dec_ids[prompt_len..]);
-        let fixed = fix_json_syntax(&raw_output).fixed;
-
-        let extract = |key: &str| -> String {
-            fancy_regex::Regex::new(&format!(r#"(?<=\s*"{key}"\s*:\s*)"([^"]*)""#))
-                .ok()
-                .and_then(|re| re.captures(&fixed).ok().flatten())
-                .and_then(|caps| caps.get(1))
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default()
-        };
-
-        let mut parsed_action = extract("action");
-        let mut parsed_reply = extract("reply");
-        let mut parsed_emotion = extract("emotion");
-
-        if parsed_action.is_empty() || parsed_action.len() < 3 {
-            parsed_action = extract(" action");
-            parsed_reply = extract(" reply");
-            parsed_emotion = extract(" emotion");
-        }
-
-        if parsed_reply.is_empty() || parsed_reply.len() < 4 {
-            let parsed: serde_json::Value = serde_json::from_str(&fixed).unwrap_or_else(|_| {
-                let extract = |key: &str| -> String {
-                    regex::Regex::new(&format!(r#""{key}"\s*:\s*"([^"]*)"#))
-                        .ok()
-                        .and_then(|re| re.captures(&fixed))
-                        .and_then(|caps| caps.get(1))
-                        .map(|m| m.as_str().to_string())
-                        .unwrap_or_default()
-                };
-
-                serde_json::json!({
-                    "action":  extract("action"),
-                    "emotion": extract("emotion"),
-                    "reply":   extract("reply"),
-                })
-            });
-
-            parsed_action = parsed["action"].to_string().trim().to_string();
-            parsed_reply = parsed["reply"].to_string().trim().to_string();
-            parsed_emotion = parsed["emotion"].to_string().trim().to_string();
-        }
-
-        parsed_action = parsed_action.replace("\"", "").trim().to_string();
-        parsed_reply = parsed_reply.replace("\"", "").trim().to_string();
-        parsed_emotion = parsed_emotion.replace("\"", "").trim().to_string();
-
-        let action = match parsed_action.as_str().trim() {
-            "go to destination" => Action::GoToDestination,
-            "go home" => Action::GoHome,
-            "follow" => Action::Follow,
-            "get help" => Action::GetHelp,
-            "survey area" => Action::Survey,
-            "collect items" => Action::Collect,
-            "stack items" => Action::Stack,
-            _ => Action::Sit,
-        };
-
-        GenerationResult {
-            reply: parsed_reply,
-            action,
-            motion_dir: CardinalDir::None,
-            parsed_emotion,
-            raw_output,
-            fsm_state: 0,
-            allowed_count: None,
-        }
+        generate_causal(
+            |tokens| self.forward(tokens),
+            self.config.training_stage,
+            self.config.max_seq_len,
+            tokenizer,
+            seed_text,
+            max_tokens,
+            device,
+        )
     }
 
     // ── Checkpoint I/O ────────────────────────────────────────────────────────
@@ -514,29 +408,6 @@ pub struct MoeMetadata {
     pub attn_heads: usize,
     pub ff_dim: usize,
     pub max_seq_len: usize,
-}
-
-// ─── Sampling helper (same shape as model.rs's private copy) ─────────────────
-
-fn sample_top_k(logits: &[f32], k: usize, temperature: f32, rng: &mut impl rand::Rng) -> usize {
-    use rand::distributions::WeightedIndex;
-    use rand::prelude::*;
-
-    let mut indexed: Vec<(usize, f32)> = logits
-        .iter()
-        .enumerate()
-        .map(|(i, &l)| (i, l / temperature))
-        .collect();
-    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    indexed.truncate(k);
-
-    let max = indexed[0].1;
-    let weights: Vec<f32> = indexed.iter().map(|(_, l)| (l - max).exp()).collect();
-    let sum: f32 = weights.iter().sum();
-    let probs: Vec<f32> = weights.iter().map(|w| w / sum).collect();
-
-    let dist = WeightedIndex::new(&probs).unwrap();
-    indexed[dist.sample(rng)].0
 }
 
 #[cfg(test)]
