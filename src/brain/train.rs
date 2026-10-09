@@ -994,7 +994,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     TrainingStage::Structured => "Structured",
                                 };
                                 let name = format!(
-                                    "{}h_{}l_{}a_{}len_b{}_{}_{}",
+                                    "{}h_{}l_{}a_{}len_b{}_{}_{}_bf16",
                                     size, n_layers, attn_heads, max_seq_len, batch_size, arch_tag, stage_tag,
                                 );
                                 runs.push(RunConfig {
@@ -1063,7 +1063,7 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
         .add("data/ideas.txt",   FileKind::TxtLines, None)
         .add("archive/arena_extract.txt",   FileKind::Chats, None)
-        .add("data/distillchatv1.csv",   FileKind::DistillChat, None)
+        // .add("data/distillchatv1.csv",   FileKind::DistillChat, None)
         // Plain text, loss on every token (cleaned extract of the simplewiki XML).
         // .add("data/wiki_extract.txt",   FileKind::Paragraphs, None) // too dense
         // .add("data/quotes.csv",   FileKind::QuotesCsv, None) // only 5 prompts used. maybe better used without prompts
