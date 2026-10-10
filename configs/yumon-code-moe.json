@@ -1,4 +1,7 @@
 {
+  "architecture": "moe",
+  "num_experts": 16,
+  "top_k": 2,
   "source": "../../rust-code",
   "cache": "training-cache/code.bin",
   "tokenizer": "yumon_code_bpe",
@@ -6,14 +9,14 @@
   "exclude_dirs": [".git", "target", "node_modules"],
   "seed": 4815162342,
   "vocab_size": 16384,
-  "embed_dim": 2048,
-  "n_layers": 32,
-  "attn_heads": 64,
-  "ff_dim": 8192,
-  "batch_size": 2,
+  "embed_dim": 1024,
+  "n_layers": 24,
+  "attn_heads": 32,
+  "ff_dim": 4096,
+  "batch_size": 4,
   "epochs": 15,
-  "first_lr": 0.0002,
+  "first_lr": 0.0001,
   "last_lr": 0.00002,
   "validation_fraction": 0.01,
-  "out_dir": "/workspace/checkpoints/yumon-code-5090"
+  "out_dir": "/workspace/checkpoints/yumon-code-moe-h100"
 }
