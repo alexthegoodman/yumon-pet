@@ -6,6 +6,7 @@ pub mod xlstm_model;
 pub mod moe_model;
 pub mod wiki;
 pub mod train;
+pub(crate) mod training_debug;
 pub mod tokenizer;
 pub mod bpe;
 pub mod mdx;

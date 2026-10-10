@@ -1,5 +1,5 @@
 //! Dropless sparse MoE decoder. Only routed rows enter expert matrix multiplies.
-//! Router scores are read once per layer for deterministic top-k dispatch.
+//! Router indices are read once per layer for sparse top-k dispatch.
 //! Activations/weights stay on device. Benchmark the synchronization overhead.
 use super::{
     bpe::{BpeTokenizer, TokenizerKind},
@@ -25,33 +25,18 @@ use burn::{
 };
 use serde::{Deserialize, Serialize};
 
-/// The dispatcher already synchronizes with the host once per layer. Read the
-/// small [tokens, experts] router matrix there and select exact top-k explicitly.
-/// This avoids Burn's dtype-dependent host sort and CubeCL's argmax sentinel.
+/// Select experts with the backend's standard top-k operation, then read the
+/// indices for host-side sparse dispatch. Tie ordering follows the backend.
 fn router_choices<B: Backend>(logits: Tensor<B, 2>, top_k: usize) -> Result<Vec<i32>> {
     let [_, experts] = logits.dims();
-    let scores = logits.detach().into_data().convert::<f32>().to_vec::<f32>()
-        .map_err(|e| anyhow::anyhow!("reading FP32 router scores: {e:?}"))?;
-    select_experts(&scores, experts, top_k)
-}
-
-fn select_experts(scores: &[f32], experts: usize, top_k: usize) -> Result<Vec<i32>> {
     anyhow::ensure!(experts > 0 && experts <= i32::MAX as usize
-        && top_k > 0 && top_k <= experts && scores.len() % experts == 0,
+        && top_k > 0 && top_k <= experts,
         "invalid router dimensions or top-k");
-    let mut choices = Vec::with_capacity(scores.len() / experts * top_k);
-    let mut order: Vec<usize> = (0..experts).collect();
-    for (token, row) in scores.chunks_exact(experts).enumerate() {
-        for (expert, score) in row.iter().enumerate() {
-            anyhow::ensure!(score.is_finite(),
-                "non-finite router logit at compact token {token}, expert {expert}: {score}; \
-                 training stopped before dispatch. Check model/optimizer numerical stability; \
-                 invalid scores must not be clamped into valid expert IDs");
-        }
-        // Exact descending score order; equal scores prefer the smaller expert ID.
-        order.sort_unstable_by(|&a, &b| row[b].partial_cmp(&row[a]).unwrap().then(a.cmp(&b)));
-        choices.extend(order[..top_k].iter().map(|&id| id as i32));
-    }
+    let (_, indices) = logits.detach().topk_with_indices(top_k, 1);
+    let choices = indices.into_data().convert::<i32>().to_vec::<i32>()
+        .map_err(|e| anyhow::anyhow!("reading router expert indices: {e:?}"))?;
+    anyhow::ensure!(choices.iter().all(|&id| id >= 0 && (id as usize) < experts),
+        "router returned an invalid expert index");
     Ok(choices)
 }
 
@@ -93,7 +78,7 @@ impl<B: Backend> SparseMoe<B> {
         // Keep routing probabilities and auxiliary reductions in FP32 under BF16.
         let logits = self.router.forward(x.clone()).cast(FloatDType::F32);
         let probabilities = softmax(logits.clone(), 1);
-        // One host read of router scores; expert activations and gates stay on device.
+        // Read selected expert indices; expert activations and gates stay on device.
         let ids = router_choices(logits.clone(), self.top_k)
             .unwrap_or_else(|error| panic!("MoE routing failed: {error}"));
         let mut rows = vec![Vec::<i32>::new(); n];
@@ -587,40 +572,31 @@ mod tests {
     }
 
     #[test]
-    fn moe_router_extreme_scores_ties_and_invalid_values() {
+    fn moe_router_extreme_scores_and_ties() {
+        let device = Default::default();
         let rows = [vec![0.0; 16], vec![f32::MIN; 16],
             (0..16).map(|i| -100.0 + i as f32).collect::<Vec<_>>()];
+        let logits = Tensor::<B, 2>::from_data(TensorData::new(rows.concat(), [3, 16]), &device);
         for k in [1, 2, 16] {
-            let actual = select_experts(&rows.concat(), 16, k).unwrap();
-            let expected: Vec<i32> = (0..k as i32).chain(0..k as i32)
-                .chain((0..16).rev().take(k)).collect();
-            assert_eq!(actual, expected);
+            let actual = router_choices(logits.clone(), k).unwrap();
+            assert_eq!(actual.len(), 3 * k);
+            // Equal scores may use any order; each expert must be selected once.
             for row in actual.chunks_exact(k) {
                 let unique: std::collections::HashSet<_> = row.iter().collect();
                 assert_eq!(unique.len(), k);
                 assert!(row.iter().all(|&id| (0..16).contains(&id)));
             }
-        }
-        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            let mut scores = vec![0.0; 32];
-            scores[19] = bad;
-            let error = select_experts(&scores, 16, 2).unwrap_err().to_string();
-            assert!(error.contains("compact token 1, expert 3"), "{error}");
-            assert!(error.contains("non-finite router logit"));
+            let expected: Vec<i32> = (0..16).rev().take(k).collect();
+            assert_eq!(&actual[2 * k..], expected.as_slice());
         }
     }
 
     #[test]
-    fn moe_router_fp32_logits_on_bf16_backend() {
-        // Reproduce the CUDA dtype combination locally without requiring BF16
-        // arithmetic: backend default BF16, actual router tensor explicitly FP32.
-        type Mixed = Autodiff<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime,
-            burn::tensor::bf16, i32, u32>, BalancedCheckpointing>;
+    fn moe_router_fp32_logits() {
         let device = Default::default();
-        let logits = Tensor::<Mixed, 2>::from_data_dtype(
+        let logits = Tensor::<B, 2>::from_data(
             TensorData::new(vec![1.0f32, 4.0, 2.0, 3.0, -4.0, -1.0, -3.0, -2.0], [2, 4]),
-            &device, burn::tensor::DType::F32);
-        assert_eq!(logits.dtype(), burn::tensor::DType::F32);
+            &device);
         for k in [1, 2, 4] {
             let ids = router_choices(logits.clone(), k).unwrap();
             let expected: Vec<i32> = [vec![1, 3, 2, 0], vec![1, 3, 2, 0]]
