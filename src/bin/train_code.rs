@@ -10,8 +10,14 @@ fn main() -> anyhow::Result<()> {
         /// Validate config, tokenizer, cache and file split without GPU/model training.
         #[arg(long)]
         check: bool,
+        /// Run tiny CUDA/BF16 MoE training and checkpoint checks; no corpus/config required.
+        #[arg(long, conflicts_with = "check")]
+        smoke_test: bool,
     }
     let args = Args::parse();
+    if args.smoke_test {
+        return yumon_pet::brain::train::cuda_moe_smoke_test();
+    }
     run_code(&CodeConfig::load(&args.config)?, args.check)
 }
 

@@ -224,9 +224,23 @@ pub struct RunConfig {
     pub stages: Vec<StageConfig>,
 }
 
+/// Number of held-out prompts run through the model every time we do a
+/// qualitative inference check, for a well-rounded read on output quality
+/// (a single prompt can look fine or awful by chance).
+fn code_eval_prompts() -> Vec<String> {
+    vec![
+        "pub struct RunConfig {".to_string(),
+        "pub enum Architecture {".to_string(),
+        "pub struct StageConfig {".to_string(),
+        "pub fn softmax(logits: &[f32]) -> Vec<f32> {".to_string(),
+        "pub fn whole_word_match(text: &str, kw: &str) -> bool {".to_string(),
+    ]
+}
+
 /// Yumon Code is prepared locally but model training is restricted to RunPod.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool) -> Result<()> {
+    let prompts = code_eval_prompts();
     use crate::brain::{code_corpus, sample_cache::{self, CacheObjective}};
     config.validate()?;
     // if !check_only {
@@ -245,12 +259,22 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
     if check_only { return Ok(()); }
     #[cfg(any(feature = "cuda-training", all(target_os = "linux", not(feature = "desktop"))))]
     {
+        let architecture = match config.architecture {
+            code_corpus::CodeArchitecture::DecoderOnly => Architecture::DecoderOnly,
+            code_corpus::CodeArchitecture::Moe => Architecture::Moe {
+                num_experts: config.num_experts, top_k: config.top_k,
+            },
+        };
+        let arch_tag = match architecture {
+            Architecture::Moe { num_experts, top_k } => format!("Moe_e{num_experts}_k{top_k}"),
+            _ => "DecoderOnly".to_string(),
+        };
         let run = RunConfig {
-            name: format!("code_{}h_{}l_{}a_{}ff_{}len_b{}_DecoderOnly_bf16", config.embed_dim,
+            name: format!("code_{}h_{}l_{}a_{}ff_{}len_b{}_{arch_tag}_bf16", config.embed_dim,
                 config.n_layers, config.attn_heads, config.ff_dim, config.max_seq_len, config.batch_size),
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
             n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
-            max_seq_len: config.max_seq_len, architecture: Architecture::DecoderOnly,
+            max_seq_len: config.max_seq_len, architecture,
             stages: vec![StageConfig { stage: TrainingStage::Language, loss_threshold: 0.0,
                 epochs: config.epochs, batch_size: config.batch_size, first_lr: config.first_lr,
                 last_lr: config.last_lr, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 }],
@@ -266,9 +290,76 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
         }
         std::fs::write(identity_path, serde_json::to_vec_pretty(&identity)?)?;
         let device = burn::backend::cuda::CudaDevice::default();
-        train_causal_lm::<YumonDecBrain<TrainBackend>>(&run, &run_dir, &tokenizer,
-            &HashMap::new(), &[], &device, Some(prepared))?;
+        match architecture {
+            Architecture::Moe { .. } => train_causal_lm::<YumonMoeBrain<TrainBackend>>(
+                &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
+            _ => train_causal_lm::<YumonDecBrain<TrainBackend>>(
+                &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
+        }
     }
+    Ok(())
+}
+
+/// Tiny CUDA verification is kept independent of corpus preparation so the
+/// deployed train_code binary can check the real RunPod backend before training.
+pub fn cuda_moe_smoke_test() -> Result<()> {
+    println!("CUDA/BF16 MoE smoke test: Flash Attention + BalancedCheckpointing");
+    tiny_moe_smoke::<CudaTrainBackend>(&Default::default(), burn::tensor::DType::BF16)
+}
+
+fn tiny_moe_smoke<B>(device: &B::Device, expected_dtype: burn::tensor::DType) -> Result<()>
+where
+    B: AutodiffBackend + FlashAttention,
+    B::InnerBackend: FlashAttention,
+{
+    use burn::{record::{BinBytesRecorder, FullPrecisionSettings, Recorder}, tensor::FloatDType};
+    let inputs = || Tensor::<B, 2, Int>::from_ints(
+        [[1, 4, 5, 6, 0, 0, 0, 0], [1, 7, 8, 0, 0, 0, 0, 0]], device);
+    let targets = || Tensor::<B, 2, Int>::from_ints(
+        [[4, 5, 6, 2, 0, 0, 0, 0], [7, 8, 2, 0, 0, 0, 0, 0]], device).reshape([16]);
+    // Match the current 16-expert/top-2 config; also cover top-1 and k=E.
+    for top_k in [1, 2, 16] {
+        let config = YumonMoeBrainConfig::new(32, TrainingStage::Language)
+            .with_embed_dim(16).with_n_layers(2).with_attn_heads(2)
+            .with_ff_dim(32).with_max_seq_len(8).with_dropout_rate(0.0)
+            .with_num_experts(16).with_top_k(top_k);
+        let mut model: YumonMoeBrain<B> = config.init(device);
+        let before = model.token_head.weight.val().into_data().convert::<f32>().to_vec::<f32>().unwrap();
+        let mut optimizer = AdamWConfig::new().with_epsilon(1e-7)
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
+            .with_weight_decay(0.01).init();
+        // Exercise repeated optimizer updates beyond the reported ~50 batches.
+        let steps = if top_k == 2 { 64 } else { 3 };
+        for step in 1..=steps {
+            let (out, aux, counts) = model.forward_with_aux(inputs());
+            anyhow::ensure!(out.dtype() == expected_dtype, "unexpected model dtype");
+            anyhow::ensure!(aux.dtype() == burn::tensor::DType::F32, "auxiliary loss must be FP32");
+            anyhow::ensure!(counts.iter().all(|c| c.iter().sum::<usize>() == 7 * top_k), "incorrect dispatch counts");
+            let logits = out.reshape([16, 32]);
+            let correct = top3_correct(logits.clone().inner(), targets().inner());
+            let loss = masked_token_ce(logits, targets(), 7, 0.0) + aux;
+            let value = loss.clone().into_data().convert::<f32>().to_vec::<f32>()?[0];
+            anyhow::ensure!(value.is_finite(), "non-finite loss at top-{top_k}, step {step}");
+            let grads = GradientsParams::from_grads(loss.backward(), &model);
+            model = optimizer.step(0.01, model, grads);
+            println!("top-{top_k} step {step}/{steps}: loss={value:.6}, top3={correct}/7");
+        }
+        let after = model.token_head.weight.val().into_data().convert::<f32>().to_vec::<f32>()?;
+        anyhow::ensure!(before != after && after.iter().all(|x| x.is_finite()), "weights did not update correctly");
+        anyhow::ensure!(model.token_head.weight.val().dtype() == expected_dtype, "optimizer changed dtype");
+        let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+        let bytes = recorder.record(model.clone().into_record(), ())
+            .map_err(|e| anyhow::anyhow!("checkpoint save: {e:?}"))?;
+        let record = recorder.load(bytes, device).map_err(|e| anyhow::anyhow!("checkpoint load: {e:?}"))?;
+        let restored: YumonMoeBrain<B> = config.init(device).load_record(record);
+        let reference = model.valid().forward(inputs().inner()).cast(FloatDType::F32)
+            .into_data().to_vec::<f32>()?;
+        let result = restored.valid().forward(inputs().inner()).cast(FloatDType::F32)
+            .into_data().to_vec::<f32>()?;
+        anyhow::ensure!(result.iter().zip(reference).all(|(a, b)| a.is_finite() && (a - b).abs() <= 1e-5 * (1.0 + b.abs())),
+            "checkpoint predictions differ");
+    }
+    println!("MoE smoke test passed: 2 samples, 64 top-2 steps plus 3 each for top-1/top-16, checkpoint round trips.");
     Ok(())
 }
 
@@ -524,7 +615,7 @@ fn ensure_same_tokenizer(current: &TokenizerKind, saved: &TokenizerKind) -> Resu
     Ok(())
 }
 
-impl<B: Backend> CausalLm<B> for YumonMoeBrain<B> {
+impl<B: FlashAttention> CausalLm<B> for YumonMoeBrain<B> {
     fn logits(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> { self.forward(tokens) }
     fn generate(&self, tokenizer: &TokenizerKind, prompt: &str, max_tokens: usize, device: &B::Device) -> GenerationResult {
         self.generate_unmasked_parsed(tokenizer, prompt, max_tokens, device)
@@ -539,7 +630,7 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             .with_n_layers(run_cfg.n_layers).with_attn_heads(run_cfg.attn_heads)
             .with_ff_dim(run_cfg.ff_dim).with_max_seq_len(run_cfg.max_seq_len)
             .with_num_experts(num_experts).with_top_k(top_k);
-        println!("MoE: {} experts, top-{}; FFN parameters/layer: {} total, {} active/token (excluding router).",
+        println!("MoE: {} experts, top-{}; Flash Attention, BalancedCheckpointing; FFN parameters/layer: {} total, {} active/token (excluding router).",
             num_experts, top_k, 3 * run_cfg.embed_dim * run_cfg.ff_dim * num_experts,
             3 * run_cfg.embed_dim * run_cfg.ff_dim * top_k);
         if !run_dir.join("model.bin").exists() {
@@ -951,11 +1042,10 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
     // batch 256 was already too large at 128 hidden on this hardware), not by
     // data volume. Reduce this matrix, don't reduce the dataset, if a sweep
     // runs too slow.
-    // Dense decoder-only RunPod run: 1024 wide x 24 layers x 32 heads (head
-    // dim 32, the flash kernel's fastest measured width), ~436M params, batch
-    // 32 x 256 tokens (Dockerfile). Estimated peak ~28 GiB: weights + grads +
-    // AdamW 6.5 GiB, stored activations 18.3 GiB, logits/CE 3.2 GiB - scaled
-    // from training_memory_probe at 256 wide on wgpu, so confirm on the pod.
+    // Pet H100 starting shape: 1024 wide x 24 layers x 32 heads, context 256.
+    // Four experts/top-1 gives ~1.34B total / ~436M active at vocab 16384.
+    // Both causal architectures use flash attention and balanced checkpointing.
+    // See configs/runpod-h100.md; peak memory must be measured on the pod.
     let sizes:       [usize; 1] = [
         // 32,
         // 64,
@@ -963,7 +1053,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 256, // smaller, maybe good seq length of 256
         // 512 // 220M ideal
         // 1024, // ~1.32B total / ~411M active at 24 layers, 4 experts top-1
-        1024, // dense: ~436M at 24 layers
+        1024,
     ];
     let layer_counts: [usize; 1] = [
         // 1,
@@ -995,30 +1085,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 32
         // 64
     ];
-    // For Moe, num_experts/top_k are swept here as real matrix dimensions
-    // instead of the single fixed pair the CLI's --moe-experts/--moe-top-k
-    // used to stamp onto every run - those two CLI flags are now unused for
-    // architecture=moe (kept only for the other architectures' CLI parsing).
-    let moe_expert_configs: [(usize, usize); 1] = [
-        // (2, 1),
-        (4, 1),
-        // (4, 2),
-        // (8, 1), // ~420M total at 512 wide x 16 layers
-        // (8, 2),
-        // (16, 2), // stretch: doubles total params, same active params as (8,2)
-    ];
-    let architectures: Vec<Architecture> = if matches!(architecture, Architecture::Moe { .. }) {
-        moe_expert_configs
-            .iter()
-            .map(|&(num_experts, top_k)| Architecture::Moe { num_experts, top_k })
-            .collect()
-    } else {
-        vec![
-            // Architecture::DecoderOnly,
-            // Architecture::EncoderDecoder,
-            architecture,
-        ]
-    };
+    // Honor the CLI expert count and routing choice.
+    let architectures = vec![architecture];
     let stages = [
         TrainingStage::Language,
         // TrainingStage::Structured
@@ -2002,6 +2070,20 @@ mod language_run_tests {
 
 #[cfg(test)]
 mod moe_loss_tests {
+    #[test]
+    fn moe_tiny_training_smoke_local() {
+        type Local = burn::backend::Autodiff<
+            burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>,
+            burn::backend::autodiff::checkpoint::strategy::BalancedCheckpointing>;
+        super::tiny_moe_smoke::<Local>(&Default::default(), burn::tensor::DType::F32).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires CUDA GPU with BF16 support"]
+    fn cuda_bf16_moe_tiny_training_smoke() {
+        super::cuda_moe_smoke_test().unwrap();
+    }
+
     use super::*;
     use burn::backend::Wgpu;
     type B = Wgpu;
@@ -2042,10 +2124,12 @@ mod moe_loss_tests {
         let runs = generate_run_configs(16, Architecture::Moe { num_experts: 4, top_k: 1 });
         assert_eq!(runs.len(), 1);
         let run = &runs[0];
-        assert_eq!((run.embed_dim, run.n_layers, run.attn_heads, run.ff_dim), (1024, 24, 8, 4096));
+        assert_eq!((run.embed_dim, run.n_layers, run.attn_heads, run.ff_dim), (1024, 24, 32, 4096));
         assert!(matches!(run.architecture, Architecture::Moe { num_experts: 4, top_k: 1 }));
         assert_eq!(run.stages[0].batch_size, 16);
-        assert_eq!(run.name, "1024h_24l_8a_512len_b16_Moe_e4_k1_Language");
+        assert_eq!(run.name, "1024h_24l_32a_256len_b16_Moe_e4_k1_Language_bf16");
+        let custom = generate_run_configs(8, Architecture::Moe { num_experts: 8, top_k: 2 });
+        assert!(matches!(custom[0].architecture, Architecture::Moe { num_experts: 8, top_k: 2 }));
     }
 
     #[test]
@@ -2144,8 +2228,8 @@ mod moe_loss_tests {
 /// process so the memory pool starts empty. Example (repo root):
 /// YUMON_PROBE=dec-balanced PROBE_WIDTH=256 PROBE_LAYERS=16 PROBE_BATCH=32 \
 ///   cargo test --release --lib training_memory_probe -- --ignored --nocapture
-/// Variants: dec-balanced, dec-plain, moe-balanced, moe-fusion (the previous
-/// setup: fusion wgpu, no checkpointing), attn-flash-{balanced,plain},
+/// Variants: dec-balanced, dec-plain, moe-balanced, moe-plain (no checkpointing),
+/// attn-flash-{balanced,plain},
 /// attn-naive-{balanced,plain} (attention alone at the model's shape).
 #[cfg(test)]
 mod memory_probe_tests {
@@ -2226,7 +2310,7 @@ mod memory_probe_tests {
         });
     }
 
-    fn moe<AD: AutodiffBackend<Device = WgpuDevice>>(label: &str, s: &Shape) {
+    fn moe<AD: AutodiffBackend<Device = WgpuDevice> + FlashAttention>(label: &str, s: &Shape) {
         let device = WgpuDevice::default();
         let config = YumonMoeBrainConfig::new(s.vocab, TrainingStage::Language)
             .with_embed_dim(s.width).with_hidden_units(s.width).with_n_layers(s.layers)
@@ -2274,7 +2358,7 @@ mod memory_probe_tests {
             "dec-balanced" => dec::<Autodiff<Inner, BalancedCheckpointing>>(&variant, &s),
             "dec-plain" => dec::<Autodiff<Inner, NoCheckpointing>>(&variant, &s),
             "moe-balanced" => moe::<Autodiff<Inner, BalancedCheckpointing>>(&variant, &s),
-            "moe-fusion" => moe::<Autodiff<burn::backend::Wgpu>>(&variant, &s),
+            "moe-plain" => moe::<Autodiff<Inner, NoCheckpointing>>(&variant, &s),
             "attn-flash-balanced" => attn::<Autodiff<Inner, BalancedCheckpointing>>(&variant, true, &s),
             "attn-flash-plain" => attn::<Autodiff<Inner, NoCheckpointing>>(&variant, true, &s),
             "attn-naive-balanced" => attn::<Autodiff<Inner, BalancedCheckpointing>>(&variant, false, &s),

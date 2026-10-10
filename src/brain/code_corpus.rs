@@ -12,10 +12,22 @@ use tokenizers::{AddedToken, Tokenizer, models::bpe::{BPE, BpeTrainerBuilder},
 use super::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN, bpe::{BpeTokenizer, TokenizerKind},
     samples::{Action, CardinalDir, Sample, WorldContext}};
 
+/// Missing architecture fields in older configs keep the dense decoder.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodeArchitecture {
+    #[default]
+    DecoderOnly,
+    Moe,
+}
+
 /// Paths are relative to the working directory, so the same config works in /app.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CodeConfig {
+    pub architecture: CodeArchitecture,
+    pub num_experts: usize,
+    pub top_k: usize,
     pub source: PathBuf,
     pub cache: PathBuf,
     pub tokenizer: String,
@@ -38,6 +50,7 @@ pub struct CodeConfig {
 impl Default for CodeConfig {
     fn default() -> Self {
         Self {
+            architecture: CodeArchitecture::DecoderOnly, num_experts: 4, top_k: 1,
             source: "../rust-code".into(), cache: "training-cache/code.bin".into(),
             tokenizer: "yumon_code_bpe".into(), max_seq_len: 512,
             exclude_dirs: [".git", "target", "node_modules"].map(String::from).to_vec(),
@@ -58,6 +71,8 @@ impl CodeConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        ensure!(self.num_experts > 0 && self.top_k > 0 && self.top_k <= self.num_experts,
+            "require num_experts > 0 and 1 <= top_k <= num_experts");
         ensure!(self.max_seq_len >= 2, "max_seq_len must be >= 2");
         ensure!(self.vocab_size >= 260, "vocab_size must cover 256 bytes and four special tokens");
         ensure!(self.embed_dim > 0 && self.attn_heads > 0 && self.embed_dim % self.attn_heads == 0,

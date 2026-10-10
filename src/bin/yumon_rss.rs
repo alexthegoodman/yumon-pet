@@ -388,7 +388,7 @@ mod desktop {
                 YumonDecBrain<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>,
                 |b, t, p, n, d| b.generate_unmasked_parsed(t, p, n, d).raw_output
             ),
-            Architecture::Moe => load!(YumonMoeBrain<Wgpu>, |b, t, p, n, d| b
+            Architecture::Moe => load!(YumonMoeBrain<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>, |b, t, p, n, d| b
                 .generate_unmasked_parsed(t, p, n, d)
                 .raw_output),
             Architecture::Xlstm => load!(YumonXLstmBrain<Wgpu>, |b, t, p, n, d| b

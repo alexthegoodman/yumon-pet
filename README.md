@@ -293,7 +293,7 @@ locally is already in the snapshot.
 3. Launch a GPU pod from the image. The default command starts `train-brain`
    with `YUMON_SAMPLE_CACHE=/app/training-cache/samples.bin` and saves checkpoints
    under `/workspace/checkpoints/brain/<run-name>/`. It resumes existing checkpoints.
-   It trains the dense decoder-only model by default (`--architecture decoder-only`).
+   It trains MoE by default; `--architecture decoder-only` selects the dense model.
    Decoder-only and MoE honor `--epochs` and `--batch-size`; model dimensions and
    context come from the grid in `src/brain/train.rs`.
 
@@ -308,10 +308,10 @@ cargo test --lib --no-default-features sample_cache
 cargo test --lib --no-default-features loading_tests
 ```
 
-## Decoder-only training (default)
+## Decoder-only training (optional)
 
 ```sh
-cargo run --release --no-default-features --bin yumon-pet -- train-brain --batch-size 32 --epochs 15
+cargo run --release --no-default-features --bin yumon-pet -- train-brain --architecture decoder-only --batch-size 32 --epochs 15
 ```
 
 `YumonDecBrain` (`src/brain/decoder_model.rs`): dense pre-norm decoder, RoPE,
@@ -381,11 +381,37 @@ YUMON_PROBE=dec-balanced PROBE_WIDTH=256 PROBE_LAYERS=16 PROBE_BATCH=32 cargo te
 cargo test --lib decoder_model -- --test-threads=1
 ```
 
-If a run panics with `matmul_naive ... Cube count too big`, delete
-`target/autotune` (the matmul autotune key ignores batch size; Burn's
-`RotaryEncoding`, still used by MoE, hits it at batch*heads*seq >= 65536).
+Both decoders now use elementwise RoPE, avoiding the old RotaryEncoding batched
+matmul that could hit `Cube count too big` at large batch/head counts.
 
-## Sparse MoE training
+## Sparse MoE training (default)
+
+For a CUDA/BF16 setup check on RunPod, rebuild the image and run
+`./train_code --smoke-test` from `/app`. It bypasses the config and corpus and
+uses the actual CUDA BF16 + BalancedCheckpointing backend: two synthetic samples,
+width 16, two layers, 16 experts, and 64 optimizer steps for top-2, plus three
+each for top-1 and top-16. It checks finite loss, routing counts, weight updates, top-3
+metrics and in-memory checkpoint round trips without writing training artifacts.
+From a source checkout use:
+
+```sh
+cargo run --release --no-default-features --features cuda-training --bin train_code -- --smoke-test
+```
+
+This smoke command always selects CUDA (even on a local build); it never silently
+falls back to WGPU. MoE routing reads explicitly converted FP32 scores at the
+existing CPU dispatch synchronization, then selects exact top-k with ties broken
+by expert ID. This avoids both Burn 0.20's dtype-dependent host sort and invalid
+indices from CubeCL argmax. Non-finite scores stop training with a diagnostic;
+they are not silently replaced. The transfer is now `tokens * experts` scores
+instead of `tokens * top_k` indices; expert computation and differentiable gates
+remain on CUDA. Throughput impact has not been measured on CUDA.
+
+The reviewable [single-H100 proposal](configs/runpod-h100.md) covers Code and Pet.
+[Code's default JSON](configs/yumon-code.json) selects four experts, top-1 routing,
+1024 width, 24 layers, 512 context, and batch 8. Existing JSON without an
+`architecture` field retains dense-decoder behavior.
+
 
 ```sh
 cargo run --release --no-default-features --bin yumon-pet -- train-brain --architecture moe --batch-size 8 --epochs 15 --out-dir checkpoints/moe --moe-experts 4 --moe-top-k 1
@@ -394,16 +420,20 @@ cargo run --release --no-default-features --bin yumon-pet -- train-brain --archi
 This selects `Architecture::Moe` in the existing training grid. It uses the same
 stage data, AdamW, charts, periodic text generation, and checkpoint workflow.
 The grid dimensions and data sources remain in `src/brain/train.rs`. The default
-architecture is decoder-only; `--architecture encoder-decoder` selects the dense
+architecture is MoE; `--architecture encoder-decoder` selects the dense
 encoder/decoder. The separate `train_ui` and `chat_ui` binaries still use their
 existing hardcoded models; MoE training is selected through `train-brain`.
 
-The MoE decoder uses causal scaled attention with RoPE and sparse SwiGLU FFNs.
+The MoE decoder uses the same causal Flash Attention and elementwise RoPE as
+the dense decoder, with sparse SwiGLU FFNs. Both retain BF16 CUDA training and
+BalancedCheckpointing. Left/interior padding uses a masked attention fallback.
+Router probabilities and auxiliary losses are reduced in FP32.
 Every non-padding token selects `--moe-top-k` of `--moe-experts` experts. Tokens
 are gathered into compact expert batches, unused experts are skipped, and the
 weighted results are scattered back. No expert capacity limit or token dropping
-is used. Only the integer dispatch indices are read back to the CPU; expert
-weights, activations, matrix multiplies, and gradients remain on the GPU.
+is used. The small routing score matrix is read back to the CPU for exact top-k
+dispatch; expert weights, activations, matrix multiplies, and gradients remain
+on the GPU.
 Top-1 is the cheapest setting. Top-k must be between 1 and the expert count.
 
 With 4 experts and top-1, expert matrix multiplies process one quarter of the

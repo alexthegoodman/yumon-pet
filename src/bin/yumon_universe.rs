@@ -91,7 +91,7 @@ mod desktop {
                 }};
             }
             match args.architecture {
-                Architecture::Moe => serve!(YumonMoeBrain<Wgpu>, |b, t, p, n, d| b
+                Architecture::Moe => serve!(YumonMoeBrain<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>, |b, t, p, n, d| b
                     .generate_unmasked_parsed(t, p, n, d)
                     .raw_output),
                 Architecture::Xlstm => serve!(YumonXLstmBrain<Wgpu>, |b, t, p, n, d| b

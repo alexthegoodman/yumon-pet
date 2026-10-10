@@ -132,7 +132,7 @@ fn main() -> Result<()> {
     thread::spawn(move || {
         // let res = YumonBrain::<Wgpu>::load(&brain_cp, &device);
         // let res = YumonXLstmBrain::<Wgpu>::load(&brain_cp, &device);
-        let res = YumonMoeBrain::<Wgpu>::load(&brain_cp, &device);
+        let res = YumonMoeBrain::<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>::load(&brain_cp, &device);
         let (brain_model, tokenizer, config) = match res {
             Ok(m) => {
                 tx_model.send(Message::System("Models loaded!".into())).unwrap();

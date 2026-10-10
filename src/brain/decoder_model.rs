@@ -48,12 +48,12 @@ struct DecBlock<B: Backend> {
 const ROPE_THETA: f64 = 10_000.0;
 
 /// cos/sin of position * theta^(-2i/dim) for pair i, shaped [1, 1, seq, dim/2, 1].
-struct RopeTables<B: Backend> {
+pub(super) struct RopeTables<B: Backend> {
     cos: Tensor<B, 5>,
     sin: Tensor<B, 5>,
 }
 impl<B: Backend> RopeTables<B> {
-    fn new(seq: usize, dim: usize, device: &B::Device) -> Self {
+    pub(super) fn new(seq: usize, dim: usize, device: &B::Device) -> Self {
         let half = dim / 2;
         let (mut cos, mut sin) = (Vec::with_capacity(seq * half), Vec::with_capacity(seq * half));
         for pos in 0..seq {
@@ -70,7 +70,7 @@ impl<B: Backend> RopeTables<B> {
 
 /// Rotates interleaved pairs (x[2i], x[2i+1]) of x: [batch, heads, seq, dim],
 /// the same convention as burn::nn::RotaryEncoding.
-fn apply_rope<B: Backend>(x: Tensor<B, 4>, rope: &RopeTables<B>) -> Tensor<B, 4> {
+pub(super) fn apply_rope<B: Backend>(x: Tensor<B, 4>, rope: &RopeTables<B>) -> Tensor<B, 4> {
     let [batch, heads, seq, dim] = x.dims();
     let pairs = x.reshape([batch, heads, seq, dim / 2, 2]);
     let x0 = pairs.clone().narrow(4, 0, 1);

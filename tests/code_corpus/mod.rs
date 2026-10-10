@@ -6,6 +6,24 @@ use crate::brain::{
     sample_cache::{self, CacheObjective}, samples::TrainingStage,
 };
 
+#[test]
+fn architecture_config_is_backward_compatible_and_validates_routing() {
+    use code_corpus::CodeArchitecture;
+    let old: CodeConfig = serde_json::from_str("{}").unwrap();
+    assert_eq!(old.architecture, CodeArchitecture::DecoderOnly);
+    let h100 = CodeConfig::load(std::path::Path::new("configs/yumon-code.json")).unwrap();
+    assert_eq!(h100.architecture, CodeArchitecture::Moe);
+    let explicit: CodeConfig = serde_json::from_str(
+        r#"{"architecture":"moe","num_experts":16,"top_k":2}"#).unwrap();
+    explicit.validate().unwrap();
+    assert_eq!((explicit.num_experts, explicit.top_k), (16, 2));
+    for (experts, top_k) in [(0, 1), (4, 0), (4, 5)] {
+        let invalid = CodeConfig { num_experts: experts, top_k, ..h100.clone() };
+        assert!(invalid.validate().is_err());
+    }
+    assert!(serde_json::from_str::<CodeConfig>(r#"{"architecture":"unknown"}"#).is_err());
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
