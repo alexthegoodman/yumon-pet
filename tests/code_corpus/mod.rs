@@ -11,7 +11,7 @@ fn architecture_config_is_backward_compatible_and_validates_routing() {
     use code_corpus::CodeArchitecture;
     let old: CodeConfig = serde_json::from_str("{}").unwrap();
     assert_eq!(old.architecture, CodeArchitecture::DecoderOnly);
-    let h100 = CodeConfig::load(std::path::Path::new("configs/yumon-code.json")).unwrap();
+    let h100 = CodeConfig::load(std::path::Path::new("configs/yumon-code-moe.json")).unwrap();
     assert_eq!(h100.architecture, CodeArchitecture::Moe);
     let explicit: CodeConfig = serde_json::from_str(
         r#"{"architecture":"moe","num_experts":16,"top_k":2}"#).unwrap();

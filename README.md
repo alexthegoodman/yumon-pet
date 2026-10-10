@@ -591,3 +591,11 @@ Secondary:
 ## TODO
 
 - Training UI (train tokenizer, organize data, run structured and unstructured training sessions, etc)
+
+## Code complexity buckets
+
+Use `sort_code_buckets` to classify the prepared Rust cache into four empirical
+structural complexity tiers for curriculum training. Calibration is explicit
+and frozen; sorting prints sample destinations and writes training-compatible
+bucket caches, per-sample records and a validation report. See
+[the counting rules and commands](docs/code-complexity.md).

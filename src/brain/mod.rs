@@ -16,6 +16,8 @@ pub mod samples;
 pub mod sample_cache;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod code_corpus;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod code_complexity;
 pub mod keywords;
 pub mod fixer;
 pub mod loader;

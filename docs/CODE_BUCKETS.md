@@ -3,7 +3,12 @@
 **Story Type:** Feature  
 **Component:** Data Processing Pipeline  
 **Priority:** High  
-**Status:** Proposed
+**Status:** Implemented for Rust syntax analysis v1
+
+Implementation, metric definitions, limitations, calibration commands and
+curriculum cache usage are documented in [code-complexity.md](code-complexity.md).
+The initial reference and bucket outputs are in `training-cache`; macro-containing
+samples are preserved separately when required metrics cannot be extracted.
 
 ## User Story
 
@@ -234,17 +239,17 @@ The pipeline shall report tier distributions, analysis failure rates, missing-me
 
 ## Definition of Done
 
-- [ ] Supported languages and analysis units are documented.
-- [ ] Deterministic metric extractors are implemented and tested.
-- [ ] Normalization and composite scoring are implemented.
-- [ ] A versioned reference population is established.
-- [ ] Four-tier classification is implemented with deterministic tie handling.
-- [ ] Structured output records are integrated into the data pipeline.
-- [ ] Parsing failures and missing metrics are handled explicitly.
-- [ ] Scoring configuration and analyzer versions are recorded.
-- [ ] Unit and integration tests verify reproducibility.
-- [ ] Baseline comparison and tier-distribution reports are available.
-- [ ] Pipeline documentation and operational monitoring are complete.
+- [x] Supported languages and analysis units are documented.
+- [x] Deterministic metric extractors are implemented and tested.
+- [x] Normalization and composite scoring are implemented.
+- [x] A versioned reference population is established.
+- [x] Four-tier classification is implemented with deterministic tie handling.
+- [x] Structured output records are integrated into the data pipeline.
+- [x] Parsing failures and missing metrics are handled explicitly.
+- [x] Scoring configuration and analyzer versions are recorded.
+- [x] Unit and integration tests verify reproducibility.
+- [x] Baseline comparison and tier-distribution reports are available.
+- [x] Pipeline documentation and operational monitoring are complete.
 
 ## Implementation Notes
 
