@@ -27,12 +27,12 @@ COPY src ./src
 # driver, panicking at container start with "undefined symbol".
 #
 # (cubecl-cuda 0.9.0's actual compile-time floor is CUDA 12.0 - anything
-# below fails to build, verified locally.) Set to 12080 to match the
-# runpod/base:*-cuda1281-* runtime image below (12.8.1 rounds down to
-# cudarc's nearest known value, 12.8.0 - fine, older ABI subset). Keep this
-# in sync with that image's version; override at build time with
-# `--build-arg CUDARC_CUDA_VERSION=12060` if you switch images again.
-ARG CUDARC_CUDA_VERSION=12080
+# below fails to build, verified locally.) cudarc 0.18.2 supports up to CUDA
+# 13.1, so target 13010 with the CUDA 13.2 runtime below. 13020 is not a
+# supported value in this dependency version. Keep the major version aligned
+# so dynamic loading searches for CUDA 13 toolkit libraries such as NVRTC.
+# Override at build time with `--build-arg CUDARC_CUDA_VERSION=...` if needed.
+ARG CUDARC_CUDA_VERSION=13010
 ENV CUDARC_CUDA_VERSION=${CUDARC_CUDA_VERSION}
 
 # Pet training (disabled):
@@ -63,14 +63,14 @@ RUN cargo build --release --no-default-features --bin train_code
 # nvidia-container-toolkit refuses to even start the container if the host
 # driver is older than what the image declares. A 12.6.3 nvidia/cuda image
 # was rejected here with "unsatisfied condition: cuda>=12.6" against the
-# actual RunPod host driver, so if 12.8.1 hits the same rejection, that's
+# actual RunPod host driver, so if 13.2.0 hits the same rejection, that's
 # the same real constraint (older driver on that specific pod), not
 # something this image swap alone fixes - the fix in that case is a pod
 # with a newer driver (check `nvidia-smi` -> "CUDA Version: X.Y" on it
 # before deploying), or dropping this tag and CUDARC_CUDA_VERSION back down
 # to something like 12.0 (nvidia/cuda:12.0.0-runtime-ubuntu22.04).
 ########################################
-FROM runpod/base:1.0.2-cuda1281-ubuntu2204 AS runtime
+FROM runpod/base:1.4.0-cuda1320-ubuntu2404 AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl \
