@@ -1,3 +1,10 @@
+> Historical BF16 sizing proposal. Training now defaults to FP32 on both CUDA and
+> local WGPU. The current production JSON uses 16 experts/top-2, while the proposal
+> below assumed four experts/top-1. Recalculate memory before using these figures:
+> at width 1024, 24 layers and vocabulary 16384, 16 experts are about 4.97B total
+> parameters. FP32 parameters, gradients and two moments alone are roughly 74 GiB,
+> before activations and temporaries. The local smoke config is independent.
+
 # Single-H100 MoE training proposal
 
 Review target: one full H100 with at least 80 GB VRAM. NVIDIA lists 80 GB for

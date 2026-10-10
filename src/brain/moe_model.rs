@@ -694,7 +694,7 @@ mod tests {
     #[ignore = "requires a CUDA GPU with native BF16 support; no profiling"]
     fn cuda_bf16_moe_optimizer_and_checkpoint() {
         use burn::{record::BinBytesRecorder, tensor::DType};
-        type AD = crate::brain::train::CudaTrainBackend;
+        type AD = crate::brain::train::CudaBf16TrainBackend;
         let device = Default::default();
         let config = tiny_config();
         let model: YumonMoeBrain<AD> = config.init(&device);

@@ -62,9 +62,13 @@ pub type TrainRuntime = CudaTrainRuntime;
 // Used by the headless `train-brain` CLI path (`run`, below) — this is what
 // RunPod/Docker actually runs. CUDA talks to the driver directly and needs no
 // Vulkan/GL adapter, unlike wgpu, which RunPod's driver stack doesn't expose.
-// CUDA defaults to BF16, including model parameters, gradients and AdamW moments.
-// Attention accumulators and reporting/loss reductions remain FP32.
+// FP32 training on CUDA matches local WGPU precision, including AdamW moments.
+// Keep the explicit BF16 alias for optional kernel regression tests.
 pub type CudaTrainBackend = burn::backend::Autodiff<
+    burn_cubecl::CubeBackend<cubecl::cuda::CudaRuntime, f32, i32, u8>,
+    burn::backend::autodiff::checkpoint::strategy::BalancedCheckpointing,
+>;
+pub type CudaBf16TrainBackend = burn::backend::Autodiff<
     burn_cubecl::CubeBackend<cubecl::cuda::CudaRuntime, burn::tensor::bf16, i32, u8>,
     burn::backend::autodiff::checkpoint::strategy::BalancedCheckpointing,
 >;
@@ -237,17 +241,12 @@ fn code_eval_prompts() -> Vec<String> {
     ]
 }
 
-/// Yumon Code is prepared locally but model training is restricted to RunPod.
+/// Yumon Code uses the same trainer locally (WGPU) and on RunPod (CUDA).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool) -> Result<()> {
     let prompts = code_eval_prompts();
     use crate::brain::{code_corpus, sample_cache::{self, CacheObjective}};
     config.validate()?;
-    // if !check_only {
-    //     anyhow::ensure!(cfg!(all(target_os = "linux", not(feature = "desktop")))
-    //         && std::env::var_os("RUNPOD_POD_ID").is_some(),
-    //         "train-code requires a headless Linux build on RunPod; --check only validates the cache locally");
-    // }
     let tokenizer = code_corpus::load_tokenizer(&config.tokenizer)?;
     let metadata = sample_cache::read_metadata(&config.cache)?;
     anyhow::ensure!(metadata.seed == config.seed, "cache seed differs from config; rebuild the cache or restore the seed");
@@ -257,7 +256,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
     println!("Yumon Code: {} training chunks, {} validation chunks; context {}",
         prepared.0.len(), prepared.1.len(), config.max_seq_len);
     if check_only { return Ok(()); }
-    #[cfg(any(feature = "cuda-training", all(target_os = "linux", not(feature = "desktop"))))]
+
     {
         let architecture = match config.architecture {
             code_corpus::CodeArchitecture::DecoderOnly => Architecture::DecoderOnly,
@@ -270,7 +269,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             _ => "DecoderOnly".to_string(),
         };
         let run = RunConfig {
-            name: format!("code_{}h_{}l_{}a_{}ff_{}len_b{}_{arch_tag}_bf16", config.embed_dim,
+            name: format!("code_{}h_{}l_{}a_{}ff_{}len_b{}_{arch_tag}_f32", config.embed_dim,
                 config.n_layers, config.attn_heads, config.ff_dim, config.max_seq_len, config.batch_size),
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
             n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
@@ -289,7 +288,8 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             anyhow::ensure!(previous["cache"] == identity["cache"], "checkpoint cache identity differs; use a new out_dir");
         }
         std::fs::write(identity_path, serde_json::to_vec_pretty(&identity)?)?;
-        let device = burn::backend::cuda::CudaDevice::default();
+        let device = <TrainBackend as Backend>::Device::default();
+        println!("Training precision: FP32; Flash Attention + BalancedCheckpointing.");
         match architecture {
             Architecture::Moe { .. } => train_causal_lm::<YumonMoeBrain<TrainBackend>>(
                 &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
@@ -303,8 +303,8 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
 /// Tiny CUDA verification is kept independent of corpus preparation so the
 /// deployed train_code binary can check the real RunPod backend before training.
 pub fn cuda_moe_smoke_test() -> Result<()> {
-    println!("CUDA/BF16 MoE smoke test: Flash Attention + BalancedCheckpointing");
-    tiny_moe_smoke::<CudaTrainBackend>(&Default::default(), burn::tensor::DType::BF16)
+    println!("CUDA/FP32 MoE smoke test: Flash Attention + BalancedCheckpointing");
+    tiny_moe_smoke::<CudaTrainBackend>(&Default::default(), burn::tensor::DType::F32)
 }
 
 fn tiny_moe_smoke<B>(device: &B::Device, expected_dtype: burn::tensor::DType) -> Result<()>
@@ -1127,7 +1127,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     TrainingStage::Structured => "Structured",
                                 };
                                 let name = format!(
-                                    "{}h_{}l_{}a_{}len_b{}_{}_{}_bf16",
+                                    "{}h_{}l_{}a_{}len_b{}_{}_{}_f32",
                                     size, n_layers, attn_heads, max_seq_len, batch_size, arch_tag, stage_tag,
                                 );
                                 runs.push(RunConfig {
@@ -1287,7 +1287,7 @@ pub fn run_with_architecture(
     #[cfg(any(feature = "cuda-training", all(target_os = "linux", not(feature = "desktop"))))]
     let device = burn::backend::cuda::CudaDevice::default();
     #[cfg(any(feature = "cuda-training", all(target_os = "linux", not(feature = "desktop"))))]
-    println!("Training precision: BF16 parameters, activations, gradients and optimizer moments; FP32 attention accumulation and final loss/metric reductions.");
+    println!("Training precision: FP32 parameters, activations, gradients and optimizer moments.");
     #[cfg(not(any(feature = "cuda-training", all(target_os = "linux", not(feature = "desktop")))))]
     println!("Training precision: FP32 (local WGPU backend).");
     let label_keywords   = build_label_keywords();
@@ -2081,7 +2081,7 @@ mod moe_loss_tests {
     #[test]
     #[ignore = "requires CUDA GPU with BF16 support"]
     fn cuda_bf16_moe_tiny_training_smoke() {
-        super::cuda_moe_smoke_test().unwrap();
+        super::tiny_moe_smoke::<super::CudaBf16TrainBackend>(&Default::default(), burn::tensor::DType::BF16).unwrap();
     }
 
     use super::*;
@@ -2116,7 +2116,7 @@ mod moe_loss_tests {
     #[test]
     #[ignore = "requires a CUDA GPU with native BF16 support; no profiling"]
     fn cuda_bf16_top3_accuracy() {
-        check_top3::<<CudaTrainBackend as AutodiffBackend>::InnerBackend>();
+        check_top3::<<CudaBf16TrainBackend as AutodiffBackend>::InnerBackend>();
     }
 
     #[test]
@@ -2127,7 +2127,7 @@ mod moe_loss_tests {
         assert_eq!((run.embed_dim, run.n_layers, run.attn_heads, run.ff_dim), (1024, 24, 32, 4096));
         assert!(matches!(run.architecture, Architecture::Moe { num_experts: 4, top_k: 1 }));
         assert_eq!(run.stages[0].batch_size, 16);
-        assert_eq!(run.name, "1024h_24l_32a_256len_b16_Moe_e4_k1_Language_bf16");
+        assert_eq!(run.name, "1024h_24l_32a_256len_b16_Moe_e4_k1_Language_f32");
         let custom = generate_run_configs(8, Architecture::Moe { num_experts: 8, top_k: 2 });
         assert!(matches!(custom[0].architecture, Architecture::Moe { num_experts: 8, top_k: 2 }));
     }

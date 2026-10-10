@@ -202,9 +202,9 @@ default command is:
 ./train_code --config configs/yumon-code.json
 ```
 
-Actual training requires a headless Linux build and the
-[`RUNPOD_POD_ID` variable supplied by RunPod](https://docs.runpod.io/pods/templates/environment-variables).
-It uses CUDA/BF16, saves checkpoints under `out_dir`, and resumes compatible
+Training uses WGPU/FP32 locally on Windows and CUDA/FP32 on headless Linux
+(or builds with `--features cuda-training`). It saves checkpoints under `out_dir`
+and resumes compatible
 model weights. As in the existing trainer, optimizer state and the within-epoch
 position are not restored. Code runs honor the configured epoch count without
 the Pet grid's automatic loss-drop early stop.
@@ -322,11 +322,12 @@ SwiGLU MLP, same data, batches, loss, validation and checkpoint layout as MoE
 `Autodiff<CubeBackend<_>, BalancedCheckpointing>` without burn-fusion.
 Batches must be right-padded (the attention op is causal only, no key mask).
 
-RunPod/headless Linux training now defaults to **BF16** on CUDA (A40, RTX 4090,
-H100). Model parameters, activations, gradients, and AdamW moments use BF16;
-there are no FP32 master weights. Local WGPU training remains FP32. The optional
-`cuda-training` Cargo feature selects the same CUDA/BF16 path on other native
-hosts, including for compile checks.
+Training now defaults to **FP32** on both CUDA and local WGPU, including model
+parameters, activations, gradients, and AdamW moments. Flash Attention and
+BalancedCheckpointing remain enabled. The `cuda-training` feature selects CUDA
+on other native hosts. New run names end in `_f32`, so they do not automatically
+resume the earlier `_bf16` runs. The explicit BF16 backend remains available for
+kernel regression tests; it is not selected by the training entry points.
 
 The custom attention kernels accept BF16 Q/K/V, outputs, and gradients, while
 shared tiles, arithmetic accumulators, softmax log-sum-exp, and backward delta
@@ -337,12 +338,11 @@ accumulation internally in its own kernels. This is a dtype change, not an
 integration of Dao's FlashAttention-3 or a rewrite using Tensor Core attention.
 No speedup or convergence equivalence has been measured.
 
-Existing FP32 model checkpoints load into the CUDA backend as BF16. Checkpoints
+Checkpoints load into the current training backend as FP32. Checkpoints
 keep the existing full-precision serialization format for compatibility; saving
 does not recover precision already lost during BF16 training. As before,
-optimizer state is reinitialized on resume. Pure BF16 optimizer updates can round
-away small weight changes, so watch validation loss and accuracy as learning
-rates decrease.
+optimizer state is reinitialized on resume. The current FP32 training path also
+avoids the small-update rounding of the earlier pure BF16 optimizer.
 
 Decoder-only and MoE reports include `top3` (current batch) and `avg_top3`
 (supervised-token-weighted average within the current epoch), displayed as
@@ -384,11 +384,37 @@ cargo test --lib decoder_model -- --test-threads=1
 Both decoders now use elementwise RoPE, avoiding the old RotaryEncoding batched
 matmul that could hit `Cube count too big` at large batch/head counts.
 
+## Lightweight local Code smoke run
+
+[`configs/yumon-code-smoke.json`](configs/yumon-code-smoke.json) runs the real Code
+trainer with FP32, four experts/top-2, width 16, two layers, FFN 32, context 64,
+batch 2, and one epoch. Eight tiny Rust functions are checked in under
+`tests/fixtures/code-smoke`; splitting by source file leaves six training samples
+and two validation samples (three optimizer steps). It has its own 320-token
+vocabulary, cache, and checkpoints, separate from the production corpus.
+
+From the repository root on Windows (local WGPU, no CUDA feature):
+
+```sh
+# First-time preparation only: creates a separate tokenizer and sample cache.
+cargo run --no-default-features --bin cache_samples -- --code-config configs/yumon-code-smoke.json --train-code-tokenizer --preview-samples 0
+cargo run --no-default-features --bin train_code -- --config configs/yumon-code-smoke.json --check
+cargo run --no-default-features --bin train_code -- --config configs/yumon-code-smoke.json
+```
+
+On headless Linux the same config uses CUDA/FP32. Precision, model, loss, optimizer,
+validation, and checkpoint code are shared; the GPU runtime differs. Reruns resume
+from `tmp/code-smoke/checkpoints/`. For a fresh run, choose a fresh `out_dir` in the
+smoke config. Preparation refuses to overwrite existing tokenizer/cache files.
+This is an end-to-end setup check, not proof that the full-size run is NaN-free.
+FP32 doubles parameter/gradient/optimizer tensor storage versus BF16; re-size the
+large RunPod model's memory budget before its next full run.
+
 ## Sparse MoE training (default)
 
-For a CUDA/BF16 setup check on RunPod, rebuild the image and run
+For a CUDA/FP32 setup check on RunPod, rebuild the image and run
 `./train_code --smoke-test` from `/app`. It bypasses the config and corpus and
-uses the actual CUDA BF16 + BalancedCheckpointing backend: two synthetic samples,
+uses the actual CUDA FP32 + BalancedCheckpointing backend: two synthetic samples,
 width 16, two layers, 16 experts, and 64 optimizer steps for top-2, plus three
 each for top-1 and top-16. It checks finite loss, routing counts, weight updates, top-3
 metrics and in-memory checkpoint round trips without writing training artifacts.
@@ -398,7 +424,7 @@ From a source checkout use:
 cargo run --release --no-default-features --features cuda-training --bin train_code -- --smoke-test
 ```
 
-This smoke command always selects CUDA (even on a local build); it never silently
+This smoke command always selects CUDA/FP32 (even on a local build); it never silently
 falls back to WGPU. MoE routing reads explicitly converted FP32 scores at the
 existing CPU dispatch synchronization, then selects exact top-k with ties broken
 by expert ID. This avoids both Burn 0.20's dtype-dependent host sort and invalid
@@ -425,7 +451,7 @@ encoder/decoder. The separate `train_ui` and `chat_ui` binaries still use their
 existing hardcoded models; MoE training is selected through `train-brain`.
 
 The MoE decoder uses the same causal Flash Attention and elementwise RoPE as
-the dense decoder, with sparse SwiGLU FFNs. Both retain BF16 CUDA training and
+the dense decoder, with sparse SwiGLU FFNs. Both use FP32 CUDA training and
 BalancedCheckpointing. Left/interior padding uses a masked attention fallback.
 Router probabilities and auxiliary losses are reduced in FP32.
 Every non-padding token selects `--moe-top-k` of `--moe-experts` experts. Tokens

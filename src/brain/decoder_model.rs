@@ -459,7 +459,7 @@ mod tests {
     #[ignore = "requires a CUDA GPU with native BF16 support; no profiling"]
     fn cuda_bf16_flash_forward_backward_matches_fp32() {
         use burn::tensor::{DType, FloatDType};
-        type AD = crate::brain::train::CudaTrainBackend;
+        type AD = crate::brain::train::CudaBf16TrainBackend;
         let device = Default::default();
         for seq in [1, 37, 70] {
             let random = || Tensor::<AD, 4>::random(
@@ -505,7 +505,7 @@ mod tests {
     #[ignore = "requires a CUDA GPU with native BF16 support; no profiling"]
     fn cuda_bf16_decoder_optimizer_and_checkpoint() {
         use burn::tensor::{DType, FloatDType};
-        type AD = crate::brain::train::CudaTrainBackend;
+        type AD = crate::brain::train::CudaBf16TrainBackend;
         let device = Default::default();
         let config = tiny_config();
         let model: YumonDecBrain<AD> = config.init(&device);
