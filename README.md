@@ -166,6 +166,13 @@ includes source filenames and line numbers for reviewing the new boundaries.
 
 Inspect the cache header or validate the complete cache locally:
 
+First sort a newly prepared cache into frozen complexity buckets (choose new
+reference/output paths when recalibrating):
+
+```sh
+cargo run --release --no-default-features --bin sort_code_buckets -- --reference training-cache/code-reference-v1.json --calibrate 1.0.0
+```
+
 ```sh
 cargo run --release --no-default-features --bin cache_samples -- --code-config configs/yumon-code.json --inspect
 cargo run --release --no-default-features --bin train_code -- --config configs/yumon-code.json --check
@@ -192,33 +199,49 @@ docker build -t alexthegoodman/yumon-code:latest .
 docker push alexthegoodman/yumon-code:latest
 ```
 
-The default image includes `train_code`, the code tokenizer,
-`training-cache/code.bin` and the JSON config. Its build-time check performs
-no model training.
+The default image includes `train_code`, the code tokenizer, low/mild/moderate
+bucket caches, their reference/report JSON, and the training config. High,
+excluded, unscored and the original mixed cache are omitted. Its build-time
+check requires curriculum mode and performs no model training.
 Attach a RunPod network volume at `/workspace` and launch that image. Its
 default command is:
 
 ```sh
-./train_code --config configs/yumon-code.json
+./train_code --config configs/yumon-code.json --require-curriculum
 ```
 
 Training uses WGPU/FP32 locally on Windows and CUDA/FP32 on headless Linux
 (or builds with `--features cuda-training`). It saves checkpoints under `out_dir`
 and resumes compatible
 model weights. As in the existing trainer, optimizer state and the within-epoch
-position are not restored. Code runs honor the configured epoch count without
+position are not restored. Completed epochs are restored: epoch 1 uses low,
+epoch 2 low+mild, and epoch 3 onward low+mild+moderate. The optimizer stays
+alive across these transitions during one run. A single held-out file split
+across the three eligible tiers is fixed throughout training. Curriculum runs
+have a separate `_curriculum_lmm_v1` checkpoint directory and validate frozen
+bucket identities on resume. Code runs honor the configured total epoch count without
 the Pet grid's automatic loss-drop early stop.
 
-For alternate local artifacts, Docker accepts `CODE_CACHE`, `CODE_TOKENIZER`
+For alternate local artifacts, Docker accepts `CODE_BUCKETS`, `CODE_TOKENIZER`
 and `CODE_CONFIG` build arguments. These change the build inputs, not the
 container destinations: the deployed config must still reference
-`training-cache/code.bin` and `yumon_code_bpe`, or explicitly mounted paths.
+`curriculum: "training-cache/code_buckets"` and `yumon_code_bpe`, or explicitly mounted paths.
 Pet build, cache-copy and startup instructions are commented out in the
 Dockerfile. The active default builds and launches only Yumon Code.
 
-CPU acceptance checks: `cargo test --no-default-features --lib code_corpus`.
+Code architectures are `decoder-only` (the default), `moe`, `xlstm`, and
+`encoder-decoder`. All use the same curriculum selection, optimizer loop and
+validation. For raw-code encoder-decoder training, the encoder receives only
+BOS; source tokens go through the causal decoder so future targets cannot leak
+through cross-attention.
+
+CPU acceptance checks: `cargo test --no-default-features --lib brain::code_`.
 The tests use tiny synthetic sources and a fixture tokenizer, with no neural
-model training. The RunPod GPU run and Docker image build remain unverified.
+model training. All 16 code CPU checks pass. The explicit tiny WGPU curriculum
+test also passes for all four architectures, including checkpoint resume and
+causal prefix predictions. The local Docker release build and its Linux/CUDA
+CPU preflight passed using the real buckets; full RunPod GPU training remains
+unverified.
 
 ### Prepare Pet samples once, then train on RunPod (Docker)
 

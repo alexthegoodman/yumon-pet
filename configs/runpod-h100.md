@@ -48,8 +48,11 @@ experts without revisiting memory and data requirements.
 
 ## Code configuration and launch
 
-[`yumon-code.json`](yumon-code.json) is the executable configuration used by
-Docker and `train_code`. It now selects MoE and uses a separate checkpoint root.
+[`yumon-code.json`](yumon-code.json) is the default dense configuration used by
+Docker and `train_code`; [`yumon-code-moe.json`](yumon-code-moe.json) explicitly
+selects MoE. Both enable the low/mild/moderate curriculum: low in epoch 1,
+low+mild in epoch 2, and low+mild+moderate from epoch 3 onward. High is excluded
+from training and validation, and Docker does not copy that cache.
 Architecture and expert settings do not affect the sample cache, so the current
 512-token cache and tokenizer can be reused if their identity checks pass.
 Increasing context requires rebuilding the cache; the whole-item chunker skips

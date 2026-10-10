@@ -426,7 +426,9 @@ impl<B: Backend> YumonXLstmBrain<B> {
         let meta_json = std::fs::read_to_string(dir.join("metadata.json"))?;
         let metadata: XLstmMetadata = serde_json::from_str(&meta_json)?;
 
-        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
+        // save() stores the BPE directory under tokenizer.json. Resume the
+        // checkpoint's tokenizer, never the unrelated global Pet tokenizer.
+        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?);
 
         let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
         let record = recorder.load(dir.join("model").into(), device)

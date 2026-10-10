@@ -14,3 +14,10 @@ archive/
 # Include finished binary snapshots, but no temporary cache files.
 training-cache/*
 !training-cache/*.bin
+!training-cache/code_buckets/
+training-cache/code_buckets/*
+!training-cache/code_buckets/tier_1_low.bin
+!training-cache/code_buckets/tier_2_mild.bin
+!training-cache/code_buckets/tier_3_moderate.bin
+!training-cache/code_buckets/reference.json
+!training-cache/code_buckets/report.json

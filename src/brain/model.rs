@@ -829,7 +829,8 @@ impl<B: Backend> YumonBrain<B> {
         let meta_json = std::fs::read_to_string(dir.join("metadata.json"))?;
         let metadata: BrainMetadata = serde_json::from_str(&meta_json)?;
 
-        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
+        // Match save()'s nested BPE directory and preserve checkpoint identity.
+        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load(dir.join("tokenizer.json").to_str().unwrap())?);
 
         let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
         let record   = recorder.load(dir.join("model").into(), device)

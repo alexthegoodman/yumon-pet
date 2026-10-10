@@ -124,12 +124,50 @@ validation set before making broader stability claims. Downstream outcome
 analysis is null until labeled outcomes are supplied; language comparison is
 explicitly unavailable for this Rust-only implementation.
 
-To train on a tier, copy your training config and set `cache` to that bucket
-path, then run `train_code --config path.json --check` before training. Keep
-tokenizer/context settings identical. Tier 1 can supply an initial curriculum
-stage, followed by more complex stages. This sorter does not change the
-trainer's epoch schedule or resume/checkpoint behavior. Use file-level held-out
-validation consistently across stages to avoid contamination.
+The production training configs set `curriculum` to `training-cache/code_buckets`.
+`train_code --config configs/yumon-code.json --check` validates the three
+eligible caches and prints the complete epoch plan without creating a GPU/model.
+Epoch 1 uses low; epoch 2 low+mild; epoch 3 and later low+mild+moderate. High,
+excluded, unscored and failed samples are never loaded, including for validation.
+The original `cache` remains the preparation output and is ignored by curriculum
+training. A missing/corrupt bucket fails explicitly without falling back to it.
+
+One file-level validation split is computed across the eligible tier union.
+All samples from those files stay held out in every epoch. Validation covers
+all three allowed tiers from the start, so losses are comparable as training
+expands. The optimizer persists between epochs, and linear learning-rate decay
+uses the cumulative batch count of the varying epoch sizes. Resumes select the
+curriculum from completed epochs, and completed epoch budgets do no further
+updates. Optimizer state and within-epoch position are still not restored;
+an interrupted epoch is replayed from its beginning using saved model weights.
+
+Curriculum checkpoints have a `_curriculum_lmm_v1` suffix, keeping them separate
+from earlier mixed-cache runs. Frozen reference/bucket identities, validation
+fraction, seed and schedule must match on resume. `decoder-only`, `moe`, `xlstm`
+and `encoder-decoder` all use the shared code trainer. The encoder-decoder
+adapter uses a constant BOS encoder input and a causal source-token decoder.
+Its qualitative completions use greedy decoding with the source prefix in the
+decoder. The separate Pet training entry points retain their existing data flows.
+
+Docker copies only the low, mild and moderate caches and their reference/report.
+It requires curriculum mode at build-time validation and in its default command.
+Set `CODE_BUCKETS`, `CODE_TOKENIZER` and `CODE_CONFIG` build arguments for alternate
+local inputs while retaining the in-container paths. Mount `/workspace` on
+RunPod for persistent checkpoints. A legacy local config with no `curriculum`
+still uses a single cache; Docker's `--require-curriculum` rejects that mode.
+
+Curriculum CPU checks and the explicit tiny GPU integration check:
+
+```powershell
+cargo test --no-default-features --lib brain::code_
+cargo test --no-default-features --lib code_curriculum_gpu -- --ignored --nocapture --test-threads=1
+```
+
+The GPU check was run locally on WGPU for all four architectures. It covers
+optimizer steps, checkpoint/tokenizer reload, resuming at epoch 3, completed
+budget behavior and causal prefix predictions. On a CUDA host add
+`--features cuda-training`. A full RunPod training run remains a separate
+deployment check.
 
 Calibration and sorting currently load one prepared cache into memory, like
 the existing trainer, and write buckets without cloning sample tensors. Large

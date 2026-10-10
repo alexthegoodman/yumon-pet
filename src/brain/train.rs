@@ -245,16 +245,11 @@ fn code_eval_prompts() -> Vec<String> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool) -> Result<()> {
     let prompts = code_eval_prompts();
-    use crate::brain::{code_corpus, sample_cache::{self, CacheObjective}};
+    use crate::brain::{code_corpus, code_curriculum};
     config.validate()?;
     let tokenizer = code_corpus::load_tokenizer(&config.tokenizer)?;
-    let metadata = sample_cache::read_metadata(&config.cache)?;
-    anyhow::ensure!(metadata.seed == config.seed, "cache seed differs from config; rebuild the cache or restore the seed");
-    let samples = sample_cache::load_cache_with_objective(&config.cache, &tokenizer,
-        TrainingStage::Language, config.max_seq_len, CacheObjective::RawCode)?;
-    let prepared = code_corpus::split_validation(samples, config)?;
-    println!("Yumon Code: {} training chunks, {} validation chunks; context {}",
-        prepared.0.len(), prepared.1.len(), config.max_seq_len);
+    let prepared = code_curriculum::prepare(config, &tokenizer)?;
+    prepared.print_plan(config.epochs, config.batch_size);
     if check_only { return Ok(()); }
 
     {
@@ -263,14 +258,19 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             code_corpus::CodeArchitecture::Moe => Architecture::Moe {
                 num_experts: config.num_experts, top_k: config.top_k,
             },
+            code_corpus::CodeArchitecture::XLstm => Architecture::XLstm,
+            code_corpus::CodeArchitecture::EncoderDecoder => Architecture::EncoderDecoder,
         };
         let arch_tag = match architecture {
             Architecture::Moe { num_experts, top_k } => format!("Moe_e{num_experts}_k{top_k}"),
-            _ => "DecoderOnly".to_string(),
+            Architecture::DecoderOnly => "DecoderOnly".to_string(),
+            Architecture::XLstm => "XLstm".to_string(),
+            Architecture::EncoderDecoder => "EncoderDecoder".to_string(),
         };
         let run = RunConfig {
-            name: format!("code_{}h_{}l_{}a_{}ff_{}len_b{}_{arch_tag}_f32", config.embed_dim,
-                config.n_layers, config.attn_heads, config.ff_dim, config.max_seq_len, config.batch_size),
+            name: format!("code_{}h_{}l_{}a_{}ff_{}len_b{}_{arch_tag}_f32{}", config.embed_dim,
+                config.n_layers, config.attn_heads, config.ff_dim, config.max_seq_len, config.batch_size,
+                if config.curriculum.is_some() { "_curriculum_lmm_v1" } else { "" }),
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
             n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
             max_seq_len: config.max_seq_len, architecture,
@@ -281,7 +281,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
         let run_dir = config.out_dir.join(&run.name);
         std::fs::create_dir_all(&run_dir)?;
         // Preserve the effective config and cache identity alongside checkpoints.
-        let identity = serde_json::json!({"config": config, "cache": metadata});
+        let identity = serde_json::json!({"config": config, "cache": prepared.identity});
         let identity_path = run_dir.join("code-config.json");
         if identity_path.exists() {
             let previous: serde_json::Value = serde_json::from_slice(&std::fs::read(&identity_path)?)?;
@@ -293,7 +293,11 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
         match architecture {
             Architecture::Moe { .. } => train_causal_lm::<YumonMoeBrain<TrainBackend>>(
                 &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
-            _ => train_causal_lm::<YumonDecBrain<TrainBackend>>(
+            Architecture::DecoderOnly => train_causal_lm::<YumonDecBrain<TrainBackend>>(
+                &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
+            Architecture::XLstm => train_causal_lm::<YumonXLstmBrain<TrainBackend>>(
+                &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
+            Architecture::EncoderDecoder => train_causal_lm::<YumonBrain<TrainBackend>>(
                 &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
         }
     }
@@ -727,6 +731,79 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
     }
 }
 
+impl<B: Backend> CausalLm<B> for YumonXLstmBrain<B> {
+    fn logits(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> { self.forward(tokens) }
+    fn generate(&self, tokenizer: &TokenizerKind, prompt: &str, max_tokens: usize, device: &B::Device) -> GenerationResult {
+        self.generate_unmasked_parsed(tokenizer, prompt, max_tokens, device)
+    }
+}
+
+// Raw-code encoder-decoder pretraining uses a constant BOS encoder input.
+// Encoding the full source would leak future target tokens through cross-attention.
+impl<B: Backend> CausalLm<B> for YumonBrain<B>
+where TrainRuntime: cubecl::Runtime<Device = B::Device> {
+    fn logits(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+        let batch = tokens.dims()[0];
+        let encoder = Tensor::<B, 2, Int>::from_ints(
+            TensorData::new(vec![BOS_TOKEN as i32; batch], [batch, 1]), &tokens.device());
+        self.forward::<TrainRuntime>(encoder, tokens)
+    }
+    fn generate(&self, tokenizer: &TokenizerKind, prompt: &str, max_tokens: usize, device: &B::Device) -> GenerationResult {
+        let mut tokens = vec![BOS_TOKEN]; tokens.extend(tokenizer.encode(prompt));
+        let mut output = Vec::new();
+        for _ in 0..max_tokens {
+            let window = &tokens[tokens.len().saturating_sub(self.config.max_seq_len)..];
+            let position = window.len()-1;
+            let ids = window.iter().map(|&t| t as i32).collect::<Vec<_>>();
+            let input = Tensor::<B, 2, Int>::from_ints(TensorData::new(ids, [1, window.len()]), device);
+            let next = self.logits(input).slice([0..1, position..position+1, 0..self.config.vocab_size])
+                .argmax(2).reshape([1]).into_data().convert::<i32>().to_vec::<i32>().unwrap()[0] as usize;
+            if next <= EOS_TOKEN || next == 3 { break; }
+            output.push(next); tokens.push(next);
+        }
+        let raw_output = tokenizer.decode(&output);
+        GenerationResult { reply: raw_output.clone(), raw_output, action: crate::brain::samples::Action::Sit,
+            motion_dir: crate::brain::samples::CardinalDir::None, parsed_emotion: String::new(), fsm_state: 0, allowed_count: None }
+    }
+}
+
+// Both legacy architectures expose the same capacity/checkpoint fields. Keep
+// their raw-code data path in the shared trainer, not in their Pet-specific loops.
+macro_rules! code_model_adapter {
+    ($model:ident, $config:ident, $metadata:ident) => {
+        impl CausalLmTrain for $model<TrainBackend> {
+            fn init_or_resume(run: &RunConfig, tokenizer: &TokenizerKind, directory: &std::path::Path,
+                device: &<TrainBackend as Backend>::Device) -> Result<(Self, usize)> {
+                let config = $config { vocab_size: tokenizer.vocab_size(), embed_dim: run.embed_dim,
+                    hidden_units: run.hidden_units, n_layers: run.n_layers, attn_heads: run.attn_heads,
+                    ff_dim: run.ff_dim, max_seq_len: run.max_seq_len, dropout_rate: 0.05,
+                    training_stage: run.stages[0].stage };
+                if !directory.join("model.bin").exists() { return Ok((config.init(device), 0)); }
+                let (model, saved_tokenizer, saved) = Self::load(directory.to_str().unwrap(), device)?;
+                anyhow::ensure!(saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
+                    && saved.hidden_units == config.hidden_units && saved.n_layers == config.n_layers
+                    && saved.attn_heads == config.attn_heads && saved.ff_dim == config.ff_dim
+                    && saved.max_seq_len == config.max_seq_len, "checkpoint capacity differs from requested code run");
+                ensure_same_tokenizer(tokenizer, &saved_tokenizer)?;
+                let metadata: $metadata = serde_json::from_slice(&std::fs::read(directory.join("metadata.json"))?)?;
+                Ok((model, metadata.epochs_trained))
+            }
+            fn set_stage(&mut self, stage: TrainingStage) { self.config.0.training_stage = stage; }
+            fn forward_train(&self, tokens: Tensor<TrainBackend, 2, Int>) -> (Tensor<TrainBackend, 3>, Tensor<TrainBackend, 1>) {
+                let device = tokens.device(); (self.logits(tokens), Tensor::zeros([1], &device))
+            }
+            fn save_run(&self, directory: &str, tokenizer: &TokenizerKind, p: &RunProgress) -> Result<()> {
+                self.save(directory, tokenizer, &$metadata { vocab_size: tokenizer.vocab_size(), epochs_trained: p.epochs_trained,
+                    final_loss: p.final_loss, batch_size: p.batch_size, training_stage: p.stage, embed_dim: p.run_cfg.embed_dim,
+                    hidden_units: p.run_cfg.hidden_units, n_layers: p.run_cfg.n_layers, attn_heads: p.run_cfg.attn_heads,
+                    ff_dim: p.run_cfg.ff_dim, max_seq_len: p.run_cfg.max_seq_len })
+            }
+        }
+    };
+}
+code_model_adapter!(YumonXLstmBrain, YumonXLstmBrainConfig, XLstmMetadata);
+code_model_adapter!(YumonBrain, YumonBrainConfig, BrainMetadata);
+
 /// Qualitative eval: every prompt through the inference model.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_eval_prompts<M: CausalLm<InnerBackend>>(
@@ -755,7 +832,7 @@ fn train_causal_lm<M>(
     keyword_index: &HashMap<String, Vec<usize>>,
     prompts:       &[String],
     device:        &<TrainBackend as Backend>::Device,
-    mut prepared_code: Option<(Vec<crate::brain::samples::Sample>, Vec<crate::brain::samples::Sample>)>,
+    mut prepared_code: Option<crate::brain::code_curriculum::PreparedCode>,
 ) -> Result<()>
 where
     M: CausalLmTrain,
@@ -764,13 +841,20 @@ where
     let raw_code = prepared_code.is_some();
     let run_dir_str = run_dir.to_str().unwrap();
     let (mut model, mut epochs_already_done) = M::init_or_resume(run_cfg, tokenizer, run_dir, device)?;
+    if raw_code && epochs_already_done >= run_cfg.stages[0].epochs {
+        println!("Code epoch budget already completed: {epochs_already_done}");
+        return Ok(());
+    }
 
     'stage_loop: for (stage_idx, stage_cfg) in run_cfg.stages.iter().enumerate() {
         model.set_stage(stage_cfg.stage);
         println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
 
+        let tier_ends = prepared_code.as_ref().and_then(|p| p.tier_ends);
+        let epoch_seed = prepared_code.as_ref().map(|p| p.seed);
+        let batch_plan = prepared_code.as_ref().map(|p| p.batch_plan(stage_cfg.epochs, stage_cfg.batch_size));
         let (training_samples, val_samples) = if let Some(prepared) = prepared_code.take() {
-            prepared
+            (prepared.training, prepared.validation)
         } else {
             let mut samples = load_stage_data(stage_cfg.stage, tokenizer, keyword_index, run_cfg.max_seq_len)?;
             anyhow::ensure!(samples.len() > 1, "Not enough training samples for stage");
@@ -841,11 +925,18 @@ where
         let sep_tokens = if raw_code { Vec::new() } else { tokenizer.encode(sep_text) };
         anyhow::ensure!(sep_tokens.len() + 2 <= run_cfg.max_seq_len, "Sequence too short for separator and reply");
 
-        'epoch_loop: for epoch in 0..stage_cfg.epochs {
+        let start_epoch = if raw_code { epochs_already_done } else { 0 };
+        let epoch_offset = if raw_code { 0 } else { epochs_already_done };
+        'epoch_loop: for epoch in start_epoch..stage_cfg.epochs {
             state.epoch = epoch + 1;
-            let mut idx: Vec<usize> = (0..training_samples.len()).collect();
-            idx.shuffle(&mut rng);
+            let epoch_samples = tier_ends.map_or(training_samples.len(), |ends| ends[epoch.min(2)]);
+            let mut idx: Vec<usize> = (0..epoch_samples).collect();
+            if let Some(seed) = epoch_seed {
+                idx.shuffle(&mut StdRng::seed_from_u64(seed.wrapping_add(epoch as u64)));
+            } else { idx.shuffle(&mut rng); }
             let num_batches = idx.len().div_ceil(stage_cfg.batch_size);
+            state.total_batches = num_batches;
+            println!("Epoch {}/{}: {epoch_samples} eligible training samples, {num_batches} batches", epoch+1, stage_cfg.epochs);
             let mut epoch_loss = 0.0f32;
             let mut processed_batches = 0usize;
             let mut epoch_top3_correct = 0usize;
@@ -853,14 +944,14 @@ where
 
             for batch_num in 0..num_batches {
                 let current_lr = {
-                    let total_steps = stage_cfg.epochs * num_batches;
-                    let step = epoch * num_batches + batch_num;
+                    let total_steps = batch_plan.as_ref().map_or(stage_cfg.epochs * num_batches, |p| p.iter().sum());
+                    let step = batch_plan.as_ref().map_or(epoch * num_batches, |p| p[..epoch].iter().sum()) + batch_num;
                     let t = step as f64 / total_steps as f64;
                     stage_cfg.first_lr * (1.0 - t) + stage_cfg.last_lr * t
                 };
 
                 let batch_start = batch_num * stage_cfg.batch_size;
-                let batch_end = (batch_start + stage_cfg.batch_size).min(training_samples.len());
+                let batch_end = (batch_start + stage_cfg.batch_size).min(idx.len());
                 let batch_idx = &idx[batch_start..batch_end];
                 let current_batch_size = batch_idx.len();
                 if current_batch_size == 0 { continue; }
@@ -934,7 +1025,7 @@ where
                     val_loss = val.map(|(loss, _, _)| loss);
                     model.save_run(run_dir_str, tokenizer, &RunProgress {
                         run_cfg,
-                        epochs_trained: epochs_already_done + epoch,
+                        epochs_trained: epoch_offset + epoch,
                         final_loss:     epoch_loss / processed_batches as f32,
                         val_loss,
                         batch_size:     stage_cfg.batch_size,
@@ -985,7 +1076,7 @@ where
 
             model.save_run(run_dir_str, tokenizer, &RunProgress {
                 run_cfg,
-                epochs_trained: epochs_already_done + epoch + 1,
+                epochs_trained: epoch_offset + epoch + 1,
                 final_loss,
                 val_loss,
                 batch_size: stage_cfg.batch_size,
@@ -1010,7 +1101,7 @@ where
 
             if run_should_stop || final_loss < stage_cfg.loss_threshold { break 'epoch_loop; }
         }
-        epochs_already_done += state.epoch;
+        if raw_code { epochs_already_done = state.epoch; } else { epochs_already_done += state.epoch; }
         if let Some(term) = terminal.as_mut() {
             term.clear()?;
         }
@@ -2048,6 +2139,10 @@ pub fn make_progress(total: usize, epoch: usize, epochs: usize) -> ProgressBar {
     pb.set_message(format!("{epoch}/{epochs}"));
     pb
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "../../tests/code_curriculum/training.rs"]
+mod code_curriculum_training_tests;
 
 #[cfg(test)]
 mod language_run_tests {

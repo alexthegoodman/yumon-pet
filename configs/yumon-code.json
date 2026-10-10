@@ -1,6 +1,7 @@
 {
   "source": "../../rust-code",
   "cache": "training-cache/code.bin",
+  "curriculum": "training-cache/code_buckets",
   "tokenizer": "yumon_code_bpe",
   "max_seq_len": 512,
   "exclude_dirs": [".git", "target", "node_modules"],

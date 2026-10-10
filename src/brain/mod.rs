@@ -18,6 +18,8 @@ pub mod sample_cache;
 pub mod code_corpus;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod code_complexity;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod code_curriculum;
 pub mod keywords;
 pub mod fixer;
 pub mod loader;

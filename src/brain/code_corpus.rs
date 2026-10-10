@@ -19,6 +19,9 @@ pub enum CodeArchitecture {
     #[default]
     DecoderOnly,
     Moe,
+    #[serde(rename = "xlstm")]
+    XLstm,
+    EncoderDecoder,
 }
 
 /// Paths are relative to the working directory, so the same config works in /app.
@@ -30,6 +33,8 @@ pub struct CodeConfig {
     pub top_k: usize,
     pub source: PathBuf,
     pub cache: PathBuf,
+    /// Optional frozen bucket directory. Only tiers 1-3 are eligible for training.
+    pub curriculum: Option<PathBuf>,
     pub tokenizer: String,
     pub max_seq_len: usize,
     pub exclude_dirs: Vec<String>,
@@ -51,7 +56,7 @@ impl Default for CodeConfig {
     fn default() -> Self {
         Self {
             architecture: CodeArchitecture::DecoderOnly, num_experts: 4, top_k: 1,
-            source: "../rust-code".into(), cache: "training-cache/code.bin".into(),
+            source: "../rust-code".into(), cache: "training-cache/code.bin".into(), curriculum: None,
             tokenizer: "yumon_code_bpe".into(), max_seq_len: 512,
             exclude_dirs: [".git", "target", "node_modules"].map(String::from).to_vec(),
             seed: 4815162342, vocab_size: 16384, embed_dim: 512, n_layers: 16,
@@ -243,12 +248,16 @@ pub fn prepare(config: &CodeConfig, files: &[PathBuf], tokenizer: &TokenizerKind
 
 /// Split by source file so neighboring chunks never leak into validation.
 pub fn split_validation(samples: Vec<Sample>, config: &CodeConfig) -> Result<(Vec<Sample>, Vec<Sample>)> {
+    let held_out = validation_files(&samples, config)?;
+    let (validation, training) = samples.into_iter().partition(|s| held_out.contains(&s.pair.0));
+    Ok((training, validation))
+}
+
+pub fn validation_files(samples: &[Sample], config: &CodeConfig) -> Result<HashSet<String>> {
     let mut files: Vec<String> = samples.iter().map(|s| s.pair.0.clone()).collect();
     files.sort(); files.dedup();
     ensure!(files.len() >= 2, "Code training needs at least two distinct nonempty files for held-out validation");
     files.shuffle(&mut StdRng::seed_from_u64(config.seed));
     let count = ((files.len() as f64 * config.validation_fraction).ceil() as usize).clamp(1, files.len() - 1);
-    let held_out: HashSet<_> = files[..count].iter().collect();
-    let (validation, training) = samples.into_iter().partition(|s| held_out.contains(&s.pair.0));
-    Ok((training, validation))
+    Ok(files[..count].iter().cloned().collect())
 }

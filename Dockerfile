@@ -91,13 +91,19 @@ WORKDIR /app
 # Config paths must match the destinations below (or point at mounted volume files).
 COPY --from=builder /build/target/release/train_code ./train_code
 ARG CODE_TOKENIZER=yumon_code_bpe
-ARG CODE_CACHE=training-cache/code.bin
+ARG CODE_BUCKETS=training-cache/code_buckets
 ARG CODE_CONFIG=configs/yumon-code.json
 COPY ${CODE_TOKENIZER}/ ./yumon_code_bpe/
-COPY ${CODE_CACHE} ./training-cache/code.bin
+# Whitelist the three allowed tiers. High, excluded and unscored data are never
+# copied into the training image; the original mixed code.bin is not included.
+COPY ${CODE_BUCKETS}/tier_1_low.bin ./training-cache/code_buckets/tier_1_low.bin
+COPY ${CODE_BUCKETS}/tier_2_mild.bin ./training-cache/code_buckets/tier_2_mild.bin
+COPY ${CODE_BUCKETS}/tier_3_moderate.bin ./training-cache/code_buckets/tier_3_moderate.bin
+COPY ${CODE_BUCKETS}/reference.json ./training-cache/code_buckets/reference.json
+COPY ${CODE_BUCKETS}/report.json ./training-cache/code_buckets/report.json
 COPY ${CODE_CONFIG} ./configs/yumon-code.json
-RUN ./train_code --config configs/yumon-code.json --check
-CMD ["./train_code", "--config", "configs/yumon-code.json"]
+RUN ./train_code --config configs/yumon-code.json --require-curriculum --check
+CMD ["./train_code", "--config", "configs/yumon-code.json", "--require-curriculum"]
 
 # Pet training (disabled; restore together with the Pet build and ENV above):
 # COPY --from=builder /build/target/release/yumon-pet ./yumon-pet
