@@ -268,6 +268,7 @@ The methodology can evolve through explicit versioned calibration without sacrif
 
 ## Notes
 
-- Keep in mind that our data is still in `../../rust-code`
-- The sorted buckets of data can be in our `./data/samples/bucket_name.bin`
+- Keep in mind that our source data is still in `../../rust-code`, but has been pre-chunked into `./training-cache/code.bin` (by cache_samples.rs) so we can pull straight from `code.bin`
+- The sorted buckets of data can be in our `./training-cache/code_buckets/bucket_name.bin`
 - When running the sorting program (a Rust file in bin folder), we should be able to see some of samples and their destination bucket to verify correctness
+- This is for a human-like curriculum training approach where we do the simpler data for epoch 1, and add in more complex data in future epochs
