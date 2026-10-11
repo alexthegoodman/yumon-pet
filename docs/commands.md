@@ -100,6 +100,30 @@ by default (`--preview-samples 0` disables previews). Comment generation covers
 four tiers, but training uses only low/mild/moderate committed journal records.
 Then run `train_bpe` above to fit the final tokenizer on the actual training mix.
 
+## Yumon Nano code editor
+
+```sh
+cargo run --release --no-default-features --bin yumon_nano -- src/example.rs --checkpoint <code-checkpoint-directory>
+# For an MoE checkpoint:
+cargo run --release --no-default-features --bin yumon_nano -- src/example.rs --checkpoint <code-checkpoint-directory> --architecture moe
+```
+
+Use the exact saved checkpoint directory containing `metadata.json`, `model.bin`
+and `tokenizer.json`, rather than the training output root. Dense decoder and MoE
+Yumon Code checkpoints are supported; inference runs locally on WGPU.
+
+Completions appear in gray after 450 ms without typing. The prompt contains the
+current line up to the cursor and up to 40 nearby preceding lines, limited to the
+checkpoint's token budget. No text after the cursor is sent to the model. A long
+current line reduces the completion budget; if it cannot fit at all, the editor
+shows a status message. Override `--debounce-ms`, `--context-lines` (0 for current
+line only), or `--max-tokens` (default 48) as needed.
+
+Tab accepts a suggestion (otherwise inserts four spaces), Ctrl+R regenerates,
+and Esc dismisses. Ctrl+O or Ctrl+S saves; Ctrl+X exits with an unsaved-change
+prompt. Arrow keys, Home/End, PageUp/PageDown, Delete/Backspace, and terminal
+bracketed paste are supported. UTF-8 text and CRLF files are supported.
+
 ## Pet and desktop apps
 
 ```sh

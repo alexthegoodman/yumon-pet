@@ -7,3 +7,5 @@
 *.mp4
 /training-cache/*
 !/training-cache/.gitkeep
+
+example.rs
