@@ -16,13 +16,19 @@ Check `docs/commands.md` for more details.
    cargo run --release --no-default-features --bin train_bpe
    ```
 
-2. Build the Docker image:
+2. Build the Rust books pretraining stage with the new tokenizer:
+
+   ```sh
+   cargo run --release --no-default-features --bin cache_samples -- --code-config training-cache/code_tokenizer_retrained/config.json --rust-docs
+   ```
+
+3. Build the Docker image:
 
    ```sh
    docker build -t alexthegoodman/yumon-code:latest .
    ```
 
-3. Push the image:
+4. Push the image:
 
    ```sh
    docker push alexthegoodman/yumon-code:latest
@@ -51,8 +57,11 @@ omit it to use WGPU on Windows. Append `--check` to validate the bundle without
 starting training.
 
 Configure tokenizer and model settings in
-[configs/yumon-code.json](configs/yumon-code.json). The curriculum uses low in
-epoch 1, adds mild in epoch 2, and adds moderate from epoch 3 onward. Each tier
+[configs/yumon-code.json](configs/yumon-code.json). With `docs` set, epoch 1
+trains only on the official Rust books (see
+[Rust books stage](docs/commands.md#code-rust-books-pretraining-stage); rebuild
+it after step 1). The code curriculum then uses low, adds mild, and adds
+moderate from its third epoch onward. Each tier
 has equal documented and distinct undocumented samples. Tokenizer fitting
 excludes validation files. Existing artifacts are preserved; use a new output
 directory for subsequent tokenizer runs.

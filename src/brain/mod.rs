@@ -22,6 +22,8 @@ pub mod code_complexity;
 pub mod code_curriculum;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod code_documented;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod code_docs;
 pub mod keywords;
 pub mod fixer;
 pub mod loader;

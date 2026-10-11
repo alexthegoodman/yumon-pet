@@ -36,6 +36,7 @@ training-cache/code_tokenizer_retrained/*
 !training-cache/code_tokenizer_retrained/tokenizer/
 !training-cache/code_tokenizer_retrained/buckets/
 !training-cache/code_tokenizer_retrained/documented/
+!training-cache/code_tokenizer_retrained/rust_docs/
 training-cache/code_tokenizer_retrained/buckets/*
 !training-cache/code_tokenizer_retrained/buckets/tier_1_low.bin
 !training-cache/code_tokenizer_retrained/buckets/tier_2_mild.bin
@@ -47,3 +48,6 @@ training-cache/code_tokenizer_retrained/documented/*
 !training-cache/code_tokenizer_retrained/documented/tier_1_low.jsonl
 !training-cache/code_tokenizer_retrained/documented/tier_2_mild.jsonl
 !training-cache/code_tokenizer_retrained/documented/tier_3_moderate.jsonl
+training-cache/code_tokenizer_retrained/rust_docs/*
+!training-cache/code_tokenizer_retrained/rust_docs/rust_docs.bin
+!training-cache/code_tokenizer_retrained/rust_docs/report.json

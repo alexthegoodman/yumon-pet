@@ -268,10 +268,11 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             Architecture::EncoderDecoder => "EncoderDecoder".to_string(),
         };
         let run = RunConfig {
-            name: format!("code_{}h_{}l_{}a_{}ff_{}len_b{}_{arch_tag}_f32{}", config.embed_dim,
+            name: format!("code_{}h_{}l_{}a_{}ff_{}len_b{}_{arch_tag}_f32{}{}", config.embed_dim,
                 config.n_layers, config.attn_heads, config.ff_dim, config.max_seq_len, config.batch_size,
                 if config.documented.is_some() { "_curriculum_documented_balanced_v1" }
-                else if config.curriculum.is_some() { "_curriculum_lmm_v1" } else { "" }),
+                else if config.curriculum.is_some() { "_curriculum_lmm_v1" } else { "" },
+                if config.docs.is_some() { "_rust_docs_v1" } else { "" }),
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
             n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
             max_seq_len: config.max_seq_len, architecture,
@@ -851,7 +852,7 @@ where
         model.set_stage(stage_cfg.stage);
         println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
 
-        let tier_ends = prepared_code.as_ref().and_then(|p| p.tier_ends);
+        let epoch_indices = prepared_code.as_ref().map(|p| (0..stage_cfg.epochs).map(|e| p.epoch_indices(e)).collect::<Vec<_>>());
         let epoch_seed = prepared_code.as_ref().map(|p| p.seed);
         let batch_plan = prepared_code.as_ref().map(|p| p.batch_plan(stage_cfg.epochs, stage_cfg.batch_size));
         let (training_samples, val_samples) = if let Some(prepared) = prepared_code.take() {
@@ -930,8 +931,9 @@ where
         let epoch_offset = if raw_code { 0 } else { epochs_already_done };
         'epoch_loop: for epoch in start_epoch..stage_cfg.epochs {
             state.epoch = epoch + 1;
-            let epoch_samples = tier_ends.map_or(training_samples.len(), |ends| ends[epoch.min(2)]);
-            let mut idx: Vec<usize> = (0..epoch_samples).collect();
+            let mut idx: Vec<usize> = epoch_indices.as_ref()
+                .map_or_else(|| (0..training_samples.len()).collect(), |all| all[epoch].clone());
+            let epoch_samples = idx.len();
             if let Some(seed) = epoch_seed {
                 idx.shuffle(&mut StdRng::seed_from_u64(seed.wrapping_add(epoch as u64)));
             } else { idx.shuffle(&mut rng); }

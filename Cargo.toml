@@ -66,6 +66,7 @@ keyword_extraction = {version = "1.5", features = ["yake"]}
 pdf-extract = "0.10.0"
 outlines-core = "0.2.14"
 walkdir = "2"
+scraper = { version = "=0.27.0", default-features = false }
 syn = { version = "=2.0.117", features = ["full", "parsing", "visit"] }
 proc-macro2 = { version = "=1.0.106", features = ["span-locations"] }
 zstd = "0.13"

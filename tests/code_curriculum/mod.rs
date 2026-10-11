@@ -462,3 +462,74 @@ fn existing_code_bpe_trainer_uses_balanced_training_split_and_rebuilds_matching_
     assert!(!output.join("buckets/tier_4_high.bin").exists());
     Ok(())
 }
+
+#[test]
+fn rust_docs_stage_trains_alone_first_then_replays_by_token_share() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let without = prepare(&fixture.config, &fixture.tokenizer)?;
+    let html = fixture.directory.join("html");
+    std::fs::create_dir_all(html.join("fixture"))?;
+    std::fs::write(
+        html.join("fixture/print.html"),
+        crate::brain::code_docs::tests::PRINT_HTML,
+    )?;
+    let docs = fixture.directory.join("docs");
+    crate::brain::code_docs::prepare(
+        &fixture.config,
+        &fixture.tokenizer,
+        &html,
+        "rustc test",
+        &["fixture".into()],
+        &docs,
+        0,
+    )?;
+    fixture.config.docs = Some(docs);
+    fixture.config.docs_share = 0.0;
+    let prepared = prepare(&fixture.config, &fixture.tokenizer)?;
+    // Context 128 splits the fixture chapters into several samples.
+    let d = prepared.docs_len;
+    assert!(d >= 2);
+    assert_eq!(prepared.tier_ends, Some([d + 4, d + 8, d + 12]));
+    // docs_share 0: the docs train once, then the code curriculum runs unchanged.
+    assert_eq!(
+        (0..6).map(|e| prepared.epoch_len(e)).collect::<Vec<_>>(),
+        [d, 4, 8, 12, 12, 12]
+    );
+    assert_eq!(prepared.epoch_indices(2), (d..d + 8).collect::<Vec<_>>());
+    assert_eq!(prepared.batch_plan(3, 3), [d.div_ceil(3), 2, 3]);
+    assert!(prepared.training[..d].iter().all(|s| s.pair.0 == "rust-docs/fixture"));
+    assert_eq!(
+        format!("{:?}", &prepared.training[d..]),
+        format!("{:?}", without.training)
+    );
+    assert_eq!(
+        format!("{:?}", prepared.validation),
+        format!("{:?}", without.validation)
+    );
+    assert_eq!(prepared.identity["docs"]["toolchain"], "rustc test");
+    assert_eq!(prepared.identity["mode"], without.identity["mode"]);
+
+    // A docs share rotates through the docs, keeps every code sample, and
+    // takes roughly the requested share of supervised tokens.
+    fixture.config.docs_share = 0.5;
+    let rotating = prepare(&fixture.config, &fixture.tokenizer)?;
+    assert_ne!(rotating.identity, prepared.identity);
+    let tokens = |i: usize| rotating.training[i].target_labels.iter().filter(|&&t| t != PAD_TOKEN).count();
+    let mut seen = HashSet::<usize>::new();
+    let mut next = 0;
+    for epoch in 1..8 {
+        let (docs, code): (Vec<usize>, Vec<usize>) =
+            rotating.epoch_indices(epoch).into_iter().partition(|&i| i < d);
+        let end = rotating.tier_ends.unwrap()[(epoch - 1).min(2)];
+        assert_eq!(code, (d..end).collect::<Vec<_>>());
+        let code_tokens: usize = code.iter().map(|&i| tokens(i)).sum();
+        let docs_tokens: usize = docs.iter().map(|&i| tokens(i)).sum();
+        assert!(docs_tokens >= code_tokens || docs.len() == d);
+        assert!(docs_tokens - tokens(*docs.last().unwrap()) < code_tokens);
+        assert_eq!(docs[0], next);
+        next = (docs.last().unwrap() + 1) % d;
+        seen.extend(docs);
+    }
+    assert_eq!(seen.len(), d);
+    Ok(())
+}

@@ -37,6 +37,12 @@ pub struct CodeConfig {
     pub curriculum: Option<PathBuf>,
     /// Saved synthetic comment journals to mix 1:1 with distinct undocumented code.
     pub documented: Option<PathBuf>,
+    /// Optional frozen Rust books stage (`cache_samples --rust-docs`), trained
+    /// alone in epoch 1 and kept in every later epoch.
+    pub docs: Option<PathBuf>,
+    /// Optional docs replay after epoch 1: target share of each later epoch's
+    /// supervised tokens, as a rotating window. 0 (default) = docs pretraining only.
+    pub docs_share: f64,
     pub tokenizer: String,
     pub max_seq_len: usize,
     pub exclude_dirs: Vec<String>,
@@ -58,7 +64,7 @@ impl Default for CodeConfig {
     fn default() -> Self {
         Self {
             architecture: CodeArchitecture::DecoderOnly, num_experts: 4, top_k: 1,
-            source: "../rust-code".into(), cache: "training-cache/code.bin".into(), curriculum: None, documented: None,
+            source: "../rust-code".into(), cache: "training-cache/code.bin".into(), curriculum: None, documented: None, docs: None, docs_share: 0.0,
             tokenizer: "yumon_code_bpe".into(), max_seq_len: 512,
             exclude_dirs: [".git", "target", "node_modules"].map(String::from).to_vec(),
             seed: 4815162342, vocab_size: 16384, embed_dim: 512, n_layers: 16,
@@ -83,6 +89,7 @@ impl CodeConfig {
         ensure!(self.num_experts > 0 && self.top_k > 0 && self.top_k <= self.num_experts,
             "require num_experts > 0 and 1 <= top_k <= num_experts");
         ensure!(self.max_seq_len >= 2, "max_seq_len must be >= 2");
+        ensure!(self.docs_share >= 0.0 && self.docs_share < 1.0, "docs_share must be in [0, 1)");
         ensure!(self.vocab_size >= 260, "vocab_size must cover 256 bytes and four special tokens");
         ensure!(self.embed_dim > 0 && self.attn_heads > 0 && self.embed_dim % self.attn_heads == 0,
             "embed_dim must be positive and divisible by attn_heads");
@@ -334,6 +341,8 @@ pub fn prepare_training_tokenizer(config: &CodeConfig, output: &Path) -> Result<
     let old = load_tokenizer(&config.tokenizer)?;
     let mut snapshot = config.clone();
     snapshot.documented = Some(new_docs.clone());
+    // The Rust docs stage is tied to a tokenizer; rebuild it for the new bundle.
+    snapshot.docs = None;
     let before = code_curriculum::prepare(&snapshot, &old)?;
     // Fit once on the final cumulative TRAINING pool. Held-out files never
     // influence vocabulary merges; there is no generic prose or raw-source scan.
@@ -430,6 +439,7 @@ pub fn prepare_training_tokenizer(config: &CodeConfig, output: &Path) -> Result<
     check.curriculum = Some(new_buckets);
     check.documented = Some(new_docs);
     check.vocab_size = new.vocab_size();
+    check.docs = None;
     let after = code_curriculum::prepare(&check, &new)?;
     // Each retained source was round-trip checked during encoding. Selection
     // may change when records no longer fit under the new tokenizer.
@@ -449,11 +459,13 @@ pub fn prepare_training_tokenizer(config: &CodeConfig, output: &Path) -> Result<
     deployed.documented = Some("training-cache/code_buckets_documented".into());
     deployed.cache = "training-cache/code.bin".into();
     deployed.out_dir = config.out_dir.join("tokenizer-retrained");
+    deployed.docs = config.docs.as_ref().map(|_| "training-cache/rust_docs".into());
     write_json(&staging.join("docker-config.json"), &deployed)?;
     let mut local = deployed;
     local.tokenizer = utf8(&output.join("tokenizer"))?.into();
     local.curriculum = Some(output.join("buckets"));
     local.documented = Some(output.join("documented"));
+    local.docs = config.docs.as_ref().map(|_| output.join("rust_docs"));
     write_json(&staging.join("config.json"), &local)?;
     // A partial/failed bundle never appears under the requested output name.
     fs::rename(&staging, output).context("publishing tokenizer and compatible cache bundle")?;

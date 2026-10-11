@@ -53,3 +53,14 @@ commands are in docs/commands.md. Runtime/CUDA/startup settings are unchanged.
 Tokenizer fitting reuses code_corpus::train_tokenizer() and the existing
 BpeTokenizer. There is no code_tokenizer module or separate BPE implementation.
 Corpus preparation and compatible cache rebuilding live in code_corpus.
+
+Rust books stage (2026-10-11): `code_docs` converts the toolchain `rust-docs`
+component's mdBook `print.html` (12 stable books, unstable-book excluded) into
+packed Markdown-like chunks via `cache_samples --code-config <cfg> --rust-docs`
+(output dir = config `docs`: rust_docs.bin, report.json, samples.jsonl). With
+`docs`, epoch 1 is docs-only and code tiers follow; `docs_share` (default 0)
+optionally replays a rotating docs window by token share. Docs never enter
+validation; run names gain `_rust_docs_v1`. The stage is tied to tokenizer and
+context: rebuild after train_bpe. Docker copies it via `CODE_DOCS`. Retrained
+bundle at 512: 5,027 samples / 1.94M tokens (code split is ~0.39M). Smoke
+training passed locally; Docker build/RunPod untested.

@@ -30,6 +30,16 @@ struct Args {
     /// Create a new case-preserving code tokenizer before caching (CPU only).
     #[arg(long, requires = "code_config")]
     train_code_tokenizer: bool,
+    /// Build the config's `docs` stage from the toolchain's rust-docs books
+    /// (CPU only; uses the existing Code tokenizer and leaves code caches alone).
+    #[arg(long, requires = "code_config", conflicts_with_all = ["train_code_tokenizer", "source", "inspect"])]
+    rust_docs: bool,
+    /// mdBook HTML root; defaults to `$(rustc --print sysroot)/share/doc/rust/html`.
+    #[arg(long, requires = "rust_docs")]
+    docs_html: Option<std::path::PathBuf>,
+    /// Comma-separated book directories (default: the stable books except unstable-book).
+    #[arg(long, requires = "rust_docs", value_delimiter = ',')]
+    books: Option<Vec<String>>,
     #[arg(long, default_value = "training-cache/samples.bin")]
     output: std::path::PathBuf,
     #[arg(long, default_value = "yumon_bpe")]
@@ -59,6 +69,22 @@ fn main() -> Result<()> {
         use yumon_pet::brain::code_corpus;
         let mut config = code_corpus::CodeConfig::load(path)?;
         if let Some(source) = args.source { config.source = source; }
+        if args.rust_docs {
+            use yumon_pet::brain::code_docs;
+            let output = config.docs.clone()
+                .context("--rust-docs needs a \"docs\" directory in the code config")?;
+            let (html, toolchain) = match args.docs_html {
+                Some(html) => (html, "unknown (--docs-html)".to_owned()),
+                None => code_docs::toolchain_html()?,
+            };
+            let books = args.books.unwrap_or_else(|| code_docs::DEFAULT_BOOKS.map(String::from).to_vec());
+            let tokenizer = code_corpus::load_tokenizer(&config.tokenizer)?;
+            let report = code_docs::prepare(&config, &tokenizer, &html, &toolchain, &books,
+                &output, args.preview_samples)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            println!("Cached Rust docs ({toolchain}) to {}", output.display());
+            return Ok(());
+        }
         if args.inspect {
             println!("{}", serde_json::to_string_pretty(&sample_cache::read_metadata(&config.cache)?)?);
             return Ok(());

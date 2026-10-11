@@ -95,6 +95,8 @@ ARG CODE_TOKENIZER=training-cache/code_tokenizer_retrained/tokenizer
 ARG CODE_BUCKETS=training-cache/code_tokenizer_retrained/buckets
 ARG CODE_CONFIG=training-cache/code_tokenizer_retrained/docker-config.json
 ARG CODE_DOCUMENTED=training-cache/code_tokenizer_retrained/documented
+# Rust books pretraining stage (cache_samples --rust-docs), built with the same tokenizer.
+ARG CODE_DOCS=training-cache/code_tokenizer_retrained/rust_docs
 COPY ${CODE_TOKENIZER}/ ./yumon_code_bpe/
 # Whitelist the three allowed tiers. High, excluded and unscored data are never
 # copied into the training image; the original mixed code.bin is not included.
@@ -107,6 +109,8 @@ COPY ${CODE_DOCUMENTED}/generation.json ./training-cache/code_buckets_documented
 COPY ${CODE_DOCUMENTED}/tier_1_low.jsonl ./training-cache/code_buckets_documented/tier_1_low.jsonl
 COPY ${CODE_DOCUMENTED}/tier_2_mild.jsonl ./training-cache/code_buckets_documented/tier_2_mild.jsonl
 COPY ${CODE_DOCUMENTED}/tier_3_moderate.jsonl ./training-cache/code_buckets_documented/tier_3_moderate.jsonl
+COPY ${CODE_DOCS}/rust_docs.bin ./training-cache/rust_docs/rust_docs.bin
+COPY ${CODE_DOCS}/report.json ./training-cache/rust_docs/report.json
 COPY ${CODE_CONFIG} ./configs/yumon-code.json
 RUN ./train_code --config configs/yumon-code.json --require-curriculum --check
 CMD ["./train_code", "--config", "configs/yumon-code.json", "--require-curriculum"]

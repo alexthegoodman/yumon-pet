@@ -1,5 +1,6 @@
 //! Model-independent cumulative curriculum, restricted to low/mild/moderate.
 use super::{
+    PAD_TOKEN,
     bpe::TokenizerKind,
     code_corpus::{self, CodeConfig},
     sample_cache::{self, CacheObjective},
@@ -16,14 +17,57 @@ pub struct PreparedCode {
     pub training: Vec<Sample>,
     pub validation: Vec<Sample>,
     /// Cumulative lengths after the single global file-level validation split.
+    /// With a docs stage these are offsets into `training`, after the docs.
     pub tier_ends: Option<[usize; 3]>,
+    /// Rust books prepended to `training`: epoch 1 is docs only, then code epochs
+    /// follow with the docs kept in every slice. Docs never enter validation.
+    pub docs_len: usize,
+    pub docs_share: f64,
     pub identity: Value,
     pub seed: u64,
 }
 impl PreparedCode {
+    fn code_end(&self, code_epoch: usize) -> usize {
+        self.tier_ends.map_or(self.training.len(), |ends| ends[code_epoch.min(2)])
+    }
+    fn tokens(&self, index: usize) -> usize {
+        self.training[index].target_labels.iter().filter(|&&t| t != PAD_TOKEN).count()
+    }
+    /// Rotating docs window for a later epoch, sized so docs take about
+    /// `docs_share` of that epoch's supervised tokens. Windows continue where
+    /// the previous epoch stopped, so replay cycles through every docs sample.
+    fn docs_window(&self, code_epoch: usize) -> Vec<usize> {
+        let mut start = 0;
+        let mut window = Vec::new();
+        for e in 0..=code_epoch {
+            let code: usize = (self.docs_len..self.code_end(e)).map(|i| self.tokens(i)).sum();
+            let target = code as f64 * self.docs_share / (1.0 - self.docs_share);
+            let mut taken = 0;
+            window.clear();
+            while (taken as f64) < target && window.len() < self.docs_len {
+                let index = (start + window.len()) % self.docs_len;
+                taken += self.tokens(index);
+                window.push(index);
+            }
+            start = (start + window.len()) % self.docs_len;
+        }
+        window
+    }
+    /// Training indices for an epoch. With docs, epoch 1 is the whole docs stage;
+    /// later epochs add a rotating docs window to the cumulative code tiers.
+    pub fn epoch_indices(&self, epoch: usize) -> Vec<usize> {
+        match (self.docs_len, epoch) {
+            (0, epoch) => (0..self.code_end(epoch)).collect(),
+            (docs, 0) => (0..docs).collect(),
+            (_, epoch) => {
+                let mut indices = self.docs_window(epoch - 1);
+                indices.extend(self.docs_len..self.code_end(epoch - 1));
+                indices
+            }
+        }
+    }
     pub fn epoch_len(&self, epoch: usize) -> usize {
-        self.tier_ends
-            .map_or(self.training.len(), |ends| ends[epoch.min(2)])
+        self.epoch_indices(epoch).len()
     }
     pub fn batch_plan(&self, epochs: usize, batch_size: usize) -> Vec<usize> {
         (0..epochs)
@@ -32,21 +76,30 @@ impl PreparedCode {
     }
     pub fn print_plan(&self, epochs: usize, batch_size: usize) {
         println!(
-            "Code data: {} train, {} held-out; high/excluded/unscored are ineligible in curriculum mode",
+            "Code data: {} train ({} Rust docs), {} held-out; high/excluded/unscored are ineligible in curriculum mode",
             self.training.len(),
+            self.docs_len,
             self.validation.len()
         );
         for epoch in 0..epochs {
+            let window = if self.docs_len > 0 && epoch > 0 { self.docs_window(epoch - 1) } else { Vec::new() };
+            let docs = if !window.is_empty() {
+                let tokens: usize = window.iter().map(|&i| self.tokens(i)).sum();
+                let total: usize = self.epoch_indices(epoch).iter().map(|&i| self.tokens(i)).sum();
+                format!("{} docs = {:.0}% of tokens + ", window.len(), 100.0 * tokens as f64 / total.max(1) as f64)
+            } else { String::new() };
+            let code = epoch - (self.docs_len > 0 && epoch > 0) as usize;
+            let label = match (self.docs_len > 0 && epoch == 0, self.tier_ends) {
+                (true, _) => " (Rust docs)".to_owned(),
+                (false, Some(_)) => format!(" ({docs}{})", ["low", "low + mild", "low + mild + moderate"][code.min(2)]),
+                (false, None) if self.docs_len > 0 => format!(" ({docs}all code)"),
+                _ => String::new(),
+            };
             println!(
-                "Epoch {}: {} samples, {} batches{}",
+                "Epoch {}: {} samples, {} batches{label}",
                 epoch + 1,
                 self.epoch_len(epoch),
                 self.epoch_len(epoch).div_ceil(batch_size),
-                if self.tier_ends.is_some() {
-                    [" (low)", " (low + mild)", " (low + mild + moderate)"][epoch.min(2)]
-                } else {
-                    ""
-                }
             );
         }
     }
@@ -60,6 +113,22 @@ pub fn file_sha256(path: &Path) -> Result<String> {
 }
 
 pub fn prepare(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<PreparedCode> {
+    let mut prepared = prepare_code(config, tokenizer)?;
+    if let Some(directory) = &config.docs {
+        let (mut docs, identity) = super::code_docs::load(directory, config, tokenizer)?;
+        let docs_len = docs.len();
+        docs.append(&mut prepared.training);
+        prepared.training = docs;
+        prepared.tier_ends = prepared.tier_ends.map(|ends| ends.map(|end| end + docs_len));
+        prepared.docs_len = docs_len;
+        prepared.docs_share = config.docs_share;
+        prepared.identity["docs"] = identity;
+        prepared.identity["docs"]["share"] = json!(config.docs_share);
+    }
+    Ok(prepared)
+}
+
+fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<PreparedCode> {
     config.validate()?;
     let Some(directory) = &config.curriculum else {
         let metadata = sample_cache::read_metadata(&config.cache)?;
@@ -79,6 +148,8 @@ pub fn prepare(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<Prepare
             training,
             validation,
             tier_ends: None,
+            docs_len: 0,
+            docs_share: 0.0,
             seed: config.seed,
             identity: json!({"mode": "full-cache", "cache": metadata, "seed": config.seed,
                 "validation_fraction": config.validation_fraction}),
@@ -187,6 +258,8 @@ pub fn prepare(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<Prepare
         training,
         validation,
         tier_ends: Some(tier_ends),
+        docs_len: 0,
+        docs_share: 0.0,
         seed: config.seed,
         identity,
     })

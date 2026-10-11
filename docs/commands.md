@@ -44,6 +44,29 @@ Tier assignments and source bytes are preserved after retokenization. Records
 exceeding `max_seq_len` are skipped with counts printed; records are never
 truncated. Each tier and split keeps equal documented and undocumented counts.
 
+## Code: Rust books pretraining stage
+
+Epoch 1 can train on the official books from doc.rust-lang.org/stable before the
+code tiers. Sources come from the toolchain's `rust-docs` component
+(`rustup component add rust-docs`), which ships each mdBook's `print.html` with
+includes and rustdoc's hidden lines already resolved.
+
+```sh
+# Needs "docs" in the config; uses its tokenizer and max_seq_len. CPU only.
+cargo run --release --no-default-features --bin cache_samples -- --code-config training-cache/code_tokenizer_retrained/config.json --rust-docs --preview-samples 5
+```
+
+Default books: book, rust-by-example, reference, nomicon, edition-guide,
+error_codes, cargo, rustdoc, clippy, style-guide, embedded-book, rustc
+(`--books a,b` overrides; `--docs-html` uses another mdBook HTML root). Chapters
+start new samples, sections are packed to the context, fenced code keeps its
+attributes (`rust,compile_fail,E0382`) and is never split; oversized blocks are
+counted and skipped. The output directory holds `rust_docs.bin`, `report.json`
+(toolchain, per-book digests and counts) and `samples.jsonl` for inspection.
+Docs never enter validation. `docs_share` (default 0) optionally replays a
+rotating docs window taking that share of tokens in later epochs. After
+`train_bpe`, rebuild the stage: it is tied to the tokenizer and context.
+
 ## RunPod Docker
 
 Docker defaults to the bundle produced by `train_bpe`:
