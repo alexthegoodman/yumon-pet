@@ -300,6 +300,29 @@ fn saved_documents_are_balanced_each_epoch_and_partition_without_source_overlap(
 }
 
 #[test]
+fn oversized_documented_records_are_skipped_without_losing_fitting_records() -> Result<()> {
+    let fixture = Fixture::with_documentation()?;
+    let before = prepare(&fixture.config, &fixture.tokenizer)?;
+    let journal = fixture.config.documented.as_ref().unwrap().join("tier_1_low.jsonl");
+    let original = std::fs::read_to_string(&journal)?;
+    let mut entries = original.lines().map(serde_json::from_str::<Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    entries[0]["doc_comment"] = json!(format!("/// {}", "long comment ".repeat(1000)));
+    let changed = entries.iter().map(|entry| format!("{entry}\n")).collect::<String>();
+    std::fs::write(&journal, changed)?;
+    let after = prepare(&fixture.config, &fixture.tokenizer)?;
+    assert_eq!(after.training.len() + after.validation.len(),
+        before.training.len() + before.validation.len() - 2);
+    assert!(after.training.iter().chain(&after.validation)
+        .all(|sample| sample.input_ids.len() == fixture.config.max_seq_len));
+    for tier in after.identity["documented"]["tiers"].as_array().unwrap() {
+        assert_eq!(tier["documented"].as_u64().unwrap(),
+            tier["training_each"].as_u64().unwrap() + tier["validation_each"].as_u64().unwrap());
+    }
+    Ok(())
+}
+
+#[test]
 fn documented_inputs_fail_closed_on_source_mismatch_or_insufficient_context() -> Result<()> {
     let fixture = Fixture::with_documentation()?;
     let journal = fixture

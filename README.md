@@ -33,6 +33,23 @@ Docker automatically copies the new bundle from
 Launch the image on RunPod with persistent storage at `/workspace`; training
 starts automatically.
 
+To train locally with the same prepared bundle and regimen as RunPod, run this
+from the repository root after step 1:
+
+```sh
+cargo run --release --no-default-features --bin train_code -- --config training-cache/code_tokenizer_retrained/config.json --require-curriculum
+```
+
+The bundle's `config.json` uses local tokenizer/cache paths and the same model,
+training settings and balanced documented/undocumented curriculum as Docker's
+`docker-config.json`. Set `out_dir` in the bundle's `config.json` to your local
+checkpoint directory before launching; it inherits the preparation config's
+output root. 
+
+Optional `cuda-training` selects RunPod's CUDA/FP32 backend on Windows too;
+omit it to use WGPU on Windows. Append `--check` to validate the bundle without
+starting training.
+
 Configure tokenizer and model settings in
 [configs/yumon-code.json](configs/yumon-code.json). The curriculum uses low in
 epoch 1, adds mild in epoch 2, and adds moderate from epoch 3 onward. Each tier

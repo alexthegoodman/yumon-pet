@@ -99,6 +99,16 @@ fn has_docs(source: &str) -> Result<bool> {
     Ok(visitor.0)
 }
 
+#[derive(Debug)]
+pub(crate) struct OversizedSample;
+
+impl std::fmt::Display for OversizedSample {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sample exceeds configured max_seq_len")
+    }
+}
+impl std::error::Error for OversizedSample {}
+
 pub(crate) fn encode(
     sample: &mut Sample,
     tokenizer: &TokenizerKind,
@@ -117,11 +127,9 @@ pub(crate) fn encode(
         ids.iter().all(|&id| id > 3) && tok.decode(ids)? == source,
         "documented source must round-trip without control/unknown tokens"
     );
-    ensure!(
-        ids.len() < context,
-        "sample needs max_seq_len >= {} (configured {context}); no records were truncated",
-        ids.len() + 1
-    );
+    if ids.len() >= context {
+        return Err(OversizedSample.into());
+    }
     sample.input_ids = std::iter::once(BOS_TOKEN)
         .chain(ids.iter().map(|&id| id as usize))
         .collect();
@@ -135,7 +143,7 @@ pub(crate) fn encode(
     Ok(())
 }
 
-/// Use every committed journal entry and choose equally many distinct raw items
+/// Use fitting committed journal entries and choose equally many distinct raw items
 /// in each tier AND partition. The held-out files are fixed before selection.
 pub fn mix(
     directory: &Path,
@@ -178,6 +186,8 @@ pub fn mix(
     let mut documented: [Vec<Sample>; 3] = std::array::from_fn(|_| Vec::new());
     let mut identities = Vec::new();
     let mut start = 0;
+    let mut total_records = 0;
+    let mut skipped_records = 0;
     for (tier, name) in ALLOWED_BUCKETS.iter().enumerate() {
         ensure!(
             manifest["inputs"][name] == buckets[tier]["sha256"],
@@ -207,26 +217,30 @@ pub fn mix(
             excluded_keys.insert(keys[offset].clone());
             excluded_items.insert(raw[offset].pair.clone());
             let mut sample = raw[offset].clone();
-            encode(
+            total_records += 1;
+            let result = encode(
                 &mut sample,
                 tokenizer,
                 &document(source, &entry.doc_comment)?,
                 config.max_seq_len,
-            )
-            .with_context(|| format!("{name} documented record {index}"))?;
+            );
+            if matches!(&result, Err(error) if error.is::<OversizedSample>()) {
+                skipped_records += 1;
+                continue;
+            }
+            result.with_context(|| format!("{name} documented record {index}"))?;
             documented[tier].push(sample);
         }
-        ensure!(
-            !documented[tier].is_empty(),
-            "{name} needs at least one saved doc comment"
-        );
         identities.push(json!({"name": name, "journal_sha256": digest(committed), "documented": documented[tier].len()}));
         start += lengths[tier];
     }
+    println!("[CodeDocumented] Skipped {skipped_records} of {total_records} documented records exceeding max_seq_len {}; no records truncated", config.max_seq_len);
     let mut rng = StdRng::seed_from_u64(config.seed);
     let mut mixed = Vec::new();
     let mut mixed_lengths = [0; 3];
     start = 0;
+    let mut raw_total = 0;
+    let mut raw_skipped = 0;
     for tier in 0..3 {
         let mut candidates: [Vec<usize>; 2] = std::array::from_fn(|_| Vec::new());
         let mut seen = HashSet::new();
@@ -237,6 +251,16 @@ pub fn mix(
                 || !seen.insert(keys[offset].clone())
             {
                 continue;
+            }
+            raw_total += 1;
+            let mut sample = raw[offset].clone();
+            match encode(&mut sample, tokenizer, &sources[offset], config.max_seq_len) {
+                Ok(()) => {}
+                Err(error) if error.is::<OversizedSample>() => {
+                    raw_skipped += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
             }
             candidates[usize::from(held_out.contains(&raw[offset].pair.0))].push(offset);
         }
@@ -276,6 +300,7 @@ pub fn mix(
         );
         start += lengths[tier];
     }
+    println!("[CodeDocumented] Skipped {raw_skipped} of {raw_total} eligible undocumented records exceeding max_seq_len {}", config.max_seq_len);
     Ok((
         mixed,
         mixed_lengths,

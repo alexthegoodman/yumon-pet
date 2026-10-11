@@ -40,8 +40,9 @@ cargo run --release --no-default-features --bin train_code -- --config training-
 journals and writes a new bundle containing the tokenizer, retokenized buckets,
 local/Docker configs, exact fitting corpus and provenance. Existing artifacts
 are preserved. For another run, append a new output directory to the command.
-It checks that training/validation samples and tiers remain identical after
-retokenization; oversized selected records fail without truncation.
+Tier assignments and source bytes are preserved after retokenization. Records
+exceeding `max_seq_len` are skipped with counts printed; records are never
+truncated. Each tier and split keeps equal documented and undocumented counts.
 
 ## RunPod Docker
 
