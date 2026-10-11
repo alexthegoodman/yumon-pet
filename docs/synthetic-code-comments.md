@@ -27,20 +27,36 @@ Defaults:
 - Input: `training-cache/code_buckets`, as produced by `sort_code_buckets`.
 - Output: `training-cache/code_buckets_documented`.
 - Tokenizer: `yumon_code_bpe` (must match the input caches).
-- Output context: 1024 tokens; model response limit: 512 tokens.
+- Output context: 1024 tokens; initial model response limit: 512 tokens,
+  doubling on truncation up to 8192 tokens.
 - Temperature: 0.2; request timeout: 300 seconds; no delay between samples.
 
 Use `--input`, `--output`, `--tokenizer`, `--max-seq-len`, `--max-tokens`,
-`--temperature`, `--timeout`, or `--delay` to override these values.
-`--help` lists all options. The program prints the complete documented sample
-at every 50th sample across the four buckets, plus bucket completion messages.
+`--retry-max-tokens`, `--temperature`, `--timeout`, or `--delay` to override
+these values. `--retry-max-tokens` must be at least `--max-tokens`.
+`--help` lists all options. Each sample logs its bucket and index before the
+request, then confirms the synced result with total progress, percentage, and
+elapsed seconds. The complete documented sample is still printed every 50
+samples, along with bucket completion messages.
 
 The model returns only `///` doc comments. The tool inserts them immediately
 before the function, struct, or wrapped method's attributes, preserving all
 original source bytes, existing comments, source paths, locations, and order.
-Responses containing code, fences, reasoning, invalid comments, or truncated
-completions are rejected. Retryable HTTP failures and invalid responses get
-up to five attempts with backoff. Authentication and request configuration
+New comments are requested as one to three short sentences, capped at 80 words
+and six lines. Oversized comments are not saved: the model is immediately asked
+to rewrite them more concisely, within the same five-attempt limit. The response
+token budget is headroom for completing a request, not a desired comment length.
+Existing saved comments are reused without applying the new length limits.
+The request explicitly disables thinking using Qwen's
+[documented API setting](https://huggingface.co/Qwen/Qwen3.8-27B#instruct-or-non-thinking-mode).
+A completed leading `<think>...</think>` block is removed if the server still
+includes one; only the final doc comments are saved. Responses containing code,
+fences, unfinished reasoning, invalid comments, or truncated completions are
+rejected. A `finish_reason=length` response retries immediately with twice the
+token budget, bounded by `--retry-max-tokens` and five total attempts. Other
+retryable HTTP failures and invalid responses use backoff. Retry logs include
+the attempt number, token budget, and finish reason when available.
+Authentication and request configuration
 errors stop immediately. Generated documentation still needs human review
 for factual accuracy.
 
@@ -50,10 +66,13 @@ after interruption to reuse saved comments and skip completed buckets. The
 next request goes to the least advanced unfinished bucket, with tier order
 breaking ties, so an interrupted round continues at the appropriate bucket.
 Older sequential runs are supported: lagging buckets catch up first.
-The
-manifest checks input hashes, tokenizer, model, prompt, and generation settings
+The manifest checks input hashes, tokenizer, model, prompt, and generation settings
 before resuming. Change those settings by choosing a new output directory.
 Run only one generator per output directory at a time.
+
+Existing journals from before the truncation fix resume with the same command.
+Keep the original `--max-tokens` value (512 by default) to match the manifest;
+the new retry behavior and `--retry-max-tokens` do not invalidate saved comments.
 
 Code and comments are never truncated or silently dropped. If a documented
 sample exceeds the output context, its comment stays in the journal. Increase

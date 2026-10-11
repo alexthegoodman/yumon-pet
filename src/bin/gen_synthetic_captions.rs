@@ -13,7 +13,7 @@ mod native {
         fs::{self, File, OpenOptions},
         io::{BufRead, BufReader, Write},
         path::{Path, PathBuf},
-        time::Duration,
+        time::{Duration, Instant},
     };
     use syn::spanned::Spanned;
     use yumon_pet::brain::{
@@ -30,6 +30,8 @@ mod native {
         "tier_3_moderate",
         "tier_4_high",
     ];
+    const MAX_COMMENT_WORDS: usize = 80;
+    const MAX_COMMENT_LINES: usize = 6;
     const SYSTEM: &str = r#"Write accurate Rust documentation for the supplied code sample.
 Return ONLY a short Rust outer doc comment, with every line starting with ///.
 Document the main function, method, or struct, not its surrounding impl/trait.
@@ -65,6 +67,9 @@ The comment will be inserted immediately before the documented item's attributes
         max_seq_len: usize,
         #[arg(long, default_value_t = 512)]
         max_tokens: usize,
+        /// Maximum response budget after doubling on truncation retries.
+        #[arg(long, default_value_t = 8192)]
+        retry_max_tokens: usize,
         #[arg(long, default_value_t = 0.2)]
         temperature: f64,
         /// Per-request timeout, including endpoint cold starts.
@@ -214,7 +219,10 @@ The comment will be inserted immediately before the documented item's attributes
     }
 
     fn generate(args: &Args, url: &str, model: &str, token: &str, source: &str) -> Result<String> {
-        let body = serde_json::json!({
+        let instruction = format!(
+            "Write one to three short sentences, at most {MAX_COMMENT_WORDS} words across at most {MAX_COMMENT_LINES} /// lines. Use a brief prose paragraph, without examples, lists, or section headings."
+        );
+        let mut body = serde_json::json!({
             "model": model,
             "messages": [
                 {"role": "system", "content": SYSTEM},
@@ -223,8 +231,17 @@ The comment will be inserted immediately before the documented item's attributes
             "stream": false,
             "temperature": args.temperature,
             "max_tokens": args.max_tokens,
+            // A prompt-only /no_think does not reliably switch Qwen's template.
+            "chat_template_kwargs": {"enable_thinking": false},
         });
+        let mut max_tokens = args.max_tokens;
+        let mut feedback = String::new();
         for attempt in 0..5 {
+            body["max_tokens"] = max_tokens.into();
+            body["messages"][1]["content"] =
+                format!("{instruction}\n{feedback}\nDocument this Rust sample:\n\n{source}").into();
+            let mut truncated = false;
+            let mut too_long = false;
             let result = (|| -> Result<String> {
                 let response = ureq::post(url)
                     .timeout(Duration::from_secs(args.timeout))
@@ -245,30 +262,104 @@ The comment will be inserted immediately before the documented item's attributes
                 let response: serde_json::Value =
                     response.into_json().context("decoding endpoint JSON")?;
                 let choice = &response["choices"][0];
+                if choice["finish_reason"] == "length" {
+                    truncated = true;
+                    bail!(
+                        "finish_reason=length at max_tokens={max_tokens} (completion_tokens={}, reasoning_tokens={}); response was not saved",
+                        response["usage"]["completion_tokens"],
+                        response["usage"]["completion_tokens_details"]["reasoning_tokens"]
+                    );
+                }
                 ensure!(
                     choice["finish_reason"] == "stop",
-                    "completion did not finish normally; increase --max-tokens if truncated"
+                    "completion did not finish normally (finish_reason={}); response was not saved",
+                    choice["finish_reason"]
                 );
                 let content = choice["message"]["content"]
                     .as_str()
                     .context("missing completion content")?;
+                // Some Qwen servers include an empty or completed thinking block
+                // in content even when thinking is disabled. Never save it.
+                let content = final_content(content)?;
                 let comment = validate_comment(content)?;
+                if let Err(error) = check_comment_length(&comment) {
+                    too_long = true;
+                    return Err(error);
+                }
                 document(source, &comment)?;
                 Ok(comment)
             })();
             match result {
                 Ok(comment) => return Ok(comment),
                 Err(error) => {
+                    if too_long {
+                        if attempt == 4 {
+                            return Err(error).context("model did not produce a concise doc comment after five attempts; saved progress is intact");
+                        }
+                        feedback = format!(
+                            "The previous comment exceeded the length limit ({error}). Rewrite it as one or two much shorter sentences; keep only the essential behavior."
+                        );
+                        eprintln!(
+                            "Request attempt {}/5 produced an oversized comment: {error}; requesting a shorter comment",
+                            attempt + 1
+                        );
+                        continue;
+                    }
+                    if truncated {
+                        if attempt == 4 || max_tokens >= args.retry_max_tokens {
+                            return Err(error).context(format!("doc-comment generation exhausted the response budget; increase --retry-max-tokens (currently {})", args.retry_max_tokens));
+                        }
+                        max_tokens = max_tokens.saturating_mul(2).min(args.retry_max_tokens);
+                        feedback = "The previous response was cut off. Return only a concise, complete doc comment; omit secondary details.".into();
+                        eprintln!(
+                            "Request attempt {}/5 truncated: {error}; retrying with max_tokens={max_tokens}",
+                            attempt + 1
+                        );
+                        continue;
+                    }
                     if attempt == 4 || error.to_string().starts_with("non-retryable") {
                         return Err(error).context("doc-comment generation failed");
                     }
                     let delay = 2_u64.pow(attempt + 1);
-                    eprintln!("Request/validation failed: {error}; retrying in {delay}s");
+                    eprintln!(
+                        "Request attempt {}/5 failed: {error}; retrying in {delay}s (max_tokens={max_tokens})",
+                        attempt + 1
+                    );
                     std::thread::sleep(Duration::from_secs(delay));
                 }
             }
         }
         unreachable!()
+    }
+
+    fn check_comment_length(comment: &str) -> Result<()> {
+        let lines = comment.lines().count();
+        let words: usize = comment
+            .lines()
+            .map(|line| {
+                line.strip_prefix("///")
+                    .unwrap_or(line)
+                    .split_whitespace()
+                    .count()
+            })
+            .sum();
+        ensure!(
+            words <= MAX_COMMENT_WORDS && lines <= MAX_COMMENT_LINES,
+            "comment has {words} words and {lines} lines; maximum is {MAX_COMMENT_WORDS} words and {MAX_COMMENT_LINES} lines"
+        );
+        Ok(())
+    }
+
+    fn final_content(content: &str) -> Result<&str> {
+        let content = content.trim();
+        if let Some(thinking) = content.strip_prefix("<think>") {
+            let (_, answer) = thinking
+                .split_once("</think>")
+                .context("model returned an unfinished thinking block")?;
+            Ok(answer.trim())
+        } else {
+            Ok(content)
+        }
     }
 
     /// Only an unterminated final line can be discarded after an interrupted write.
@@ -349,6 +440,10 @@ The comment will be inserted immediately before the documented item's attributes
         ensure!(
             args.max_seq_len >= 2 && args.max_tokens > 0 && args.timeout > 0,
             "invalid context, token limit, or timeout"
+        );
+        ensure!(
+            args.retry_max_tokens >= args.max_tokens,
+            "--retry-max-tokens must be at least --max-tokens"
         );
         ensure!(
             args.temperature.is_finite() && (0.0..=2.0).contains(&args.temperature),
@@ -438,6 +533,10 @@ The comment will be inserted immediately before the documented item's attributes
             file.sync_all()?;
         }
         let url = chat_url(&args.endpoint);
+        let planned_total: usize = inputs
+            .keys()
+            .map(|bucket| input_report["bucket_counts"][bucket].as_u64().unwrap() as usize)
+            .sum();
         let mut total = 0;
         let mut buckets = Vec::new();
         for bucket in BUCKETS {
@@ -508,6 +607,10 @@ The comment will be inserted immediately before the documented item's attributes
             }
             buckets.push(bucket);
         }
+        println!(
+            "[Progress] {total}/{planned_total} comments already saved; cycling through unfinished buckets"
+        );
+        std::io::stdout().flush()?;
         loop {
             let progress: Vec<_> = buckets
                 .iter()
@@ -520,6 +623,14 @@ The comment will be inserted immediately before the documented item's attributes
             let index = bucket.cursor;
             let sample = &mut bucket.samples[index];
             let source = decode_sample(sample, &tokenizer)?;
+            println!(
+                "[Generate] {} sample {}/{} | {total}/{planned_total} saved",
+                bucket.name,
+                index + 1,
+                bucket.metadata.samples
+            );
+            std::io::stdout().flush()?;
+            let started = Instant::now();
             let comment =
                 generate(&args, &url, &args.model, &args.token, &source).with_context(|| {
                     format!(
@@ -544,6 +655,15 @@ The comment will be inserted immediately before the documented item's attributes
                 .with_context(|| format!("{} sample {}", bucket.name, index + 1))?;
             bucket.cursor += 1;
             total += 1;
+            println!(
+                "[Saved] {} sample {}/{} | {total}/{planned_total} ({:.2}%) | {:.1}s",
+                bucket.name,
+                bucket.cursor,
+                bucket.metadata.samples,
+                100.0 * total as f64 / planned_total as f64,
+                started.elapsed().as_secs_f64()
+            );
+            std::io::stdout().flush()?;
             if total % 50 == 0 {
                 println!(
                     "\n=== Sample {total} | {} #{} | {} | {} ===\n{documented}\n",
@@ -777,6 +897,7 @@ The comment will be inserted immediately before the documented item's attributes
                     let request: serde_json::Value = serde_json::from_slice(&bytes)?;
                     assert_eq!(request["model"], "test-qwen-model");
                     assert_eq!(request["stream"], false);
+                    assert_eq!(request["chat_template_kwargs"]["enable_thinking"], false);
                     assert!(request["messages"][1]["content"].as_str().unwrap().contains("fn f() {}"));
                     write!(socket, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())?;
                     Ok(())
@@ -788,6 +909,121 @@ The comment will be inserted immediately before the documented item's attributes
                 if succeeds { assert_eq!(result?, "/// Does nothing."); }
             }
             Ok(())
+        }
+
+        #[test]
+        fn retries_grow_truncation_budget_and_shorten_oversized_comments() -> Result<()> {
+            use std::{io::Read, net::TcpListener};
+            for (budgets, cap, succeeds, oversized) in [
+                (vec![512, 1024, 2048], 8192, true, false),
+                (vec![512, 1024], 1024, false, false),
+                (vec![512, 512], 8192, true, true),
+            ] {
+                let listener = TcpListener::bind("127.0.0.1:0")?;
+                listener.set_nonblocking(true)?;
+                let url = format!("http://{}/v1/chat/completions", listener.local_addr()?);
+                let server = std::thread::spawn(move || -> Result<()> {
+                    for (attempt, budget) in budgets.iter().enumerate() {
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        let mut socket = loop {
+                            match listener.accept() {
+                                Ok((socket, _)) => break socket,
+                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                    ensure!(Instant::now() < deadline, "missing retry request");
+                                    std::thread::sleep(Duration::from_millis(10));
+                                }
+                                Err(error) => return Err(error.into()),
+                            }
+                        };
+                        socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+                        let mut reader = BufReader::new(socket.try_clone()?);
+                        let mut content_length = 0;
+                        loop {
+                            let mut line = String::new();
+                            ensure!(reader.read_line(&mut line)? > 0, "unexpected request EOF");
+                            if line == "\r\n" {
+                                break;
+                            }
+                            if let Some(length) =
+                                line.to_lowercase().strip_prefix("content-length:")
+                            {
+                                content_length = length.trim().parse::<usize>()?;
+                            }
+                        }
+                        let mut bytes = vec![0; content_length];
+                        reader.read_exact(&mut bytes)?;
+                        let request: serde_json::Value = serde_json::from_slice(&bytes)?;
+                        assert_eq!(request["max_tokens"], *budget);
+                        let prompt = request["messages"][1]["content"].as_str().unwrap();
+                        assert!(prompt.contains("at most 80 words"));
+                        if oversized && attempt > 0 {
+                            assert!(prompt.contains("previous comment exceeded the length limit"));
+                        }
+                        let done = succeeds && attempt + 1 == budgets.len();
+                        let content = if done {
+                            "<think>\n\n</think>\n/// Does nothing.".to_owned()
+                        } else if oversized {
+                            format!("/// {}", vec!["word"; 81].join(" "))
+                        } else {
+                            "/// Truncated".to_owned()
+                        };
+                        let body = serde_json::json!({
+                            "choices": [{"finish_reason": if done || oversized {"stop"} else {"length"},
+                                "message": {"content": content}}],
+                            "usage": {"completion_tokens": budget}
+                        }).to_string();
+                        write!(
+                            socket,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )?;
+                    }
+                    Ok(())
+                });
+                let mut args = Args::try_parse_from([
+                    "gen_synthetic_captions",
+                    "--endpoint",
+                    "https://example.test",
+                    "--model",
+                    "test",
+                    "--token",
+                    "test",
+                ])?;
+                args.retry_max_tokens = cap;
+                let result = generate(&args, &url, "test", "test", "fn f() {}");
+                server.join().unwrap()?;
+                if succeeds {
+                    assert_eq!(result?, "/// Does nothing.");
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(error.to_string().contains("--retry-max-tokens"));
+                    assert!(format!("{error:#}").contains("finish_reason=length"));
+                }
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn thinking_blocks_are_removed_without_accepting_incomplete_answers() -> Result<()> {
+            assert_eq!(
+                final_content("<think>Private reasoning</think>\n/// Docs.")?,
+                "/// Docs."
+            );
+            assert!(final_content("<think>unfinished").is_err());
+            assert!(validate_comment(final_content("<think>done</think>")?).is_err());
+            assert!(
+                validate_comment(final_content("<think>done</think>\nfn injected() {}")?).is_err()
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn doc_comment_limits_count_prose_without_comment_markers() {
+            assert!(check_comment_length("/// Returns the number of matching items.").is_ok());
+            assert!(check_comment_length(&format!("/// {}", vec!["word"; 80].join(" "))).is_ok());
+            assert!(check_comment_length(&format!("/// {}", vec!["word"; 81].join(" "))).is_err());
+            assert!(check_comment_length(&vec!["/// Brief."; 6].join("\n")).is_ok());
+            assert!(check_comment_length(&vec!["/// Brief."; 7].join("\n")).is_err());
         }
 
         #[test]
