@@ -27,3 +27,29 @@ Validation: 16 code CPU tests and the tiny WGPU curriculum/resume/causality
 check passed for all four architectures. Docker image `yumon-code-curriculum:local`
 built successfully; its Linux/CUDA CPU preflight validated the real three-bucket
 schedule. Actual RunPod GPU training remains untested.
+
+Balanced documented curriculum: production configs additionally set `documented`
+to `training-cache/code_buckets_documented` and use context 1024. All committed
+low/mild/moderate JSONL comments are reconstructed against verified raw buckets;
+each tier and validation partition gets equally many distinct undocumented
+items, excluding matching documented source locations/code and existing doc
+attributes. Journals are read without mutation or endpoint calls. Docker adds
+only generation metadata and the three eligible journals; its runtime is unchanged.
+Balanced checkpoint directories use `_curriculum_documented_balanced_v1` and
+reject changed journals on resume. Freeze journal inputs for each training run.
+
+Code tokenizer retraining: `train_bpe` defaults to the shared balanced Code
+training split, excludes held-out files from BPE fitting, and preserves source
+case/bytes. Default output is `training-cache/code_tokenizer_retrained`, a new
+bundle with matching tokenizer, retokenized low/mild/moderate buckets, frozen
+journals and local/Docker configs. Selection/source equality is checked before
+publication. `--pet` retains the old prose-tokenizer path. README gives Docker
+build arguments; existing artifacts and runtime settings are preserved.
+
+Docker COPY inputs now default to the `training-cache/code_tokenizer_retrained`
+bundle. README presents tokenizer -> docker build -> docker push; additional
+commands are in docs/commands.md. Runtime/CUDA/startup settings are unchanged.
+
+Tokenizer fitting reuses code_corpus::train_tokenizer() and the existing
+BpeTokenizer. There is no code_tokenizer module or separate BPE implementation.
+Corpus preparation and compatible cache rebuilding live in code_corpus.

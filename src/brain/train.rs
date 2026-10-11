@@ -270,7 +270,8 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
         let run = RunConfig {
             name: format!("code_{}h_{}l_{}a_{}ff_{}len_b{}_{arch_tag}_f32{}", config.embed_dim,
                 config.n_layers, config.attn_heads, config.ff_dim, config.max_seq_len, config.batch_size,
-                if config.curriculum.is_some() { "_curriculum_lmm_v1" } else { "" }),
+                if config.documented.is_some() { "_curriculum_documented_balanced_v1" }
+                else if config.curriculum.is_some() { "_curriculum_lmm_v1" } else { "" }),
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
             n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
             max_seq_len: config.max_seq_len, architecture,

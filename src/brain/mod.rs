@@ -20,6 +20,8 @@ pub mod code_corpus;
 pub mod code_complexity;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod code_curriculum;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod code_documented;
 pub mod keywords;
 pub mod fixer;
 pub mod loader;

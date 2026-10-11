@@ -35,6 +35,8 @@ pub struct CodeConfig {
     pub cache: PathBuf,
     /// Optional frozen bucket directory. Only tiers 1-3 are eligible for training.
     pub curriculum: Option<PathBuf>,
+    /// Saved synthetic comment journals to mix 1:1 with distinct undocumented code.
+    pub documented: Option<PathBuf>,
     pub tokenizer: String,
     pub max_seq_len: usize,
     pub exclude_dirs: Vec<String>,
@@ -56,7 +58,7 @@ impl Default for CodeConfig {
     fn default() -> Self {
         Self {
             architecture: CodeArchitecture::DecoderOnly, num_experts: 4, top_k: 1,
-            source: "../rust-code".into(), cache: "training-cache/code.bin".into(), curriculum: None,
+            source: "../rust-code".into(), cache: "training-cache/code.bin".into(), curriculum: None, documented: None,
             tokenizer: "yumon_code_bpe".into(), max_seq_len: 512,
             exclude_dirs: [".git", "target", "node_modules"].map(String::from).to_vec(),
             seed: 4815162342, vocab_size: 16384, embed_dim: 512, n_layers: 16,
@@ -76,6 +78,8 @@ impl CodeConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        ensure!(self.documented.is_none() || self.curriculum.is_some(),
+            "documented samples require curriculum raw buckets");
         ensure!(self.num_experts > 0 && self.top_k > 0 && self.top_k <= self.num_experts,
             "require num_experts > 0 and 1 <= top_k <= num_experts");
         ensure!(self.max_seq_len >= 2, "max_seq_len must be >= 2");
@@ -260,4 +264,216 @@ pub fn validation_files(samples: &[Sample], config: &CodeConfig) -> Result<HashS
     files.shuffle(&mut StdRng::seed_from_u64(config.seed));
     let count = ((files.len() as f64 * config.validation_fraction).ceil() as usize).clamp(1, files.len() - 1);
     Ok(files[..count].iter().cloned().collect())
+}
+
+/// Prepare the shared curriculum's training text, fit it with `train_tokenizer`,
+/// and rebuild matching caches without changing sample selection or source bytes.
+pub fn prepare_training_tokenizer(config: &CodeConfig, output: &Path) -> Result<CodeConfig> {
+    use std::{fs, io::Write};
+    use serde_json::{Value, json};
+    use super::{code_curriculum::{self, ALLOWED_BUCKETS, PreparedCode}, code_documented,
+        sample_cache::{self, CacheObjective}, samples::TrainingStage};
+
+    fn utf8(path: &Path) -> Result<&str> {
+        path.to_str().context("path must be UTF-8")
+    }
+    fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
+        fs::write(path, serde_json::to_vec_pretty(value)?).map_err(Into::into)
+    }
+    fn sources(samples: &[Sample], tokenizer: &TokenizerKind) -> Result<Vec<String>> {
+        let TokenizerKind::Bpe(tok) = tokenizer else {
+            anyhow::bail!("Code requires byte-level BPE")
+        };
+        samples
+            .iter()
+            .map(|sample| {
+                let ids: Vec<_> = sample.target_labels.iter().map(|&id| id as u32).collect();
+                tok.decode(&ids)
+            })
+            .collect()
+    }
+
+    fn verify_same(
+        before: &PreparedCode,
+        after: &PreparedCode,
+        old: &TokenizerKind,
+        new: &TokenizerKind,
+    ) -> Result<()> {
+        ensure!(
+            before.tier_ends == after.tier_ends,
+            "retokenization changed curriculum tier lengths"
+        );
+        for (label, left, right) in [
+            ("training", &before.training, &after.training),
+            ("validation", &before.validation, &after.validation),
+        ] {
+            ensure!(
+                left.len() == right.len(),
+                "retokenization changed {label} sample count"
+            );
+            ensure!(
+                left.iter().zip(right).all(|(a, b)| a.pair == b.pair)
+                    && sources(left, old)? == sources(right, new)?,
+                "retokenization changed {label} sources or selection"
+            );
+        }
+        Ok(())
+    }
+
+    config.validate()?;
+    ensure!(
+        !output.exists(),
+        "output already exists: {}; choose a new directory",
+        output.display()
+    );
+    let buckets = config
+        .curriculum
+        .as_ref()
+        .context("Code BPE retraining requires curriculum buckets")?;
+    let documented = config
+        .documented
+        .as_ref()
+        .context("Code BPE retraining requires documented journals")?;
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let staging = parent.join(format!(
+        ".code-tokenizer-preparing-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir(&staging)?;
+    let new_docs = staging.join("documented");
+    fs::create_dir(&new_docs)?;
+    fs::copy(
+        documented.join("generation.json"),
+        new_docs.join("generation.json"),
+    )?;
+    for name in ALLOWED_BUCKETS {
+        let bytes = fs::read(documented.join(format!("{name}.jsonl")))?;
+        let end = bytes
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |index| index + 1);
+        fs::write(new_docs.join(format!("{name}.jsonl")), &bytes[..end])?;
+    }
+    let old = load_tokenizer(&config.tokenizer)?;
+    let mut snapshot = config.clone();
+    snapshot.documented = Some(new_docs.clone());
+    let before = code_curriculum::prepare(&snapshot, &old)?;
+    // Fit once on the final cumulative TRAINING pool. Held-out files never
+    // influence vocabulary merges; there is no generic prose or raw-source scan.
+    let texts = sources(&before.training, &old)?;
+    println!(
+        "Fitting Code BPE on {} balanced training samples; {} held-out samples excluded",
+        texts.len(),
+        before.validation.len()
+    );
+    let corpus_path = staging.join("tokenizer-corpus.jsonl");
+    let mut corpus = fs::File::create(&corpus_path)?;
+    for (sample, text) in before.training.iter().zip(&texts) {
+        serde_json::to_writer(&mut corpus, &json!({"source": sample.pair, "text": text}))?;
+        corpus.write_all(b"\n")?;
+    }
+    corpus.sync_all()?;
+    drop(corpus);
+    // Feed plain source text to the existing Code BPE trainer. JSON provenance
+    // above is for inspection only and never enters vocabulary fitting.
+    let text_path = staging.join("tokenizer-corpus.txt");
+    {
+        let mut text_file = fs::File::create(&text_path)?;
+        for source in &texts {
+            writeln!(text_file, "{source}")?;
+        }
+    }
+    train_tokenizer(&[text_path], config.vocab_size, utf8(&staging.join("tokenizer"))?)?;
+    let new = load_tokenizer(utf8(&staging.join("tokenizer"))?)?;
+    let new_buckets = staging.join("buckets");
+    fs::create_dir(&new_buckets)?;
+    fs::copy(
+        buckets.join("reference.json"),
+        new_buckets.join("reference.json"),
+    )?;
+    let mut report = json!({"reference_sha256": before.identity["reference_sha256"],
+        "bucket_counts": {}, "bucket_caches": {},
+        "classification": "Frozen original tier assignments preserved during retokenization"});
+    let mut manifest: Value = serde_json::from_slice(&fs::read(new_docs.join("generation.json"))?)?;
+    manifest["inputs"] = json!({});
+    manifest["tokenizer_sha256"] = json!(code_curriculum::file_sha256(
+        &staging.join("tokenizer/tokenizer.json")
+    )?);
+    let mut total = 0;
+    for (tier, name) in ALLOWED_BUCKETS.iter().enumerate() {
+        let input_path = buckets.join(format!("{name}.bin"));
+        ensure!(
+            code_curriculum::file_sha256(&input_path)?
+                == before.identity["buckets"][tier]["sha256"],
+            "{name} source bucket changed during tokenizer training"
+        );
+        let metadata = sample_cache::read_metadata(&input_path)?;
+        let mut samples = sample_cache::load_cache_with_objective(
+            &input_path,
+            &old,
+            TrainingStage::Language,
+            metadata.max_seq_len,
+            CacheObjective::RawCode,
+        )?;
+        let raw_text = sources(&samples, &old)?;
+        for (sample, source) in samples.iter_mut().zip(&raw_text) {
+            code_documented::encode(sample, &new, source, config.max_seq_len)
+                .with_context(|| format!("retokenizing {name}: {:?}", sample.pair))?;
+        }
+        let path = new_buckets.join(format!("{name}.bin"));
+        let metadata = sample_cache::write_cache_with_objective(
+            &path,
+            &new,
+            TrainingStage::Language,
+            config.max_seq_len,
+            config.seed,
+            &samples,
+            CacheObjective::RawCode,
+        )?;
+        let sha = code_curriculum::file_sha256(&path)?;
+        total += samples.len();
+        report["bucket_counts"][name] = json!(samples.len());
+        report["bucket_caches"][name] = json!({"sha256": sha, "metadata": metadata});
+        manifest["inputs"][name] = json!(sha);
+    }
+    report["total"] = json!(total);
+    write_json(&new_docs.join("generation.json"), &manifest)?;
+    report["generation_sha256"] = json!(code_curriculum::file_sha256(
+        &new_docs.join("generation.json")
+    )?);
+    write_json(&new_buckets.join("report.json"), &report)?;
+    let mut check = config.clone();
+    check.tokenizer = utf8(&staging.join("tokenizer"))?.into();
+    check.curriculum = Some(new_buckets);
+    check.documented = Some(new_docs);
+    check.vocab_size = new.vocab_size();
+    let after = code_curriculum::prepare(&check, &new)?;
+    verify_same(&before, &after, &old, &new)?;
+    write_json(
+        &staging.join("provenance.json"),
+        &json!({
+        "source_identity": before.identity, "output_identity": after.identity,
+        "tokenizer_training_samples": texts.len(), "held_out_samples": before.validation.len(),
+        "corpus_sha256": code_curriculum::file_sha256(&corpus_path)?,
+        "fit": "final cumulative training split, each selected sample once; validation excluded"}),
+    )?;
+    let mut deployed = check.clone();
+    deployed.tokenizer = "yumon_code_bpe".into();
+    deployed.curriculum = Some("training-cache/code_buckets".into());
+    deployed.documented = Some("training-cache/code_buckets_documented".into());
+    deployed.cache = "training-cache/code.bin".into();
+    deployed.out_dir = config.out_dir.join("tokenizer-retrained");
+    write_json(&staging.join("docker-config.json"), &deployed)?;
+    let mut local = deployed;
+    local.tokenizer = utf8(&output.join("tokenizer"))?.into();
+    local.curriculum = Some(output.join("buckets"));
+    local.documented = Some(output.join("documented"));
+    write_json(&staging.join("config.json"), &local)?;
+    // A partial/failed bundle never appears under the requested output name.
+    fs::rename(&staging, output).context("publishing tokenizer and compatible cache bundle")?;
+    Ok(local)
 }

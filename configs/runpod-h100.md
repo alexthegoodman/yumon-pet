@@ -53,10 +53,10 @@ Docker and `train_code`; [`yumon-code-moe.json`](yumon-code-moe.json) explicitly
 selects MoE. Both enable the low/mild/moderate curriculum: low in epoch 1,
 low+mild in epoch 2, and low+mild+moderate from epoch 3 onward. High is excluded
 from training and validation, and Docker does not copy that cache.
-Architecture and expert settings do not affect the sample cache, so the current
-512-token cache and tokenizer can be reused if their identity checks pass.
-Increasing context requires rebuilding the cache; the whole-item chunker skips
-functions/structs that exceed the context budget.
+Both configs also load the saved documented journals and select an equal number
+of distinct undocumented items per tier in training and validation. Their
+1,024-token context accommodates the comments while reusing the original
+512-token raw buckets and tokenizer. See the README for snapshot/resume rules.
 
 ```sh
 # CPU-only cache/config validation (also performed by the Docker build).

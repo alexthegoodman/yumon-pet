@@ -125,7 +125,11 @@ pub fn prepare(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<Prepare
             &path,
             tokenizer,
             TrainingStage::Language,
-            config.max_seq_len,
+            if config.documented.is_some() {
+                metadata.max_seq_len
+            } else {
+                config.max_seq_len
+            },
             CacheObjective::RawCode,
         )?;
         lengths[tier] = group.len();
@@ -133,6 +137,23 @@ pub fn prepare(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<Prepare
         buckets.push(json!({"name": name, "sha256": sha, "metadata": metadata}));
     }
     let held_out = code_corpus::validation_files(&samples, config)?;
+    let documented_identity = if let Some(directory) = &config.documented {
+        let (mixed, ends, identity) = super::code_documented::mix(
+            directory,
+            &samples,
+            lengths,
+            &held_out,
+            config,
+            tokenizer,
+            &reference_sha,
+            &buckets,
+        )?;
+        samples = mixed;
+        lengths = ends;
+        Some(identity)
+    } else {
+        None
+    };
     let mut training = Vec::new();
     let mut validation = Vec::new();
     let mut tier_ends = [0; 3];
@@ -155,14 +176,19 @@ pub fn prepare(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<Prepare
         !validation.is_empty(),
         "curriculum needs held-out validation samples"
     );
+    let mut identity = json!({"mode": "low-mild-moderate-v1", "reference_sha256": reference_sha,
+        "buckets": buckets, "seed": config.seed, "validation_fraction": config.validation_fraction,
+        "tier_ends": tier_ends});
+    if let Some(documented) = documented_identity {
+        identity["mode"] = json!("documented-balanced-lmm-v1");
+        identity["documented"] = documented;
+    }
     Ok(PreparedCode {
         training,
         validation,
         tier_ends: Some(tier_ends),
         seed: config.seed,
-        identity: json!({"mode": "low-mild-moderate-v1", "reference_sha256": reference_sha,
-            "buckets": buckets, "seed": config.seed, "validation_fraction": config.validation_fraction,
-            "tier_ends": tier_ends}),
+        identity,
     })
 }
 

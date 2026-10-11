@@ -87,12 +87,14 @@ ENV RUST_BACKTRACE=1
 
 WORKDIR /app
 
-# The default image trains Yumon Code. No Pet binary or cache is included.
+# The default image trains Yumon Code from the bundle produced by train_bpe.
+# No Pet binary or cache is included.
 # Config paths must match the destinations below (or point at mounted volume files).
 COPY --from=builder /build/target/release/train_code ./train_code
-ARG CODE_TOKENIZER=yumon_code_bpe
-ARG CODE_BUCKETS=training-cache/code_buckets
-ARG CODE_CONFIG=configs/yumon-code.json
+ARG CODE_TOKENIZER=training-cache/code_tokenizer_retrained/tokenizer
+ARG CODE_BUCKETS=training-cache/code_tokenizer_retrained/buckets
+ARG CODE_CONFIG=training-cache/code_tokenizer_retrained/docker-config.json
+ARG CODE_DOCUMENTED=training-cache/code_tokenizer_retrained/documented
 COPY ${CODE_TOKENIZER}/ ./yumon_code_bpe/
 # Whitelist the three allowed tiers. High, excluded and unscored data are never
 # copied into the training image; the original mixed code.bin is not included.
@@ -101,6 +103,10 @@ COPY ${CODE_BUCKETS}/tier_2_mild.bin ./training-cache/code_buckets/tier_2_mild.b
 COPY ${CODE_BUCKETS}/tier_3_moderate.bin ./training-cache/code_buckets/tier_3_moderate.bin
 COPY ${CODE_BUCKETS}/reference.json ./training-cache/code_buckets/reference.json
 COPY ${CODE_BUCKETS}/report.json ./training-cache/code_buckets/report.json
+COPY ${CODE_DOCUMENTED}/generation.json ./training-cache/code_buckets_documented/generation.json
+COPY ${CODE_DOCUMENTED}/tier_1_low.jsonl ./training-cache/code_buckets_documented/tier_1_low.jsonl
+COPY ${CODE_DOCUMENTED}/tier_2_mild.jsonl ./training-cache/code_buckets_documented/tier_2_mild.jsonl
+COPY ${CODE_DOCUMENTED}/tier_3_moderate.jsonl ./training-cache/code_buckets_documented/tier_3_moderate.jsonl
 COPY ${CODE_CONFIG} ./configs/yumon-code.json
 RUN ./train_code --config configs/yumon-code.json --require-curriculum --check
 CMD ["./train_code", "--config", "configs/yumon-code.json", "--require-curriculum"]

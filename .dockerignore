@@ -21,3 +21,29 @@ training-cache/code_buckets/*
 !training-cache/code_buckets/tier_3_moderate.bin
 !training-cache/code_buckets/reference.json
 !training-cache/code_buckets/report.json
+
+# Saved documentation for the balanced curriculum (never include high).
+!training-cache/code_buckets_documented/
+training-cache/code_buckets_documented/*
+!training-cache/code_buckets_documented/generation.json
+!training-cache/code_buckets_documented/tier_1_low.jsonl
+!training-cache/code_buckets_documented/tier_2_mild.jsonl
+!training-cache/code_buckets_documented/tier_3_moderate.jsonl
+# Retrained Code bundle produced by train_bpe (only deployable artifacts).
+!training-cache/code_tokenizer_retrained/
+training-cache/code_tokenizer_retrained/*
+!training-cache/code_tokenizer_retrained/docker-config.json
+!training-cache/code_tokenizer_retrained/tokenizer/
+!training-cache/code_tokenizer_retrained/buckets/
+!training-cache/code_tokenizer_retrained/documented/
+training-cache/code_tokenizer_retrained/buckets/*
+!training-cache/code_tokenizer_retrained/buckets/tier_1_low.bin
+!training-cache/code_tokenizer_retrained/buckets/tier_2_mild.bin
+!training-cache/code_tokenizer_retrained/buckets/tier_3_moderate.bin
+!training-cache/code_tokenizer_retrained/buckets/reference.json
+!training-cache/code_tokenizer_retrained/buckets/report.json
+training-cache/code_tokenizer_retrained/documented/*
+!training-cache/code_tokenizer_retrained/documented/generation.json
+!training-cache/code_tokenizer_retrained/documented/tier_1_low.jsonl
+!training-cache/code_tokenizer_retrained/documented/tier_2_mild.jsonl
+!training-cache/code_tokenizer_retrained/documented/tier_3_moderate.jsonl

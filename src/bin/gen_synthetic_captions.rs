@@ -15,7 +15,6 @@ mod native {
         path::{Path, PathBuf},
         time::{Duration, Instant},
     };
-    use syn::spanned::Spanned;
     use yumon_pet::brain::{
         BOS_TOKEN, EOS_TOKEN, PAD_TOKEN,
         bpe::TokenizerKind,
@@ -163,60 +162,7 @@ The comment will be inserted immediately before the documented item's attributes
         }
     }
 
-    fn validate_comment(text: &str) -> Result<String> {
-        let text = text.trim();
-        ensure!(!text.is_empty(), "model returned an empty doc comment");
-        let mut has_text = false;
-        for line in text.lines() {
-            let body = line
-                .strip_prefix("///")
-                .context("expected only /// doc-comment lines")?;
-            ensure!(!body.starts_with('/'), "//// is not a Rust doc comment");
-            has_text |= !body.trim().is_empty();
-        }
-        ensure!(has_text, "model returned an empty doc comment");
-        Ok(text.to_owned())
-    }
-
-    /// Select the actual item, including its attributes, inside an impl/trait wrapper.
-    fn document(source: &str, comment: &str) -> Result<String> {
-        let comment = validate_comment(comment)?;
-        let file = syn::parse_file(source).context("parsing input Rust sample")?;
-        let mut positions = Vec::new();
-        for item in &file.items {
-            match item {
-                syn::Item::Fn(_) | syn::Item::Struct(_) => {
-                    positions.push(item.span().byte_range().start)
-                }
-                syn::Item::Impl(block) => {
-                    for member in &block.items {
-                        if let syn::ImplItem::Fn(function) = member {
-                            positions.push(function.span().byte_range().start);
-                        }
-                    }
-                }
-                syn::Item::Trait(block) => {
-                    for member in &block.items {
-                        if let syn::TraitItem::Fn(function) = member {
-                            positions.push(function.span().byte_range().start);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        ensure!(
-            positions.len() == 1,
-            "expected one function, method, or struct per sample"
-        );
-        // syn spans exclude an initial BOM/shebang; restore their byte offsets.
-        let bom = usize::from(source.starts_with('\u{feff}')) * '\u{feff}'.len_utf8();
-        let start = positions[0] + bom + file.shebang.as_ref().map_or(0, String::len);
-        ensure!(source.is_char_boundary(start), "invalid Rust item span");
-        let documented = format!("{}{}\n{}", &source[..start], comment, &source[start..]);
-        syn::parse_file(&documented).context("doc comment produced invalid Rust")?;
-        Ok(documented)
-    }
+    use yumon_pet::brain::code_documented::{validate_comment, document};
 
     fn generate(args: &Args, url: &str, model: &str, token: &str, source: &str) -> Result<String> {
         let instruction = format!(
