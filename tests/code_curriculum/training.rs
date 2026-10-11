@@ -56,6 +56,9 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
                 epsilon: 1e-7,
                 smoothing: 0.0,
             }],
+            dropout_rate: 0.05,
+            overfit: false,
+            heatmap_every: 1,
         };
         let path = directory.join(&run.name);
         std::fs::create_dir_all(&path)?;

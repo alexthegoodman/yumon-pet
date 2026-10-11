@@ -58,6 +58,14 @@ pub struct CodeConfig {
     pub last_lr: f64,
     pub validation_fraction: f64,
     pub out_dir: PathBuf,
+    /// Overfit sanity run on this many fixed low-tier training sequences: no
+    /// docs/curriculum replay, dropout 0, constant `first_lr`, validation on the
+    /// same sequences. Loss should fall below ~0.1; stalling above 1 points at
+    /// label shifting, loss masking or padding.
+    pub overfit_samples: Option<usize>,
+    /// Save a per-token loss heatmap, position/token loss plots and a token-colored
+    /// held-out text view every N optimizer steps (and at step 1). 0 disables.
+    pub heatmap_every: usize,
 }
 
 impl Default for CodeConfig {
@@ -71,6 +79,7 @@ impl Default for CodeConfig {
             attn_heads: 16, ff_dim: 2048, batch_size: 8, epochs: 15,
             first_lr: 2e-4, last_lr: 2e-5, validation_fraction: 0.01,
             out_dir: "/workspace/checkpoints/yumon-code".into(),
+            overfit_samples: None, heatmap_every: 250,
         }
     }
 }
@@ -89,6 +98,7 @@ impl CodeConfig {
         ensure!(self.num_experts > 0 && self.top_k > 0 && self.top_k <= self.num_experts,
             "require num_experts > 0 and 1 <= top_k <= num_experts");
         ensure!(self.max_seq_len >= 2, "max_seq_len must be >= 2");
+        ensure!(self.overfit_samples != Some(0), "overfit_samples must be positive");
         ensure!(self.docs_share >= 0.0 && self.docs_share < 1.0, "docs_share must be in [0, 1)");
         ensure!(self.vocab_size >= 260, "vocab_size must cover 256 bytes and four special tokens");
         ensure!(self.embed_dim > 0 && self.attn_heads > 0 && self.embed_dim % self.attn_heads == 0,

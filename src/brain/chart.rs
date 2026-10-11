@@ -19,6 +19,19 @@ pub struct TrainingState {
     pub last_reply: String,
 }
 
+/// Smoothing factor for the loss EMA drawn over the raw per-batch points.
+pub const EMA_ALPHA: f64 = 0.05;
+
+/// Exponential moving average of a (step, value) series.
+pub fn ema(data: &[(f64, f64)], alpha: f64) -> Vec<(f64, f64)> {
+    let mut previous: Option<f64> = None;
+    data.iter().map(|&(x, y)| {
+        let v = previous.map_or(y, |p| p + alpha * (y - p));
+        previous = Some(v);
+        (x, v)
+    }).collect()
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
@@ -29,14 +42,23 @@ use ratatui::{
     widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Gauge, Paragraph},
 };
 
+/// (ln step, log10 value) for the terminal chart, which has no log axes of its own.
+#[cfg(not(target_arch = "wasm32"))]
+fn log_xy(data: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    data.iter().filter(|p| p.1 > 0.0 && p.1.is_finite())
+        .map(|&(x, y)| (x.max(1.0).ln(), y.log10())).collect()
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
+    use self::plot::fmt_num;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),   // stats bar
-            Constraint::Min(10),     // loss chart
-            Constraint::Length(9), // top-3 accuracy
+            Constraint::Min(10),     // loss chart (log-log)
+            Constraint::Length(7),   // learning rate
+            Constraint::Length(8),   // top-3 accuracy
         ])
         .split(frame.area());
 
@@ -60,129 +82,296 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
         .block(Block::default().borders(Borders::ALL).title("Training"));
     frame.render_widget(para, chunks[0]);
 
-    // ── Chart ───────────────────────────────────────────────────────────────
-    let max_loss = state.loss_history.iter()
-        .map(|&(_, l)| l)
-        .fold(0.0_f64, f64::max)
-        .max(0.01);
+    // ── Loss: raw (dim), EMA, epoch average and entropy on log10 axes ──────
+    let raw = log_xy(&state.loss_history);
+    let smooth = log_xy(&ema(&state.loss_history, EMA_ALPHA));
+    let avg = log_xy(&state.avg_loss_history);
+    let entropy = log_xy(&state.entropy_history);
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &(_, y) in raw.iter().chain(&entropy).chain(&avg) {
+        lo = lo.min(y);
+        hi = hi.max(y);
+    }
+    if !lo.is_finite() { lo = -1.0; hi = 1.0; }
+    let (lo, hi) = (lo.floor(), (hi.ceil()).max(lo.floor() + 1.0));
 
-    let lr_ds = Dataset::default()
-        .name("lr")
-        .marker(symbols::Marker::Braille)
-        .graph_type(GraphType::Line)
-        .style(Style::default().fg(Color::Green))
-        .data(&state.lr_history);
-
-    let entropy_ds = Dataset::default()
-        .name("entropy")
-        .marker(symbols::Marker::Braille)
-        .graph_type(GraphType::Line)
-        .style(Style::default().fg(Color::Magenta))
-        .data(&state.entropy_history);
-
-    let loss_ds = Dataset::default()
-        .name("loss")
-        .marker(symbols::Marker::Braille)
-        .graph_type(GraphType::Line)
-        .style(Style::default().fg(Color::Cyan))
-        .data(&state.loss_history);
-
-    let avg_ds = Dataset::default()
-        .name("avg")
-        .marker(symbols::Marker::Braille)
-        .graph_type(GraphType::Line)
-        .style(Style::default().fg(Color::Yellow))
-        .data(&state.avg_loss_history);
-
-    let n = state.global_step.max(1) as f64;
-    let chart = Chart::new(vec![loss_ds, avg_ds, entropy_ds, lr_ds])
-        .block(Block::default().title("Loss").borders(Borders::ALL))
+    fn datasets<'a>(name: &'a str, color: Color, data: &'a [(f64, f64)]) -> Dataset<'a> {
+        Dataset::default().name(name).marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line).style(Style::default().fg(color)).data(data)
+    }
+    let n = (state.global_step.max(2) as f64).ln();
+    let chart = Chart::new(vec![
+        datasets("raw", Color::DarkGray, &raw),
+        datasets("entropy", Color::Magenta, &entropy),
+        datasets("avg", Color::Yellow, &avg),
+        datasets("ema", Color::Cyan, &smooth),
+    ])
+        .block(Block::default().title("Loss (log-log; ema over raw)").borders(Borders::ALL))
         .x_axis(
             Axis::default()
                 .bounds([0.0, n])
-                .labels(["0".to_string(), format!("{}", state.global_step)]),
+                .labels(["1".to_string(), format!("{}", state.global_step)]),
         )
         .y_axis(
             Axis::default()
-                .bounds([0.0, max_loss * 1.1])
-                .labels(["0".to_string(), format!("{:.3}", max_loss)]),
+                .bounds([lo, hi])
+                .labels([fmt_num(10f64.powf(lo)), fmt_num(10f64.powf(hi))]),
         );
     frame.render_widget(chart, chunks[1]);
-    let accuracy = Dataset::default().name("top-3")
-        .marker(symbols::Marker::Braille).graph_type(GraphType::Line)
-        .style(Style::default().fg(Color::Blue)).data(&state.top3_history);
-    let chart = Chart::new(vec![accuracy])
+
+    // ── LR on its own axis ──────────────────────────────────────────────────
+    let lr: Vec<(f64, f64)> = state.lr_history.iter().map(|&(x, y)| (x.max(1.0).ln(), y)).collect();
+    let max_lr = state.lr_history.iter().map(|p| p.1).fold(0.0_f64, f64::max).max(1e-12);
+    let lr_chart = Chart::new(vec![datasets("lr", Color::Green, &lr)])
+        .block(Block::default().title("Learning rate").borders(Borders::ALL))
+        .x_axis(Axis::default().bounds([0.0, n]))
+        .y_axis(Axis::default().bounds([0.0, max_lr * 1.1])
+            .labels(["0".to_string(), format!("{:.1e}", max_lr)]));
+    frame.render_widget(lr_chart, chunks[2]);
+
+    let top3_data: Vec<(f64, f64)> = state.top3_history.iter().map(|&(x, y)| (x.max(1.0).ln(), y)).collect();
+    let chart = Chart::new(vec![datasets("top-3", Color::Blue, &top3_data)])
         .block(Block::default().title("Top-3 token accuracy").borders(Borders::ALL))
         .x_axis(Axis::default().bounds([0.0, n]))
         .y_axis(Axis::default().bounds([0.0, 1.0]).labels(["0%", "50%", "100%"]));
-    frame.render_widget(chart, chunks[2]);
+    frame.render_widget(chart, chunks[3]);
+}
+
+/// Software-rendered PNG plotting: log or linear axes, decade gridlines and
+/// numeric tick labels from a tiny built-in digit font (no font dependency).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod plot {
+    use image::{Rgb, RgbImage};
+
+    pub type Series<'a> = (&'a [(f64, f64)], Rgb<u8>);
+
+    pub const BACKGROUND: Rgb<u8> = Rgb([10, 10, 15]);
+    const PANEL: Rgb<u8> = Rgb([16, 16, 24]);
+    const GRID: Rgb<u8> = Rgb([42, 42, 54]);
+    const BORDER: Rgb<u8> = Rgb([120, 120, 130]);
+    const LABEL: Rgb<u8> = Rgb([175, 175, 185]);
+
+    fn glyph(c: char) -> [u8; 5] {
+        match c {
+            '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+            '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+            '2' => [0b111, 0b001, 0b111, 0b100, 0b111],
+            '3' => [0b111, 0b001, 0b111, 0b001, 0b111],
+            '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+            '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
+            '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
+            '7' => [0b111, 0b001, 0b001, 0b001, 0b001],
+            '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
+            '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
+            '.' => [0, 0, 0, 0, 0b010],
+            '-' => [0, 0, 0b111, 0, 0],
+            _ => [0; 5],
+        }
+    }
+
+    /// Plain decimal without exponent or trailing zeros: 0.0003, 1.5, 128.
+    pub fn fmt_num(v: f64) -> String {
+        if v == 0.0 { return "0".into(); }
+        let a = v.abs();
+        let s = if a >= 100.0 { format!("{v:.0}") }
+            else if a >= 1.0 { format!("{v:.2}") }
+            else { format!("{:.*}", ((-a.log10().floor()) as usize + 1).min(10), v) };
+        if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
+    }
+
+    pub fn put(img: &mut RgbImage, x: i32, y: i32, c: Rgb<u8>) {
+        if x >= 0 && y >= 0 && (x as u32) < img.width() && (y as u32) < img.height() {
+            img.put_pixel(x as u32, y as u32, c);
+        }
+    }
+
+    pub fn text_width(s: &str) -> i32 { s.chars().count() as i32 * 8 }
+
+    pub fn text(img: &mut RgbImage, s: &str, x: i32, y: i32, color: Rgb<u8>) {
+        let mut cx = x;
+        for c in s.chars() {
+            for (r, row) in glyph(c).iter().enumerate() {
+                for col in 0..3 {
+                    if (row >> (2 - col)) & 1 == 1 {
+                        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                            put(img, cx + col * 2 + dx, y + r as i32 * 2 + dy, color);
+                        }
+                    }
+                }
+            }
+            cx += 8;
+        }
+    }
+
+    pub fn fill(img: &mut RgbImage, x: i32, y: i32, w: i32, h: i32, c: Rgb<u8>) {
+        for yy in y..y + h { for xx in x..x + w { put(img, xx, yy, c); } }
+    }
+
+    pub fn line(img: &mut RgbImage, (x1, y1): (i32, i32), (x2, y2): (i32, i32), color: Rgb<u8>) {
+        let (dx, dy) = ((x2 - x1).abs(), (y2 - y1).abs());
+        let (sx, sy) = (if x1 < x2 { 1 } else { -1 }, if y1 < y2 { 1 } else { -1 });
+        let (mut x, mut y, mut err) = (x1, y1, dx - dy);
+        loop {
+            put(img, x, y, color);
+            if x == x2 && y == y2 { break; }
+            let e2 = 2 * err;
+            if e2 > -dy { err -= dy; x += sx; }
+            if e2 < dx { err += dx; y += sy; }
+        }
+    }
+
+    /// One axes rectangle. Ranges are in data units; `*log` axes map through ln.
+    pub struct Panel {
+        pub x: i32, pub y: i32, pub w: i32, pub h: i32,
+        pub xr: (f64, f64), pub yr: (f64, f64),
+        pub xlog: bool, pub ylog: bool,
+    }
+
+    impl Panel {
+        pub fn new(x: i32, y: i32, w: i32, h: i32, xlog: bool, ylog: bool) -> Self {
+            Self { x, y, w, h, xr: (1.0, 2.0), yr: (0.0, 1.0), xlog, ylog }
+        }
+
+        /// Fit both ranges to the data. Log axes snap to whole decades.
+        pub fn fit(mut self, series: &[Series], zero_based: bool) -> Self {
+            let (mut x0, mut x1, mut y0, mut y1) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+            for (data, _) in series {
+                for &(x, y) in data.iter() {
+                    if !x.is_finite() || !y.is_finite() || (self.xlog && x <= 0.0) || (self.ylog && y <= 0.0) { continue; }
+                    x0 = x0.min(x); x1 = x1.max(x); y0 = y0.min(y); y1 = y1.max(y);
+                }
+            }
+            if x0 > x1 { x0 = 1.0; x1 = 2.0; y0 = 0.1; y1 = 1.0; }
+            self.xr = if self.xlog { (1.0, x1.max(2.0)) } else { (x0, if x1 > x0 { x1 } else { x0 + 1.0 }) };
+            self.yr = if self.ylog {
+                let (lo, mut hi) = (10f64.powf(y0.log10().floor()), 10f64.powf(y1.log10().ceil()));
+                if hi <= lo * 1.0001 { hi = lo * 10.0; }
+                (lo, hi)
+            } else {
+                let lo = if zero_based { y0.min(0.0) } else { y0 };
+                let hi = y1 + 0.05 * (y1 - lo);
+                (lo, if hi > lo { hi } else { lo + 1.0 })
+            };
+            self
+        }
+
+        pub fn y_range(mut self, lo: f64, hi: f64) -> Self { self.yr = (lo, hi); self }
+
+        fn tx(&self, v: f64) -> f64 { if self.xlog { v.max(1e-300).ln() } else { v } }
+        fn ty(&self, v: f64) -> f64 { if self.ylog { v.max(1e-300).ln() } else { v } }
+
+        pub fn map(&self, x: f64, y: f64) -> (i32, i32) {
+            let (a, b) = (self.tx(self.xr.0), self.tx(self.xr.1));
+            let (c, d) = (self.ty(self.yr.0), self.ty(self.yr.1));
+            let fx = ((self.tx(x) - a) / (b - a)).clamp(0.0, 1.0);
+            let fy = ((self.ty(y) - c) / (d - c)).clamp(0.0, 1.0);
+            (self.x + (fx * self.w as f64).round() as i32, self.y + self.h - (fy * self.h as f64).round() as i32)
+        }
+
+        fn ticks(range: (f64, f64), log: bool) -> Vec<f64> {
+            if log {
+                let (lo, hi) = (range.0.log10().floor() as i32, range.1.log10().ceil() as i32);
+                (lo..=hi).map(|k| 10f64.powi(k))
+                    .filter(|v| *v >= range.0 * 0.9999 && *v <= range.1 * 1.0001).collect()
+            } else {
+                (0..=4).map(|i| range.0 + (range.1 - range.0) * i as f64 / 4.0).collect()
+            }
+        }
+
+        pub fn draw(&self, img: &mut RgbImage, series: &[Series]) {
+            fill(img, self.x, self.y, self.w + 1, self.h + 1, PANEL);
+            for v in Self::ticks(self.yr, self.ylog) {
+                let (_, py) = self.map(self.xr.0, v);
+                line(img, (self.x, py), (self.x + self.w, py), GRID);
+                let label = fmt_num(v);
+                text(img, &label, self.x - 6 - text_width(&label), py - 5, LABEL);
+            }
+            for v in Self::ticks(self.xr, self.xlog) {
+                let (px, _) = self.map(v, self.yr.0);
+                line(img, (px, self.y), (px, self.y + self.h), GRID);
+                let label = fmt_num(v);
+                text(img, &label, px - text_width(&label) / 2, self.y + self.h + 6, LABEL);
+            }
+            for (data, color) in series {
+                let mut prev: Option<(i32, i32)> = None;
+                for &(x, y) in data.iter() {
+                    if !x.is_finite() || !y.is_finite() { prev = None; continue; }
+                    let p = self.map(x, y);
+                    if let Some(q) = prev { line(img, q, p, *color); } else { put(img, p.0, p.1, *color); }
+                    prev = Some(p);
+                }
+            }
+            line(img, (self.x, self.y), (self.x, self.y + self.h), BORDER);
+            line(img, (self.x, self.y + self.h), (self.x + self.w, self.y + self.h), BORDER);
+        }
+    }
+
+    /// Fraction of a color kept for de-emphasised "raw" series.
+    pub fn dim(c: Rgb<u8>, f: f32) -> Rgb<u8> { Rgb(c.0.map(|v| (v as f32 * f) as u8)) }
+
+    /// Single-panel plot saved to `path`.
+    pub fn save_plot(path: &std::path::Path, width: u32, height: u32, panel: Panel, series: &[Series]) -> anyhow::Result<()> {
+        let mut img = RgbImage::from_pixel(width, height, BACKGROUND);
+        panel.draw(&mut img, series);
+        img.save(path)?;
+        Ok(())
+    }
+
+    /// Inferno-like colormap on [0, 1].
+    pub fn colormap(t: f32) -> [u8; 3] {
+        const STOPS: [(f32, [f32; 3]); 5] = [
+            (0.0, [0.0, 0.0, 4.0]), (0.25, [87.0, 16.0, 110.0]), (0.5, [188.0, 55.0, 84.0]),
+            (0.75, [249.0, 142.0, 9.0]), (1.0, [252.0, 255.0, 164.0]),
+        ];
+        let t = t.clamp(0.0, 1.0);
+        let i = STOPS.windows(2).position(|w| t <= w[1].0).unwrap_or(3);
+        let (a, b) = (STOPS[i], STOPS[i + 1]);
+        let f = (t - a.0) / (b.0 - a.0);
+        [0, 1, 2].map(|k| (a.1[k] + (b.1[k] - a.1[k]) * f) as u8)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-use image::{Rgb, RgbImage};
-
-#[cfg(not(target_arch = "wasm32"))]
 impl TrainingState {
+    /// Writes the training dashboard PNG (log-log loss with EMA over raw points,
+    /// entropy, epoch average; LR and top-3 on their own panels) plus CSVs.
     pub fn save_chart_image(&self, path: &str) -> anyhow::Result<()> {
-        let width = 1200;
-        let height = 800;
-        let mut img = RgbImage::new(width, height);
+        use self::plot::{Panel, dim, Series};
+        use image::Rgb;
+        let (width, height) = (1400u32, 1000u32);
+        let mut img = image::RgbImage::from_pixel(width, height, plot::BACKGROUND);
+        let (left, panel_w) = (100, width as i32 - 100 - 24);
 
-        // Background
-        for pixel in img.pixels_mut() {
-            *pixel = Rgb([10, 10, 15]);
-        }
-
-        let margin = 60;
-        let graph_width = width - 2 * margin;
-        let graph_height = height - 2 * margin;
-
-        let max_loss = self.loss_history.iter()
-            .map(|&(_, l)| l)
-            .fold(0.0_f64, f64::max)
-            .max(0.01);
-
-        let max_steps = self.global_step.max(1) as f64;
-
-        let to_x = |step: f64| (margin as f64 + (step / max_steps) * graph_width as f64) as u32;
-        let to_y = |val: f64| (height as f64 - margin as f64 - (val / (max_loss * 1.1)) * graph_height as f64) as u32;
-
-        // Draw axes
-        let white = Rgb([200, 200, 200]);
-        for x in margin..(width - margin) {
-            img.put_pixel(x, height - margin, white);
-        }
-        for y in margin..(height - margin) {
-            img.put_pixel(margin, y, white);
-        }
-
-        // Draw loss (Cyan)
+        let smooth = ema(&self.loss_history, EMA_ALPHA);
         let cyan = Rgb([0, 255, 255]);
-        self.draw_line(&mut img, &self.loss_history, cyan, to_x, to_y);
+        let loss_series: [Series; 4] = [
+            (&self.loss_history, dim(cyan, 0.35)),
+            (&self.entropy_history, Rgb([150, 0, 150])),
+            (&self.avg_loss_history, Rgb([255, 220, 0])),
+            (&smooth, cyan),
+        ];
+        Panel::new(left, 20, panel_w, 560, true, true).fit(&loss_series, false).draw(&mut img, &loss_series);
 
-        // Draw avg loss (Yellow)
-        let yellow = Rgb([255, 255, 0]);
-        self.draw_line(&mut img, &self.avg_loss_history, yellow, to_x, to_y);
+        let lr_series: [Series; 1] = [(&self.lr_history, Rgb([0, 255, 0]))];
+        Panel::new(left, 625, panel_w, 170, true, false).fit(&lr_series, true).draw(&mut img, &lr_series);
 
-        // Draw entropy (Magenta)
-        let magenta = Rgb([255, 0, 255]);
-        self.draw_line(&mut img, &self.entropy_history, magenta, to_x, to_y);
-
-        // Draw Learning Rate (Green)
-        // Scale LR to match max_loss for visibility
-        let max_lr = self.lr_history.iter()
-            .map(|&(_, lr)| lr)
-            .fold(0.0_f64, f64::max)
-            .max(1e-10);
-
-        let lr_scale = (max_loss * 0.8) / max_lr;
-        let green = Rgb([0, 255, 0]);
-        let to_y_lr = |lr: f64| to_y(lr * lr_scale);
-        self.draw_line(&mut img, &self.lr_history, green, to_x, to_y_lr);
+        let top3_series: [Series; 1] = [(&self.top3_history, Rgb([80, 140, 255]))];
+        Panel::new(left, 840, panel_w, 120, true, false).fit(&top3_series, true)
+            .y_range(0.0, 1.0).draw(&mut img, &top3_series);
 
         img.save(path)?;
+
+        use std::io::Write;
+        let csv_path = std::path::Path::new(path).with_extension("csv");
+        let mut csv = std::io::BufWriter::new(std::fs::File::create(csv_path)?);
+        writeln!(csv, "step,loss,loss_ema,epoch_avg,lr,entropy,top3_accuracy")?;
+        let get = |h: &[(f64, f64)], i: usize| h.get(i).map_or(String::new(), |p| p.1.to_string());
+        for (i, (step, loss)) in self.loss_history.iter().enumerate() {
+            writeln!(csv, "{step},{loss},{},{},{},{},{}", smooth[i].1, get(&self.avg_loss_history, i),
+                get(&self.lr_history, i), get(&self.entropy_history, i), get(&self.top3_history, i))?;
+        }
+        csv.flush()?;
         if !self.top3_history.is_empty() {
-            use std::io::Write;
             let csv_path = std::path::Path::new(path).with_extension("top3.csv");
             let mut csv = std::io::BufWriter::new(std::fs::File::create(csv_path)?);
             writeln!(csv, "step,top3_accuracy")?;
@@ -193,43 +382,4 @@ impl TrainingState {
         }
         Ok(())
     }
-    fn draw_line<FX, FY>(&self, img: &mut RgbImage, data: &[(f64, f64)], color: Rgb<u8>, to_x: FX, to_y: FY)
-    where
-        FX: Fn(f64) -> u32,
-        FY: Fn(f64) -> u32,
-    {
-        if data.len() < 2 { return; }
-        for window in data.windows(2) {
-            let (x1, y1) = (to_x(window[0].0), to_y(window[0].1));
-            let (x2, y2) = (to_x(window[1].0), to_y(window[1].1));
-            self.draw_pixel_line(img, x1, y1, x2, y2, color);
-        }
-    }
-
-    fn draw_pixel_line(&self, img: &mut RgbImage, x1: u32, y1: u32, x2: u32, y2: u32, color: Rgb<u8>) {
-        let dx = (x2 as i32 - x1 as i32).abs();
-        let dy = (y2 as i32 - y1 as i32).abs();
-        let sx = if x1 < x2 { 1 } else { -1 };
-        let sy = if y1 < y2 { 1 } else { -1 };
-        let mut err = dx - dy;
-
-        let mut x = x1 as i32;
-        let mut y = y1 as i32;
-
-        loop {
-            if x >= 0 && x < img.width() as i32 && y >= 0 && y < img.height() as i32 {
-                img.put_pixel(x as u32, y as u32, color);
-            }
-            if x == x2 as i32 && y == y2 as i32 { break; }
-            let e2 = 2 * err;
-            if e2 > -dy {
-                err -= dy;
-                x += sx;
-            }
-            if e2 < dx {
-                err += dx;
-                y += sy;
-            }
-        }
-    }
-    }
+}

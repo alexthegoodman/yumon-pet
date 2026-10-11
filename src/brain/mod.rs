@@ -24,6 +24,8 @@ pub mod code_curriculum;
 pub mod code_documented;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod code_docs;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod loss_stats;
 pub mod keywords;
 pub mod fixer;
 pub mod loader;

@@ -23,6 +23,8 @@ use crate::brain::{
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::brain::{chart::render};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::brain::loss_stats::{TokenLossStats, save_batch_heatmap, write_token_html};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::brain::mdx::{load_dictionary_sentences, load_handcrafted_sentences, load_qa_pairs, load_qa_singles, load_txt_sentences};
@@ -226,6 +228,11 @@ pub struct RunConfig {
     pub max_seq_len: usize,
     pub architecture: Architecture,
     pub stages: Vec<StageConfig>,
+    pub dropout_rate: f64,
+    /// Sanity-check run: fewer log lines, generation only every 25 epochs and at the end.
+    pub overfit: bool,
+    /// Steps between loss heatmap/plot snapshots; 0 disables.
+    pub heatmap_every: usize,
 }
 
 /// Number of held-out prompts run through the model every time we do a
@@ -248,7 +255,28 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
     use crate::brain::{code_corpus, code_curriculum};
     config.validate()?;
     let tokenizer = code_corpus::load_tokenizer(&config.tokenizer)?;
-    let prepared = code_curriculum::prepare(config, &tokenizer)?;
+    let mut prepared = code_curriculum::prepare(config, &tokenizer)?;
+    let overfit = config.overfit_samples.is_some();
+    if let Some(count) = config.overfit_samples {
+        // Fixed subset, no docs stage or tier schedule; validate on the same sequences.
+        prepared.training.drain(..prepared.docs_len);
+        prepared.docs_len = 0;
+        prepared.tier_ends = None;
+        anyhow::ensure!(prepared.training.len() >= count, "overfit_samples {count} exceeds {} training samples", prepared.training.len());
+        prepared.training.truncate(count);
+        prepared.validation = prepared.training.clone();
+        let (mut matching, mut total) = (0usize, 0usize);
+        for s in &prepared.training {
+            for i in 0..s.target_labels.len().saturating_sub(1) {
+                // The final target (e.g. EOS) has no following input token.
+                if s.target_labels[i] == PAD_TOKEN || s.input_ids[i + 1] == PAD_TOKEN { continue; }
+                total += 1;
+                matching += (s.target_labels[i] == s.input_ids[i + 1]) as usize;
+            }
+        }
+        println!("Overfit run: {count} fixed sequences, dropout 0, constant LR {}. Label shift check: {matching}/{total} targets equal the next input token.", config.first_lr);
+        anyhow::ensure!(matching == total, "targets are not input shifted by one position");
+    }
     prepared.print_plan(config.epochs, config.batch_size);
     if check_only { return Ok(()); }
 
@@ -272,13 +300,17 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 config.n_layers, config.attn_heads, config.ff_dim, config.max_seq_len, config.batch_size,
                 if config.documented.is_some() { "_curriculum_documented_balanced_v1" }
                 else if config.curriculum.is_some() { "_curriculum_lmm_v1" } else { "" },
-                if config.docs.is_some() { "_rust_docs_v1" } else { "" }),
+                if config.docs.is_some() { "_rust_docs_v1" } else { "" })
+                + &config.overfit_samples.map_or(String::new(), |n| format!("_overfit{n}")),
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
             n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
             max_seq_len: config.max_seq_len, architecture,
             stages: vec![StageConfig { stage: TrainingStage::Language, loss_threshold: 0.0,
                 epochs: config.epochs, batch_size: config.batch_size, first_lr: config.first_lr,
-                last_lr: config.last_lr, weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 }],
+                last_lr: if overfit { config.first_lr } else { config.last_lr },
+                weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 }],
+            dropout_rate: if overfit { 0.0 } else { 0.05 },
+            overfit, heatmap_every: config.heatmap_every,
         };
         let run_dir = config.out_dir.join(&run.name);
         std::fs::create_dir_all(&run_dir)?;
@@ -548,6 +580,39 @@ fn masked_token_ce<B: Backend>(
     (per_token * mask).cast(burn::tensor::FloatDType::F32).sum() / supervised.max(1) as f64
 }
 
+/// Negative log-likelihood of each target as a flat [batch * seq] vector. Rows
+/// whose target is PAD hold a meaningless value; callers mask them by target.
+#[cfg(not(target_arch = "wasm32"))]
+fn per_token_nll<B: Backend>(log_probs: Tensor<B, 3>, targets: Tensor<B, 1, Int>) -> Vec<f32> {
+    let [batch, seq, _] = log_probs.dims();
+    log_probs.gather(2, targets.reshape([batch, seq, 1])).reshape([batch * seq]).neg()
+        .cast(burn::tensor::FloatDType::F32).into_data().convert::<f32>().to_vec::<f32>().unwrap()
+}
+
+/// Writes up to three held-out sequences as HTML with every token colored by its loss.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_validation_token_view<B: Backend, M: CausalLm<B>>(
+    model: &M, tokenizer: &TokenizerKind, samples: &[crate::brain::samples::Sample],
+    max_seq_len: usize, vocab: usize, device: &B::Device, path: &std::path::Path, ceiling: f32,
+) -> Result<()> {
+    let idx: Vec<usize> = (0..samples.len().min(3)).collect();
+    let (ids, targets, supervised) = build_moe_batch(samples, &idx, &[], max_seq_len, true);
+    if supervised == 0 { return Ok(()); }
+    let n = idx.len();
+    let tokens = Tensor::<B, 2, Int>::from_ints(TensorData::new(ids, [n, max_seq_len]), device);
+    let target_t = Tensor::<B, 1, Int>::from_ints(TensorData::new(targets.clone(), [n * max_seq_len]), device);
+    let log_probs = burn::tensor::activation::log_softmax(
+        model.logits(tokens).cast(burn::tensor::FloatDType::F32), 2);
+    debug_assert_eq!(log_probs.dims()[2], vocab);
+    let nll = per_token_nll(log_probs, target_t);
+    let rows: Vec<Vec<(String, f32)>> = (0..n).map(|r| {
+        (0..max_seq_len).filter(|&p| targets[r * max_seq_len + p] != PAD_TOKEN as i32)
+            .map(|p| (tokenizer.decode(&[targets[r * max_seq_len + p] as usize]), nll[r * max_seq_len + p]))
+            .collect()
+    }).collect();
+    write_token_html(path, &format!("Held-out token loss: {}", path.display()), &rows, ceiling)
+}
+
 /// Per-token loss over the held-out samples, without dropout or gradients.
 /// Returns loss, top-3 accuracy, and the number of supervised tokens covered.
 fn causal_validation_loss<B: Backend, M: CausalLm<B>>(
@@ -635,6 +700,7 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             .with_embed_dim(run_cfg.embed_dim).with_hidden_units(run_cfg.hidden_units)
             .with_n_layers(run_cfg.n_layers).with_attn_heads(run_cfg.attn_heads)
             .with_ff_dim(run_cfg.ff_dim).with_max_seq_len(run_cfg.max_seq_len)
+            .with_dropout_rate(run_cfg.dropout_rate)
             .with_num_experts(num_experts).with_top_k(top_k);
         println!("MoE: {} experts, top-{}; Flash Attention, BalancedCheckpointing; FFN parameters/layer: {} total, {} active/token (excluding router).",
             num_experts, top_k, 3 * run_cfg.embed_dim * run_cfg.ff_dim * num_experts,
@@ -693,7 +759,8 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
         let config = YumonDecBrainConfig::new(tokenizer.vocab_size(), run_cfg.stages[0].stage)
             .with_embed_dim(run_cfg.embed_dim).with_hidden_units(run_cfg.hidden_units)
             .with_n_layers(run_cfg.n_layers).with_attn_heads(run_cfg.attn_heads)
-            .with_ff_dim(run_cfg.ff_dim).with_max_seq_len(run_cfg.max_seq_len);
+            .with_ff_dim(run_cfg.ff_dim).with_max_seq_len(run_cfg.max_seq_len)
+            .with_dropout_rate(run_cfg.dropout_rate);
         println!("Decoder-only: {:.1}M parameters, flash attention, BalancedCheckpointing.",
             config.param_count() as f64 / 1e6);
         if !run_dir.join("model.bin").exists() {
@@ -778,7 +845,7 @@ macro_rules! code_model_adapter {
                 device: &<TrainBackend as Backend>::Device) -> Result<(Self, usize)> {
                 let config = $config { vocab_size: tokenizer.vocab_size(), embed_dim: run.embed_dim,
                     hidden_units: run.hidden_units, n_layers: run.n_layers, attn_heads: run.attn_heads,
-                    ff_dim: run.ff_dim, max_seq_len: run.max_seq_len, dropout_rate: 0.05,
+                    ff_dim: run.ff_dim, max_seq_len: run.max_seq_len, dropout_rate: run.dropout_rate,
                     training_stage: run.stages[0].stage };
                 if !directory.join("model.bin").exists() { return Ok((config.init(device), 0)); }
                 let (model, saved_tokenizer, saved) = Self::load(directory.to_str().unwrap(), device)?;
@@ -921,6 +988,10 @@ where
         let mut run_should_stop = false;
         let mut val_loss: Option<f32>;
         let vocab = tokenizer.vocab_size();
+        let mut loss_stats = TokenLossStats::new(run_cfg.max_seq_len, vocab);
+        let heatmap_dir = std::path::Path::new(run_dir_str).join("heatmaps");
+        let heatmap_ceiling = (vocab as f32).ln();
+        let log_every = if run_cfg.overfit { 10 } else { 50 };
 
         // Decoder-only style: [prompt][separator][reply] packed into one causal sequence
         let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { " " };
@@ -939,7 +1010,7 @@ where
             } else { idx.shuffle(&mut rng); }
             let num_batches = idx.len().div_ceil(stage_cfg.batch_size);
             state.total_batches = num_batches;
-            println!("Epoch {}/{}: {epoch_samples} eligible training samples, {num_batches} batches", epoch+1, stage_cfg.epochs);
+            // println!("Epoch {}/{}: {epoch_samples} eligible training samples, {num_batches} batches", epoch+1, stage_cfg.epochs);
             let mut epoch_loss = 0.0f32;
             let mut processed_batches = 0usize;
             let mut epoch_top3_correct = 0usize;
@@ -962,6 +1033,7 @@ where
                 let (all_seq_ids, all_lang_targets, supervised) = build_moe_batch(&training_samples, batch_idx, &sep_tokens, run_cfg.max_seq_len, raw_code);
 
                 if supervised == 0 { continue; }
+                let targets_cpu = all_lang_targets.clone();
                 let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), device);
                 let tokens_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_seq_ids, [current_batch_size, run_cfg.max_seq_len]), device);
 
@@ -976,8 +1048,11 @@ where
 
                 // Entropy, on detached logits so none of its [batch, seq, vocab]
                 // intermediates join the autodiff graph.
-                let probs = burn::tensor::activation::softmax(token_logits.clone().detach(), 2);
-                let log_probs = (probs.clone() + 1e-10).log();
+                let log_probs = burn::tensor::activation::log_softmax(token_logits.clone().detach(), 2);
+                // Per-token loss of this batch (0 at PAD) for the heatmaps; no gradient.
+                let token_nll = per_token_nll(log_probs.clone(), lang_target_t.clone());
+                loss_stats.add(&targets_cpu, &token_nll);
+                let probs = log_probs.clone().exp();
                 let token_entropy = (probs * log_probs).sum_dim(2).neg().squeeze_dim::<2>(2);
                 let non_pad_mask = tokens_t.clone().equal_elem(PAD_TOKEN as u32).bool_not().float();
                 let entropy_val: f32 = (token_entropy * non_pad_mask.clone()).cast(burn::tensor::FloatDType::F32).sum()
@@ -1010,9 +1085,23 @@ where
                 state.lr_history.push((state.global_step as f64, current_lr));
                 state.top3_history.push((state.global_step as f64, top3));
 
+                if run_cfg.heatmap_every > 0 && (state.global_step == 1 || state.global_step % run_cfg.heatmap_every == 0) {
+                    let step = state.global_step;
+                    let snapshot = (|| -> Result<()> {
+                        std::fs::create_dir_all(&heatmap_dir)?;
+                        save_batch_heatmap(&heatmap_dir.join(format!("batch_{step:06}.png")), &targets_cpu,
+                            &token_nll, current_batch_size, run_cfg.max_seq_len, heatmap_ceiling)?;
+                        loss_stats.save(&heatmap_dir, step)?;
+                        write_validation_token_view(&model.valid(), tokenizer, &val_samples, run_cfg.max_seq_len,
+                            vocab, device, &heatmap_dir.join(format!("tokens_{step:06}.html")), heatmap_ceiling)
+                    })();
+                    if let Err(e) = snapshot { eprintln!("⚠️  Failed to save loss heatmaps: {e}"); }
+                    loss_stats.reset();
+                }
+
                 if let Some(term) = terminal.as_mut() {
                     term.draw(|frame| render(frame, &state))?;
-                } else if state.global_step % 50 == 0 || batch_num + 1 == num_batches {
+                } else if state.global_step % log_every == 0 || batch_num + 1 == num_batches {
                     println!(
                         "epoch {}/{} batch {}/{} loss {:.4} avg {:.4} lr {:.2e} entropy {:.4} top3 {:.2}% avg_top3 {:.2}%",
                         state.epoch, state.total_epochs, state.batch, state.total_batches,
@@ -1077,29 +1166,37 @@ where
             }
             prev_epoch_loss = Some(stop_loss);
 
-            model.save_run(run_dir_str, tokenizer, &RunProgress {
-                run_cfg,
-                epochs_trained: epoch_offset + epoch + 1,
-                final_loss,
-                val_loss,
-                batch_size: stage_cfg.batch_size,
-                stage:      stage_cfg.stage,
-            })?;
+            // Overfit runs have many tiny epochs: checkpoint, generate and chart rarely.
+            let heavy = !run_cfg.overfit || (epoch + 1) % 25 == 0 || epoch + 1 == stage_cfg.epochs;
+            if heavy {
+                model.save_run(run_dir_str, tokenizer, &RunProgress {
+                    run_cfg,
+                    epochs_trained: epoch_offset + epoch + 1,
+                    final_loss,
+                    val_loss,
+                    batch_size: stage_cfg.batch_size,
+                    stage:      stage_cfg.stage,
+                })?;
 
-            let entries = run_eval_prompts(&inference_model, tokenizer, prompts, stage_cfg.stage, run_cfg.max_seq_len, device);
-            state.last_reply = entries.first().map(|entry| entry.1.clone()).unwrap_or_default();
-            if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
-                eprintln!("⚠️  Failed to append inference log: {}", e);
-            }
-            if let Some((loss, top3, tokens)) = val {
-                let line = format!("val_loss {loss:.4} val_top3 {:.2}% over {tokens} held-out tokens (epoch end)", top3 * 100.0);
-                println!("{line}");
-                if let Err(e) = append_log_line(&inference_log_path, &line) {
+                let entries = run_eval_prompts(&inference_model, tokenizer, prompts, stage_cfg.stage, run_cfg.max_seq_len, device);
+                state.last_reply = entries.first().map(|entry| entry.1.clone()).unwrap_or_default();
+                if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
                     eprintln!("⚠️  Failed to append inference log: {}", e);
                 }
             }
-            if let Err(e) = state.save_chart_image(&chart_path) {
-                eprintln!("⚠️  Failed to save chart image: {}", e);
+            if let Some((loss, top3, tokens)) = val {
+                let line = format!("val_loss {loss:.4} val_top3 {:.2}% over {tokens} held-out tokens (epoch end)", top3 * 100.0);
+                if heavy || !run_cfg.overfit { println!("{line}"); }
+                if heavy {
+                    if let Err(e) = append_log_line(&inference_log_path, &line) {
+                        eprintln!("⚠️  Failed to append inference log: {}", e);
+                    }
+                }
+            }
+            if heavy {
+                if let Err(e) = state.save_chart_image(&chart_path) {
+                    eprintln!("⚠️  Failed to save chart image: {}", e);
+                }
             }
 
             if run_should_stop || final_loss < stage_cfg.loss_threshold { break 'epoch_loop; }
@@ -1116,6 +1213,15 @@ where
         }
 
         println!("✅ Stage complete. Final loss: {:.4}", final_loss);
+        if run_cfg.overfit {
+            let tail = state.loss_history.len().saturating_sub(10);
+            let recent = &state.loss_history[tail..];
+            let last10 = recent.iter().map(|p| p.1).sum::<f64>() / recent.len().max(1) as f64;
+            let verdict = if last10 < 0.1 { "memorized (expected < 0.1)" }
+                else if last10 < 1.0 { "learning but not memorized yet" }
+                else { "STALLED above 1: check label shifting, loss masking, padding" };
+            println!("Overfit result: mean of last {} batch losses {last10:.4} - {verdict}", recent.len());
+        }
 
         if run_should_stop {
             println!("⏹️  Run {} finished early, skipping remaining stages.", run_cfg.name);
@@ -1244,6 +1350,9 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                         epsilon: 1e-7,
                                         smoothing: 0.0,
                                     }],
+                                    dropout_rate: 0.05,
+                                    overfit: false,
+                                    heatmap_every: 0,
                                 });
                             }
                         }
