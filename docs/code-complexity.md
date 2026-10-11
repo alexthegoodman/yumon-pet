@@ -127,7 +127,10 @@ explicitly unavailable for this Rust-only implementation.
 The production training configs set `curriculum` to `training-cache/code_buckets`.
 `train_code --config configs/yumon-code.json --check` validates the three
 eligible caches and prints the complete epoch plan without creating a GPU/model.
-Epoch 1 uses low; epoch 2 low+mild; epoch 3 and later low+mild+moderate. High,
+Epoch 1 is all low; epoch 2 is 20% low + 80% mild; epoch 3 and later is 10% low +
+20% mild + 70% moderate. The hardest tier of an epoch is used whole and the easier
+tiers are sized to the shares (capped by availability), rotating through their
+samples each epoch. High,
 excluded, unscored and failed samples are never loaded, including for validation.
 The original `cache` remains the preparation output and is ignored by curriculum
 training. A missing/corrupt bucket fails explicitly without falling back to it.
@@ -141,7 +144,7 @@ curriculum from completed epochs, and completed epoch budgets do no further
 updates. Optimizer state and within-epoch position are still not restored;
 an interrupted epoch is replayed from its beginning using saved model weights.
 
-Curriculum checkpoints have a `_curriculum_lmm_v1` suffix, keeping them separate
+Curriculum checkpoints have a `_curriculum_lmm_v2` suffix, keeping them separate
 from earlier mixed-cache runs. Frozen reference/bucket identities, validation
 fraction, seed and schedule must match on resume. `decoder-only`, `moe`, `xlstm`
 and `encoder-decoder` all use the shared code trainer. The encoder-decoder

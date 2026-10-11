@@ -1,4 +1,4 @@
-//! Model-independent cumulative curriculum, restricted to low/mild/moderate.
+//! Model-independent mixed curriculum, restricted to low/mild/moderate.
 use super::{
     PAD_TOKEN,
     bpe::TokenizerKind,
@@ -27,8 +27,35 @@ pub struct PreparedCode {
     pub seed: u64,
 }
 impl PreparedCode {
-    fn code_end(&self, code_epoch: usize) -> usize {
-        self.tier_ends.map_or(self.training.len(), |ends| ends[code_epoch.min(2)])
+    /// Training index range of a tier (offsets include any docs prefix).
+    fn tier_range(&self, tier: usize) -> std::ops::Range<usize> {
+        let ends = self.tier_ends.expect("tier ranges need a curriculum");
+        (if tier == 0 { self.docs_len } else { ends[tier - 1] })..ends[tier]
+    }
+    /// Code samples for a code epoch. Without tiers that is everything. With tiers
+    /// the epoch is a mix anchored on its hardest tier, which is taken whole:
+    /// epoch 1 100% low, epoch 2 20% low + 80% mild, epoch 3+ 10% low + 20% mild
+    /// + 70% moderate. Easier tiers are capped by availability and rotate through
+    /// their samples from one epoch to the next.
+    fn code_indices(&self, code_epoch: usize) -> Vec<usize> {
+        if self.tier_ends.is_none() {
+            return (self.docs_len..self.training.len()).collect();
+        }
+        let (anchor, shares) = match code_epoch {
+            0 => (0, [1.0, 0.0, 0.0]),
+            1 => (1, [0.2, 0.8, 0.0]),
+            _ => (2, [0.1, 0.2, 0.7]),
+        };
+        let anchor_len = self.tier_range(anchor).len();
+        let mut indices = Vec::new();
+        for tier in 0..=anchor {
+            let range = self.tier_range(tier);
+            let want = (anchor_len as f64 * shares[tier] / shares[anchor]).round() as usize;
+            let take = if tier == anchor { anchor_len } else { want.min(range.len()) };
+            let start = if range.is_empty() { 0 } else { code_epoch * take % range.len() };
+            indices.extend((0..take).map(|i| range.start + (start + i) % range.len()));
+        }
+        indices
     }
     fn tokens(&self, index: usize) -> usize {
         self.training[index].target_labels.iter().filter(|&&t| t != PAD_TOKEN).count()
@@ -40,7 +67,7 @@ impl PreparedCode {
         let mut start = 0;
         let mut window = Vec::new();
         for e in 0..=code_epoch {
-            let code: usize = (self.docs_len..self.code_end(e)).map(|i| self.tokens(i)).sum();
+            let code: usize = self.code_indices(e).into_iter().map(|i| self.tokens(i)).sum();
             let target = code as f64 * self.docs_share / (1.0 - self.docs_share);
             let mut taken = 0;
             window.clear();
@@ -57,11 +84,11 @@ impl PreparedCode {
     /// later epochs add a rotating docs window to the cumulative code tiers.
     pub fn epoch_indices(&self, epoch: usize) -> Vec<usize> {
         match (self.docs_len, epoch) {
-            (0, epoch) => (0..self.code_end(epoch)).collect(),
+            (0, epoch) => self.code_indices(epoch),
             (docs, 0) => (0..docs).collect(),
             (_, epoch) => {
                 let mut indices = self.docs_window(epoch - 1);
-                indices.extend(self.docs_len..self.code_end(epoch - 1));
+                indices.extend(self.code_indices(epoch - 1));
                 indices
             }
         }
@@ -91,7 +118,7 @@ impl PreparedCode {
             let code = epoch - (self.docs_len > 0 && epoch > 0) as usize;
             let label = match (self.docs_len > 0 && epoch == 0, self.tier_ends) {
                 (true, _) => " (Rust docs)".to_owned(),
-                (false, Some(_)) => format!(" ({docs}{})", ["low", "low + mild", "low + mild + moderate"][code.min(2)]),
+                (false, Some(_)) => format!(" ({docs}{})", ["low", "20% low + 80% mild", "10% low + 20% mild + 70% moderate"][code.min(2)]),
                 (false, None) if self.docs_len > 0 => format!(" ({docs}all code)"),
                 _ => String::new(),
             };
@@ -247,11 +274,11 @@ fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<Prepar
         !validation.is_empty(),
         "curriculum needs held-out validation samples"
     );
-    let mut identity = json!({"mode": "low-mild-moderate-v1", "reference_sha256": reference_sha,
+    let mut identity = json!({"mode": "low-mild-moderate-v2", "reference_sha256": reference_sha,
         "buckets": buckets, "seed": config.seed, "validation_fraction": config.validation_fraction,
         "tier_ends": tier_ends});
     if let Some(documented) = documented_identity {
-        identity["mode"] = json!("documented-balanced-lmm-v1");
+        identity["mode"] = json!("documented-balanced-lmm-v2");
         identity["documented"] = documented;
     }
     Ok(PreparedCode {

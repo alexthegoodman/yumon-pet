@@ -100,9 +100,9 @@ fn cumulative_schedule_never_loads_high_or_original_and_has_no_file_leakage() ->
     assert_eq!(prepared.tier_ends, Some([4, 8, 12]));
     assert_eq!(
         (0..6).map(|e| prepared.epoch_len(e)).collect::<Vec<_>>(),
-        [4, 8, 12, 12, 12, 12]
+        [4, 5, 6, 6, 6, 6]
     );
-    assert_eq!(prepared.batch_plan(5, 3), [2, 3, 4, 4, 4]);
+    assert_eq!(prepared.batch_plan(5, 3), [2, 2, 2, 2, 2]);
     assert_eq!(prepared.validation.len(), 6);
     let training_files: HashSet<_> = prepared.training.iter().map(|s| &s.pair.0).collect();
     assert!(
@@ -112,22 +112,15 @@ fn cumulative_schedule_never_loads_high_or_original_and_has_no_file_leakage() ->
             .all(|s| !training_files.contains(&s.pair.0))
     );
     for epoch in 0..5 {
-        let decoded = prepared.training[..prepared.epoch_len(epoch)]
-            .iter()
-            .map(|s| fixture.tokenizer.decode(&s.target_labels))
+        let decoded = prepared
+            .epoch_indices(epoch)
+            .into_iter()
+            .map(|i| fixture.tokenizer.decode(&prepared.training[i].target_labels))
             .collect::<Vec<_>>();
-        assert_eq!(decoded.iter().filter(|s| s.contains("fn low(")).count(), 4);
-        assert_eq!(
-            decoded.iter().filter(|s| s.contains("fn mild(")).count(),
-            if epoch >= 1 { 4 } else { 0 }
-        );
-        assert_eq!(
-            decoded
-                .iter()
-                .filter(|s| s.contains("fn moderate("))
-                .count(),
-            if epoch >= 2 { 4 } else { 0 }
-        );
+        let count = |name: &str| decoded.iter().filter(|s| s.contains(name)).count();
+        assert_eq!(count("fn low("), [4, 1, 1, 1, 1][epoch]);
+        assert_eq!(count("fn mild("), [0, 4, 1, 1, 1][epoch]);
+        assert_eq!(count("fn moderate("), if epoch >= 2 { 4 } else { 0 });
     }
     let repeated = prepare(&fixture.config, &fixture.tokenizer)?;
     assert_eq!(prepared.identity, repeated.identity);
@@ -493,10 +486,10 @@ fn rust_docs_stage_trains_alone_first_then_replays_by_token_share() -> Result<()
     // docs_share 0: the docs train once, then the code curriculum runs unchanged.
     assert_eq!(
         (0..6).map(|e| prepared.epoch_len(e)).collect::<Vec<_>>(),
-        [d, 4, 8, 12, 12, 12]
+        [d, 4, 5, 6, 6, 6]
     );
-    assert_eq!(prepared.epoch_indices(2), (d..d + 8).collect::<Vec<_>>());
-    assert_eq!(prepared.batch_plan(3, 3), [d.div_ceil(3), 2, 3]);
+    assert_eq!(prepared.epoch_indices(2), [d + 1, d + 4, d + 5, d + 6, d + 7]);
+    assert_eq!(prepared.batch_plan(3, 3), [d.div_ceil(3), 2, 2]);
     assert!(prepared.training[..d].iter().all(|s| s.pair.0 == "rust-docs/fixture"));
     assert_eq!(
         format!("{:?}", &prepared.training[d..]),
@@ -520,8 +513,11 @@ fn rust_docs_stage_trains_alone_first_then_replays_by_token_share() -> Result<()
     for epoch in 1..8 {
         let (docs, code): (Vec<usize>, Vec<usize>) =
             rotating.epoch_indices(epoch).into_iter().partition(|&i| i < d);
-        let end = rotating.tier_ends.unwrap()[(epoch - 1).min(2)];
-        assert_eq!(code, (d..end).collect::<Vec<_>>());
+        let mut expected = prepared.code_indices(epoch - 1);
+        expected.sort();
+        let mut code_sorted = code.clone();
+        code_sorted.sort();
+        assert_eq!(code_sorted, expected);
         let code_tokens: usize = code.iter().map(|&i| tokens(i)).sum();
         let docs_tokens: usize = docs.iter().map(|&i| tokens(i)).sum();
         assert!(docs_tokens >= code_tokens || docs.len() == d);

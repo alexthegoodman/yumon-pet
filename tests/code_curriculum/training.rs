@@ -32,6 +32,7 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
         },
         Architecture::XLstm,
         Architecture::EncoderDecoder,
+        Architecture::Reference,
     ]
     .into_iter()
     .enumerate()
@@ -74,6 +75,9 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
             }
             Architecture::EncoderDecoder => {
                 exercise::<YumonBrain<TrainBackend>>(&mut run, &path, &tokenizer, &device)?
+            }
+            Architecture::Reference => {
+                exercise::<YumonReferenceBrain<TrainBackend>>(&mut run, &path, &tokenizer, &device)?
             }
         }
     }

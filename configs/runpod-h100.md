@@ -50,8 +50,8 @@ experts without revisiting memory and data requirements.
 
 [`yumon-code.json`](yumon-code.json) is the default dense configuration used by
 Docker and `train_code`; [`yumon-code-moe.json`](yumon-code-moe.json) explicitly
-selects MoE. Both enable the low/mild/moderate curriculum: low in epoch 1,
-low+mild in epoch 2, and low+mild+moderate from epoch 3 onward. High is excluded
+selects MoE. Both enable the low/mild/moderate curriculum: all low in epoch 1,
+20% low + 80% mild in epoch 2, and 10% low + 20% mild + 70% moderate from epoch 3 onward. High is excluded
 from training and validation, and Docker does not copy that cache.
 Both configs also load the saved documented journals and select an equal number
 of distinct undocumented items per tier in training and validation. Their

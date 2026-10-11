@@ -22,6 +22,8 @@ pub enum CodeArchitecture {
     #[serde(rename = "xlstm")]
     XLstm,
     EncoderDecoder,
+    /// Stock Burn transformer (no flash attention, RoPE or custom blocks) as a baseline.
+    Reference,
 }
 
 /// Paths are relative to the working directory, so the same config works in /app.

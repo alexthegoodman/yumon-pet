@@ -39,6 +39,7 @@ use crate::brain::{
     model::{YumonBrain, YumonBrainConfig, BrainMetadata, GenerationResult},
     moe_model::{YumonMoeBrain, YumonMoeBrainConfig, MoeMetadata},
     xlstm_model::{YumonXLstmBrain, YumonXLstmBrainConfig, XLstmMetadata},
+    reference_model::{RefMetadata, YumonReferenceBrain, YumonReferenceBrainConfig},
 };
 
 // Used by the local desktop training UI (src/bin/train_ui.rs), which runs on
@@ -216,6 +217,8 @@ pub enum Architecture {
     XLstm,
     /// Causal transformer with dropless sparse SwiGLU experts.
     Moe { num_experts: usize, top_k: usize },
+    /// Stock `burn::nn::transformer` baseline (reference_model.rs).
+    Reference,
 }
 
 pub struct RunConfig {
@@ -288,18 +291,20 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             },
             code_corpus::CodeArchitecture::XLstm => Architecture::XLstm,
             code_corpus::CodeArchitecture::EncoderDecoder => Architecture::EncoderDecoder,
+            code_corpus::CodeArchitecture::Reference => Architecture::Reference,
         };
         let arch_tag = match architecture {
             Architecture::Moe { num_experts, top_k } => format!("Moe_e{num_experts}_k{top_k}"),
             Architecture::DecoderOnly => "DecoderOnly".to_string(),
             Architecture::XLstm => "XLstm".to_string(),
             Architecture::EncoderDecoder => "EncoderDecoder".to_string(),
+            Architecture::Reference => "Reference".to_string(),
         };
         let run = RunConfig {
             name: format!("code_{}h_{}l_{}a_{}ff_{}len_b{}_{arch_tag}_f32{}{}", config.embed_dim,
                 config.n_layers, config.attn_heads, config.ff_dim, config.max_seq_len, config.batch_size,
-                if config.documented.is_some() { "_curriculum_documented_balanced_v1" }
-                else if config.curriculum.is_some() { "_curriculum_lmm_v1" } else { "" },
+                if config.documented.is_some() { "_curriculum_documented_balanced_v2" }
+                else if config.curriculum.is_some() { "_curriculum_lmm_v2" } else { "" },
                 if config.docs.is_some() { "_rust_docs_v1" } else { "" })
                 + &config.overfit_samples.map_or(String::new(), |n| format!("_overfit{n}")),
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
@@ -332,6 +337,8 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             Architecture::XLstm => train_causal_lm::<YumonXLstmBrain<TrainBackend>>(
                 &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
             Architecture::EncoderDecoder => train_causal_lm::<YumonBrain<TrainBackend>>(
+                &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
+            Architecture::Reference => train_causal_lm::<YumonReferenceBrain<TrainBackend>>(
                 &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
         }
     }
@@ -797,6 +804,55 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
             max_seq_len:    p.run_cfg.max_seq_len,
         };
         self.save(dir, tokenizer, &meta)
+    }
+}
+
+impl<B: Backend> CausalLm<B> for YumonReferenceBrain<B> {
+    fn logits(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> { self.forward(tokens) }
+    fn generate(&self, tokenizer: &TokenizerKind, prompt: &str, max_tokens: usize, device: &B::Device) -> GenerationResult {
+        self.generate_unmasked_parsed(tokenizer, prompt, max_tokens, device)
+    }
+}
+
+impl CausalLmTrain for YumonReferenceBrain<TrainBackend> {
+    fn init_or_resume(run_cfg: &RunConfig, tokenizer: &TokenizerKind, run_dir: &std::path::Path, device: &<TrainBackend as Backend>::Device) -> Result<(Self, usize)> {
+        let config = YumonReferenceBrainConfig::new(tokenizer.vocab_size(), run_cfg.stages[0].stage)
+            .with_embed_dim(run_cfg.embed_dim).with_n_layers(run_cfg.n_layers)
+            .with_attn_heads(run_cfg.attn_heads).with_ff_dim(run_cfg.ff_dim)
+            .with_max_seq_len(run_cfg.max_seq_len).with_dropout_rate(run_cfg.dropout_rate);
+        println!("Reference: stock burn::nn::transformer, learned positions, LayerNorm; no flash attention or RoPE.");
+        if !run_dir.join("model.bin").exists() {
+            return Ok((config.init(device), 0));
+        }
+        let (m, checkpoint_tokenizer, saved) = Self::load(run_dir.to_str().unwrap(), device)?;
+        anyhow::ensure!(saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
+            && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
+            && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len,
+            "reference checkpoint configuration differs from requested run");
+        ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
+        let meta: RefMetadata = serde_json::from_str(&std::fs::read_to_string(run_dir.join("metadata.json"))?)?;
+        Ok((m, meta.epochs_trained))
+    }
+    fn set_stage(&mut self, stage: TrainingStage) { self.config.0.training_stage = stage; }
+    fn forward_train(&self, tokens: Tensor<TrainBackend, 2, Int>) -> (Tensor<TrainBackend, 3>, Tensor<TrainBackend, 1>) {
+        let device = tokens.device();
+        (self.forward(tokens), Tensor::zeros([1], &device))
+    }
+    fn save_run(&self, dir: &str, tokenizer: &TokenizerKind, p: &RunProgress) -> Result<()> {
+        self.save(dir, tokenizer, &RefMetadata {
+            dropout_rate:   self.config.dropout_rate,
+            vocab_size:     tokenizer.vocab_size(),
+            epochs_trained: p.epochs_trained,
+            final_loss:     p.final_loss,
+            val_loss:       p.val_loss,
+            batch_size:     p.batch_size,
+            training_stage: p.stage,
+            embed_dim:      p.run_cfg.embed_dim,
+            n_layers:       p.run_cfg.n_layers,
+            attn_heads:     p.run_cfg.attn_heads,
+            ff_dim:         p.run_cfg.ff_dim,
+            max_seq_len:    p.run_cfg.max_seq_len,
+        })
     }
 }
 
@@ -1315,12 +1371,14 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     // Architecture::XLstm          => (1e-4, 1e-5),
                                     Architecture::XLstm          => (1e-3, 1e-4),
                                     // Architecture::XLstm          => (1e-2, 1e-6),
+                                    Architecture::Reference      => (3e-4, 3e-5),
                                 };
                                 let arch_tag = match architecture {
                                     Architecture::Moe { num_experts, top_k } => format!("Moe_e{num_experts}_k{top_k}"),
                                     Architecture::DecoderOnly    => "DecoderOnly".to_string(),
                                     Architecture::EncoderDecoder => "EncoderDecoder".to_string(),
                                     Architecture::XLstm          => "XLstm".to_string(),
+                                    Architecture::Reference      => "Reference".to_string(),
                                 };
                                 let stage_tag = match stage {
                                     TrainingStage::Language   => "Language",
@@ -2207,6 +2265,10 @@ pub fn run_with_architecture(
 
         Architecture::DecoderOnly => {
             train_causal_lm::<YumonDecBrain<TrainBackend>>(&run_cfg, &run_dir, &tokenizer, &keyword_index, &prompts, &device, None)?;
+        }
+
+        Architecture::Reference => {
+            train_causal_lm::<YumonReferenceBrain<TrainBackend>>(&run_cfg, &run_dir, &tokenizer, &keyword_index, &prompts, &device, None)?;
         }
 
         } // match run_cfg.architecture

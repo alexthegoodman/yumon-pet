@@ -71,3 +71,26 @@ validation, alternate configs, Pet apps and smoke tests. Details:
 [comment generation](docs/synthetic-code-comments.md),
 [complexity scoring](docs/code-complexity.md),
 [RunPod sizing](configs/runpod-h100.md).
+
+### Loss diagnostics, overfit check and reference model
+
+The terminal/PNG chart plots loss log-log (raw points dim, EMA over them) with LR
+and top-3 on their own panels, and writes a `.csv` beside the PNG. Every
+`heatmap_every` steps (config, default 250, 0 = off) the run folder's `heatmaps/`
+gets `batch_*.png` (sample x position, colored by token loss), `position_loss_*`,
+`token_loss_*` (loss by token id sorted by frequency, plus cumulative loss share)
+and `tokens_*.html` (held-out text colored token by token).
+
+`overfit_samples: N` trains on N fixed low-tier sequences with dropout 0 and a
+constant `first_lr`; it checks the label shift at startup and prints a verdict
+(below 0.1 expected, above 1 suggests a shift, masking or padding bug):
+
+```sh
+cargo run --release --bin train_code -- --config configs/yumon-code-overfit.json
+cargo run --release --bin train_code -- --config configs/yumon-code-overfit-reference.json
+```
+
+`"architecture": "reference"` selects `reference_model.rs`, a baseline built only
+from stock `burn::nn` modules (`TransformerEncoder` with a causal mask, learned
+positions, LayerNorm; no flash attention or RoPE). Same overfit config, so the two
+curves are directly comparable.
