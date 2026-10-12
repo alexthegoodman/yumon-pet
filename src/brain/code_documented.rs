@@ -72,6 +72,8 @@ struct Entry {
     index: usize,
     source_sha256: String,
     doc_comment: String,
+    #[serde(default)]
+    skipped: bool,
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -214,6 +216,10 @@ pub fn mix(
                 entry.source_sha256 == digest(source.as_bytes()),
                 "{name} journal source mismatch at {index}"
             );
+            if entry.skipped {
+                // Never documented, so it remains eligible as an undocumented sample.
+                continue;
+            }
             excluded_keys.insert(keys[offset].clone());
             excluded_items.insert(raw[offset].pair.clone());
             let mut sample = raw[offset].clone();

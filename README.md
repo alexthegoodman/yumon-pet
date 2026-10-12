@@ -94,3 +94,9 @@ cargo run --release --bin train_code -- --config configs/yumon-code-overfit-refe
 from stock `burn::nn` modules (`TransformerEncoder` with a causal mask, learned
 positions, LayerNorm; no flash attention or RoPE). Same overfit config, so the two
 curves are directly comparable.
+
+## Yumon Nano / InstaCode Edit:
+
+```
+cargo run --release --no-default-features --bin yumon_nano -- tmp/example2.rs --checkpoint "D:/models/moe-mini-2/code_256h_24l_32a_1024ff_512len_b2_Moe_e8_k2_f32_curriculum_documented_balanced_v2" --architecture moe
+```

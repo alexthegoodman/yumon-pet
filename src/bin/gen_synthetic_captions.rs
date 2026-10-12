@@ -84,7 +84,22 @@ The comment will be inserted immediately before the documented item's attributes
         index: usize,
         source_sha256: String,
         doc_comment: String,
+        /// The model never produced a valid comment; the sample stays undocumented.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        skipped: bool,
     }
+
+    /// The endpoint answered, but every attempt produced an unusable comment.
+    /// Endpoint/transport failures are never this type, so outages still stop the run.
+    #[derive(Debug)]
+    struct Rejected(String);
+
+    impl std::fmt::Display for Rejected {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+    impl std::error::Error for Rejected {}
 
     fn digest(bytes: &[u8]) -> String {
         format!("{:x}", Sha256::digest(bytes))
@@ -188,6 +203,7 @@ The comment will be inserted immediately before the documented item's attributes
                 format!("{instruction}\n{feedback}\nDocument this Rust sample:\n\n{source}").into();
             let mut truncated = false;
             let mut too_long = false;
+            let mut rejected = false;
             let result = (|| -> Result<String> {
                 let response = ureq::post(url)
                     .timeout(Duration::from_secs(args.timeout))
@@ -208,6 +224,7 @@ The comment will be inserted immediately before the documented item's attributes
                 let response: serde_json::Value =
                     response.into_json().context("decoding endpoint JSON")?;
                 let choice = &response["choices"][0];
+                rejected = true;
                 if choice["finish_reason"] == "length" {
                     truncated = true;
                     bail!(
@@ -238,6 +255,11 @@ The comment will be inserted immediately before the documented item's attributes
             match result {
                 Ok(comment) => return Ok(comment),
                 Err(error) => {
+                    let error = if rejected {
+                        anyhow::Error::new(Rejected(format!("{error:#}")))
+                    } else {
+                        error
+                    };
                     if too_long {
                         if attempt == 4 {
                             return Err(error).context("model did not produce a concise doc comment after five attempts; saved progress is intact");
@@ -530,7 +552,11 @@ The comment will be inserted immediately before the documented item's attributes
                     entry.source_sha256 == digest(source.as_bytes()),
                     "saved {bucket} sample {index} does not match input"
                 );
-                let documented = document(&source, &entry.doc_comment)?;
+                let documented = if entry.skipped {
+                    source.clone()
+                } else {
+                    document(&source, &entry.doc_comment)?
+                };
                 encode(
                     &mut samples[index],
                     &tokenizer,
@@ -577,26 +603,44 @@ The comment will be inserted immediately before the documented item's attributes
             );
             std::io::stdout().flush()?;
             let started = Instant::now();
-            let comment =
-                generate(&args, &url, &args.model, &args.token, &source).with_context(|| {
-                    format!(
-                        "{} sample {} ({}, {})",
+            let comment = match generate(&args, &url, &args.model, &args.token, &source) {
+                Ok(comment) => Some(comment),
+                Err(error) if error.downcast_ref::<Rejected>().is_some() => {
+                    eprintln!(
+                        "[Skipped] {} sample {} ({}, {}): {error:#}",
                         bucket.name,
                         index + 1,
                         sample.pair.0,
                         sample.pair.1
-                    )
-                })?;
+                    );
+                    None
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "{} sample {} ({}, {})",
+                            bucket.name,
+                            index + 1,
+                            sample.pair.0,
+                            sample.pair.1
+                        )
+                    });
+                }
+            };
             let entry = Entry {
                 index,
                 source_sha256: digest(source.as_bytes()),
-                doc_comment: comment.clone(),
+                doc_comment: comment.clone().unwrap_or_default(),
+                skipped: comment.is_none(),
             };
             let mut line = serde_json::to_vec(&entry)?;
             line.push(b'\n');
             bucket.journal.write_all(&line)?;
             bucket.journal.sync_data()?;
-            let documented = document(&source, &comment)?;
+            let documented = match &comment {
+                Some(comment) => document(&source, comment)?,
+                None => source.clone(),
+            };
             encode(sample, &tokenizer, &documented, args.max_seq_len)
                 .with_context(|| format!("{} sample {}", bucket.name, index + 1))?;
             bucket.cursor += 1;
@@ -798,6 +842,7 @@ The comment will be inserted immediately before the documented item's attributes
                 index: 0,
                 source_sha256: "hash".into(),
                 doc_comment: "/// Docs.".into(),
+                skipped: false,
             };
             let mut committed = serde_json::to_vec(&entry)?;
             committed.push(b'\n');

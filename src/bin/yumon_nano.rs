@@ -64,10 +64,10 @@ mod native {
         #[arg(long, value_enum, default_value = "decoder-only")]
         architecture: Architecture,
         /// Idle time before requesting a completion.
-        #[arg(long, default_value_t = 450)]
+        #[arg(long, default_value_t = 750)]
         debounce_ms: u64,
         /// Maximum number of nearby preceding lines (current line is always included).
-        #[arg(long, default_value_t = 40)]
+        #[arg(long, default_value_t = 10)]
         context_lines: usize,
         #[arg(long, default_value_t = 48, value_parser = clap::value_parser!(u32).range(1..=512))]
         max_tokens: u32,
