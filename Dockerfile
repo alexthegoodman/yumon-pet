@@ -93,7 +93,7 @@ WORKDIR /app
 COPY --from=builder /build/target/release/train_code ./train_code
 ARG CODE_TOKENIZER=training-cache/code_tokenizer_retrained/tokenizer
 ARG CODE_BUCKETS=training-cache/code_tokenizer_retrained/buckets
-ARG CODE_CONFIG=training-cache/code_tokenizer_retrained/docker-config.json
+ARG CODE_CONFIG=configs/yumon-code.json
 ARG CODE_DOCUMENTED=training-cache/code_tokenizer_retrained/documented
 # Rust books pretraining stage (cache_samples --rust-docs), built with the same tokenizer.
 ARG CODE_DOCS=training-cache/code_tokenizer_retrained/rust_docs

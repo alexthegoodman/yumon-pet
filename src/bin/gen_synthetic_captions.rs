@@ -77,6 +77,10 @@ The comment will be inserted immediately before the documented item's attributes
         /// Optional delay between successful requests in seconds.
         #[arg(long, default_value_t = 0.0)]
         delay: f64,
+        /// Older journal directory. Samples whose source hash already has a saved
+        /// (non-skipped) comment there reuse it instead of calling the endpoint.
+        #[arg(long)]
+        reuse: Option<PathBuf>,
     }
 
     #[derive(Serialize, Deserialize)]
@@ -583,6 +587,21 @@ The comment will be inserted immediately before the documented item's attributes
             "[Progress] {total}/{planned_total} comments already saved; cycling through unfinished buckets"
         );
         std::io::stdout().flush()?;
+        let mut reusable: std::collections::HashMap<String, String> = Default::default();
+        if let Some(dir) = &args.reuse {
+            for bucket in BUCKETS {
+                let path = dir.join(format!("{bucket}.jsonl"));
+                if path.exists() {
+                    for entry in read_journal(&path)? {
+                        if !entry.skipped {
+                            reusable.insert(entry.source_sha256, entry.doc_comment);
+                        }
+                    }
+                }
+            }
+            println!("[Reuse] {} saved comments available from {}", reusable.len(), dir.display());
+        }
+        let mut reused = 0usize;
         loop {
             let progress: Vec<_> = buckets
                 .iter()
@@ -603,7 +622,9 @@ The comment will be inserted immediately before the documented item's attributes
             );
             std::io::stdout().flush()?;
             let started = Instant::now();
-            let comment = match generate(&args, &url, &args.model, &args.token, &source) {
+            let source_hash = digest(source.as_bytes());
+            let reuse_hit = reusable.get(&source_hash).cloned();
+            let comment = match reuse_hit.map(Ok).unwrap_or_else(|| generate(&args, &url, &args.model, &args.token, &source)) {
                 Ok(comment) => Some(comment),
                 Err(error) if error.downcast_ref::<Rejected>().is_some() => {
                     eprintln!(
@@ -627,9 +648,11 @@ The comment will be inserted immediately before the documented item's attributes
                     });
                 }
             };
+            let was_reused = reusable.contains_key(&source_hash);
+            reused += was_reused as usize;
             let entry = Entry {
                 index,
-                source_sha256: digest(source.as_bytes()),
+                source_sha256: source_hash,
                 doc_comment: comment.clone().unwrap_or_default(),
                 skipped: comment.is_none(),
             };
@@ -666,9 +689,12 @@ The comment will be inserted immediately before the documented item's attributes
             if bucket.cursor == bucket.metadata.samples {
                 publish_bucket(bucket, &tokenizer, args.max_seq_len)?;
             }
-            if args.delay > 0.0 {
+            if args.delay > 0.0 && !was_reused {
                 std::thread::sleep(Duration::from_secs_f64(args.delay));
             }
+        }
+        if args.reuse.is_some() {
+            println!("[Reuse] {reused} comments came from the older journals this run");
         }
         // Preserve the original tier assignments and calibration, but publish
         // fresh cache identities. Original complexity metrics describe raw code

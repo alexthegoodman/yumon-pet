@@ -244,10 +244,10 @@ pub struct RunConfig {
 fn code_eval_prompts() -> Vec<String> {
     vec![
         "pub struct RunConfig {".to_string(),
-        "pub enum Architecture {".to_string(),
-        "pub struct StageConfig {".to_string(),
+        "/// A video encoder accepts pixel data".to_string(),
+        "/// Process the data".to_string(),
         "pub fn softmax(logits: &[f32]) -> Vec<f32> {".to_string(),
-        "pub fn whole_word_match(text: &str, kw: &str) -> bool {".to_string(),
+        "let reverb_params = |mix: f64| {".to_string(),
     ]
 }
 
@@ -1066,7 +1066,7 @@ where
             } else { idx.shuffle(&mut rng); }
             let num_batches = idx.len().div_ceil(stage_cfg.batch_size);
             state.total_batches = num_batches;
-            // println!("Epoch {}/{}: {epoch_samples} eligible training samples, {num_batches} batches", epoch+1, stage_cfg.epochs);
+            
             let mut epoch_loss = 0.0f32;
             let mut processed_batches = 0usize;
             let mut epoch_top3_correct = 0usize;
@@ -1306,10 +1306,10 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 32,
         // 64,
         // 128,
-        // 256, // smaller, maybe good seq length of 256
+        256, // smaller, maybe good seq length of 256
         // 512 // 220M ideal
         // 1024, // ~1.32B total / ~411M active at 24 layers, 4 experts top-1
-        1024,
+        // 1024,
     ];
     let layer_counts: [usize; 1] = [
         // 1,

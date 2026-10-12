@@ -20,5 +20,5 @@
   "first_lr": 0.0001,
   "last_lr": 0.00002,
   "validation_fraction": 0.01,
-  "out_dir": "D:/models/moe-mini-2"
+  "out_dir": "D:/models/moe-mini-3"
 }
