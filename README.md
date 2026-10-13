@@ -95,6 +95,32 @@ from stock `burn::nn` modules (`TransformerEncoder` with a causal mask, learned
 positions, LayerNorm; no flash attention or RoPE). Same overfit config, so the two
 curves are directly comparable.
 
+### Adaptive learning-value loss (experimental)
+
+An optional `adaptive_loss` config section ([design](docs/ADAPTIVE_LEARNING.md),
+`src/brain/adaptive_loss.rs`) weights each target's CE by
+`(1 - lambda) + lambda * w_v`. Here `w_v` comes from per-token difficulty, learning
+progress and confidence, and is clipped to `[min_weight, max_weight]`. Weights
+update every `statistics_interval_steps` from detached losses of completed windows.
+`lambda` is 0 for `warmup_fraction` of the steps, then ramps over `ramp_fraction`.
+The loss is still divided by the supervised token count, and MoE aux losses are
+unchanged. Without the section, training is unchanged.
+
+Modes: `disabled` (plain CE, same stats and logs: the baseline), `difficulty`,
+`difficulty_progress`, `frequency` (inverse smoothed-count control). Each mode gets
+its own run folder (`_alw_<mode>`). The backend is seeded from `seed` when the
+section is present. State resumes from `adaptive_loss.bin`. Per window,
+`adaptive_loss.jsonl` logs standard vs. weighted CE, mean effective weight, weight,
+difficulty and progress quantiles, weight by training frequency, grad norm,
+tokens/s and CPU overhead. At each epoch end it logs unweighted validation CE by
+training-frequency bucket. Charts, metadata and `val_loss` always use unweighted CE.
+
+```sh
+for mode in disabled difficulty difficulty_progress frequency; do
+  cargo run --release --bin train_code -- --config configs/yumon-code-moe-mini-adaptive.json --adaptive-mode $mode
+done
+```
+
 ## Yumon Nano / InstaCode Edit:
 
 ```

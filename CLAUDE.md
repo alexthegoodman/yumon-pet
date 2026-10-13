@@ -34,6 +34,15 @@ buckets, journals and retrained bundles were moved to `../yumon-pet-cache-backup
 `sort_code_buckets` and `view_code_bucket` still exist but training no longer uses
 their output. Checkpoint run names use `_curriculum_documented_tiers_v3`.
 
+Adaptive loss (2026-10-12): optional `adaptive_loss` config section
+(`adaptive_loss.rs`, docs/ADAPTIVE_LEARNING.md) weights token CE by per-token
+difficulty/progress/confidence with warm-up and ramp. Stats come from the per-token
+NLL the trainer already reads back. State is in `adaptive_loss.bin`, diagnostics in
+`adaptive_loss.jsonl`. Run names gain `_alw_<mode>`, and the backend is seeded only
+when the section is present. `train_code --adaptive-mode` picks the experiment arm
+for `configs/yumon-code-moe-mini-adaptive.json`. Unit tests and local smoke runs
+(including resume and seeded repeatability) passed. Real A/B/C/D runs are not done yet.
+
 Rust books stage (2026-10-11): `code_docs` converts the toolchain `rust-docs`
 component's mdBook `print.html` (12 stable books, unstable-book excluded) into
 packed Markdown-like chunks via `cache_samples --code-config <cfg> --rust-docs`

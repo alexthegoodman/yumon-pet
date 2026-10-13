@@ -67,6 +67,9 @@ pub struct CodeConfig {
     /// Save a per-token loss heatmap, position/token loss plots and a token-colored
     /// held-out text view every N optimizer steps (and at step 1). 0 disables.
     pub heatmap_every: usize,
+    /// Optional adaptive learning-value loss weighting (docs/ADAPTIVE_LEARNING.md).
+    /// Absent = plain cross-entropy with no extra statistics.
+    pub adaptive_loss: Option<super::adaptive_loss::AdaptiveLossConfig>,
 }
 
 impl Default for CodeConfig {
@@ -80,7 +83,7 @@ impl Default for CodeConfig {
             attn_heads: 16, ff_dim: 2048, batch_size: 8, epochs: 15,
             first_lr: 2e-4, last_lr: 2e-5, validation_fraction: 0.01,
             out_dir: "/workspace/checkpoints/yumon-code".into(),
-            overfit_samples: None, heatmap_every: 250,
+            overfit_samples: None, heatmap_every: 250, adaptive_loss: None,
         }
     }
 }
@@ -109,6 +112,7 @@ impl CodeConfig {
             && self.last_lr > 0.0 && self.last_lr <= self.first_lr, "invalid learning-rate range");
         ensure!(self.validation_fraction > 0.0 && self.validation_fraction < 1.0,
             "validation_fraction must be between 0 and 1");
+        if let Some(adaptive) = &self.adaptive_loss { adaptive.validate()?; }
         Ok(())
     }
 }

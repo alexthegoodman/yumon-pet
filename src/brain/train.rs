@@ -236,6 +236,9 @@ pub struct RunConfig {
     pub overfit: bool,
     /// Steps between loss heatmap/plot snapshots; 0 disables.
     pub heatmap_every: usize,
+    /// Adaptive learning-value token weighting; raw-code runs only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub adaptive_loss: Option<crate::brain::adaptive_loss::AdaptiveLossConfig>,
 }
 
 /// Number of held-out prompts run through the model every time we do a
@@ -305,7 +308,9 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 config.n_layers, config.attn_heads, config.ff_dim, config.max_seq_len, config.batch_size,
                 if config.curriculum.is_some() { "_curriculum_documented_tiers_v3" } else { "" },
                 if config.docs.is_some() { "_rust_docs_v1" } else { "" })
-                + &config.overfit_samples.map_or(String::new(), |n| format!("_overfit{n}")),
+                + &config.overfit_samples.map_or(String::new(), |n| format!("_overfit{n}"))
+                // Separate directories so A/B/C/D experiments never resume each other.
+                + &config.adaptive_loss.as_ref().map_or(String::new(), |a| format!("_alw_{}", a.effective_mode().tag())),
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
             n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
             max_seq_len: config.max_seq_len, architecture,
@@ -315,6 +320,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 weight_decay: 0.01, epsilon: 1e-7, smoothing: 0.0 }],
             dropout_rate: if overfit { 0.0 } else { 0.05 },
             overfit, heatmap_every: config.heatmap_every,
+            adaptive_loss: config.adaptive_loss.clone(),
         };
         let run_dir = config.out_dir.join(&run.name);
         std::fs::create_dir_all(&run_dir)?;
@@ -327,6 +333,10 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
         }
         std::fs::write(identity_path, serde_json::to_vec_pretty(&identity)?)?;
         let device = <TrainBackend as Backend>::Device::default();
+        if config.adaptive_loss.is_some() {
+            // Adaptive-loss experiment arms must share initialization and dropout streams.
+            <TrainBackend as Backend>::seed(&device, config.seed);
+        }
         println!("Training precision: FP32; Flash Attention + BalancedCheckpointing.");
         match architecture {
             Architecture::Moe { .. } => train_causal_lm::<YumonMoeBrain<TrainBackend>>(
@@ -573,8 +583,22 @@ fn masked_token_ce<B: Backend>(
     supervised: usize,
     smoothing:  f32,
 ) -> Tensor<B, 1> {
+    weighted_token_ce(logits, targets, None, supervised, smoothing)
+}
+
+/// `masked_token_ce` with optional per-row weights (adaptive loss). Still divided
+/// by the supervised count, not the weight sum, so gradient-scale drift shows up
+/// in the logged mean effective weight instead of being normalized away.
+fn weighted_token_ce<B: Backend>(
+    logits:      Tensor<B, 2>,
+    targets:     Tensor<B, 1, Int>,
+    row_weights: Option<Tensor<B, 1>>,
+    supervised:  usize,
+    smoothing:   f32,
+) -> Tensor<B, 1> {
     let [rows, _] = logits.dims();
     let mask = targets.clone().equal_elem(PAD_TOKEN as i32).bool_not().float();
+    let mask = match row_weights { Some(weights) => mask * weights.detach(), None => mask };
     let log_probs = burn::tensor::activation::log_softmax(logits, 1);
     let nll = log_probs.clone().gather(1, targets.reshape([rows, 1])).reshape([rows]).neg();
     let per_token = if smoothing > 0.0 {
@@ -584,6 +608,23 @@ fn masked_token_ce<B: Backend>(
         nll
     };
     (per_token * mask).cast(burn::tensor::FloatDType::F32).sum() / supervised.max(1) as f64
+}
+
+/// Global L2 norm of all parameter gradients before clipping, with one readback.
+#[cfg(not(target_arch = "wasm32"))]
+fn global_grad_norm<M: AutodiffModule<TrainBackend>>(model: &M, grads: &GradientsParams) -> f32 {
+    struct SquaredSum<'a> { grads: &'a GradientsParams, total: Option<Tensor<InnerBackend, 1>> }
+    impl burn::module::ModuleVisitor<TrainBackend> for SquaredSum<'_> {
+        fn visit_float<const D: usize>(&mut self, param: &burn::module::Param<Tensor<TrainBackend, D>>) {
+            if let Some(grad) = self.grads.get::<InnerBackend, D>(param.id) {
+                let sum = grad.square().sum();
+                self.total = Some(match self.total.take() { Some(total) => total + sum, None => sum });
+            }
+        }
+    }
+    let mut visitor = SquaredSum { grads, total: None };
+    model.visit(&mut visitor);
+    visitor.total.map_or(0.0, |t| t.into_scalar().elem::<f32>().sqrt())
 }
 
 /// Negative log-likelihood of each target as a flat [batch * seq] vector. Rows
@@ -621,6 +662,7 @@ fn write_validation_token_view<B: Backend, M: CausalLm<B>>(
 
 /// Per-token loss over the held-out samples, without dropout or gradients.
 /// Returns loss, top-3 accuracy, and the number of supervised tokens covered.
+#[cfg(not(target_arch = "wasm32"))]
 fn causal_validation_loss<B: Backend, M: CausalLm<B>>(
     model:       &M,
     samples:     &[crate::brain::samples::Sample],
@@ -630,6 +672,8 @@ fn causal_validation_loss<B: Backend, M: CausalLm<B>>(
     vocab:       usize,
     device:      &B::Device,
     raw_code: bool,
+    // Unweighted CE per training-frequency bucket (adaptive-loss diagnostics).
+    mut buckets: Option<(&crate::brain::adaptive_loss::FrequencyBuckets, &mut crate::brain::adaptive_loss::BucketLoss)>,
 ) -> Option<(f32, f64, usize)> {
     let mut total = 0.0f64;
     let mut correct = 0usize;
@@ -640,8 +684,14 @@ fn causal_validation_loss<B: Backend, M: CausalLm<B>>(
         if supervised == 0 { continue; }
         let n = batch_idx.len();
         let tokens_t = Tensor::<B, 2, Int>::from_ints(TensorData::new(seq_ids, [n, max_seq_len]), device);
+        let targets_cpu = buckets.is_some().then(|| targets.clone());
         let targets_t = Tensor::<B, 1, Int>::from_ints(TensorData::new(targets, [n * max_seq_len]), device);
         let logits = model.logits(tokens_t).reshape([n * max_seq_len, vocab]);
+        if let (Some((map, sums)), Some(targets_cpu)) = (buckets.as_mut(), targets_cpu) {
+            let log_probs = burn::tensor::activation::log_softmax(logits.clone().cast(burn::tensor::FloatDType::F32), 1);
+            let nll = per_token_nll(log_probs.reshape([n, max_seq_len, vocab]), targets_t.clone());
+            sums.add(map, &targets_cpu, &nll);
+        }
         correct += top3_correct(logits.clone(), targets_t.clone());
         let loss = masked_token_ce(logits, targets_t, supervised, 0.0)
             .into_data().convert::<f32>().to_vec::<f32>().ok()?[0];
@@ -1047,6 +1097,27 @@ where
         let heatmap_dir = std::path::Path::new(run_dir_str).join("heatmaps");
         let heatmap_ceiling = (vocab as f32).ln();
         let log_every = if run_cfg.overfit { 10 } else { 50 };
+        let total_steps = batch_plan.as_ref().map_or(stage_cfg.epochs * training_samples.len().div_ceil(stage_cfg.batch_size), |p| p.iter().sum());
+
+        // Adaptive learning-value weighting (raw code only); state resumes with the checkpoint.
+        use crate::brain::adaptive_loss::{AdaptiveLoss, FrequencyBuckets};
+        let mut adaptive = match run_cfg.adaptive_loss.as_ref().filter(|_| raw_code) {
+            Some(cfg) => Some(AdaptiveLoss::load_or_new(run_dir, cfg, vocab)?),
+            None => None,
+        };
+        let frequency_buckets = adaptive.as_ref()
+            .map(|_| FrequencyBuckets::from_counts(&FrequencyBuckets::count_targets(&training_samples, vocab)));
+        if let Some(a) = adaptive.as_ref() {
+            let c = &a.config;
+            println!("Adaptive loss: mode {}, lambda {}, warm-up {} steps, ramp {} steps, window {} steps, {} completed windows restored.",
+                c.effective_mode().tag(), c.lambda_at(total_steps, total_steps), (c.warmup_fraction * total_steps as f64) as usize,
+                (c.ramp_fraction * total_steps as f64) as usize, c.statistics_interval_steps, a.windows);
+        }
+        // Per-window sums for the diagnostics log.
+        #[derive(Default)]
+        struct Window { ce: f64, weighted: f64, weight: f64, tokens: usize, steps: usize, overhead: std::time::Duration }
+        let mut window = Window::default();
+        let mut window_start = std::time::Instant::now();
 
         // Decoder-only style: [prompt][separator][reply] packed into one causal sequence
         let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { " " };
@@ -1070,11 +1141,12 @@ where
             let mut processed_batches = 0usize;
             let mut epoch_top3_correct = 0usize;
             let mut epoch_supervised = 0usize;
+            let step_base: usize = batch_plan.as_ref().map_or(epoch * num_batches, |p| p[..epoch].iter().sum());
 
             for batch_num in 0..num_batches {
+                let step = step_base + batch_num;
                 let current_lr = {
                     let total_steps = batch_plan.as_ref().map_or(stage_cfg.epochs * num_batches, |p| p.iter().sum());
-                    let step = batch_plan.as_ref().map_or(epoch * num_batches, |p| p[..epoch].iter().sum()) + batch_num;
                     let t = step as f64 / total_steps as f64;
                     stage_cfg.first_lr * (1.0 - t) + stage_cfg.last_lr * t
                 };
@@ -1116,13 +1188,63 @@ where
 
                 // Loss
                 let logits_2d = token_logits.reshape([current_batch_size * run_cfg.max_seq_len, vocab]);
-                let lang_loss = masked_token_ce(logits_2d, lang_target_t, supervised, stage_cfg.smoothing);
+                // Weights come only from completed windows; lambda 0 (warm-up or
+                // disabled) keeps the plain masked CE path exactly.
+                let bookkeeping = std::time::Instant::now();
+                let lambda = adaptive.as_ref().map_or(0.0, |a| a.config.lambda_at(step, total_steps));
+                let row_weights = adaptive.as_ref().filter(|_| lambda > 0.0)
+                    .map(|a| a.row_weights(&targets_cpu, lambda));
+                let weight_sum = row_weights.as_ref().map_or(supervised as f64, |w| w.iter().map(|&x| x as f64).sum());
+                let rows = current_batch_size * run_cfg.max_seq_len;
+                let row_weights_t = row_weights.map(|w| Tensor::<TrainBackend, 1>::from_floats(TensorData::new(w, [rows]), device));
+                window.overhead += bookkeeping.elapsed();
+                let lang_loss = weighted_token_ce(logits_2d, lang_target_t, row_weights_t, supervised, stage_cfg.smoothing);
 
                 let total_loss = lang_loss.clone() + aux_loss.cast(burn::tensor::FloatDType::F32);
                 let grads = GradientsParams::from_grads(total_loss.backward(), &model);
+                let grad_norm = adaptive.as_ref().filter(|a| a.closes_window_next_step())
+                    .map(|_| global_grad_norm(&model, &grads));
                 model = optimizer.step(current_lr, model, grads);
 
-                let loss_val: f32 = lang_loss.inner().to_data().convert::<f32>().to_vec::<f32>().unwrap()[0];
+                let lang_val: f32 = lang_loss.inner().to_data().convert::<f32>().to_vec::<f32>().unwrap()[0];
+                // Charts, epoch loss and metadata stay on unweighted CE for comparability.
+                let ce_sum: f64 = targets_cpu.iter().zip(&token_nll)
+                    .filter(|(t, _)| **t != PAD_TOKEN as i32).map(|(_, &l)| l as f64).sum();
+                let loss_val = if lambda > 0.0 { (ce_sum / supervised as f64) as f32 } else { lang_val };
+                if let Some(a) = adaptive.as_mut() {
+                    let bookkeeping = std::time::Instant::now();
+                    window.ce += ce_sum;
+                    window.weighted += lang_val as f64 * supervised as f64;
+                    window.weight += weight_sum;
+                    window.tokens += supervised;
+                    window.steps += 1;
+                    let closed = a.observe(&targets_cpu, &token_nll);
+                    window.overhead += bookkeeping.elapsed();
+                    if closed {
+                        let elapsed = window_start.elapsed().as_secs_f64();
+                        let report = a.report(frequency_buckets.as_ref().unwrap());
+                        let tokens = window.tokens.max(1) as f64;
+                        let line = serde_json::json!({
+                            "step": step + 1, "epoch": epoch + 1, "lambda": lambda,
+                            "standard_ce": window.ce / tokens, "adaptive_lm_loss": window.weighted / tokens,
+                            "mean_effective_weight": window.weight / tokens, "grad_norm": grad_norm,
+                            "tokens_per_sec": window.tokens as f64 / elapsed,
+                            "step_ms": 1e3 * elapsed / window.steps.max(1) as f64,
+                            "adaptive_cpu_ms_per_step": 1e3 * window.overhead.as_secs_f64() / window.steps.max(1) as f64,
+                            "stats": report,
+                        });
+                        if terminal.is_none() {
+                            println!("adaptive window {} lambda {lambda:.3} ce {:.4} weighted {:.4} mean_w {:.3} w p05/p50/p95 {:.2}/{:.2}/{:.2} grad_norm {:.3}",
+                                a.windows, window.ce / tokens, window.weighted / tokens, window.weight / tokens,
+                                report.weight_p05, report.weight_p50, report.weight_p95, grad_norm.unwrap_or(f32::NAN));
+                        }
+                        if let Err(e) = crate::brain::adaptive_loss::append_log(run_dir, &line) {
+                            eprintln!("⚠️  Failed to append adaptive loss log: {e}");
+                        }
+                        window = Window::default();
+                        window_start = std::time::Instant::now();
+                    }
+                }
                 epoch_loss += loss_val;
                 processed_batches += 1;
 
@@ -1168,7 +1290,8 @@ where
                 // Periodic save and inference every 500 batches
                 if (batch_num + 1) % 500 == 0 {
                     let inference_model = model.valid();
-                    let val = causal_validation_loss(&inference_model, &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, device, raw_code);
+                    let val = causal_validation_loss(&inference_model, &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, device, raw_code, None);
+                    if let Some(a) = adaptive.as_ref() { a.save(run_dir)?; }
                     val_loss = val.map(|(loss, _, _)| loss);
                     model.save_run(run_dir_str, tokenizer, &RunProgress {
                         run_cfg,
@@ -1205,8 +1328,16 @@ where
             anyhow::ensure!(processed_batches > 0, "epoch contains no supervised tokens");
             final_loss = epoch_loss / processed_batches as f32;
             let inference_model = model.valid();
-            let val = causal_validation_loss(&inference_model, &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, device, raw_code);
+            let mut bucket_loss = crate::brain::adaptive_loss::BucketLoss::default();
+            let val = causal_validation_loss(&inference_model, &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, device, raw_code,
+                frequency_buckets.as_ref().map(|b| (b, &mut bucket_loss)));
             val_loss = val.map(|(loss, _, _)| loss);
+            if let (Some(a), Some((loss, top3, tokens))) = (adaptive.as_ref(), val) {
+                let line = serde_json::json!({"validation": {"epoch": epoch + 1, "step": step_base + num_batches,
+                    "ce": loss, "top3": top3, "tokens": tokens, "ce_by_train_frequency": bucket_loss.to_json()}});
+                if terminal.is_none() { println!("adaptive validation: {line}"); }
+                crate::brain::adaptive_loss::append_log(run_dir, &line)?;
+            }
 
             // Early stop on held-out loss when available.
             let stop_loss = val_loss.unwrap_or(final_loss);
@@ -1224,6 +1355,7 @@ where
             // Overfit runs have many tiny epochs: checkpoint, generate and chart rarely.
             let heavy = !run_cfg.overfit || (epoch + 1) % 25 == 0 || epoch + 1 == stage_cfg.epochs;
             if heavy {
+                if let Some(a) = adaptive.as_ref() { a.save(run_dir)?; }
                 model.save_run(run_dir_str, tokenizer, &RunProgress {
                     run_cfg,
                     epochs_trained: epoch_offset + epoch + 1,
@@ -1410,6 +1542,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     dropout_rate: 0.05,
                                     overfit: false,
                                     heatmap_every: 0,
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    adaptive_loss: None,
                                 });
                             }
                         }
@@ -2425,6 +2559,44 @@ mod moe_loss_tests {
             .forward(logits, targets)
             .into_scalar();
         assert!((burn * 4.0 / 2.0 - expected).abs() < 1e-5, "{burn} vs {expected}");
+    }
+
+    /// Adaptive loss: sum(a * CE) / supervised, PAD ignored, unit weights equal
+    /// masked CE, and each row's gradient scales by its weight.
+    #[test]
+    fn weighted_loss_scales_rows_and_gradients() {
+        type AD = burn::backend::Autodiff<B>;
+        let device = Default::default();
+        let rows = [[2.0, 0.5, -1.0], [0.1, 0.2, 0.3], [-0.5, 1.5, 0.0], [3.0, -2.0, 1.0]];
+        let targets = || Tensor::<AD, 1, Int>::from_ints([1, PAD_TOKEN as i32, 2, PAD_TOKEN as i32], &device);
+        let scalar = |t: Tensor<AD, 1>| t.into_data().convert::<f32>().to_vec::<f32>().unwrap()[0];
+        let plain = scalar(masked_token_ce(Tensor::<AD, 2>::from_floats(rows, &device), targets(), 2, 0.0));
+        let ones = Tensor::<AD, 1>::from_floats([1.0, 0.0, 1.0, 0.0], &device);
+        let unit = scalar(weighted_token_ce(Tensor::<AD, 2>::from_floats(rows, &device), targets(), Some(ones), 2, 0.0));
+        assert!((plain - unit).abs() < 1e-6, "{plain} vs {unit}");
+
+        let grads_for = |weights: Option<[f32; 4]>| {
+            let logits = Tensor::<AD, 2>::from_floats(rows, &device).require_grad();
+            let weights = weights.map(|w| Tensor::<AD, 1>::from_floats(w, &device));
+            let loss = weighted_token_ce(logits.clone(), targets(), weights, 2, 0.0);
+            let value = scalar(loss.clone());
+            let grads = loss.backward();
+            (value, logits.grad(&grads).unwrap().into_data().convert::<f32>().to_vec::<f32>().unwrap())
+        };
+        let (base, base_grad) = grads_for(None);
+        // PAD rows carry weight 0 from row_weights; a stray weight there must still be masked.
+        let (weighted, weighted_grad) = grads_for(Some([0.5, 7.0, 2.0, 7.0]));
+        let nll = |row: [f32; 3], target: usize| {
+            let max = row.iter().cloned().fold(f32::MIN, f32::max);
+            row.iter().map(|x| (x - max).exp()).sum::<f32>().ln() + max - row[target]
+        };
+        let expected = (0.5 * nll(rows[0], 1) + 2.0 * nll(rows[2], 2)) / 2.0;
+        assert!((weighted - expected).abs() < 1e-5, "{weighted} vs {expected}");
+        assert!((base - plain).abs() < 1e-6);
+        for (i, (g, b)) in weighted_grad.iter().zip(&base_grad).enumerate() {
+            let scale = [0.5, 0.0, 2.0, 0.0][i / 3];
+            assert!(g.is_finite() && (g - scale * b).abs() < 1e-5, "row {} grad {g} vs {}", i / 3, scale * b);
+        }
     }
 
     /// Real Language data: samples, duplicates removed and tokens per source,

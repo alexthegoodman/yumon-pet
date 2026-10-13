@@ -28,6 +28,8 @@ pub mod code_documented;
 pub mod code_docs;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod loss_stats;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod adaptive_loss;
 pub mod keywords;
 pub mod fixer;
 pub mod loader;
