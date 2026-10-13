@@ -672,8 +672,8 @@ fn causal_validation_loss<B: Backend, M: CausalLm<B>>(
     vocab:       usize,
     device:      &B::Device,
     raw_code: bool,
-    // Unweighted CE per training-frequency bucket (adaptive-loss diagnostics).
-    mut buckets: Option<(&crate::brain::adaptive_loss::FrequencyBuckets, &mut crate::brain::adaptive_loss::BucketLoss)>,
+    // Receives each batch's flat targets and per-token NLL (adaptive-loss diagnostics).
+    mut per_token: Option<&mut dyn FnMut(&[i32], &[f32])>,
 ) -> Option<(f32, f64, usize)> {
     let mut total = 0.0f64;
     let mut correct = 0usize;
@@ -684,13 +684,12 @@ fn causal_validation_loss<B: Backend, M: CausalLm<B>>(
         if supervised == 0 { continue; }
         let n = batch_idx.len();
         let tokens_t = Tensor::<B, 2, Int>::from_ints(TensorData::new(seq_ids, [n, max_seq_len]), device);
-        let targets_cpu = buckets.is_some().then(|| targets.clone());
+        let targets_cpu = per_token.is_some().then(|| targets.clone());
         let targets_t = Tensor::<B, 1, Int>::from_ints(TensorData::new(targets, [n * max_seq_len]), device);
         let logits = model.logits(tokens_t).reshape([n * max_seq_len, vocab]);
-        if let (Some((map, sums)), Some(targets_cpu)) = (buckets.as_mut(), targets_cpu) {
+        if let (Some(callback), Some(targets_cpu)) = (per_token.as_mut(), targets_cpu) {
             let log_probs = burn::tensor::activation::log_softmax(logits.clone().cast(burn::tensor::FloatDType::F32), 1);
-            let nll = per_token_nll(log_probs.reshape([n, max_seq_len, vocab]), targets_t.clone());
-            sums.add(map, &targets_cpu, &nll);
+            callback(&targets_cpu, &per_token_nll(log_probs.reshape([n, max_seq_len, vocab]), targets_t.clone()));
         }
         correct += top3_correct(logits.clone(), targets_t.clone());
         let loss = masked_token_ce(logits, targets_t, supervised, 0.0)
@@ -1100,13 +1099,15 @@ where
         let total_steps = batch_plan.as_ref().map_or(stage_cfg.epochs * training_samples.len().div_ceil(stage_cfg.batch_size), |p| p.iter().sum());
 
         // Adaptive learning-value weighting (raw code only); state resumes with the checkpoint.
-        use crate::brain::adaptive_loss::{AdaptiveLoss, FrequencyBuckets};
+        use crate::brain::adaptive_loss::{AdaptiveLoss, CONTEXT_LABELS, ContextLabeler, FrequencyBuckets, GroupLoss};
         let mut adaptive = match run_cfg.adaptive_loss.as_ref().filter(|_| raw_code) {
             Some(cfg) => Some(AdaptiveLoss::load_or_new(run_dir, cfg, vocab)?),
             None => None,
         };
         let frequency_buckets = adaptive.as_ref()
             .map(|_| FrequencyBuckets::from_counts(&FrequencyBuckets::count_targets(&training_samples, vocab)));
+        // Every adaptive mode logs CE by occurrence context, so arms compare on it.
+        let labeler = adaptive.as_ref().map(|_| ContextLabeler::from_tokenizer(tokenizer, vocab));
         if let Some(a) = adaptive.as_ref() {
             let c = &a.config;
             println!("Adaptive loss: mode {}, lambda {}, warm-up {} steps, ramp {} steps, window {} steps, {} completed windows restored.",
@@ -1115,7 +1116,7 @@ where
         }
         // Per-window sums for the diagnostics log.
         #[derive(Default)]
-        struct Window { ce: f64, weighted: f64, weight: f64, tokens: usize, steps: usize, overhead: std::time::Duration }
+        struct Window { ce: f64, weighted: f64, weight: f64, tokens: usize, steps: usize, overhead: std::time::Duration, by_context: GroupLoss }
         let mut window = Window::default();
         let mut window_start = std::time::Instant::now();
 
@@ -1123,6 +1124,30 @@ where
         let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { " " };
         let sep_tokens = if raw_code { Vec::new() } else { tokenizer.encode(sep_text) };
         anyhow::ensure!(sep_tokens.len() + 2 <= run_cfg.max_seq_len, "Sequence too short for separator and reply");
+        // Held-out loss; with adaptive loss also unweighted CE by training frequency
+        // and by occurrence context, appended to adaptive_loss.jsonl.
+        let validate = |model: &M::InnerModule, epoch: usize, step: usize, print: bool| -> Result<Option<(f32, f64, usize)>> {
+            let (Some(buckets), Some(labeler)) = (frequency_buckets.as_ref(), labeler.as_ref()) else {
+                return Ok(causal_validation_loss(model, &val_samples, &sep_tokens, run_cfg.max_seq_len,
+                    stage_cfg.batch_size, vocab, device, raw_code, None));
+            };
+            let (mut by_frequency, mut by_context) = (GroupLoss::default(), GroupLoss::default());
+            let mut collect = |targets: &[i32], nll: &[f32]| {
+                by_frequency.add_by_frequency(buckets, targets, nll);
+                by_context.add_by_label(&labeler.label(targets, run_cfg.max_seq_len), nll, None);
+            };
+            let val = causal_validation_loss(model, &val_samples, &sep_tokens, run_cfg.max_seq_len,
+                stage_cfg.batch_size, vocab, device, raw_code, Some(&mut collect));
+            if let Some((loss, top3, tokens)) = val {
+                let line = serde_json::json!({"validation": {"epoch": epoch, "step": step,
+                    "ce": loss, "top3": top3, "tokens": tokens,
+                    "ce_by_train_frequency": by_frequency.to_json(&FrequencyBuckets::LABELS, false),
+                    "ce_by_context": by_context.to_json(&CONTEXT_LABELS, false)}});
+                if print { println!("adaptive validation: {line}"); }
+                crate::brain::adaptive_loss::append_log(run_dir, &line)?;
+            }
+            Ok(val)
+        };
 
         let start_epoch = if raw_code { epochs_already_done } else { 0 };
         let epoch_offset = if raw_code { 0 } else { epochs_already_done };
@@ -1192,8 +1217,13 @@ where
                 // disabled) keeps the plain masked CE path exactly.
                 let bookkeeping = std::time::Instant::now();
                 let lambda = adaptive.as_ref().map_or(0.0, |a| a.config.lambda_at(step, total_steps));
-                let row_weights = adaptive.as_ref().filter(|_| lambda > 0.0)
-                    .map(|a| a.row_weights(&targets_cpu, lambda));
+                let labels = labeler.as_ref().map(|l| l.label(&targets_cpu, run_cfg.max_seq_len));
+                let keys = adaptive.as_ref().map(|a| a.keys(&targets_cpu, labels.as_deref()));
+                let row_weights = adaptive.as_ref().zip(keys.as_ref()).filter(|_| lambda > 0.0)
+                    .map(|(a, keys)| a.row_weights(keys, lambda));
+                if let Some(labels) = &labels {
+                    window.by_context.add_by_label(labels, &token_nll, row_weights.as_deref());
+                }
                 let weight_sum = row_weights.as_ref().map_or(supervised as f64, |w| w.iter().map(|&x| x as f64).sum());
                 let rows = current_batch_size * run_cfg.max_seq_len;
                 let row_weights_t = row_weights.map(|w| Tensor::<TrainBackend, 1>::from_floats(TensorData::new(w, [rows]), device));
@@ -1218,7 +1248,7 @@ where
                     window.weight += weight_sum;
                     window.tokens += supervised;
                     window.steps += 1;
-                    let closed = a.observe(&targets_cpu, &token_nll);
+                    let closed = a.observe(keys.as_ref().unwrap(), &token_nll);
                     window.overhead += bookkeeping.elapsed();
                     if closed {
                         let elapsed = window_start.elapsed().as_secs_f64();
@@ -1231,12 +1261,17 @@ where
                             "tokens_per_sec": window.tokens as f64 / elapsed,
                             "step_ms": 1e3 * elapsed / window.steps.max(1) as f64,
                             "adaptive_cpu_ms_per_step": 1e3 * window.overhead.as_secs_f64() / window.steps.max(1) as f64,
+                            // Unweighted CE and mean applied weight a (1 when lambda is 0) per context.
+                            "by_context": window.by_context.to_json(&CONTEXT_LABELS, true),
                             "stats": report,
                         });
                         if terminal.is_none() {
                             println!("adaptive window {} lambda {lambda:.3} ce {:.4} weighted {:.4} mean_w {:.3} w p05/p50/p95 {:.2}/{:.2}/{:.2} grad_norm {:.3}",
                                 a.windows, window.ce / tokens, window.weighted / tokens, window.weight / tokens,
                                 report.weight_p05, report.weight_p50, report.weight_p95, grad_norm.unwrap_or(f32::NAN));
+                            let context: Vec<String> = CONTEXT_LABELS.iter().zip(&window.by_context.0)
+                                .map(|(label, &(ce, w, n))| format!("{label} {:.2}@{:.2}", ce / n.max(1) as f64, w / n.max(1) as f64)).collect();
+                            println!("  ce@weight by context: {}", context.join("  "));
                         }
                         if let Err(e) = crate::brain::adaptive_loss::append_log(run_dir, &line) {
                             eprintln!("⚠️  Failed to append adaptive loss log: {e}");
@@ -1290,7 +1325,7 @@ where
                 // Periodic save and inference every 500 batches
                 if (batch_num + 1) % 500 == 0 {
                     let inference_model = model.valid();
-                    let val = causal_validation_loss(&inference_model, &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, device, raw_code, None);
+                    let val = validate(&inference_model, epoch + 1, step + 1, terminal.is_none())?;
                     if let Some(a) = adaptive.as_ref() { a.save(run_dir)?; }
                     val_loss = val.map(|(loss, _, _)| loss);
                     model.save_run(run_dir_str, tokenizer, &RunProgress {
@@ -1328,16 +1363,8 @@ where
             anyhow::ensure!(processed_batches > 0, "epoch contains no supervised tokens");
             final_loss = epoch_loss / processed_batches as f32;
             let inference_model = model.valid();
-            let mut bucket_loss = crate::brain::adaptive_loss::BucketLoss::default();
-            let val = causal_validation_loss(&inference_model, &val_samples, &sep_tokens, run_cfg.max_seq_len, stage_cfg.batch_size, vocab, device, raw_code,
-                frequency_buckets.as_ref().map(|b| (b, &mut bucket_loss)));
+            let val = validate(&inference_model, epoch + 1, step_base + num_batches, terminal.is_none())?;
             val_loss = val.map(|(loss, _, _)| loss);
-            if let (Some(a), Some((loss, top3, tokens))) = (adaptive.as_ref(), val) {
-                let line = serde_json::json!({"validation": {"epoch": epoch + 1, "step": step_base + num_batches,
-                    "ce": loss, "top3": top3, "tokens": tokens, "ce_by_train_frequency": bucket_loss.to_json()}});
-                if terminal.is_none() { println!("adaptive validation: {line}"); }
-                crate::brain::adaptive_loss::append_log(run_dir, &line)?;
-            }
 
             // Early stop on held-out loss when available.
             let stop_loss = val_loss.unwrap_or(final_loss);

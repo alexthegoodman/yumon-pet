@@ -42,6 +42,11 @@ NLL the trainer already reads back. State is in `adaptive_loss.bin`, diagnostics
 when the section is present. `train_code --adaptive-mode` picks the experiment arm
 for `configs/yumon-code-moe-mini-adaptive.json`. Unit tests and local smoke runs
 (including resume and seeded repeatability) passed. Real A/B/C/D runs are not done yet.
+2026-10-13: `context` mode keys stats by (occurrence context, token). `ContextLabeler`
+tags targets as code_symbol/code_novel/code_copy/comment_novel/comment_copy (copy = id
+seen earlier in the sequence), with category priors. All modes log CE and weight by
+context. The test config is context mode with no warm-up, beta 0.9, kappa 10, gamma 1,
+lambda 0.5 and out_dir moe-mini-adaptive-2. Older `adaptive_loss.bin` files restart fresh.
 
 Rust books stage (2026-10-11): `code_docs` converts the toolchain `rust-docs`
 component's mdBook `print.html` (12 stable books, unstable-book excluded) into

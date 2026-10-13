@@ -107,16 +107,24 @@ The loss is still divided by the supervised token count, and MoE aux losses are
 unchanged. Without the section, training is unchanged.
 
 Modes: `disabled` (plain CE, same stats and logs: the baseline), `difficulty`,
-`difficulty_progress`, `frequency` (inverse smoothed-count control). Each mode gets
-its own run folder (`_alw_<mode>`). The backend is seeded from `seed` when the
-section is present. State resumes from `adaptive_loss.bin`. Per window,
-`adaptive_loss.jsonl` logs standard vs. weighted CE, mean effective weight, weight,
-difficulty and progress quantiles, weight by training frequency, grad norm,
-tokens/s and CPU overhead. At each epoch end it logs unweighted validation CE by
-training-frequency bucket. Charts, metadata and `val_loss` always use unweighted CE.
+`difficulty_progress`, `frequency` (inverse smoothed-count control) and `context`.
+`context` keys the statistics by (occurrence context, token). Each target is
+labelled `code_symbol`, `code_novel`, `code_copy`, `comment_novel` or
+`comment_copy`, where a copy is a token id seen earlier in the same sequence.
+Sparse keys shrink toward their category's mean. Each mode gets its own run folder
+(`_alw_<mode>`). The backend is seeded from `seed` when the section is present.
+State resumes from `adaptive_loss.bin`. Per window, `adaptive_loss.jsonl` logs
+standard vs. weighted CE, CE and applied weight by context, mean effective weight,
+weight/difficulty/progress quantiles, weight by training frequency, grad norm,
+tokens/s and CPU overhead. Every validation pass logs unweighted CE by training
+frequency and by context. Charts, metadata and `val_loss` always use unweighted CE.
+
+`configs/yumon-code-moe-mini-adaptive.json` is set up for quick testing: `context`
+mode with no warm-up or ramp (weights stay at 1 until the first 50-step window
+closes), beta 0.9, kappa 10, gamma 1 and lambda 0.5.
 
 ```sh
-for mode in disabled difficulty difficulty_progress frequency; do
+for mode in disabled context difficulty_progress; do
   cargo run --release --bin train_code -- --config configs/yumon-code-moe-mini-adaptive.json --adaptive-mode $mode
 done
 ```

@@ -1,21 +1,25 @@
 //! Adaptive learning-value token weighting for causal-LM training
 //! (docs/ADAPTIVE_LEARNING.md). Training only: inference never touches it.
 //!
-//! Per vocabulary token it keeps a difficulty EMA of detached cross-entropy,
-//! decayed occurrence counts and a short history of difficulty snapshots for
-//! learning progress. Statistics accumulate on the CPU from the per-token NLL the
-//! trainer already reads back, and update once per window of optimizer steps.
-//! Weights used at a step always come from windows completed before it.
+//! Statistics are kept per key. A key is the target token id, or in `context`
+//! mode the pair (occurrence category, token id). Per key there is a difficulty
+//! EMA of detached cross-entropy, decayed occurrence counts and a short history
+//! of difficulty snapshots for learning progress. Sparse keys shrink toward
+//! their category's mean. Statistics accumulate on the CPU from the per-token
+//! NLL the trainer already reads back, and update once per window of optimizer
+//! steps. Weights used at a step always come from windows completed before it.
 #[cfg(test)]
 #[path = "../../tests/adaptive_loss/mod.rs"]
 mod tests;
-use std::{collections::VecDeque, path::Path};
-use anyhow::{Context, Result, ensure};
+use std::{collections::{HashSet, VecDeque}, path::Path};
+use anyhow::{Context as _, Result, ensure};
 use serde::{Deserialize, Serialize};
-use super::PAD_TOKEN;
+use super::{PAD_TOKEN, bpe::TokenizerKind};
 
 pub const STATE_FILE: &str = "adaptive_loss.bin";
 pub const LOG_FILE: &str = "adaptive_loss.jsonl";
+/// Key for PAD and out-of-range targets; never observed or weighted.
+pub const NO_KEY: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +32,10 @@ pub enum AdaptiveMode {
     DifficultyProgress,
     /// Inverse smoothed-frequency control: score 1 / (C_v + kappa).
     Frequency,
+    /// difficulty_progress keyed by (occurrence context, token): the same token
+    /// copied from earlier in the sequence, newly introduced, or inside a
+    /// comment gets separate statistics.
+    Context,
 }
 
 impl AdaptiveMode {
@@ -37,7 +45,12 @@ impl AdaptiveMode {
             Self::Difficulty => "difficulty",
             Self::DifficultyProgress => "difficulty_progress",
             Self::Frequency => "frequency",
+            Self::Context => "context",
         }
+    }
+
+    fn categories(self) -> usize {
+        if self == Self::Context { CONTEXT_LABELS.len() } else { 1 }
     }
 }
 
@@ -111,6 +124,72 @@ impl AdaptiveLossConfig {
     }
 }
 
+/// Occurrence categories for `context` mode and the per-context diagnostics.
+/// Symbols are code tokens without letters or digits; a copy is a token id that
+/// already occurred earlier in the same sequence.
+pub const CONTEXT_LABELS: [&str; 5] = ["code_symbol", "code_novel", "code_copy", "comment_novel", "comment_copy"];
+pub const NO_LABEL: u8 = u8::MAX;
+
+/// Labels target positions by scanning decoded token text. Rust-aware enough for
+/// line/block comments and string literals; raw strings and odd char literals
+/// can mislabel a few tokens, which only shifts statistics, never targets.
+pub struct ContextLabeler {
+    text: Vec<String>,
+    alphanumeric: Vec<bool>,
+}
+
+impl ContextLabeler {
+    pub fn new(text: Vec<String>) -> Self {
+        let alphanumeric = text.iter().map(|t| t.chars().any(char::is_alphanumeric)).collect();
+        Self { text, alphanumeric }
+    }
+
+    pub fn from_tokenizer(tokenizer: &TokenizerKind, vocab: usize) -> Self {
+        Self::new((0..vocab).map(|id| tokenizer.decode(&[id])).collect())
+    }
+
+    /// One label per target, rows of `seq_len`; `NO_LABEL` at PAD/invalid targets.
+    pub fn label(&self, targets: &[i32], seq_len: usize) -> Vec<u8> {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Scan { Code, Line, Block, Str { escaped: bool } }
+        let mut labels = Vec::with_capacity(targets.len());
+        for row in targets.chunks(seq_len) {
+            let (mut scan, mut prev) = (Scan::Code, '\0');
+            let mut seen = HashSet::new();
+            for &t in row {
+                if t == PAD_TOKEN as i32 || t < 0 || t as usize >= self.text.len() {
+                    labels.push(NO_LABEL);
+                    continue;
+                }
+                let copy = !seen.insert(t) as u8;
+                let comment = matches!(scan, Scan::Line | Scan::Block);
+                labels.push(if comment { 3 + copy } else if !self.alphanumeric[t as usize] { 0 } else { 1 + copy });
+                for c in self.text[t as usize].chars() {
+                    let next = match scan {
+                        Scan::Code if prev == '/' && c == '/' => Scan::Line,
+                        Scan::Code if prev == '/' && c == '*' => Scan::Block,
+                        // `'"'` is a char literal, not the start of a string.
+                        Scan::Code if c == '"' && prev != '\'' => Scan::Str { escaped: false },
+                        Scan::Line if c == '\n' => Scan::Code,
+                        Scan::Block if prev == '*' && c == '/' => Scan::Code,
+                        Scan::Str { escaped: true } => Scan::Str { escaped: false },
+                        Scan::Str { .. } if c == '\\' => Scan::Str { escaped: true },
+                        Scan::Str { .. } if c == '"' => Scan::Code,
+                        other => other,
+                    };
+                    // A char that opens or closes a construct never pairs with the next one
+                    // (`/*/` stays open, `*//` closes once).
+                    prev = if next != scan { '\0' }
+                        else if next == Scan::Code && (c == '/' || c == '\'') || next == Scan::Block { c }
+                        else { '\0' };
+                    scan = next;
+                }
+            }
+        }
+        labels
+    }
+}
+
 /// Training-frequency buckets for weight-vs-frequency and validation CE reports.
 pub struct FrequencyBuckets {
     bucket: Vec<u8>,
@@ -137,23 +216,38 @@ impl FrequencyBuckets {
     pub fn of(&self, token: usize) -> usize { self.bucket.get(token).copied().unwrap_or(0) as usize }
 }
 
-/// (loss sum, token count) per frequency bucket.
+/// Unweighted loss sum, applied-weight sum and token count per group.
 #[derive(Debug, Clone, Default)]
-pub struct BucketLoss(pub [(f64, u64); 5]);
+pub struct GroupLoss(pub [(f64, f64, u64); 5]);
 
-impl BucketLoss {
-    pub fn add(&mut self, buckets: &FrequencyBuckets, targets: &[i32], nll: &[f32]) {
+impl GroupLoss {
+    pub fn add(&mut self, group: usize, loss: f32, weight: f32) {
+        if !loss.is_finite() { return; }
+        let g = &mut self.0[group];
+        g.0 += loss as f64;
+        g.1 += weight as f64;
+        g.2 += 1;
+    }
+
+    pub fn add_by_frequency(&mut self, buckets: &FrequencyBuckets, targets: &[i32], nll: &[f32]) {
         for (&t, &l) in targets.iter().zip(nll) {
-            if t == PAD_TOKEN as i32 || !l.is_finite() { continue; }
-            let b = &mut self.0[buckets.of(t as usize)];
-            b.0 += l as f64;
-            b.1 += 1;
+            if t != PAD_TOKEN as i32 && t >= 0 { self.add(buckets.of(t as usize), l, 1.0); }
         }
     }
 
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::Value::Object(FrequencyBuckets::LABELS.iter().zip(&self.0).map(|(label, &(sum, n))| {
-            (label.to_string(), serde_json::json!({"ce": (n > 0).then(|| sum / n as f64), "tokens": n}))
+    pub fn add_by_label(&mut self, labels: &[u8], nll: &[f32], weights: Option<&[f32]>) {
+        for (i, (&label, &l)) in labels.iter().zip(nll).enumerate() {
+            if label != NO_LABEL { self.add(label as usize, l, weights.map_or(1.0, |w| w[i])); }
+        }
+    }
+
+    /// `{label: {ce, tokens[, mean_weight]}}`.
+    pub fn to_json(&self, labels: &[&str; 5], with_weight: bool) -> serde_json::Value {
+        serde_json::Value::Object(labels.iter().zip(&self.0).map(|(label, &(sum, weight, n))| {
+            let mean = |v: f64| (n > 0).then(|| v / n as f64);
+            let mut entry = serde_json::json!({"ce": mean(sum), "tokens": n});
+            if with_weight { entry["mean_weight"] = serde_json::json!(mean(weight)); }
+            (label.to_string(), entry)
         }).collect())
     }
 }
@@ -163,17 +257,19 @@ impl BucketLoss {
 pub struct AdaptiveLoss {
     pub config: AdaptiveLossConfig,
     vocab: usize,
+    /// 1, or `CONTEXT_LABELS.len()` in context mode; key = category * vocab + token.
+    categories: usize,
     /// Completed statistics windows.
     pub windows: u64,
     window_steps: usize,
     pending_sum: Vec<f64>,
     pending_count: Vec<u32>,
-    /// D_v; NaN until the token is first observed.
+    /// D per key; NaN until first observed.
     difficulty: Vec<f32>,
-    /// C_v, decayed by `difficulty_beta` each window (bounded history).
+    /// C per key, decayed by `difficulty_beta` each window (bounded history).
     counts: Vec<f32>,
-    /// D_global, an EMA of the mean window loss; NaN before the first window.
-    global_difficulty: f32,
+    /// Per-category EMA of the mean window loss (D_global per category); NaN before data.
+    category_difficulty: Vec<f32>,
     /// Difficulty snapshots, oldest first; at most `progress_history_windows + 1`.
     history: VecDeque<Vec<f32>>,
     weights: Vec<f32>,
@@ -183,40 +279,47 @@ pub struct AdaptiveLoss {
 #[derive(Debug, Clone, Serialize)]
 pub struct WindowReport {
     pub window: u64,
-    pub observed_tokens: usize,
-    pub global_difficulty: f32,
+    pub observed_keys: usize,
+    pub category_difficulty: Vec<f32>,
     pub difficulty_p50: f32,
     pub difficulty_p95: f32,
-    /// Count-weighted mean of max(P_v, 0) and the fraction of observed ids with P_v > 0.
+    /// Count-weighted mean of max(P, 0) and the fraction of observed keys with P > 0.
     pub progress_mean: f32,
     pub progress_positive_fraction: f32,
-    /// Raw weight w_v over observed ids (before lambda mixing).
+    /// Raw weight w over observed keys (before lambda mixing).
     pub weight_p05: f32,
     pub weight_p50: f32,
     pub weight_p95: f32,
     pub weight_at_min_fraction: f32,
     pub weight_at_max_fraction: f32,
-    /// Occurrence-weighted mean w_v per training-frequency bucket.
+    /// Occurrence-weighted mean w per training-frequency bucket.
     pub weight_by_frequency: serde_json::Value,
 }
 
 impl AdaptiveLoss {
     pub fn new(config: AdaptiveLossConfig, vocab: usize) -> Self {
+        let categories = config.effective_mode().categories();
+        let keys = vocab * categories;
         Self {
-            config, vocab, windows: 0, window_steps: 0,
-            pending_sum: vec![0.0; vocab], pending_count: vec![0; vocab],
-            difficulty: vec![f32::NAN; vocab], counts: vec![0.0; vocab],
-            global_difficulty: f32::NAN, history: VecDeque::new(), weights: vec![1.0; vocab],
+            config, vocab, categories, windows: 0, window_steps: 0,
+            pending_sum: vec![0.0; keys], pending_count: vec![0; keys],
+            difficulty: vec![f32::NAN; keys], counts: vec![0.0; keys],
+            category_difficulty: vec![f32::NAN; categories], history: VecDeque::new(), weights: vec![1.0; keys],
         }
     }
 
     /// Restores `adaptive_loss.bin` from a run directory, or starts fresh (also
-    /// for checkpoints written before adaptive loss existed).
+    /// for checkpoints written before adaptive loss or this state format existed).
     pub fn load_or_new(dir: &Path, config: &AdaptiveLossConfig, vocab: usize) -> Result<Self> {
         let path = dir.join(STATE_FILE);
         if !path.exists() { return Ok(Self::new(config.clone(), vocab)); }
-        let state: Self = bincode::deserialize(&std::fs::read(&path)?)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let state: Self = match bincode::deserialize(&std::fs::read(&path)?) {
+            Ok(state) => state,
+            Err(e) => {
+                eprintln!("⚠️  {} uses an older format ({e}); starting adaptive statistics fresh.", path.display());
+                return Ok(Self::new(config.clone(), vocab));
+            }
+        };
         ensure!(state.vocab == vocab, "adaptive_loss state vocabulary differs from the tokenizer");
         ensure!(&state.config == config, "adaptive_loss config differs from the checkpoint's; use a new out_dir");
         Ok(state)
@@ -224,12 +327,26 @@ impl AdaptiveLoss {
 
     pub fn save(&self, dir: &Path) -> Result<()> {
         let tmp = dir.join(format!("{STATE_FILE}.tmp"));
-        std::fs::write(&tmp, bincode::serialize(self)?)?;
+        std::fs::write(&tmp, bincode::serialize(self)?).with_context(|| format!("writing {}", tmp.display()))?;
         std::fs::rename(&tmp, dir.join(STATE_FILE))?;
         Ok(())
     }
 
     pub fn weights(&self) -> &[f32] { &self.weights }
+    pub fn uses_context(&self) -> bool { self.categories > 1 }
+
+    /// Statistics key per target. Context mode needs the labeler's labels.
+    pub fn keys(&self, targets: &[i32], labels: Option<&[u8]>) -> Vec<u32> {
+        assert!(!self.uses_context() || labels.is_some(), "context mode requires context labels");
+        targets.iter().enumerate().map(|(i, &t)| {
+            if t == PAD_TOKEN as i32 || t < 0 || t as usize >= self.vocab { return NO_KEY; }
+            if !self.uses_context() { return t as u32; }
+            match labels.unwrap()[i] {
+                NO_LABEL => NO_KEY,
+                label => (label as usize * self.vocab + t as usize) as u32,
+            }
+        }).collect()
+    }
 
     /// True when the next `observe` closes a window (the trainer measures the
     /// gradient norm on that step only, to avoid a readback every step).
@@ -237,21 +354,21 @@ impl AdaptiveLoss {
         self.window_steps + 1 >= self.config.statistics_interval_steps
     }
 
-    /// Per-row a_v = (1 - lambda) + lambda * w_v, and 0 for PAD/invalid targets.
-    pub fn row_weights(&self, targets: &[i32], lambda: f64) -> Vec<f32> {
-        targets.iter().map(|&t| {
-            if t == PAD_TOKEN as i32 || t < 0 || t as usize >= self.vocab { return 0.0; }
-            ((1.0 - lambda) + lambda * self.weights[t as usize] as f64) as f32
+    /// Per-row a = (1 - lambda) + lambda * w[key], and 0 for `NO_KEY`.
+    pub fn row_weights(&self, keys: &[u32], lambda: f64) -> Vec<f32> {
+        keys.iter().map(|&k| {
+            if k == NO_KEY { return 0.0; }
+            ((1.0 - lambda) + lambda * self.weights[k as usize] as f64) as f32
         }).collect()
     }
 
     /// Adds one step's detached per-token losses. Returns true when this step
     /// closed a statistics window and the weights were recomputed.
-    pub fn observe(&mut self, targets: &[i32], nll: &[f32]) -> bool {
-        for (&t, &l) in targets.iter().zip(nll) {
-            if t == PAD_TOKEN as i32 || t < 0 || t as usize >= self.vocab || !l.is_finite() { continue; }
-            self.pending_sum[t as usize] += l as f64;
-            self.pending_count[t as usize] += 1;
+    pub fn observe(&mut self, keys: &[u32], nll: &[f32]) -> bool {
+        for (&k, &l) in keys.iter().zip(nll) {
+            if k == NO_KEY || !l.is_finite() { continue; }
+            self.pending_sum[k as usize] += l as f64;
+            self.pending_count[k as usize] += 1;
         }
         self.window_steps += 1;
         if self.window_steps < self.config.statistics_interval_steps { return false; }
@@ -259,22 +376,25 @@ impl AdaptiveLoss {
         true
     }
 
+    fn category(&self, key: usize) -> usize { key / self.vocab }
+
     fn close_window(&mut self) {
         let beta = self.config.difficulty_beta as f32;
-        let (mut sum, mut n) = (0.0f64, 0u64);
-        for v in 0..self.vocab {
-            let count = self.pending_count[v];
-            self.counts[v] = beta * self.counts[v] + count as f32;
+        let mut by_category = vec![(0.0f64, 0u64); self.categories];
+        for k in 0..self.difficulty.len() {
+            let count = self.pending_count[k];
+            self.counts[k] = beta * self.counts[k] + count as f32;
             if count == 0 { continue; }
-            let mean = (self.pending_sum[v] / count as f64) as f32;
-            let d = &mut self.difficulty[v];
+            let mean = (self.pending_sum[k] / count as f64) as f32;
+            let d = &mut self.difficulty[k];
             *d = if d.is_nan() { mean } else { beta * *d + (1.0 - beta) * mean };
-            sum += self.pending_sum[v];
-            n += count as u64;
+            let c = &mut by_category[k / self.vocab];
+            c.0 += self.pending_sum[k];
+            c.1 += count as u64;
         }
-        if n > 0 {
+        for (g, (sum, n)) in self.category_difficulty.iter_mut().zip(by_category) {
+            if n == 0 { continue; }
             let mean = (sum / n as f64) as f32;
-            let g = &mut self.global_difficulty;
             *g = if g.is_nan() { mean } else { beta * *g + (1.0 - beta) * mean };
         }
         self.history.push_back(self.difficulty.clone());
@@ -286,27 +406,28 @@ impl AdaptiveLoss {
         self.recompute_weights();
     }
 
-    /// R_v = C_v / (C_v + kappa).
-    fn confidence(&self, v: usize) -> f32 {
-        let c = self.counts[v];
+    /// R = C / (C + kappa).
+    fn confidence(&self, k: usize) -> f32 {
+        let c = self.counts[k];
         let denom = c + self.config.confidence_kappa as f32;
         if denom > 0.0 { c / denom } else { 0.0 }
     }
 
-    /// P_v = D_v(k - h) - D_v(k) against the oldest retained snapshot; 0 when either is unset.
-    pub fn progress(&self, v: usize) -> f32 {
-        let old = self.history.front().map_or(f32::NAN, |h| h[v]);
-        let p = old - self.difficulty[v];
+    /// P = D(k - h) - D(k) against the oldest retained snapshot; 0 when either is unset.
+    pub fn progress(&self, k: usize) -> f32 {
+        let old = self.history.front().map_or(f32::NAN, |h| h[k]);
+        let p = old - self.difficulty[k];
         if p.is_finite() { p } else { 0.0 }
     }
 
-    /// D~_v = R_v D_v + (1 - R_v) D_global.
-    pub fn smoothed_difficulty(&self, v: usize) -> f32 {
-        let global = if self.global_difficulty.is_nan() { 0.0 } else { self.global_difficulty };
-        let d = self.difficulty[v];
-        if d.is_nan() { return global; }
-        let r = self.confidence(v);
-        r * d + (1.0 - r) * global
+    /// D~ = R D + (1 - R) D_category.
+    pub fn smoothed_difficulty(&self, k: usize) -> f32 {
+        let prior = self.category_difficulty[self.category(k)];
+        let prior = if prior.is_nan() { 0.0 } else { prior };
+        let d = self.difficulty[k];
+        if d.is_nan() { return prior; }
+        let r = self.confidence(k);
+        r * d + (1.0 - r) * prior
     }
 
     fn recompute_weights(&mut self) {
@@ -318,59 +439,65 @@ impl AdaptiveLoss {
         };
         let total_count: f64 = self.counts.iter().map(|&c| c as f64).sum();
         if total_count <= 0.0 { self.weights.fill(1.0); return; }
-        // Unreliable progress shrinks toward the count-weighted global positive progress,
-        // the same way difficulty shrinks toward D_global, so unseen ids score near neutral.
-        let global_progress = (0..self.vocab).map(|v| self.counts[v] as f64 * self.progress(v).max(0.0) as f64)
-            .sum::<f64>() / total_count;
+        // Unreliable progress shrinks toward its category's count-weighted positive
+        // progress, the same way difficulty shrinks toward the category mean.
+        let mut category_progress = vec![(0.0f64, 0.0f64); self.categories];
+        for k in 0..self.counts.len() {
+            let c = &mut category_progress[k / self.vocab];
+            c.0 += self.counts[k] as f64 * self.progress(k).max(0.0) as f64;
+            c.1 += self.counts[k] as f64;
+        }
+        let category_progress: Vec<f64> = category_progress.iter().map(|&(p, c)| if c > 0.0 { p / c } else { 0.0 }).collect();
         let (eps, kappa) = (cfg.epsilon, cfg.confidence_kappa);
-        let scores: Vec<f64> = (0..self.vocab).map(|v| {
-            let difficulty = (self.smoothed_difficulty(v) as f64 + eps).powf(cfg.difficulty_alpha);
+        let scores: Vec<f64> = (0..self.counts.len()).map(|k| {
+            let difficulty = (self.smoothed_difficulty(k) as f64 + eps).powf(cfg.difficulty_alpha);
             match mode {
-                AdaptiveMode::Frequency => 1.0 / (self.counts[v] as f64 + kappa + eps),
+                AdaptiveMode::Frequency => 1.0 / (self.counts[k] as f64 + kappa + eps),
                 AdaptiveMode::Difficulty => difficulty,
                 _ => {
-                    let r = self.confidence(v) as f64;
-                    let progress = r * self.progress(v).max(0.0) as f64 + (1.0 - r) * global_progress;
+                    let r = self.confidence(k) as f64;
+                    let progress = r * self.progress(k).max(0.0) as f64 + (1.0 - r) * category_progress[self.category(k)];
                     difficulty * (progress + cfg.progress_floor).powf(cfg.progress_eta)
                 }
             }
         }).collect();
-        // S_ref: occurrence-weighted mean score, so typical training tokens sit near w = 1.
-        let reference = (0..self.vocab).map(|v| self.counts[v] as f64 * scores[v]).sum::<f64>() / total_count;
-        for v in 0..self.vocab {
-            let w = (scores[v] / (reference + eps)).powf(cfg.weight_gamma).clamp(cfg.min_weight, cfg.max_weight);
-            self.weights[v] = if w.is_finite() { w as f32 } else { 1.0 };
+        // S_ref: occurrence-weighted mean score over all keys, so typical training
+        // tokens sit near w = 1 and categories are compared on one scale.
+        let reference = (0..scores.len()).map(|k| self.counts[k] as f64 * scores[k]).sum::<f64>() / total_count;
+        for k in 0..scores.len() {
+            let w = (scores[k] / (reference + eps)).powf(cfg.weight_gamma).clamp(cfg.min_weight, cfg.max_weight);
+            self.weights[k] = if w.is_finite() { w as f32 } else { 1.0 };
         }
     }
 
     pub fn report(&self, buckets: &FrequencyBuckets) -> WindowReport {
-        let observed: Vec<usize> = (0..self.vocab).filter(|&v| self.counts[v] > 0.0).collect();
+        let observed: Vec<usize> = (0..self.counts.len()).filter(|&k| self.counts[k] > 0.0).collect();
         let quantile = |mut values: Vec<f32>, q: f32| -> f32 {
             if values.is_empty() { return f32::NAN; }
             values.sort_by(|a, b| a.total_cmp(b));
             values[((values.len() - 1) as f32 * q).round() as usize]
         };
-        let difficulty: Vec<f32> = observed.iter().map(|&v| self.difficulty[v]).filter(|d| !d.is_nan()).collect();
-        let weights: Vec<f32> = observed.iter().map(|&v| self.weights[v]).collect();
-        let total_count: f64 = observed.iter().map(|&v| self.counts[v] as f64).sum();
-        let progress_mean = observed.iter().map(|&v| self.counts[v] as f64 * self.progress(v).max(0.0) as f64)
+        let difficulty: Vec<f32> = observed.iter().map(|&k| self.difficulty[k]).filter(|d| !d.is_nan()).collect();
+        let weights: Vec<f32> = observed.iter().map(|&k| self.weights[k]).collect();
+        let total_count: f64 = observed.iter().map(|&k| self.counts[k] as f64).sum();
+        let progress_mean = observed.iter().map(|&k| self.counts[k] as f64 * self.progress(k).max(0.0) as f64)
             .sum::<f64>() / total_count.max(f64::MIN_POSITIVE);
         let n = observed.len().max(1) as f32;
         let (lo, hi) = (self.config.min_weight as f32, self.config.max_weight as f32);
         let mut by_bucket = [(0.0f64, 0.0f64); 5];
-        for &v in &observed {
-            let b = &mut by_bucket[buckets.of(v)];
-            b.0 += self.counts[v] as f64 * self.weights[v] as f64;
-            b.1 += self.counts[v] as f64;
+        for &k in &observed {
+            let b = &mut by_bucket[buckets.of(k % self.vocab)];
+            b.0 += self.counts[k] as f64 * self.weights[k] as f64;
+            b.1 += self.counts[k] as f64;
         }
         WindowReport {
             window: self.windows,
-            observed_tokens: observed.len(),
-            global_difficulty: self.global_difficulty,
+            observed_keys: observed.len(),
+            category_difficulty: self.category_difficulty.clone(),
             difficulty_p50: quantile(difficulty.clone(), 0.5),
             difficulty_p95: quantile(difficulty, 0.95),
             progress_mean: progress_mean as f32,
-            progress_positive_fraction: observed.iter().filter(|&&v| self.progress(v) > 0.0).count() as f32 / n,
+            progress_positive_fraction: observed.iter().filter(|&&k| self.progress(k) > 0.0).count() as f32 / n,
             weight_p05: quantile(weights.clone(), 0.05),
             weight_p50: quantile(weights.clone(), 0.5),
             weight_p95: quantile(weights.clone(), 0.95),
