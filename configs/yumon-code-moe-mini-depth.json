@@ -1,0 +1,45 @@
+{
+  "architecture": "moe",
+  "vocab_size": 16384,
+  "embed_dim": 256,
+  "n_layers": 24,
+  "attn_heads": 8,
+  "max_seq_len": 512,
+  "source": "../../rust-code",
+  "cache": "training-cache/code.bin",
+  "curriculum": "training-cache",
+  "tokenizer": "yumon_code_bpe",
+  "exclude_dirs": [".git", "target", "node_modules"],
+  "seed": 4815162342,
+  "batch_size": 2,
+  "epochs": 15,
+  "first_lr": 0.0001,
+  "last_lr": 0.00002,
+  "validation_fraction": 0.01,
+  "out_dir": "D:/models/moe-mini-depth-1",
+  "adaptive_depth": {
+    "budget_loss_weight": 0.1,
+    "tiers": [
+      { 
+        "name": "easy", 
+        "layers": 8, 
+        "top_k": 2, 
+        "experts": [{ "count": 16, "ff_dim": 512 }] 
+      },
+      { 
+        "name": "medium", 
+        "layers": 8,
+        "capacity": 0.5, 
+        "top_k": 2,
+        "experts": [{ "count": 12, "ff_dim": 1024 }, { "count": 4, "ff_dim": 2048 }] 
+      },
+      { 
+        "name": "hard", 
+        "layers": 8, 
+        "capacity": 0.25, 
+        "top_k": 2, 
+        "experts": [{ "count": 8, "ff_dim": 3072 }] 
+      }
+    ]
+  }
+}

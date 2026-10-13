@@ -239,6 +239,8 @@ pub struct RunConfig {
     /// Adaptive learning-value token weighting; raw-code runs only.
     #[cfg(not(target_arch = "wasm32"))]
     pub adaptive_loss: Option<crate::brain::adaptive_loss::AdaptiveLossConfig>,
+    /// MoE depth tiers with per-tier experts and exit gates.
+    pub adaptive_depth: Option<crate::brain::adaptive_depth::AdaptiveDepthConfig>,
 }
 
 /// Number of held-out prompts run through the model every time we do a
@@ -297,6 +299,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             code_corpus::CodeArchitecture::Reference => Architecture::Reference,
         };
         let arch_tag = match architecture {
+            Architecture::Moe { .. } if config.adaptive_depth.is_some() => config.adaptive_depth.as_ref().unwrap().tag(),
             Architecture::Moe { num_experts, top_k } => format!("Moe_e{num_experts}_k{top_k}"),
             Architecture::DecoderOnly => "DecoderOnly".to_string(),
             Architecture::XLstm => "XLstm".to_string(),
@@ -304,8 +307,11 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             Architecture::Reference => "Reference".to_string(),
         };
         let run = RunConfig {
-            name: format!("code_{}h_{}l_{}a_{}ff_{}len_b{}_{arch_tag}_f32{}{}", config.embed_dim,
-                config.n_layers, config.attn_heads, config.ff_dim, config.max_seq_len, config.batch_size,
+            // Depth tiers carry their own expert widths in arch_tag.
+            name: format!("code_{}h_{}l_{}a_{}{}len_b{}_{arch_tag}_f32{}{}", config.embed_dim,
+                config.n_layers, config.attn_heads,
+                if config.adaptive_depth.is_some() { String::new() } else { format!("{}ff_", config.ff_dim) },
+                config.max_seq_len, config.batch_size,
                 if config.curriculum.is_some() { "_curriculum_documented_tiers_v3" } else { "" },
                 if config.docs.is_some() { "_rust_docs_v1" } else { "" })
                 + &config.overfit_samples.map_or(String::new(), |n| format!("_overfit{n}"))
@@ -321,6 +327,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             dropout_rate: if overfit { 0.0 } else { 0.05 },
             overfit, heatmap_every: config.heatmap_every,
             adaptive_loss: config.adaptive_loss.clone(),
+            adaptive_depth: config.adaptive_depth.clone(),
         };
         let run_dir = config.out_dir.join(&run.name);
         std::fs::create_dir_all(&run_dir)?;
@@ -727,6 +734,13 @@ trait CausalLmTrain: AutodiffModule<TrainBackend> + Sized {
     fn set_stage(&mut self, stage: TrainingStage);
     /// Logits and the weighted auxiliary loss (zero for dense models).
     fn forward_train(&self, tokens: Tensor<TrainBackend, 2, Int>) -> (Tensor<TrainBackend, 3>, Tensor<TrainBackend, 1>);
+    /// `forward_train` plus the fraction of tokens reaching each depth tier
+    /// (empty for models without adaptive depth).
+    fn forward_train_depth(&self, tokens: Tensor<TrainBackend, 2, Int>) -> (Tensor<TrainBackend, 3>, Tensor<TrainBackend, 1>, Vec<f64>) {
+        let (logits, aux) = self.forward_train(tokens);
+        (logits, aux, Vec::new())
+    }
+    fn depth_tier_names(&self) -> Vec<String> { Vec::new() }
     fn save_run(&self, dir: &str, tokenizer: &TokenizerKind, progress: &RunProgress) -> Result<()>;
 }
 
@@ -756,10 +770,20 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             .with_n_layers(run_cfg.n_layers).with_attn_heads(run_cfg.attn_heads)
             .with_ff_dim(run_cfg.ff_dim).with_max_seq_len(run_cfg.max_seq_len)
             .with_dropout_rate(run_cfg.dropout_rate)
-            .with_num_experts(num_experts).with_top_k(top_k);
-        println!("MoE: {} experts, top-{}; Flash Attention, BalancedCheckpointing; FFN parameters/layer: {} total, {} active/token (excluding router).",
-            num_experts, top_k, 3 * run_cfg.embed_dim * run_cfg.ff_dim * num_experts,
-            3 * run_cfg.embed_dim * run_cfg.ff_dim * top_k);
+            .with_num_experts(num_experts).with_top_k(top_k)
+            .with_adaptive_depth(run_cfg.adaptive_depth.clone());
+        if let Some(depth) = &run_cfg.adaptive_depth {
+            println!("MoE adaptive depth: {} tiers, budget loss weight {}; Flash Attention, BalancedCheckpointing.",
+                depth.tiers.len(), depth.budget_loss_weight);
+            for (tier, (total, active)) in depth.tiers.iter().zip(depth.ffn_params(run_cfg.embed_dim)) {
+                println!("  {}: {} layers, {} experts {:?}, top-{}, target reach {:.0}%; FFN parameters/layer: {total} total, ~{active} active/token.",
+                    tier.name, tier.layers, tier.num_experts(), tier.expert_widths(), tier.top_k, 100.0 * tier.capacity);
+            }
+        } else {
+            println!("MoE: {} experts, top-{}; Flash Attention, BalancedCheckpointing; FFN parameters/layer: {} total, {} active/token (excluding router).",
+                num_experts, top_k, 3 * run_cfg.embed_dim * run_cfg.ff_dim * num_experts,
+                3 * run_cfg.embed_dim * run_cfg.ff_dim * top_k);
+        }
         if !run_dir.join("model.bin").exists() {
             return Ok((config.init(device), 0));
         }
@@ -767,7 +791,8 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
         anyhow::ensure!(saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
             && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
             && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
-            && saved.num_experts == num_experts && saved.top_k == top_k,
+            && saved.num_experts == num_experts && saved.top_k == top_k
+            && saved.adaptive_depth == config.adaptive_depth,
             "MoE checkpoint configuration differs from requested run");
         ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
         let meta: MoeMetadata = serde_json::from_str(&std::fs::read_to_string(run_dir.join("metadata.json"))?)?;
@@ -777,6 +802,14 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
     fn forward_train(&self, tokens: Tensor<TrainBackend, 2, Int>) -> (Tensor<TrainBackend, 3>, Tensor<TrainBackend, 1>) {
         let (logits, aux, _expert_counts) = self.forward_with_aux(tokens);
         (logits, aux)
+    }
+    fn forward_train_depth(&self, tokens: Tensor<TrainBackend, 2, Int>) -> (Tensor<TrainBackend, 3>, Tensor<TrainBackend, 1>, Vec<f64>) {
+        let (logits, aux, counts) = self.forward_with_aux(tokens);
+        let reach = self.depth_reach(&counts);
+        (logits, aux, reach)
+    }
+    fn depth_tier_names(&self) -> Vec<String> {
+        self.config.adaptive_depth.iter().flat_map(|d| d.tiers.iter().map(|t| t.name.clone())).collect()
     }
     fn save_run(&self, dir: &str, tokenizer: &TokenizerKind, p: &RunProgress) -> Result<()> {
         let meta = MoeMetadata {
@@ -797,6 +830,7 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             attn_heads:      p.run_cfg.attn_heads,
             ff_dim:          p.run_cfg.ff_dim,
             max_seq_len:     p.run_cfg.max_seq_len,
+            adaptive_depth:  self.config.adaptive_depth.clone(),
         };
         self.save(dir, tokenizer, &meta)
     }
@@ -1119,6 +1153,9 @@ where
         struct Window { ce: f64, weighted: f64, weight: f64, tokens: usize, steps: usize, overhead: std::time::Duration, by_context: GroupLoss }
         let mut window = Window::default();
         let mut window_start = std::time::Instant::now();
+        // Adaptive depth: summed per-tier reach fractions and steps since the last log line.
+        let depth_names = model.depth_tier_names();
+        let mut depth_window: (Vec<f64>, usize) = (Vec::new(), 0);
 
         // Decoder-only style: [prompt][separator][reply] packed into one causal sequence
         let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { " " };
@@ -1189,7 +1226,12 @@ where
                 let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), device);
                 let tokens_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_seq_ids, [current_batch_size, run_cfg.max_seq_len]), device);
 
-                let (token_logits, aux_loss) = model.forward_train(tokens_t.clone());
+                let (token_logits, aux_loss, reach) = model.forward_train_depth(tokens_t.clone());
+                if !reach.is_empty() {
+                    depth_window.0.resize(reach.len(), 0.0);
+                    depth_window.0.iter_mut().zip(&reach).for_each(|(sum, r)| *sum += r);
+                    depth_window.1 += 1;
+                }
                 let correct = top3_correct(
                     token_logits.clone().inner().reshape([current_batch_size * run_cfg.max_seq_len, vocab]),
                     lang_target_t.clone().inner(),
@@ -1320,6 +1362,22 @@ where
                         state.current_loss, state.avg_loss, state.current_lr, state.entropy,
                         100.0 * top3, 100.0 * state.avg_top3_accuracy.unwrap(),
                     );
+                }
+                if depth_window.1 > 0 && (state.global_step % log_every == 0 || batch_num + 1 == num_batches) {
+                    let mean: Vec<f64> = depth_window.0.iter().map(|s| s / depth_window.1 as f64).collect();
+                    if terminal.is_none() {
+                        let parts: Vec<String> = depth_names.iter().zip(&mean)
+                            .map(|(name, r)| format!("{name} {:.1}%", 100.0 * r)).collect();
+                        println!("  depth reach: {}", parts.join("  "));
+                    }
+                    let line = serde_json::json!({"step": step + 1, "epoch": epoch + 1, "steps": depth_window.1,
+                        "reach": depth_names.iter().zip(mean).map(|(n, r)| (n.clone(), serde_json::json!(r)))
+                            .collect::<serde_json::Map<_, _>>()});
+                    let appended = std::fs::OpenOptions::new().create(true).append(true)
+                        .open(run_dir.join("adaptive_depth.jsonl"))
+                        .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()));
+                    if let Err(e) = appended { eprintln!("⚠️  Failed to append adaptive depth log: {e}"); }
+                    depth_window = (Vec::new(), 0);
                 }
 
                 // Periodic save and inference every 500 batches
@@ -1571,6 +1629,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     heatmap_every: 0,
                                     #[cfg(not(target_arch = "wasm32"))]
                                     adaptive_loss: None,
+                                    adaptive_depth: None,
                                 });
                             }
                         }

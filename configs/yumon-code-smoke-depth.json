@@ -1,0 +1,28 @@
+{
+  "architecture": "moe",
+  "source": "tests/fixtures/code-smoke",
+  "cache": "training-cache/code-smoke.bin",
+  "tokenizer": "tmp/code-smoke/tokenizer",
+  "max_seq_len": 64,
+  "exclude_dirs": [".git", "target", "node_modules"],
+  "seed": 4815162342,
+  "vocab_size": 320,
+  "embed_dim": 16,
+  "n_layers": 3,
+  "attn_heads": 2,
+  "batch_size": 2,
+  "epochs": 1,
+  "first_lr": 0.0001,
+  "last_lr": 0.00002,
+  "validation_fraction": 0.25,
+  "heatmap_every": 0,
+  "out_dir": "tmp/code-smoke/checkpoints-depth",
+  "adaptive_depth": {
+    "tiers": [
+      { "name": "easy", "layers": 1, "top_k": 2, "experts": [{ "count": 4, "ff_dim": 16 }] },
+      { "name": "medium", "layers": 1, "capacity": 0.5, "top_k": 1,
+        "experts": [{ "count": 2, "ff_dim": 32 }, { "count": 1, "ff_dim": 64 }] },
+      { "name": "hard", "layers": 1, "capacity": 0.25, "top_k": 1, "experts": [{ "count": 2, "ff_dim": 128 }] }
+    ]
+  }
+}

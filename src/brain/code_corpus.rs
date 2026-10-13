@@ -70,6 +70,10 @@ pub struct CodeConfig {
     /// Optional adaptive learning-value loss weighting (docs/ADAPTIVE_LEARNING.md).
     /// Absent = plain cross-entropy with no extra statistics.
     pub adaptive_loss: Option<super::adaptive_loss::AdaptiveLossConfig>,
+    /// Optional MoE depth tiers with per-tier experts and exit gates
+    /// (docs/ADAPTIVE_DEPTH.md). Replaces num_experts/top_k/ff_dim; tier layers
+    /// must add up to n_layers.
+    pub adaptive_depth: Option<super::adaptive_depth::AdaptiveDepthConfig>,
 }
 
 impl Default for CodeConfig {
@@ -83,7 +87,7 @@ impl Default for CodeConfig {
             attn_heads: 16, ff_dim: 2048, batch_size: 8, epochs: 15,
             first_lr: 2e-4, last_lr: 2e-5, validation_fraction: 0.01,
             out_dir: "/workspace/checkpoints/yumon-code".into(),
-            overfit_samples: None, heatmap_every: 250, adaptive_loss: None,
+            overfit_samples: None, heatmap_every: 250, adaptive_loss: None, adaptive_depth: None,
         }
     }
 }
@@ -113,6 +117,12 @@ impl CodeConfig {
         ensure!(self.validation_fraction > 0.0 && self.validation_fraction < 1.0,
             "validation_fraction must be between 0 and 1");
         if let Some(adaptive) = &self.adaptive_loss { adaptive.validate()?; }
+        if let Some(depth) = &self.adaptive_depth {
+            depth.validate()?;
+            ensure!(self.architecture == CodeArchitecture::Moe, "adaptive_depth requires architecture \"moe\"");
+            ensure!(depth.total_layers() == self.n_layers,
+                "adaptive_depth tier layers add up to {}, but n_layers is {}", depth.total_layers(), self.n_layers);
+        }
         Ok(())
     }
 }

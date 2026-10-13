@@ -20,9 +20,10 @@ use burn::{
     record::{BinFileRecorder, FullPrecisionSettings, Recorder},
     tensor::{
         IndexingUpdateOp, FloatDType,
-        activation::{log_softmax, softmax},
+        activation::{log_softmax, sigmoid, softmax},
     },
 };
+use super::adaptive_depth::AdaptiveDepthConfig;
 use serde::{Deserialize, Serialize};
 
 /// Select experts with the backend's standard top-k operation, then read the
@@ -54,18 +55,24 @@ impl<B: Backend> SparseMoe<B> {
         top_k: usize,
         device: &B::Device,
     ) -> Self {
-        assert!(width > 0 && hidden > 0 && experts > 0);
+        Self::with_widths(width, &vec![hidden; experts], top_k, device)
+    }
+    /// Heterogeneous experts: one SwiGLU per entry of `hidden`, one shared router.
+    pub fn with_widths(width: usize, hidden: &[usize], top_k: usize, device: &B::Device) -> Self {
+        let experts = hidden.len();
+        assert!(width > 0 && experts > 0 && hidden.iter().all(|&h| h > 0));
         assert!(top_k > 0 && top_k <= experts);
         Self {
             router: LinearConfig::new(width, experts)
                 .with_bias(false)
                 .init(device),
-            experts: (0..experts)
-                .map(|_| MLPConfig::new(width, hidden).init(device))
+            experts: hidden.iter()
+                .map(|&h| MLPConfig::new(width, h).init(device))
                 .collect(),
             top_k,
         }
     }
+    pub fn num_experts(&self) -> usize { self.experts.len() }
     /// Non-padding tokens [tokens, width]; output, balance/z losses, actual row counts.
     pub fn forward(
         &self,
@@ -186,6 +193,13 @@ impl<B: FlashAttention> MoeBlock<B> {
     }
 }
 
+/// Per-token continue score before a gated depth tier.
+#[derive(Module, Debug)]
+struct ExitGate<B: Backend> {
+    norm: RMSNorm<B>,
+    score: Linear<B>,
+}
+
 #[derive(Module, Debug)]
 pub struct YumonMoeBrain<B: Backend> {
     pub config: Ignored<YumonMoeBrainConfig>,
@@ -197,6 +211,20 @@ pub struct YumonMoeBrain<B: Backend> {
     norm: RMSNorm<B>,
     dropout: Dropout,
     pub token_head: Linear<B>,
+    /// One per depth tier after the first; empty without `adaptive_depth`.
+    exit_gates: Vec<ExitGate<B>>,
+}
+
+/// Record layout of checkpoints saved before adaptive depth (no `exit_gates`).
+#[derive(Module, Debug)]
+struct LegacyMoeBrain<B: Backend> {
+    config: Ignored<YumonMoeBrainConfig>,
+    embedding: Embedding<B>,
+    rope: RotaryEncoding<B>,
+    blocks: Vec<MoeBlock<B>>,
+    norm: RMSNorm<B>,
+    dropout: Dropout,
+    token_head: Linear<B>,
 }
 #[derive(Config, Debug)]
 pub struct YumonMoeBrainConfig {
@@ -224,10 +252,17 @@ pub struct YumonMoeBrainConfig {
     pub aux_loss_weight: f64,
     #[config(default = 0.001)]
     pub z_loss_weight: f64,
+    /// Depth tiers with their own experts; replaces num_experts/top_k/ff_dim.
+    #[config(default = "None")]
+    pub adaptive_depth: Option<AdaptiveDepthConfig>,
 }
 impl YumonMoeBrainConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> YumonMoeBrain<B> {
         assert!(self.n_layers > 0 && self.max_seq_len > 0 && self.vocab_size > 0);
+        if let Some(depth) = &self.adaptive_depth {
+            depth.validate().expect("invalid adaptive_depth");
+            assert_eq!(depth.total_layers(), self.n_layers, "adaptive_depth tiers must add up to n_layers");
+        }
         assert!(self.attn_heads > 0 && self.embed_dim > 0 && self.embed_dim % self.attn_heads == 0);
         assert!(
             (self.embed_dim / self.attn_heads) % 2 == 0,
@@ -240,32 +275,41 @@ impl YumonMoeBrainConfig {
                 .with_bias(false)
                 .init(device)
         };
+        let tiers = self.adaptive_depth.as_ref().map(|d| d.layer_tiers());
         YumonMoeBrain {
             config: Ignored(self.clone()),
             embedding: EmbeddingConfig::new(self.vocab_size, self.embed_dim).init(device),
             rope: RotaryEncodingConfig::new(self.max_seq_len, self.embed_dim / self.attn_heads)
                 .init(device),
             blocks: (0..self.n_layers)
-                .map(|_| MoeBlock {
+                .map(|layer| MoeBlock {
                     attn_norm: RMSNormConfig::new(self.embed_dim).init(device),
                     q: linear(),
                     k: linear(),
                     v: linear(),
                     o: linear(),
                     ffn_norm: RMSNormConfig::new(self.embed_dim).init(device),
-                    moe: SparseMoe::new(
-                        self.embed_dim,
-                        self.ff_dim,
-                        self.num_experts,
-                        self.top_k,
-                        device,
-                    ),
+                    moe: match (&self.adaptive_depth, &tiers) {
+                        (Some(depth), Some(tiers)) => {
+                            let tier = &depth.tiers[tiers[layer]];
+                            SparseMoe::with_widths(self.embed_dim, &tier.expert_widths(), tier.top_k, device)
+                        }
+                        _ => SparseMoe::new(self.embed_dim, self.ff_dim, self.num_experts, self.top_k, device),
+                    },
                     heads: self.attn_heads,
                 })
                 .collect(),
             norm: RMSNormConfig::new(self.embed_dim).init(device),
             dropout: DropoutConfig::new(self.dropout_rate).init(),
             token_head: LinearConfig::new(self.embed_dim, self.vocab_size).init(device),
+            // Zero bias: about half the tokens continue at first; the budget loss
+            // then pulls each tier toward its capacity.
+            exit_gates: self.adaptive_depth.iter().flat_map(|d| d.tiers.iter().skip(1)).map(|_| ExitGate {
+                norm: RMSNormConfig::new(self.embed_dim).init(device),
+                score: LinearConfig::new(self.embed_dim, 1)
+                    .with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 0.02 })
+                    .init(device),
+            }).collect(),
         }
     }
 }
@@ -308,25 +352,90 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             return (
                 self.token_head.forward(self.norm.forward(x)),
                 auxiliary,
-                vec![vec![0; self.config.num_experts]; self.blocks.len()],
+                self.blocks.iter().map(|b| vec![0; b.moe.num_experts()]).collect(),
             );
         }
-        let index =
-            Tensor::<B, 1, Int>::from_ints(TensorData::new(active, [active_count]), &device);
-        for block in &self.blocks {
-            let (next, balance, z_loss, dispatched) =
-                block.forward(x, &rope, index.clone(), pad.clone());
-            x = next;
-            auxiliary = auxiliary
-                + balance * self.config.aux_loss_weight
-                + z_loss * self.config.z_loss_weight;
-            counts.push(dispatched);
+        let rows = batch * seq;
+        let layer_tiers = self.config.adaptive_depth.as_ref().map(|d| d.layer_tiers());
+        let tier_of = |layer: usize| layer_tiers.as_ref().map_or(0, |t| t[layer]);
+        let mut budget = Tensor::<B, 1>::zeros([1], &device).cast(FloatDType::F32);
+        // Rows still continuing, the hard keep mask, and (tier input, straight-through mask).
+        let mut current = active;
+        let mut keep: Option<Tensor<B, 3>> = None;
+        let mut tier_start: Option<(Tensor<B, 3>, Tensor<B, 3>)> = None;
+        for (layer, block) in self.blocks.iter().enumerate() {
+            let tier = tier_of(layer);
+            if tier > 0 && tier_of(layer - 1) != tier {
+                let depth = self.config.adaptive_depth.as_ref().unwrap();
+                let gate = &self.exit_gates[tier - 1];
+                let score = sigmoid(gate.score.forward(gate.norm.forward(x.clone()))
+                    .reshape([rows]).cast(FloatDType::F32));
+                // Causal per-position decision, identical in training and inference.
+                // Zero-length selections are not supported by every backend.
+                let previous: Vec<f32> = if current.is_empty() { Vec::new() } else {
+                    score.clone().detach()
+                        .select(0, Tensor::from_ints(TensorData::new(current.clone(), [current.len()]), &device))
+                        .into_data().convert::<f32>().to_vec().expect("exit gate scores")
+                };
+                let mut prev_mask = vec![0f32; rows];
+                let mut hard = vec![0f32; rows];
+                for (&row, &s) in current.iter().zip(&previous) {
+                    prev_mask[row as usize] = 1.0;
+                    hard[row as usize] = (s >= 0.5) as u8 as f32;
+                }
+                current.retain(|&row| hard[row as usize] == 1.0);
+                let floats = |v: Vec<f32>| Tensor::<B, 1>::from_data_dtype(
+                    TensorData::new(v, [rows]), &device, burn::tensor::DType::F32);
+                // Straight-through: forward is the hard decision, gradient reaches the gate.
+                let soft = score * floats(prev_mask);
+                let hard = floats(hard);
+                let straight = hard.clone() + soft.clone() - soft.detach();
+                let reached = straight.clone().sum() / active_count as f64;
+                budget = budget + (reached - depth.tiers[tier].capacity).powf_scalar(2.0);
+                keep = Some(hard.reshape([batch, seq, 1]).cast(x.dtype()));
+                tier_start = Some((x.clone(), straight.reshape([batch, seq, 1]).cast(x.dtype())));
+            }
+            if current.is_empty() {
+                counts.push(vec![0; block.moe.num_experts()]);
+            } else {
+                let index = Tensor::<B, 1, Int>::from_ints(
+                    TensorData::new(current.clone(), [current.len()]), &device);
+                let (next, balance, z_loss, dispatched) = block.forward(x.clone(), &rope, index, pad.clone());
+                // Exited positions keep their state; it still serves as keys and values.
+                x = match &keep {
+                    Some(keep) if tier > 0 => x.clone() + keep.clone() * (next - x),
+                    _ => next,
+                };
+                auxiliary = auxiliary
+                    + balance * self.config.aux_loss_weight
+                    + z_loss * self.config.z_loss_weight;
+                counts.push(dispatched);
+            }
+            let tier_ends = layer + 1 == self.blocks.len() || tier_of(layer + 1) != tier;
+            if tier > 0 && tier_ends {
+                let (input, straight) = tier_start.take().unwrap();
+                x = input.clone() + straight * (x - input);
+            }
         }
+        let budget_weight = self.config.adaptive_depth.as_ref().map_or(0.0, |d| d.budget_loss_weight);
         (
             self.token_head.forward(self.norm.forward(x)),
-            auxiliary / self.blocks.len() as f64,
+            auxiliary / self.blocks.len() as f64 + budget * budget_weight,
             counts,
         )
+    }
+
+    /// Fraction of non-padding tokens that reached each depth tier, from the
+    /// per-layer dispatch counts of `forward_with_aux`. Empty without tiers.
+    pub fn depth_reach(&self, counts: &[Vec<usize>]) -> Vec<f64> {
+        let Some(depth) = self.config.adaptive_depth.as_ref() else { return Vec::new() };
+        let mut first = 0;
+        let tokens: Vec<f64> = depth.tiers.iter().map(|tier| {
+            let routed: usize = counts.get(first).map_or(0, |c| c.iter().sum());
+            first += tier.layers;
+            routed as f64 / tier.top_k as f64
+        }).collect();
+        tokens.iter().map(|&t| if tokens[0] > 0.0 { t / tokens[0] } else { 0.0 }).collect()
     }
     pub fn generate_unmasked_parsed(
         &self,
@@ -385,9 +494,20 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load(directory)?);
 
         let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
-        let record = recorder
-            .load(dir.join("model").into(), device)
-            .map_err(|e| anyhow::anyhow!("load: {e:?}"))?;
+        let record = match recorder.load(dir.join("model").into(), device) {
+            Ok(record) => record,
+            // Checkpoints from before adaptive depth have no exit gate field.
+            Err(error) if metadata.adaptive_depth.is_none() => {
+                let legacy: LegacyMoeBrainRecord<B> = recorder.load(dir.join("model").into(), device)
+                    .map_err(|e| anyhow::anyhow!("load: {error:?}; legacy layout: {e:?}"))?;
+                YumonMoeBrainRecord {
+                    config: legacy.config, embedding: legacy.embedding, rope: legacy.rope,
+                    blocks: legacy.blocks, norm: legacy.norm, dropout: legacy.dropout,
+                    token_head: legacy.token_head, exit_gates: Vec::new(),
+                }
+            }
+            Err(error) => anyhow::bail!("load: {error:?}"),
+        };
 
         let config = YumonMoeBrainConfig {
             vocab_size: metadata.vocab_size,
@@ -403,6 +523,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             top_k: metadata.top_k,
             aux_loss_weight: metadata.aux_loss_weight,
             z_loss_weight: metadata.z_loss_weight,
+            adaptive_depth: metadata.adaptive_depth,
         };
 
         let model = config.init::<B>(device).load_record(record);
@@ -435,6 +556,9 @@ pub struct MoeMetadata {
     pub attn_heads: usize,
     pub ff_dim: usize,
     pub max_seq_len: usize,
+    /// Depth tiers; absent for uniform-depth models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive_depth: Option<AdaptiveDepthConfig>,
 }
 
 #[cfg(test)]
@@ -776,6 +900,7 @@ mod tests {
             attn_heads: config.attn_heads,
             ff_dim: config.ff_dim,
             max_seq_len: config.max_seq_len,
+            adaptive_depth: None,
         };
         model
             .save(path.to_str().unwrap(), &tokenizer, &meta)
@@ -801,6 +926,127 @@ mod tests {
         assert_eq!(path.parent(), Some(std::env::temp_dir().as_path()));
         std::fs::remove_dir_all(path).unwrap();
     }
+    #[test]
+    fn moe_heterogeneous_experts_match_dense() {
+        let device = Default::default();
+        let model = SparseMoe::<B>::with_widths(8, &[4, 16, 16, 40], 2, &device);
+        let x = Tensor::<B, 2>::random([9, 8], burn::tensor::Distribution::Normal(0.0, 1.0), &device);
+        let (out, _, _, counts) = model.forward(x.clone());
+        assert_eq!(counts.iter().sum::<usize>(), 18);
+        assert_close(values(out), values(dense_reference(&model, x)), 1e-4);
+    }
+
+    fn depth_config() -> YumonMoeBrainConfig {
+        let depth: AdaptiveDepthConfig = serde_json::from_str(r#"{"tiers": [
+            {"name": "easy", "layers": 1, "top_k": 2, "experts": [{"count": 4, "ff_dim": 16}]},
+            {"name": "medium", "layers": 1, "capacity": 0.5, "top_k": 1,
+             "experts": [{"count": 2, "ff_dim": 16}, {"count": 1, "ff_dim": 32}]},
+            {"name": "hard", "layers": 2, "capacity": 0.25, "top_k": 1, "experts": [{"count": 2, "ff_dim": 64}]}
+        ]}"#).unwrap();
+        tiny_config().with_n_layers(4).with_adaptive_depth(Some(depth))
+    }
+
+    /// Forces every exit gate to continue (+) or exit (-) regardless of input.
+    fn force_gates(model: YumonMoeBrain<B>, bias: f32) -> YumonMoeBrain<B> {
+        let mut model = model;
+        for gate in &mut model.exit_gates {
+            let device = gate.score.weight.val().device();
+            gate.score.weight = Param::from_tensor(Tensor::zeros([16, 1], &device));
+            gate.score.bias = Some(Param::from_tensor(Tensor::from_floats([bias], &device)));
+        }
+        model
+    }
+
+    #[test]
+    fn moe_depth_layout_and_forced_gates() {
+        let device = Default::default();
+        let model: YumonMoeBrain<B> = depth_config().init(&device);
+        assert_eq!(model.exit_gates.len(), 2);
+        let experts: Vec<usize> = model.blocks.iter().map(|b| b.moe.num_experts()).collect();
+        assert_eq!(experts, vec![4, 3, 2, 2]);
+        let tokens = || Tensor::<B, 2, Int>::from_ints([[1, 4, 5, 6, 0, 0], [7, 8, 9, 3, 2, 0]], &device);
+
+        // Everyone continues: every layer routes all 9 tokens, reach is 100% everywhere.
+        let all = force_gates(model.clone(), 20.0);
+        let (_, _, counts) = all.forward_with_aux(tokens());
+        let routed: Vec<usize> = counts.iter().map(|c| c.iter().sum()).collect();
+        assert_eq!(routed, vec![18, 9, 9, 9]);
+        assert_eq!(all.depth_reach(&counts), vec![1.0, 1.0, 1.0]);
+
+        // Everyone exits after the easy tier: deeper experts get nothing, and the
+        // result equals running only the first block.
+        let none = force_gates(model, -20.0);
+        let (logits, aux, counts) = none.forward_with_aux(tokens());
+        let routed: Vec<usize> = counts.iter().map(|c| c.iter().sum()).collect();
+        assert_eq!(routed, vec![18, 0, 0, 0]);
+        assert_eq!(none.depth_reach(&counts), vec![1.0, 0.0, 0.0]);
+        assert!(values(aux)[0].is_finite());
+        let mut shallow = none.clone();
+        shallow.blocks.truncate(1);
+        shallow.exit_gates.clear();
+        shallow.config.0.adaptive_depth = None;
+        shallow.config.0.n_layers = 1;
+        assert_close(values(logits), values(shallow.forward(tokens())), 1e-5);
+    }
+
+    #[test]
+    fn moe_depth_is_causal_and_trains_gates() {
+        let device = Default::default();
+        let mut model: YumonMoeBrain<B> = depth_config().init(&device);
+        // Medium gate passes everyone (s = 0.95), so 6/6 vs capacity 0.5 and k/6 vs
+        // 0.25 both leave a non-zero budget gradient for the two gates.
+        model.exit_gates[0].score.weight = Param::from_tensor(Tensor::zeros([16, 1], &device));
+        model.exit_gates[0].score.bias = Some(Param::from_tensor(Tensor::from_floats([3.0], &device)));
+        let (logits, aux, counts) = model.forward_with_aux(Tensor::from_ints([[1, 4, 5, 6, 7, 8]], &device));
+        assert_eq!(counts[1].iter().sum::<usize>(), 6);
+        let reach = model.depth_reach(&counts);
+        assert!(reach[0] == 1.0 && reach[1] >= reach[2], "reach must not grow with depth: {reach:?}");
+        // Exit decisions are per position, so later tokens cannot change earlier logits.
+        let changed = model.forward(Tensor::from_ints([[1, 4, 5, 9, 3, 2]], &device));
+        assert_close(values(logits.clone().slice([0..1, 0..3, 0..32])), values(changed.slice([0..1, 0..3, 0..32])), 1e-4);
+        let short = model.forward(Tensor::from_ints([[1, 4, 5]], &device));
+        assert_close(values(logits.clone().slice([0..1, 0..3, 0..32])), values(short), 1e-4);
+        // The budget term alone reaches every gate through the straight-through mask.
+        let grads = (logits.square().mean() + aux).backward();
+        for gate in &model.exit_gates {
+            let grad = values(gate.score.weight.val().grad(&grads).expect("exit gate gradient"));
+            assert!(grad.iter().all(|g| g.is_finite()) && grad.iter().any(|g| g.abs() > 0.0));
+        }
+    }
+
+    #[test]
+    fn moe_depth_checkpoint_and_legacy_roundtrip() {
+        let device = Default::default();
+        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe").unwrap());
+        let input = || Tensor::<Wgpu, 2, Int>::from_ints([[1, 4, 5, 6]], &device);
+        for depth in [true, false] {
+            let mut config = if depth { depth_config() } else { tiny_config() };
+            config.vocab_size = tokenizer.vocab_size();
+            let model: YumonMoeBrain<Wgpu> = config.init(&device);
+            let path = std::env::temp_dir().join(format!("yumon-moe-depth-{}", uuid::Uuid::new_v4()));
+            let meta = MoeMetadata { num_experts: config.num_experts, top_k: config.top_k,
+                aux_loss_weight: config.aux_loss_weight, z_loss_weight: config.z_loss_weight,
+                dropout_rate: config.dropout_rate, vocab_size: config.vocab_size, epochs_trained: 1,
+                final_loss: 1.0, val_loss: None, batch_size: 1, training_stage: config.training_stage,
+                embed_dim: config.embed_dim, hidden_units: config.hidden_units, n_layers: config.n_layers,
+                attn_heads: config.attn_heads, ff_dim: config.ff_dim, max_seq_len: config.max_seq_len,
+                adaptive_depth: config.adaptive_depth.clone() };
+            model.save(path.to_str().unwrap(), &tokenizer, &meta).unwrap();
+            if !depth {
+                // Rewrite the weights in the pre-adaptive-depth record layout.
+                let r = model.clone().into_record();
+                let legacy = LegacyMoeBrainRecord::<Wgpu> { config: r.config, embedding: r.embedding,
+                    rope: r.rope, blocks: r.blocks, norm: r.norm, dropout: r.dropout, token_head: r.token_head };
+                BinFileRecorder::<FullPrecisionSettings>::new().record(legacy, path.join("model")).unwrap();
+            }
+            let (restored, _, restored_config) = YumonMoeBrain::<Wgpu>::load(path.to_str().unwrap(), &device).unwrap();
+            assert_eq!(restored_config.adaptive_depth, config.adaptive_depth);
+            assert_close(values(model.forward(input())), values(restored.forward(input())), 1e-5);
+            assert_eq!(path.parent(), Some(std::env::temp_dir().as_path()));
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
     /// Real GPU forward/backward timing including dispatch/readback overhead.
     /// Compares against the same experts/router executing every expert for all tokens.
     #[test]

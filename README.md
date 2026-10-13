@@ -129,6 +129,25 @@ for mode in disabled context difficulty_progress; do
 done
 ```
 
+### Adaptive depth with expert tiers (experimental)
+
+An optional `adaptive_depth` section ([design](docs/ADAPTIVE_DEPTH.md),
+`src/brain/adaptive_depth.rs`) splits the MoE layers into tiers such as easy,
+medium and hard. Each tier has its own `layers`, `top_k` and `experts` groups
+(`count` x `ff_dim`, mixed sizes allowed), plus a target `capacity`: the share of
+tokens that should reach it. Every token runs the first tier. Before each later tier
+a per-token gate decides whether that position goes on. Exited positions keep their
+hidden state, stay visible to attention and skip the deeper experts. A budget loss
+(`budget_loss_weight`, default 0.1) keeps the share reaching each tier near its
+capacity. When the section is present it replaces `num_experts`/`top_k`/`ff_dim`,
+and tier layers must add up to `n_layers`. Run names use `MoeDepth_<tiers>`.
+`adaptive_depth.jsonl` and the console log the share of tokens reaching each tier.
+Checkpoints from before this change still load.
+
+```sh
+cargo run --release --bin train_code -- --config configs/yumon-code-moe-mini-depth.json
+```
+
 ## Yumon Nano / InstaCode Edit:
 
 ```

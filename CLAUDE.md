@@ -48,6 +48,17 @@ seen earlier in the sequence), with category priors. All modes log CE and weight
 context. The test config is context mode with no warm-up, beta 0.9, kappa 10, gamma 1,
 lambda 0.5 and out_dir moe-mini-adaptive-2. Older `adaptive_loss.bin` files restart fresh.
 
+Adaptive depth (2026-10-13): optional `adaptive_depth` config (`adaptive_depth.rs`,
+docs/ADAPTIVE_DEPTH.md) splits MoE layers into tiers (easy/medium/hard), each with its
+own experts (`count` x `ff_dim` groups, mixed sizes allowed) and top-k. All tokens run
+tier 1. Per-token sigmoid exit gates (causal, s >= 0.5, permanent) pick who continues.
+Exited rows are frozen but still serve as K/V, and they skip deeper MoE. A
+straight-through mask gives the gate an LM gradient, and the budget loss pulls reach
+toward `capacity`. `YumonMoeBrain.exit_gates` is new. `load` falls back to
+`LegacyMoeBrainRecord` for older checkpoints. `adaptive_depth.jsonl` logs reach per tier.
+Configs: `yumon-code-moe-mini-depth.json`, `yumon-code-smoke-depth.json`. Tests and a
+local smoke run (with resume) passed. Real runs are not done yet.
+
 Rust books stage (2026-10-11): `code_docs` converts the toolchain `rust-docs`
 component's mdBook `print.html` (12 stable books, unstable-book excluded) into
 packed Markdown-like chunks via `cache_samples --code-config <cfg> --rust-docs`

@@ -5,6 +5,7 @@ pub mod decoder_model;
 pub mod reference_model;
 pub mod xlstm_model;
 pub mod moe_model;
+pub mod adaptive_depth;
 pub mod wiki;
 pub mod train;
 pub mod tokenizer;

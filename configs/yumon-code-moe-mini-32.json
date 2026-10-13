@@ -1,0 +1,23 @@
+{
+  "architecture": "moe",
+  "num_experts": 32,
+  "top_k": 4,
+  "vocab_size": 16384,
+  "embed_dim": 256,
+  "n_layers": 24,
+  "attn_heads": 8,
+  "ff_dim": 1024,
+  "max_seq_len": 512,
+  "source": "../../rust-code",
+  "cache": "training-cache/code.bin",
+  "curriculum": "training-cache",
+  "tokenizer": "yumon_code_bpe",
+  "exclude_dirs": [".git", "target", "node_modules"],
+  "seed": 4815162342,
+  "batch_size": 2,
+  "epochs": 15,
+  "first_lr": 0.0001,
+  "last_lr": 0.00002,
+  "validation_fraction": 0.01,
+  "out_dir": "D:/models/moe-mini-32-2"
+}
