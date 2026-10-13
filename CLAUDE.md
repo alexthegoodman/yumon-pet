@@ -17,43 +17,22 @@ impl/trait wrappers for methods; oversized items are reported and skipped.
 Old token-window caches must be rebuilt with the existing tokenizer. Five
 code-corpus acceptance tests and five existing cache tests passed locally. Local smoke training is authorized using configs/yumon-code-smoke.json. Docker/CUDA runtime validation is pending.
 
-Code curriculum: production configs set `curriculum` to `training-cache/code_buckets`.
-The shared code trainer uses all low in epoch 1, 20% low + 80% mild in epoch 2, and
-10% low + 20% mild + 70% moderate from epoch 3 onward (hardest tier whole, easier
-tiers sized to the shares; runs are named `_lmm_v2`); high is never loaded. Validation files
-are split once across all eligible tiers. Dense, MoE, xLSTM and encoder-decoder
-use this path. Docker copies only eligible buckets plus reference/report and
-launches with `--require-curriculum`. Check with `train_code --check`.
-Validation: 16 code CPU tests and the tiny WGPU curriculum/resume/causality
-check passed for all four architectures. Docker image `yumon-code-curriculum:local`
-built successfully; its Linux/CUDA CPU preflight validated the real three-bucket
-schedule. Actual RunPod GPU training remains untested.
-
-Balanced documented curriculum: production configs additionally set `documented`
-to `training-cache/code_buckets_documented` and use context 1024. All committed
-low/mild/moderate JSONL comments are reconstructed against verified raw buckets;
-each tier and validation partition gets equally many distinct undocumented
-items, excluding matching documented source locations/code and existing doc
-attributes. Journals are read without mutation or endpoint calls. Docker adds
-only generation metadata and the three eligible journals; its runtime is unchanged.
-Balanced checkpoint directories use `_curriculum_documented_balanced_v1` and
-reject changed journals on resume. Freeze journal inputs for each training run.
-
-Code tokenizer retraining: `train_bpe` defaults to the shared balanced Code
-training split, excludes held-out files from BPE fitting, and preserves source
-case/bytes. Default output is `training-cache/code_tokenizer_retrained`, a new
-bundle with matching tokenizer, retokenized low/mild/moderate buckets, frozen
-journals and local/Docker configs. Selection/source equality is checked before
-publication. `--pet` retains the old prose-tokenizer path. README gives Docker
-build arguments; existing artifacts and runtime settings are preserved.
-
-Docker COPY inputs now default to the `training-cache/code_tokenizer_retrained`
-bundle. README presents tokenizer -> docker build -> docker push; additional
-commands are in docs/commands.md. Runtime/CUDA/startup settings are unchanged.
-
-Tokenizer fitting reuses code_corpus::train_tokenizer() and the existing
-BpeTokenizer. There is no code_tokenizer module or separate BPE implementation.
-Corpus preparation and compatible cache rebuilding live in code_corpus.
+Code data (2026-10-12): `training-cache` holds `code.bin`, the frozen
+`code-reference-v1.json`, and `documented/` and `undocumented/` folders with one
+append-only `.bin` per tier (low/mild/moderate; high is never stored). Records are
+file, location and code text. `documented/` holds code from the front of each tier
+in `code.bin` with a `///` comment; `undocumented/` holds different, doc-free code
+from the back, one per documented sample, so counts match. `gen_synthetic_captions`
+tiers `code.bin` chunks with the frozen reference and appends one record to each
+folder per sample; it resumes by skipping code already stored in either. Training (`code_data.rs`, `code_curriculum.rs`) tokenizes at load,
+skips samples over `max_seq_len`, mixes both kinds within each tier and holds out
+whole files. Epochs: all low, then 20% low + 80% mild, then 10/20/70 low/mild/moderate.
+`train_bpe` fits only on stored training-pool text and writes just `tokenizer.json`
+(`--replace` to overwrite); `code.bin` must then be rebuilt with `cache_samples`.
+Configs set `curriculum` to `training-cache` (`documented` was removed). The old
+buckets, journals and retrained bundles were moved to `../yumon-pet-cache-backup`;
+`sort_code_buckets` and `view_code_bucket` still exist but training no longer uses
+their output. Checkpoint run names use `_curriculum_documented_tiers_v3`.
 
 Rust books stage (2026-10-11): `code_docs` converts the toolchain `rust-docs`
 component's mdBook `print.html` (12 stable books, unstable-book excluded) into

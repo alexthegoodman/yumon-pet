@@ -14,40 +14,19 @@ archive/
 # Include finished binary snapshots, but no temporary cache files.
 training-cache/*
 !training-cache/*.bin
-!training-cache/code_buckets/
-training-cache/code_buckets/*
-!training-cache/code_buckets/tier_1_low.bin
-!training-cache/code_buckets/tier_2_mild.bin
-!training-cache/code_buckets/tier_3_moderate.bin
-!training-cache/code_buckets/reference.json
-!training-cache/code_buckets/report.json
-
-# Saved documentation for the balanced curriculum (never include high).
-!training-cache/code_buckets_documented/
-training-cache/code_buckets_documented/*
-!training-cache/code_buckets_documented/generation.json
-!training-cache/code_buckets_documented/tier_1_low.jsonl
-!training-cache/code_buckets_documented/tier_2_mild.jsonl
-!training-cache/code_buckets_documented/tier_3_moderate.jsonl
-# Retrained Code bundle produced by train_bpe (only deployable artifacts).
-!training-cache/code_tokenizer_retrained/
-training-cache/code_tokenizer_retrained/*
-!training-cache/code_tokenizer_retrained/docker-config.json
-!training-cache/code_tokenizer_retrained/tokenizer/
-!training-cache/code_tokenizer_retrained/buckets/
-!training-cache/code_tokenizer_retrained/documented/
-!training-cache/code_tokenizer_retrained/rust_docs/
-training-cache/code_tokenizer_retrained/buckets/*
-!training-cache/code_tokenizer_retrained/buckets/tier_1_low.bin
-!training-cache/code_tokenizer_retrained/buckets/tier_2_mild.bin
-!training-cache/code_tokenizer_retrained/buckets/tier_3_moderate.bin
-!training-cache/code_tokenizer_retrained/buckets/reference.json
-!training-cache/code_tokenizer_retrained/buckets/report.json
-training-cache/code_tokenizer_retrained/documented/*
-!training-cache/code_tokenizer_retrained/documented/generation.json
-!training-cache/code_tokenizer_retrained/documented/tier_1_low.jsonl
-!training-cache/code_tokenizer_retrained/documented/tier_2_mild.jsonl
-!training-cache/code_tokenizer_retrained/documented/tier_3_moderate.jsonl
-training-cache/code_tokenizer_retrained/rust_docs/*
-!training-cache/code_tokenizer_retrained/rust_docs/rust_docs.bin
-!training-cache/code_tokenizer_retrained/rust_docs/report.json
+# Training data: three tiers, each with and without doc comments (never high).
+!training-cache/documented/
+training-cache/documented/*
+!training-cache/documented/tier_1_low.bin
+!training-cache/documented/tier_2_mild.bin
+!training-cache/documented/tier_3_moderate.bin
+!training-cache/undocumented/
+training-cache/undocumented/*
+!training-cache/undocumented/tier_1_low.bin
+!training-cache/undocumented/tier_2_mild.bin
+!training-cache/undocumented/tier_3_moderate.bin
+# Optional Rust books stage.
+!training-cache/rust_docs/
+training-cache/rust_docs/*
+!training-cache/rust_docs/rust_docs.bin
+!training-cache/rust_docs/report.json

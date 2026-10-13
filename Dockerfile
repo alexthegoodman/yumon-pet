@@ -87,28 +87,24 @@ ENV RUST_BACKTRACE=1
 
 WORKDIR /app
 
-# The default image trains Yumon Code from the bundle produced by train_bpe.
-# No Pet binary or cache is included.
+# The default image trains Yumon Code from training-cache/{documented,undocumented}
+# and the tokenizer.json from train_bpe. No Pet binary or cache is included.
 # Config paths must match the destinations below (or point at mounted volume files).
 COPY --from=builder /build/target/release/train_code ./train_code
-ARG CODE_TOKENIZER=training-cache/code_tokenizer_retrained/tokenizer
-ARG CODE_BUCKETS=training-cache/code_tokenizer_retrained/buckets
+ARG CODE_TOKENIZER=yumon_code_bpe
+ARG CODE_DATA=training-cache
 ARG CODE_CONFIG=configs/yumon-code.json
-ARG CODE_DOCUMENTED=training-cache/code_tokenizer_retrained/documented
 # Rust books pretraining stage (cache_samples --rust-docs), built with the same tokenizer.
-ARG CODE_DOCS=training-cache/code_tokenizer_retrained/rust_docs
-COPY ${CODE_TOKENIZER}/ ./yumon_code_bpe/
-# Whitelist the three allowed tiers. High, excluded and unscored data are never
-# copied into the training image; the original mixed code.bin is not included.
-COPY ${CODE_BUCKETS}/tier_1_low.bin ./training-cache/code_buckets/tier_1_low.bin
-COPY ${CODE_BUCKETS}/tier_2_mild.bin ./training-cache/code_buckets/tier_2_mild.bin
-COPY ${CODE_BUCKETS}/tier_3_moderate.bin ./training-cache/code_buckets/tier_3_moderate.bin
-COPY ${CODE_BUCKETS}/reference.json ./training-cache/code_buckets/reference.json
-COPY ${CODE_BUCKETS}/report.json ./training-cache/code_buckets/report.json
-COPY ${CODE_DOCUMENTED}/generation.json ./training-cache/code_buckets_documented/generation.json
-COPY ${CODE_DOCUMENTED}/tier_1_low.jsonl ./training-cache/code_buckets_documented/tier_1_low.jsonl
-COPY ${CODE_DOCUMENTED}/tier_2_mild.jsonl ./training-cache/code_buckets_documented/tier_2_mild.jsonl
-COPY ${CODE_DOCUMENTED}/tier_3_moderate.jsonl ./training-cache/code_buckets_documented/tier_3_moderate.jsonl
+ARG CODE_DOCS=training-cache/rust_docs
+COPY ${CODE_TOKENIZER}/tokenizer.json ./yumon_code_bpe/tokenizer.json
+# Whitelist the three allowed tiers. High, excluded and unscored data and the
+# full code.bin are never copied into the training image.
+COPY ${CODE_DATA}/documented/tier_1_low.bin ./training-cache/documented/tier_1_low.bin
+COPY ${CODE_DATA}/documented/tier_2_mild.bin ./training-cache/documented/tier_2_mild.bin
+COPY ${CODE_DATA}/documented/tier_3_moderate.bin ./training-cache/documented/tier_3_moderate.bin
+COPY ${CODE_DATA}/undocumented/tier_1_low.bin ./training-cache/undocumented/tier_1_low.bin
+COPY ${CODE_DATA}/undocumented/tier_2_mild.bin ./training-cache/undocumented/tier_2_mild.bin
+COPY ${CODE_DATA}/undocumented/tier_3_moderate.bin ./training-cache/undocumented/tier_3_moderate.bin
 COPY ${CODE_DOCS}/rust_docs.bin ./training-cache/rust_docs/rust_docs.bin
 COPY ${CODE_DOCS}/report.json ./training-cache/rust_docs/report.json
 COPY ${CODE_CONFIG} ./configs/yumon-code.json

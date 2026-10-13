@@ -4,11 +4,23 @@ Yumon Pet is a conversational desktop companion. Yumon Code trains on complete
 Rust functions, methods and structs. Run commands from this repository's root.
 Native training uses FP32: WGPU on Windows, CUDA on headless Linux/RunPod.
 
-## Code: tokenizer and training
+## Code: data, tokenizer and training
 
-The production config is [configs/yumon-code.json](../configs/yumon-code.json);
-[configs/yumon-code-moe.json](../configs/yumon-code-moe.json) selects MoE.
-Both use a 1,024-token context and the documented/undocumented curriculum:
+The training cache holds `code.bin` (every chunk of `rust-code`), the frozen
+`code-reference-v1.json`, and two folders with one file per tier:
+
+```
+training-cache/documented/tier_{1_low,2_mild,3_moderate}.bin    code with its doc comment
+training-cache/undocumented/tier_{1_low,2_mild,3_moderate}.bin  the same code without it
+```
+
+The files are append-only text records (file, location, code), so there are no
+hashes or positions to keep in sync and nothing depends on the tokenizer. The two
+folders hold different code and always the same count: comments are written for
+code taken from the front of each tier in `code.bin`, and plain code (without doc
+comments) is taken from the back. Training tokenizes at load time (samples over `max_seq_len` are skipped), shuffles the two kinds together
+within each tier, and holds out whole source files for validation. Configs set
+`curriculum` to `training-cache`.
 
 | Epoch | Eligible tiers |
 | --- | --- |
@@ -16,33 +28,21 @@ Both use a 1,024-token context and the documented/undocumented curriculum:
 | 2 | Low + mild |
 | 3 onward | Low + mild + moderate |
 
-Every saved documented record is retained across training and validation. Each
-tier in each split gets equally many distinct undocumented items; matching
-documented source items and existing doc attributes are excluded. High,
-excluded and unscored buckets never enter training.
-
-With the original buckets, tokenizer and saved comment journals already prepared:
-
 ```sh
-# Fit BPE on exactly the balanced training split; validation files are excluded.
-cargo run --release --no-default-features --bin train_bpe
+# Caption more code. Resumable: code already stored is skipped. See synthetic-code-comments.md.
+cargo run --release --no-default-features --bin gen_synthetic_captions -- --endpoint "https://YOUR-ENDPOINT.endpoints.huggingface.cloud" --model "YOUR-SERVED-MODEL-ID" --token "YOUR-HF-TOKEN"
 
-# Validate the new bundle without model training or GPU initialization.
-cargo run --release --no-default-features --bin train_code -- --config training-cache/code_tokenizer_retrained/config.json --check
+# Optional: refit the BPE on the stored samples (held-out files excluded). Writes only tokenizer.json.
+cargo run --release --no-default-features --bin train_bpe -- --replace
 
-# Train using that tokenizer and its matching caches.
-cargo run --release --no-default-features --bin train_code -- --config training-cache/code_tokenizer_retrained/config.json
+# Validate without model training or GPU initialization, then train.
+cargo run --release --no-default-features --bin train_code -- --config configs/yumon-code.json --check
+cargo run --release --no-default-features --bin train_code -- --config configs/yumon-code.json
 ```
 
-`train_bpe` feeds the selected source text into the existing
-`code_corpus::train_tokenizer()` BPE trainer, which saves `BpeTokenizer` from
-`bpe.rs`. It preserves case, source bytes and generated comments. It snapshots the
-journals and writes a new bundle containing the tokenizer, retokenized buckets,
-local/Docker configs, exact fitting corpus and provenance. Existing artifacts
-are preserved. For another run, append a new output directory to the command.
-Tier assignments and source bytes are preserved after retokenization. Records
-exceeding `max_seq_len` are skipped with counts printed; records are never
-truncated. Each tier and split keeps equal documented and undocumented counts.
+After a new tokenizer, `code.bin` (and the Rust books stage) were tokenized with the
+old one: delete `training-cache/code.bin` and rerun `cache_samples` (below) before
+captioning more. The documented/undocumented files need no rebuild.
 
 ## Code: Rust books pretraining stage
 
@@ -69,59 +69,48 @@ rotating docs window taking that share of tokens in later epochs. After
 
 ## RunPod Docker
 
-Docker defaults to the bundle produced by `train_bpe`:
-
 ```sh
 docker build -t alexthegoodman/yumon-code:latest .
 docker push alexthegoodman/yumon-code:latest
 ```
 
-Attach persistent storage at `/workspace`. The existing image startup runs:
+Attach persistent storage at `/workspace`. The image startup runs:
 
 ```sh
 ./train_code --config configs/yumon-code.json --require-curriculum
 ```
 
-Docker copies eligible caches, journals, metadata and the tokenizer, then runs a
-CPU-only preflight. Its CUDA runtime settings are unchanged. Plain `docker build`
-uses `training-cache/code_tokenizer_retrained`. For alternate bundles, override
-`CODE_TOKENIZER`, `CODE_BUCKETS`, `CODE_DOCUMENTED` and `CODE_CONFIG`.
-The default bundle directory is allowed by `.dockerignore`; add exceptions for
-other bundle paths beneath `training-cache`.
+Docker copies `yumon_code_bpe/tokenizer.json`, the six tier files and the optional
+Rust books stage, then runs a CPU-only preflight. Override `CODE_TOKENIZER`,
+`CODE_DATA`, `CODE_DOCS` and `CODE_CONFIG` build arguments for other locations.
 
-Checkpoints use the config's `out_dir`. Retrained bundles select a separate root.
-Resume restores weights and completed epochs, but not optimizer state or the
-within-epoch position. Changed tokenizer/data identities require a fresh run.
-Freeze input journals for each run; later comments require a new bundle.
+Checkpoints use the config's `out_dir`. Resume restores weights and completed
+epochs, but not optimizer state or the within-epoch position. A changed
+tokenizer or data identity (including new captions) needs a fresh run.
 
 ## Code: first-time data preparation
 
-Skip this section if `training-cache/code_buckets`,
-`training-cache/code_buckets_documented` and `yumon_code_bpe` already exist.
 Set the Rust `source` folder in [configs/yumon-code-local.json](../configs/yumon-code-local.json)
-(or pass `--source <folder>`). This bootstrap config uses a 512-token context,
-leaving room for comments in the production 1,024-token context.
+(or pass `--source <folder>`). This config uses a 512-token context.
+Adding code to `rust-code` later needs only the first command (delete the old
+`code.bin` first) and then more captioning; existing samples keep their tiers
+because `code-reference-v1.json` is frozen.
 
 ```sh
-# Create the initial source-only tokenizer and raw cache.
+# Create the initial source-only tokenizer and the raw cache (code.bin).
 cargo run --release --no-default-features --bin cache_samples -- --code-config configs/yumon-code-local.json --train-code-tokenizer
 
-# Explicitly calibrate and sort the raw cache into complexity buckets.
-cargo run --release --no-default-features --bin sort_code_buckets -- --code-config configs/yumon-code-local.json --reference training-cache/code-reference-v1.json --calibrate 1.0.0
+# Reuse an existing tokenizer instead (rebuilding code.bin after adding code):
+cargo run --release --no-default-features --bin cache_samples -- --code-config configs/yumon-code-local.json
 
-# Generate resumable doc comments using your existing inference endpoint.
-cargo run --release --no-default-features --bin gen_synthetic_captions -- --endpoint "https://YOUR-ENDPOINT.endpoints.huggingface.cloud" --model "YOUR-SERVED-MODEL-ID" --token "YOUR-HF-TOKEN"
-
-# Inspect the original cache metadata.
+# Inspect the cache metadata.
 cargo run --release --no-default-features --bin cache_samples -- --code-config configs/yumon-code-local.json --inspect
 ```
 
-Preparation refuses to overwrite existing artifacts. Reuse a tokenizer by
-omitting `--train-code-tokenizer`; choose new cache/reference/output paths for
-new datasets. Raw preparation skips oversized whole items and prints 50 samples
-by default (`--preview-samples 0` disables previews). Comment generation covers
-four tiers, but training uses only low/mild/moderate committed journal records.
-Then run `train_bpe` above to fit the final tokenizer on the actual training mix.
+Preparation refuses to overwrite existing artifacts. Raw preparation skips
+oversized whole items and prints 50 samples by default (`--preview-samples 0`
+disables previews). The captioner assigns tiers with the frozen reference and
+covers the low, mild and moderate tiers; high code is never stored.
 
 ## Yumon Nano code editor
 

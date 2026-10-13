@@ -1,34 +1,31 @@
 //! Generate Rust doc comments with a dedicated Hugging Face Inference Endpoint.
 //! Endpoint, model, and token are supplied as command-line arguments.
-//! See docs/synthetic-code-comments.md for setup and resumable output details.
+//! Reads `code.bin`, tiers each chunk with the frozen complexity reference, and
+//! appends every finished sample to `<data>/documented/<tier>.bin` (code with its
+//! comment) and `<data>/undocumented/<tier>.bin` (the same code without it).
+//! Rerun to resume: code already stored is skipped. See docs/synthetic-code-comments.md.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use anyhow::{Context, Result, bail, ensure};
     use clap::Parser;
-    use serde::{Deserialize, Serialize};
     use sha2::{Digest, Sha256};
     use std::{
-        collections::BTreeMap,
-        fs::{self, File, OpenOptions},
+        collections::HashSet,
         io::{BufRead, BufReader, Write},
-        path::{Path, PathBuf},
+        path::PathBuf,
         time::{Duration, Instant},
     };
     use yumon_pet::brain::{
-        BOS_TOKEN, EOS_TOKEN, PAD_TOKEN,
         bpe::TokenizerKind,
-        code_corpus,
+        code_complexity::{self as complexity, Reference},
+        code_corpus::{self, CodeConfig},
+        code_data::{self, Kind, Record, Writer},
+        code_documented,
         sample_cache::{self, CacheObjective},
         samples::Sample,
     };
 
-    const BUCKETS: [&str; 4] = [
-        "tier_1_low",
-        "tier_2_mild",
-        "tier_3_moderate",
-        "tier_4_high",
-    ];
     const MAX_COMMENT_WORDS: usize = 80;
     const MAX_COMMENT_LINES: usize = 6;
     const SYSTEM: &str = r#"Write accurate Rust documentation for the supplied code sample.
@@ -43,7 +40,7 @@ The comment will be inserted immediately before the documented item's attributes
 /no_think"#;
 
     #[derive(Parser)]
-    #[command(about = "Add synthetic Rust doc comments by cycling through four code buckets")]
+    #[command(about = "Add synthetic Rust doc comments to code.bin samples, cycling through the three tiers")]
     pub struct Args {
         /// Dedicated HF endpoint base URL, /v1 URL, or full chat-completions URL.
         #[arg(long)]
@@ -54,14 +51,13 @@ The comment will be inserted immediately before the documented item's attributes
         /// Hugging Face bearer token (never written to generated output).
         #[arg(long, alias = "api-key")]
         token: String,
-        #[arg(long, default_value = "training-cache/code_buckets")]
-        input: PathBuf,
-        /// Separate output directory; matching interrupted runs resume automatically.
-        #[arg(long, default_value = "training-cache/code_buckets_documented")]
-        output: PathBuf,
-        #[arg(long, default_value = "yumon_code_bpe")]
-        tokenizer: String,
-        /// Output context length. Never truncate code/comments; increase if needed.
+        /// Code config: `cache` (code.bin), `tokenizer` and `curriculum` (the data directory).
+        #[arg(long, default_value = "configs/yumon-code.json")]
+        config: PathBuf,
+        /// Frozen complexity reference that assigns each chunk its tier.
+        #[arg(long, default_value = "training-cache/code-reference-v1.json")]
+        reference: PathBuf,
+        /// Documented samples needing more tokens than this are not stored.
         #[arg(long, default_value_t = 1024)]
         max_seq_len: usize,
         #[arg(long, default_value_t = 512)]
@@ -77,20 +73,6 @@ The comment will be inserted immediately before the documented item's attributes
         /// Optional delay between successful requests in seconds.
         #[arg(long, default_value_t = 0.0)]
         delay: f64,
-        /// Older journal directory. Samples whose source hash already has a saved
-        /// (non-skipped) comment there reuse it instead of calling the endpoint.
-        #[arg(long)]
-        reuse: Option<PathBuf>,
-    }
-
-    #[derive(Serialize, Deserialize)]
-    struct Entry {
-        index: usize,
-        source_sha256: String,
-        doc_comment: String,
-        /// The model never produced a valid comment; the sample stays undocumented.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        skipped: bool,
     }
 
     /// The endpoint answered, but every attempt produced an unusable comment.
@@ -109,10 +91,278 @@ The comment will be inserted immediately before the documented item's attributes
         format!("{:x}", Sha256::digest(bytes))
     }
 
-    fn file_digest(path: &Path) -> Result<String> {
-        let mut hash = Sha256::new();
-        std::io::copy(&mut File::open(path)?, &mut hash)?;
-        Ok(format!("{:x}", hash.finalize()))
+    fn decode(sample: &Sample, tokenizer: &TokenizerKind) -> Result<String> {
+        let TokenizerKind::Bpe(tok) = tokenizer else {
+            bail!("requires code BPE");
+        };
+        let ids = sample
+            .target_labels
+            .iter()
+            .map(|&id| u32::try_from(id))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        tok.decode(&ids)
+    }
+
+    /// Code without its `///` lines, so a documented record matches the code it came from.
+    fn code_key(text: &str) -> String {
+        text.lines()
+            .filter(|line| !line.trim_start().starts_with("///"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn has_docs(text: &str) -> bool {
+        text.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("///") || line.starts_with("//!") || line.starts_with("#[doc")
+        })
+    }
+
+    /// Comments are written for code taken from the front of a tier, and plain code
+    /// is kept from the back, so the two folders never hold the same sample.
+    struct Tier {
+        name: &'static str,
+        /// `code.bin` indices of this tier in file order, one per distinct code.
+        candidates: Vec<usize>,
+        /// Next candidate to caption; candidates `back..` are taken as plain code.
+        front: usize,
+        back: usize,
+        /// Plain code chosen for the next stored sample, kept if generation fails.
+        reserved: Option<usize>,
+        stored: usize,
+        documented: Writer,
+        undocumented: Writer,
+    }
+
+    impl Tier {
+        fn take_front(&mut self, used: &mut HashSet<String>, keys: &[String]) -> Option<usize> {
+            while self.front < self.back {
+                let index = self.candidates[self.front];
+                self.front += 1;
+                if used.insert(keys[index].clone()) {
+                    return Some(index);
+                }
+            }
+            None
+        }
+
+        fn take_back(&mut self, used: &mut HashSet<String>, keys: &[String], texts: &[String]) -> Option<usize> {
+            while self.back > self.front {
+                self.back -= 1;
+                let index = self.candidates[self.back];
+                if !has_docs(&texts[index]) && used.insert(keys[index].clone()) {
+                    return Some(index);
+                }
+            }
+            None
+        }
+
+        /// Samples this tier can still add, as an estimate for progress and ordering.
+        fn remaining(&self) -> usize {
+            (self.back - self.front) / 2 + usize::from(self.reserved.is_some())
+        }
+    }
+
+    pub fn run(args: Args) -> Result<()> {
+        ensure!(
+            args.max_seq_len >= 2 && args.max_tokens > 0 && args.timeout > 0,
+            "invalid context, token limit, or timeout"
+        );
+        ensure!(
+            args.retry_max_tokens >= args.max_tokens,
+            "--retry-max-tokens must be at least --max-tokens"
+        );
+        ensure!(
+            args.temperature.is_finite() && (0.0..=2.0).contains(&args.temperature),
+            "temperature must be between 0 and 2"
+        );
+        ensure!(
+            args.delay.is_finite() && (0.0..=3600.0).contains(&args.delay),
+            "delay must be between 0 and 3600 seconds"
+        );
+        ensure!(
+            args.endpoint.starts_with("https://"),
+            "use an HTTPS endpoint to protect the token"
+        );
+        ensure!(
+            !args.model.trim().is_empty() && !args.token.trim().is_empty(),
+            "--model and --token must not be empty"
+        );
+        let config = CodeConfig::load(&args.config)?;
+        let root = config
+            .curriculum
+            .clone()
+            .context("the config needs `curriculum` (the data directory)")?;
+        let tokenizer = code_corpus::load_tokenizer(&config.tokenizer)?;
+        let metadata = sample_cache::read_metadata(&config.cache)?;
+        let samples = sample_cache::load_cache_with_objective(
+            &config.cache,
+            &tokenizer,
+            metadata.stage,
+            metadata.max_seq_len,
+            CacheObjective::RawCode,
+        )?;
+        let reference_bytes =
+            std::fs::read(&args.reference).context("reading the frozen complexity reference")?;
+        let reference: Reference = serde_json::from_slice(&reference_bytes)?;
+        reference.validate()?;
+        let reference_sha = digest(&reference_bytes);
+
+        // Tier every chunk exactly as the sorter did, so tiers match earlier runs.
+        let mut texts = Vec::with_capacity(samples.len());
+        let mut tier_of = Vec::with_capacity(samples.len());
+        for (i, sample) in samples.iter().enumerate() {
+            let source = decode(sample, &tokenizer).unwrap_or_default();
+            let mut record =
+                complexity::analyze(&format!("{i}"), "rust", &source, &sample.pair.0, &sample.pair.1);
+            if source.is_empty() || reference.preprocessing.excluded(&source, &sample.pair.0) {
+                tier_of.push(None);
+            } else {
+                reference.classify(&mut record, &reference_sha);
+                tier_of.push(
+                    record
+                        .complexity_tier
+                        .map(|t| t as usize - 1)
+                        .filter(|&t| t < code_data::TIERS.len()),
+                );
+            }
+            texts.push(source);
+            if (i + 1) % 20000 == 0 {
+                println!("Tiered {} / {} chunks", i + 1, samples.len());
+            }
+        }
+
+        let keys: Vec<String> = texts.iter().map(|text| code_key(text)).collect();
+        // Everything already stored, in either folder, is off limits for both picks.
+        let mut used: HashSet<String> = HashSet::new();
+        for tier in 0..code_data::TIERS.len() {
+            for kind in [Kind::Documented, Kind::Undocumented] {
+                for record in code_data::scan(&code_data::file(&root, kind, tier))?.records {
+                    used.insert(code_key(&record.text));
+                }
+            }
+        }
+        let mut tiers = Vec::new();
+        for (tier, name) in code_data::TIERS.iter().enumerate() {
+            let (stored, plain) = code_data::reconcile(&root, tier)?;
+            let mut seen = HashSet::new();
+            let candidates: Vec<usize> = (0..samples.len())
+                .filter(|&i| tier_of[i] == Some(tier) && seen.insert(keys[i].clone()))
+                .collect();
+            let back = candidates.len();
+            tiers.push(Tier {
+                name,
+                candidates,
+                front: 0,
+                back,
+                reserved: None,
+                stored,
+                documented: Writer::open(&code_data::file(&root, Kind::Documented, tier))?,
+                undocumented: Writer::open(&code_data::file(&root, Kind::Undocumented, tier))?,
+            });
+            // Bring the plain side up to the documented count (e.g. after an import).
+            let tier = tiers.last_mut().unwrap();
+            let mut plain = plain;
+            while plain < stored {
+                let Some(index) = tier.take_back(&mut used, &keys, &texts) else {
+                    eprintln!("{name}: not enough plain code to match {stored} documented samples");
+                    break;
+                };
+                tier.undocumented.append(&Record {
+                    path: samples[index].pair.0.clone(),
+                    location: samples[index].pair.1.clone(),
+                    text: texts[index].clone(),
+                })?;
+                plain += 1;
+            }
+            println!("{name}: {stored} documented, {plain} plain, about {} more possible", tier.remaining());
+        }
+        let url = chat_url(&args.endpoint);
+        let mut total: usize = tiers.iter().map(|t| t.stored).sum();
+        println!("[Progress] {total} stored per kind; cycling through the tiers");
+        std::io::stdout().flush()?;
+        let (mut skipped, mut too_long) = (0usize, 0usize);
+        loop {
+            let progress: Vec<_> = tiers.iter().map(|t| (t.stored, t.stored + t.remaining())).collect();
+            let Some(next) = next_bucket(&progress) else { break };
+            let tier = &mut tiers[next];
+            if tier.reserved.is_none() {
+                tier.reserved = tier.take_back(&mut used, &keys, &texts);
+            }
+            let (Some(plain), Some(index)) = (tier.reserved, tier.take_front(&mut used, &keys)) else {
+                tier.back = tier.front; // exhausted
+                tier.reserved = None;
+                continue;
+            };
+            let (source, sample) = (&texts[index], &samples[index]);
+            let planned: usize = tiers.iter().map(|t| t.stored + t.remaining()).sum();
+            let tier = &mut tiers[next];
+            println!("[Generate] {} {} | {total}/~{planned} stored", tier.name, tier.stored + 1);
+            std::io::stdout().flush()?;
+            let started = Instant::now();
+            let comment = match generate(&args, &url, &args.model, &args.token, source) {
+                Ok(comment) => comment,
+                Err(error) if error.downcast_ref::<Rejected>().is_some() => {
+                    eprintln!(
+                        "[Skipped] {} ({}, {}): {error:#}",
+                        tier.name, sample.pair.0, sample.pair.1
+                    );
+                    skipped += 1;
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("{} ({}, {})", tier.name, sample.pair.0, sample.pair.1)
+                    });
+                }
+            };
+            let documented = document(source, &comment)?;
+            let record = |text: &str, from: &Sample| Record {
+                path: from.pair.0.clone(),
+                location: from.pair.1.clone(),
+                text: text.to_owned(),
+            };
+            let documented_record = record(&documented, sample);
+            if code_data::to_sample(&documented_record, &tokenizer, args.max_seq_len)?.is_none() {
+                eprintln!(
+                    "[TooLong] {} ({}, {}) needs more than {} tokens with its comment; not stored",
+                    tier.name, sample.pair.0, sample.pair.1, args.max_seq_len
+                );
+                too_long += 1;
+                continue;
+            }
+            // Plain side first: a stop between the two leaves one extra record for `reconcile` to trim.
+            tier.undocumented.append(&record(&texts[plain], &samples[plain]))?;
+            tier.documented.append(&documented_record)?;
+            tier.reserved = None;
+            tier.stored += 1;
+            total += 1;
+            println!(
+                "[Saved] {} {} | {total} stored | {:.1}s",
+                tier.name,
+                tier.stored,
+                started.elapsed().as_secs_f64()
+            );
+            if total % 50 == 0 {
+                println!(
+                    "\n=== Sample {total} | {} | {} | {} ===\n{documented}\n",
+                    tier.name, sample.pair.0, sample.pair.1
+                );
+            }
+            std::io::stdout().flush()?;
+            if args.delay > 0.0 {
+                std::thread::sleep(Duration::from_secs_f64(args.delay));
+            }
+        }
+        println!(
+            "Complete: {total} samples stored per kind in {} ({skipped} skipped, {too_long} too long)",
+            root.display()
+        );
+        Ok(())
+    }
+
+    pub fn main() -> Result<()> {
+        run(Args::parse())
     }
 
     // Pick the least advanced unfinished bucket, with tier order breaking ties.
@@ -124,50 +374,6 @@ The comment will be inserted immediately before the documented item's attributes
             .filter(|(_, (done, total))| done < total)
             .min_by_key(|(index, (done, _))| (*done, *index))
             .map(|(index, _)| index)
-    }
-
-    struct Bucket {
-        name: &'static str,
-        samples: Vec<Sample>,
-        cursor: usize,
-        metadata: sample_cache::CacheMetadata,
-        journal: File,
-        output: PathBuf,
-    }
-
-    fn publish_bucket(
-        bucket: &mut Bucket,
-        tokenizer: &TokenizerKind,
-        max_seq_len: usize,
-    ) -> Result<()> {
-        sample_cache::write_cache_with_objective(
-            &bucket.output,
-            tokenizer,
-            bucket.metadata.stage,
-            max_seq_len,
-            bucket.metadata.seed,
-            &bucket.samples,
-            CacheObjective::RawCode,
-        )?;
-        println!(
-            "Saved {} documented samples to {}",
-            bucket.samples.len(),
-            bucket.output.display()
-        );
-        bucket.samples.clear();
-        Ok(())
-    }
-
-    fn decode_sample(sample: &Sample, tokenizer: &TokenizerKind) -> Result<String> {
-        let TokenizerKind::Bpe(tok) = tokenizer else {
-            bail!("requires code BPE");
-        };
-        let ids = sample
-            .target_labels
-            .iter()
-            .map(|&id| u32::try_from(id))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        tok.decode(&ids)
     }
 
     fn chat_url(endpoint: &str) -> String {
@@ -334,423 +540,6 @@ The comment will be inserted immediately before the documented item's attributes
         }
     }
 
-    /// Only an unterminated final line can be discarded after an interrupted write.
-    fn read_journal(path: &Path) -> Result<Vec<Entry>> {
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let mut reader = BufReader::new(File::open(path)?);
-        let mut entries = Vec::new();
-        let mut committed_bytes = 0;
-        loop {
-            let mut line = Vec::new();
-            let count = reader.read_until(b'\n', &mut line)?;
-            if count == 0 {
-                break;
-            }
-            if !line.ends_with(b"\n") {
-                drop(reader);
-                OpenOptions::new()
-                    .write(true)
-                    .open(path)?
-                    .set_len(committed_bytes)?;
-                break;
-            }
-            let entry: Entry =
-                serde_json::from_slice(&line).context("corrupt committed journal record")?;
-            ensure!(
-                entry.index == entries.len(),
-                "journal samples are out of order"
-            );
-            entries.push(entry);
-            committed_bytes += count as u64;
-        }
-        Ok(entries)
-    }
-
-    fn encode(
-        sample: &mut Sample,
-        tokenizer: &TokenizerKind,
-        source: &str,
-        max_seq_len: usize,
-    ) -> Result<()> {
-        let TokenizerKind::Bpe(tok) = tokenizer else {
-            bail!("requires code BPE");
-        };
-        let encoding = tok
-            .inner
-            .encode(source, false)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let ids = encoding.get_ids();
-        ensure!(
-            ids.iter().all(|&id| id > 3),
-            "documented code contains control/unknown tokens"
-        );
-        ensure!(
-            tok.decode(ids)? == source,
-            "tokenizer changed documented source bytes"
-        );
-        ensure!(
-            ids.len() < max_seq_len,
-            "documented sample requires --max-seq-len >= {}; rerun with a larger value (saved comments are reused)",
-            ids.len() + 1
-        );
-        sample.input_ids = std::iter::once(BOS_TOKEN)
-            .chain(ids.iter().map(|&id| id as usize))
-            .collect();
-        sample.target_labels = ids
-            .iter()
-            .map(|&id| id as usize)
-            .chain(std::iter::once(EOS_TOKEN))
-            .collect();
-        sample.input_ids.resize(max_seq_len, PAD_TOKEN);
-        sample.target_labels.resize(max_seq_len, PAD_TOKEN);
-        Ok(())
-    }
-
-    pub fn run(args: Args) -> Result<()> {
-        ensure!(
-            args.max_seq_len >= 2 && args.max_tokens > 0 && args.timeout > 0,
-            "invalid context, token limit, or timeout"
-        );
-        ensure!(
-            args.retry_max_tokens >= args.max_tokens,
-            "--retry-max-tokens must be at least --max-tokens"
-        );
-        ensure!(
-            args.temperature.is_finite() && (0.0..=2.0).contains(&args.temperature),
-            "temperature must be between 0 and 2"
-        );
-        ensure!(
-            args.delay.is_finite() && (0.0..=3600.0).contains(&args.delay),
-            "delay must be between 0 and 3600 seconds"
-        );
-        ensure!(
-            args.endpoint.starts_with("https://"),
-            "use an HTTPS endpoint to protect the token"
-        );
-        ensure!(
-            !args.model.trim().is_empty() && !args.token.trim().is_empty(),
-            "--model and --token must not be empty"
-        );
-        let tokenizer = code_corpus::load_tokenizer(&args.tokenizer)?;
-        let input = fs::canonicalize(&args.input).context("opening input bucket directory")?;
-        let reference_path = input.join("reference.json");
-        let reference: yumon_pet::brain::code_complexity::Reference = serde_json::from_slice(
-            &fs::read(&reference_path).context("input requires the sorter's reference.json")?,
-        )?;
-        reference.validate()?;
-        let reference_sha = file_digest(&reference_path)?;
-        let input_report: serde_json::Value =
-            serde_json::from_slice(&fs::read(input.join("report.json"))?)?;
-        ensure!(
-            input_report["reference_sha256"].as_str() == Some(reference_sha.as_str()),
-            "input reference digest mismatch"
-        );
-        fs::create_dir_all(&args.output)?;
-        ensure!(
-            input != fs::canonicalize(&args.output)?,
-            "input and output must be different directories"
-        );
-        let mut inputs = BTreeMap::new();
-        for bucket in BUCKETS {
-            let path = input.join(format!("{bucket}.bin"));
-            if !path.exists() {
-                ensure!(
-                    input_report["bucket_counts"][bucket].as_u64() == Some(0),
-                    "missing input bucket {bucket}"
-                );
-                continue;
-            }
-            let metadata = sample_cache::read_metadata(&path)?;
-            ensure!(
-                metadata.objective == CacheObjective::RawCode,
-                "{bucket} is not raw code"
-            );
-            ensure!(
-                input_report["bucket_counts"][bucket].as_u64() == Some(metadata.samples as u64),
-                "input {bucket} count mismatch"
-            );
-            let sha = file_digest(&path)?;
-            ensure!(
-                input_report["bucket_caches"][bucket]["sha256"].as_str() == Some(sha.as_str()),
-                "input {bucket} digest mismatch"
-            );
-            inputs.insert(bucket, sha);
-        }
-        ensure!(!inputs.is_empty(), "all four input buckets are empty");
-        let manifest = serde_json::json!({
-            "version": 1, "inputs": inputs, "reference_sha256": reference_sha,
-            "tokenizer_sha256": file_digest(&Path::new(&args.tokenizer).join("tokenizer.json"))?,
-            "model": args.model, "system_prompt": SYSTEM,
-            "temperature": args.temperature, "max_tokens": args.max_tokens,
-        });
-        let manifest_path = args.output.join("generation.json");
-        if manifest_path.exists() {
-            let previous: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-            ensure!(
-                manifest == previous,
-                "output belongs to different inputs/tokenizer/generation settings; choose a new --output"
-            );
-        } else {
-            ensure!(
-                fs::read_dir(&args.output)?.next().is_none(),
-                "output must be empty or contain a matching generation.json"
-            );
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&manifest_path)?;
-            serde_json::to_writer_pretty(&mut file, &manifest)?;
-            file.sync_all()?;
-        }
-        let url = chat_url(&args.endpoint);
-        let planned_total: usize = inputs
-            .keys()
-            .map(|bucket| input_report["bucket_counts"][bucket].as_u64().unwrap() as usize)
-            .sum();
-        let mut total = 0;
-        let mut buckets = Vec::new();
-        for bucket in BUCKETS {
-            if !inputs.contains_key(bucket) {
-                continue;
-            }
-            let input_path = input.join(format!("{bucket}.bin"));
-            let metadata = sample_cache::read_metadata(&input_path)?;
-            let output_path = args.output.join(format!("{bucket}.bin"));
-            if output_path.exists() {
-                let saved = sample_cache::read_metadata(&output_path)?;
-                ensure!(
-                    saved.max_seq_len == args.max_seq_len && saved.samples == metadata.samples,
-                    "completed {bucket} has a different context/count; choose a new --output"
-                );
-                total += saved.samples;
-                println!("{bucket}: already complete ({} samples)", saved.samples);
-                continue;
-            }
-            let mut samples = sample_cache::load_cache_with_objective(
-                &input_path,
-                &tokenizer,
-                metadata.stage,
-                metadata.max_seq_len,
-                CacheObjective::RawCode,
-            )?;
-            let journal_path = args.output.join(format!("{bucket}.jsonl"));
-            let entries = read_journal(&journal_path)?;
-            ensure!(
-                entries.len() <= samples.len(),
-                "journal exceeds bucket sample count"
-            );
-            let journal = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&journal_path)?;
-            println!(
-                "{bucket}: {} samples, {} saved comments",
-                samples.len(),
-                entries.len()
-            );
-            for (index, entry) in entries.iter().enumerate() {
-                let source = decode_sample(&samples[index], &tokenizer)?;
-                ensure!(
-                    entry.source_sha256 == digest(source.as_bytes()),
-                    "saved {bucket} sample {index} does not match input"
-                );
-                let documented = if entry.skipped {
-                    source.clone()
-                } else {
-                    document(&source, &entry.doc_comment)?
-                };
-                encode(
-                    &mut samples[index],
-                    &tokenizer,
-                    &documented,
-                    args.max_seq_len,
-                )
-                .with_context(|| format!("{bucket} sample {}", index + 1))?;
-            }
-            total += entries.len();
-            let mut bucket = Bucket {
-                name: bucket,
-                samples,
-                cursor: entries.len(),
-                metadata,
-                journal,
-                output: output_path,
-            };
-            if bucket.cursor == bucket.metadata.samples {
-                publish_bucket(&mut bucket, &tokenizer, args.max_seq_len)?;
-            }
-            buckets.push(bucket);
-        }
-        println!(
-            "[Progress] {total}/{planned_total} comments already saved; cycling through unfinished buckets"
-        );
-        std::io::stdout().flush()?;
-        let mut reusable: std::collections::HashMap<String, String> = Default::default();
-        if let Some(dir) = &args.reuse {
-            for bucket in BUCKETS {
-                let path = dir.join(format!("{bucket}.jsonl"));
-                if path.exists() {
-                    for entry in read_journal(&path)? {
-                        if !entry.skipped {
-                            reusable.insert(entry.source_sha256, entry.doc_comment);
-                        }
-                    }
-                }
-            }
-            println!("[Reuse] {} saved comments available from {}", reusable.len(), dir.display());
-        }
-        let mut reused = 0usize;
-        loop {
-            let progress: Vec<_> = buckets
-                .iter()
-                .map(|bucket| (bucket.cursor, bucket.metadata.samples))
-                .collect();
-            let Some(next) = next_bucket(&progress) else {
-                break;
-            };
-            let bucket = &mut buckets[next];
-            let index = bucket.cursor;
-            let sample = &mut bucket.samples[index];
-            let source = decode_sample(sample, &tokenizer)?;
-            println!(
-                "[Generate] {} sample {}/{} | {total}/{planned_total} saved",
-                bucket.name,
-                index + 1,
-                bucket.metadata.samples
-            );
-            std::io::stdout().flush()?;
-            let started = Instant::now();
-            let source_hash = digest(source.as_bytes());
-            let reuse_hit = reusable.get(&source_hash).cloned();
-            let comment = match reuse_hit.map(Ok).unwrap_or_else(|| generate(&args, &url, &args.model, &args.token, &source)) {
-                Ok(comment) => Some(comment),
-                Err(error) if error.downcast_ref::<Rejected>().is_some() => {
-                    eprintln!(
-                        "[Skipped] {} sample {} ({}, {}): {error:#}",
-                        bucket.name,
-                        index + 1,
-                        sample.pair.0,
-                        sample.pair.1
-                    );
-                    None
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!(
-                            "{} sample {} ({}, {})",
-                            bucket.name,
-                            index + 1,
-                            sample.pair.0,
-                            sample.pair.1
-                        )
-                    });
-                }
-            };
-            let was_reused = reusable.contains_key(&source_hash);
-            reused += was_reused as usize;
-            let entry = Entry {
-                index,
-                source_sha256: source_hash,
-                doc_comment: comment.clone().unwrap_or_default(),
-                skipped: comment.is_none(),
-            };
-            let mut line = serde_json::to_vec(&entry)?;
-            line.push(b'\n');
-            bucket.journal.write_all(&line)?;
-            bucket.journal.sync_data()?;
-            let documented = match &comment {
-                Some(comment) => document(&source, comment)?,
-                None => source.clone(),
-            };
-            encode(sample, &tokenizer, &documented, args.max_seq_len)
-                .with_context(|| format!("{} sample {}", bucket.name, index + 1))?;
-            bucket.cursor += 1;
-            total += 1;
-            println!(
-                "[Saved] {} sample {}/{} | {total}/{planned_total} ({:.2}%) | {:.1}s",
-                bucket.name,
-                bucket.cursor,
-                bucket.metadata.samples,
-                100.0 * total as f64 / planned_total as f64,
-                started.elapsed().as_secs_f64()
-            );
-            std::io::stdout().flush()?;
-            if total % 50 == 0 {
-                println!(
-                    "\n=== Sample {total} | {} #{} | {} | {} ===\n{documented}\n",
-                    bucket.name,
-                    index + 1,
-                    sample.pair.0,
-                    sample.pair.1
-                );
-            }
-            if bucket.cursor == bucket.metadata.samples {
-                publish_bucket(bucket, &tokenizer, args.max_seq_len)?;
-            }
-            if args.delay > 0.0 && !was_reused {
-                std::thread::sleep(Duration::from_secs_f64(args.delay));
-            }
-        }
-        if args.reuse.is_some() {
-            println!("[Reuse] {reused} comments came from the older journals this run");
-        }
-        // Preserve the original tier assignments and calibration, but publish
-        // fresh cache identities. Original complexity metrics describe raw code
-        // and must not be presented as measurements of the documented samples.
-        let saved_reference = args.output.join("reference.json");
-        if saved_reference.exists() {
-            ensure!(
-                file_digest(&saved_reference)? == reference_sha,
-                "output reference mismatch"
-            );
-        } else {
-            fs::copy(&reference_path, &saved_reference)?;
-        }
-        let mut counts = BTreeMap::new();
-        let mut caches = BTreeMap::new();
-        for bucket in BUCKETS {
-            let path = args.output.join(format!("{bucket}.bin"));
-            if inputs.contains_key(bucket) {
-                let metadata = sample_cache::read_metadata(&path)?;
-                counts.insert(bucket, metadata.samples);
-                caches.insert(
-                    bucket,
-                    serde_json::json!({"metadata": metadata, "sha256": file_digest(&path)?}),
-                );
-            } else {
-                counts.insert(bucket, 0);
-            }
-        }
-        let report = serde_json::json!({
-            "total": total, "reference_sha256": reference_sha,
-            "bucket_counts": counts, "bucket_caches": caches,
-            "generation_sha256": file_digest(&manifest_path)?,
-            "classification": "Original raw-code tier assignments preserved; documented code was not rescored",
-        });
-        let report_path = args.output.join("report.json");
-        if report_path.exists() {
-            let saved: serde_json::Value = serde_json::from_slice(&fs::read(&report_path)?)?;
-            ensure!(saved == report, "output report mismatch");
-        } else {
-            let temporary = args.output.join(".report.json.tmp");
-            let mut file = File::create(&temporary)?;
-            serde_json::to_writer_pretty(&mut file, &report)?;
-            file.sync_all()?;
-            drop(file);
-            fs::rename(temporary, report_path)?;
-        }
-        println!(
-            "Complete: {total} documented samples in {}",
-            args.output.display()
-        );
-        Ok(())
-    }
-
-    pub fn main() -> Result<()> {
-        run(Args::parse())
-    }
 
     #[cfg(test)]
     mod tests {
@@ -858,29 +647,6 @@ The comment will be inserted immediately before the documented item's attributes
             ] {
                 assert_eq!(chat_url(base), "https://example.test/v1/chat/completions");
             }
-        }
-
-        #[test]
-        fn journal_recovers_only_uncommitted_tail() -> Result<()> {
-            let path =
-                std::env::temp_dir().join(format!("yumon-comments-{}.jsonl", uuid::Uuid::new_v4()));
-            let entry = Entry {
-                index: 0,
-                source_sha256: "hash".into(),
-                doc_comment: "/// Docs.".into(),
-                skipped: false,
-            };
-            let mut committed = serde_json::to_vec(&entry)?;
-            committed.push(b'\n');
-            let mut interrupted = committed.clone();
-            interrupted.extend_from_slice(b"{\"index\":1");
-            fs::write(&path, interrupted)?;
-            assert_eq!(read_journal(&path)?.len(), 1);
-            assert_eq!(fs::read(&path)?, committed);
-            fs::write(&path, b"invalid\n")?;
-            assert!(read_journal(&path).is_err());
-            fs::remove_file(path)?;
-            Ok(())
         }
 
         #[test]
@@ -1041,82 +807,6 @@ The comment will be inserted immediately before the documented item's attributes
             assert!(check_comment_length(&format!("/// {}", vec!["word"; 81].join(" "))).is_err());
             assert!(check_comment_length(&vec!["/// Brief."; 6].join("\n")).is_ok());
             assert!(check_comment_length(&vec!["/// Brief."; 7].join("\n")).is_err());
-        }
-
-        #[test]
-        fn documented_cache_round_trip_preserves_source_and_provenance() -> Result<()> {
-            let directory =
-                std::env::temp_dir().join(format!("yumon-doc-cache-{}", uuid::Uuid::new_v4()));
-            fs::create_dir(&directory)?;
-            struct Cleanup(PathBuf);
-            impl Drop for Cleanup {
-                fn drop(&mut self) {
-                    let _ = fs::remove_dir_all(&self.0);
-                }
-            }
-            let _cleanup = Cleanup(directory.clone());
-            let source_path = directory.join("input.rs");
-            let source = "impl Example { pub fn count(&self) -> usize { 42 } }";
-            fs::write(&source_path, source)?;
-            let tokenizer_dir = directory.join("tokenizer");
-            code_corpus::train_tokenizer(&[source_path], 300, tokenizer_dir.to_str().unwrap())?;
-            let tokenizer = code_corpus::load_tokenizer(tokenizer_dir.to_str().unwrap())?;
-            let mut samples = code_corpus::chunk_source(source, &tokenizer, 512, "original.rs")?;
-            assert_eq!(samples.len(), 1);
-            let provenance = samples[0].pair.clone();
-            let TokenizerKind::Bpe(tok) = &tokenizer else {
-                unreachable!()
-            };
-            let original = tok.decode(
-                &samples[0]
-                    .target_labels
-                    .iter()
-                    .map(|&id| id as u32)
-                    .collect::<Vec<_>>(),
-            )?;
-            let documented = document(&original, "/// Returns 42.")?;
-            assert!(encode(&mut samples[0], &tokenizer, &documented, 2).is_err());
-            encode(&mut samples[0], &tokenizer, &documented, 512)?;
-            let path = directory.join("tier_1_low.bin");
-            let stage = yumon_pet::brain::samples::TrainingStage::Language;
-            sample_cache::write_cache_with_objective(
-                &path,
-                &tokenizer,
-                stage,
-                512,
-                42,
-                &samples,
-                CacheObjective::RawCode,
-            )?;
-            let loaded = sample_cache::load_cache_with_objective(
-                &path,
-                &tokenizer,
-                stage,
-                512,
-                CacheObjective::RawCode,
-            )?;
-            assert_eq!(loaded[0].pair, provenance);
-            assert_eq!(
-                tok.decode(
-                    &loaded[0]
-                        .target_labels
-                        .iter()
-                        .map(|&id| id as u32)
-                        .collect::<Vec<_>>()
-                )?,
-                documented
-            );
-            assert_eq!(loaded[0].input_ids[0], BOS_TOKEN);
-            assert_eq!(
-                loaded[0]
-                    .target_labels
-                    .iter()
-                    .copied()
-                    .filter(|&id| id != PAD_TOKEN)
-                    .last(),
-                Some(EOS_TOKEN)
-            );
-            Ok(())
         }
     }
 }

@@ -303,8 +303,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
         let run = RunConfig {
             name: format!("code_{}h_{}l_{}a_{}ff_{}len_b{}_{arch_tag}_f32{}{}", config.embed_dim,
                 config.n_layers, config.attn_heads, config.ff_dim, config.max_seq_len, config.batch_size,
-                if config.documented.is_some() { "_curriculum_documented_balanced_v2" }
-                else if config.curriculum.is_some() { "_curriculum_lmm_v2" } else { "" },
+                if config.curriculum.is_some() { "_curriculum_documented_tiers_v3" } else { "" },
                 if config.docs.is_some() { "_rust_docs_v1" } else { "" })
                 + &config.overfit_samples.map_or(String::new(), |n| format!("_overfit{n}")),
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,

@@ -22,6 +22,7 @@ pub mod code_complexity;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod code_curriculum;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod code_data;
 pub mod code_documented;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod code_docs;

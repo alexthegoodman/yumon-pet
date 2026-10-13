@@ -11,8 +11,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{fs::File, path::Path};
 
-pub const ALLOWED_BUCKETS: [&str; 3] = ["tier_1_low", "tier_2_mild", "tier_3_moderate"];
-
 pub struct PreparedCode {
     pub training: Vec<Sample>,
     pub validation: Vec<Sample>,
@@ -182,89 +180,48 @@ fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<Prepar
                 "validation_fraction": config.validation_fraction}),
         });
     };
-    let report: Value = serde_json::from_slice(
-        &std::fs::read(directory.join("report.json"))
-            .context("curriculum requires the sorter's report.json")?,
-    )?;
-    let reference_path = directory.join("reference.json");
-    let reference_sha = file_sha256(&reference_path)?;
-    ensure!(
-        report["reference_sha256"].as_str() == Some(reference_sha.as_str()),
-        "curriculum reference digest mismatch"
-    );
-    let reference: super::code_complexity::Reference =
-        serde_json::from_slice(&std::fs::read(reference_path)?)?;
-    reference.validate()?;
-    let mut buckets = Vec::new();
-    let mut samples = Vec::new();
-    let mut lengths = [0; 3];
-    // This whitelist is deliberate: no directory glob or original code.bin fallback.
-    for (tier, name) in ALLOWED_BUCKETS.iter().enumerate() {
-        let count = report["bucket_counts"][name]
-            .as_u64()
-            .context("missing curriculum bucket count")?;
-        if count == 0 {
-            buckets.push(json!({"name": name, "samples": 0}));
-            continue;
-        }
-        let path = directory.join(format!("{name}.bin"));
-        let sha =
-            file_sha256(&path).with_context(|| format!("curriculum bucket {}", path.display()))?;
-        ensure!(
-            report["bucket_caches"][name]["sha256"].as_str() == Some(sha.as_str()),
-            "{name} digest mismatch"
-        );
-        let metadata = sample_cache::read_metadata(&path)?;
-        ensure!(
-            metadata.seed == config.seed && metadata.samples as u64 == count,
-            "{name} seed or count mismatch"
-        );
-        let group = sample_cache::load_cache_with_objective(
-            &path,
-            tokenizer,
-            TrainingStage::Language,
-            if config.documented.is_some() {
-                metadata.max_seq_len
-            } else {
-                config.max_seq_len
-            },
-            CacheObjective::RawCode,
-        )?;
-        lengths[tier] = group.len();
-        samples.extend(group);
-        buckets.push(json!({"name": name, "sha256": sha, "metadata": metadata}));
+    use super::code_data::{self, Kind, TIERS};
+    use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
+    // Each tier is its documented file followed by its undocumented file: the same
+    // code with and without a doc comment. Nothing else is read (no high tier).
+    let mut tiers = Vec::new();
+    let mut files = Vec::new();
+    for tier in 0..TIERS.len() {
+        let documented = code_data::scan(&code_data::file(directory, Kind::Documented, tier))?.records;
+        let undocumented = code_data::scan(&code_data::file(directory, Kind::Undocumented, tier))?.records;
+        files.extend(documented.iter().chain(&undocumented).map(|r| r.path.clone()));
+        tiers.push((documented, undocumented));
     }
-    let held_out = code_corpus::validation_files(&samples, config)?;
-    let documented_identity = if let Some(directory) = &config.documented {
-        let (mixed, ends, identity) = super::code_documented::mix(
-            directory,
-            &samples,
-            lengths,
-            &held_out,
-            config,
-            tokenizer,
-            &reference_sha,
-            &buckets,
-        )?;
-        samples = mixed;
-        lengths = ends;
-        Some(identity)
-    } else {
-        None
-    };
+    ensure!(!files.is_empty(), "no samples under {}; run gen_synthetic_captions", directory.display());
+    let held_out = code_data::held_out_files(files.iter().map(String::as_str), config)?;
     let mut training = Vec::new();
     let mut validation = Vec::new();
     let mut tier_ends = [0; 3];
-    let mut samples = samples.into_iter();
-    for tier in 0..3 {
-        for sample in samples.by_ref().take(lengths[tier]) {
-            if held_out.contains(&sample.pair.0) {
-                validation.push(sample);
-            } else {
-                training.push(sample);
+    let mut summary = Vec::new();
+    for (tier, (documented, undocumented)) in tiers.iter().enumerate() {
+        let mut samples = Vec::new();
+        let mut skipped = 0;
+        for (kind, records) in [(Kind::Documented, documented), (Kind::Undocumented, undocumented)] {
+            for record in records {
+                match code_data::to_sample(record, tokenizer, config.max_seq_len)? {
+                    Some(sample) => samples.push((kind, sample)),
+                    None => skipped += 1,
+                }
             }
         }
+        // Mix the two kinds so any slice of a tier (see `code_indices`) is balanced.
+        samples.shuffle(&mut StdRng::seed_from_u64(config.seed.wrapping_add(tier as u64)));
+        let mut counts = [[0usize; 2]; 2];
+        for (kind, sample) in samples {
+            let split = usize::from(held_out.contains(&sample.pair.0));
+            counts[split][usize::from(kind == Kind::Undocumented)] += 1;
+            if split == 1 { validation.push(sample) } else { training.push(sample) }
+        }
         tier_ends[tier] = training.len();
+        println!("{}: {} documented + {} undocumented train; {} + {} validation; {skipped} over {} tokens skipped",
+            TIERS[tier], counts[0][0], counts[0][1], counts[1][0], counts[1][1], config.max_seq_len);
+        summary.push(json!({"name": TIERS[tier], "documented": documented.len(),
+            "undocumented": undocumented.len(), "skipped_oversized": skipped}));
     }
     ensure!(
         tier_ends[0] > 0,
@@ -274,13 +231,8 @@ fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<Prepar
         !validation.is_empty(),
         "curriculum needs held-out validation samples"
     );
-    let mut identity = json!({"mode": "low-mild-moderate-v2", "reference_sha256": reference_sha,
-        "buckets": buckets, "seed": config.seed, "validation_fraction": config.validation_fraction,
-        "tier_ends": tier_ends});
-    if let Some(documented) = documented_identity {
-        identity["mode"] = json!("documented-balanced-lmm-v2");
-        identity["documented"] = documented;
-    }
+    let identity = json!({"mode": "documented-tiers-v3", "tiers": summary, "context": config.max_seq_len,
+        "seed": config.seed, "validation_fraction": config.validation_fraction, "tier_ends": tier_ends});
     Ok(PreparedCode {
         training,
         validation,

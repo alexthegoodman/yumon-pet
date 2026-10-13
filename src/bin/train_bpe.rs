@@ -5,7 +5,7 @@ fn main() -> anyhow::Result<()> {
     use std::path::PathBuf;
     #[derive(Parser)]
     #[command(
-        about = "Train Code BPE on the exact balanced curriculum and publish matching caches"
+        about = "Fit the Code BPE on the documented/undocumented tier files and write tokenizer.json"
     )]
     struct Args {
         #[arg(
@@ -14,8 +14,11 @@ fn main() -> anyhow::Result<()> {
             conflicts_with = "pet"
         )]
         code_config: PathBuf,
-        /// New output bundle directory (Pet mode: tokenizer directory).
+        /// Directory for tokenizer.json (default: the config's `tokenizer`).
         output: Option<PathBuf>,
+        /// Overwrite an existing tokenizer.json.
+        #[arg(long, conflicts_with = "pet")]
+        replace: bool,
         /// Train the legacy Pet prose tokenizer instead of Code.
         #[arg(long)]
         pet: bool,
@@ -53,13 +56,14 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let config = yumon_pet::brain::code_corpus::CodeConfig::load(&args.code_config)?;
-    let output = args
-        .output
-        .unwrap_or_else(|| "training-cache/code_tokenizer_retrained".into());
-    yumon_pet::brain::code_corpus::prepare_training_tokenizer(&config, &output)?;
+    let output = args.output.unwrap_or_else(|| config.tokenizer.clone().into());
+    yumon_pet::brain::code_corpus::train_tokenizer_from_data(
+        &config,
+        output.to_str().ok_or_else(|| anyhow::anyhow!("output path must be UTF-8"))?,
+        args.replace,
+    )?;
     println!(
-        "Prepared {}. Train with: train_code --config {}/config.json",
-        output.display(),
+        "Wrote {}/tokenizer.json. Rebuild anything tokenized with the old one (cache_samples for code.bin).",
         output.display()
     );
     Ok(())
