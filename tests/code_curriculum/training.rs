@@ -109,8 +109,9 @@ where
         training: vec![sample(4), sample(6), sample(7)],
         validation: vec![sample(8)],
         tier_ends: Some([1, 2, 3]),
-        docs_len: 0,
-        docs_share: 0.0,
+        pretrain_len: 0,
+        pretrain_epochs: 0,
+        pretrain_share: 0.0,
         identity: serde_json::json!({}),
         seed: 42,
     };

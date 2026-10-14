@@ -266,9 +266,9 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
     let mut prepared = code_curriculum::prepare(config, &tokenizer)?;
     let overfit = config.overfit_samples.is_some();
     if let Some(count) = config.overfit_samples {
-        // Fixed subset, no docs stage or tier schedule; validate on the same sequences.
-        prepared.training.drain(..prepared.docs_len);
-        prepared.docs_len = 0;
+        // Fixed subset, no pretraining stage or tier schedule; validate on the same sequences.
+        prepared.training.drain(..prepared.pretrain_len);
+        prepared.pretrain_len = 0;
         prepared.tier_ends = None;
         anyhow::ensure!(prepared.training.len() >= count, "overfit_samples {count} exceeds {} training samples", prepared.training.len());
         prepared.training.truncate(count);
@@ -313,7 +313,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 if config.adaptive_depth.is_some() { String::new() } else { format!("{}ff_", config.ff_dim) },
                 config.max_seq_len, config.batch_size,
                 if config.curriculum.is_some() { "_curriculum_documented_tiers_v3" } else { "" },
-                if config.docs.is_some() { "_rust_docs_v1" } else { "" })
+                if config.docs.is_some() { "_rust_docs_v1" } else if config.pretrain_code { "_code_pretrain_v1" } else { "" })
                 + &config.overfit_samples.map_or(String::new(), |n| format!("_overfit{n}"))
                 // Separate directories so A/B/C/D experiments never resume each other.
                 + &config.adaptive_loss.as_ref().map_or(String::new(), |a| format!("_alw_{}", a.effective_mode().tag())),

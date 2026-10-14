@@ -9,26 +9,28 @@ use super::{
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{fs::File, path::Path};
+use std::{collections::HashSet, fs::File, path::Path};
 
 pub struct PreparedCode {
     pub training: Vec<Sample>,
     pub validation: Vec<Sample>,
     /// Cumulative lengths after the single global file-level validation split.
-    /// With a docs stage these are offsets into `training`, after the docs.
+    /// With a pretraining stage these are offsets into `training`, after the stage.
     pub tier_ends: Option<[usize; 3]>,
-    /// Rust books prepended to `training`: epoch 1 is docs only, then code epochs
-    /// follow with the docs kept in every slice. Docs never enter validation.
-    pub docs_len: usize,
-    pub docs_share: f64,
+    /// Pretraining stage prepended to `training` (all of `code.bin`, or the Rust
+    /// books): the first `pretrain_epochs` epochs train it alone, then code epochs
+    /// follow with an optional replay window. It never enters validation.
+    pub pretrain_len: usize,
+    pub pretrain_epochs: usize,
+    pub pretrain_share: f64,
     pub identity: Value,
     pub seed: u64,
 }
 impl PreparedCode {
-    /// Training index range of a tier (offsets include any docs prefix).
+    /// Training index range of a tier (offsets include any pretraining prefix).
     fn tier_range(&self, tier: usize) -> std::ops::Range<usize> {
         let ends = self.tier_ends.expect("tier ranges need a curriculum");
-        (if tier == 0 { self.docs_len } else { ends[tier - 1] })..ends[tier]
+        (if tier == 0 { self.pretrain_len } else { ends[tier - 1] })..ends[tier]
     }
     /// Code samples for a code epoch. Without tiers that is everything. With tiers
     /// the epoch is a mix anchored on its hardest tier, which is taken whole:
@@ -37,7 +39,7 @@ impl PreparedCode {
     /// their samples from one epoch to the next.
     fn code_indices(&self, code_epoch: usize) -> Vec<usize> {
         if self.tier_ends.is_none() {
-            return (self.docs_len..self.training.len()).collect();
+            return (self.pretrain_len..self.training.len()).collect();
         }
         let (anchor, shares) = match code_epoch {
             0 => (0, [1.0, 0.0, 0.0]),
@@ -58,35 +60,42 @@ impl PreparedCode {
     fn tokens(&self, index: usize) -> usize {
         self.training[index].target_labels.iter().filter(|&&t| t != PAD_TOKEN).count()
     }
-    /// Rotating docs window for a later epoch, sized so docs take about
-    /// `docs_share` of that epoch's supervised tokens. Windows continue where
-    /// the previous epoch stopped, so replay cycles through every docs sample.
-    fn docs_window(&self, code_epoch: usize) -> Vec<usize> {
+    /// Rotating pretraining window for a later epoch, sized so the stage takes
+    /// about `pretrain_share` of that epoch's supervised tokens. Windows continue
+    /// where the previous epoch stopped, so replay cycles through every sample.
+    fn pretrain_window(&self, code_epoch: usize) -> Vec<usize> {
         let mut start = 0;
         let mut window = Vec::new();
         for e in 0..=code_epoch {
             let code: usize = self.code_indices(e).into_iter().map(|i| self.tokens(i)).sum();
-            let target = code as f64 * self.docs_share / (1.0 - self.docs_share);
+            let target = code as f64 * self.pretrain_share / (1.0 - self.pretrain_share);
             let mut taken = 0;
             window.clear();
-            while (taken as f64) < target && window.len() < self.docs_len {
-                let index = (start + window.len()) % self.docs_len;
+            while (taken as f64) < target && window.len() < self.pretrain_len {
+                let index = (start + window.len()) % self.pretrain_len;
                 taken += self.tokens(index);
                 window.push(index);
             }
-            start = (start + window.len()) % self.docs_len;
+            start = (start + window.len()) % self.pretrain_len;
         }
         window
     }
-    /// Training indices for an epoch. With docs, epoch 1 is the whole docs stage;
-    /// later epochs add a rotating docs window to the cumulative code tiers.
+    /// The code curriculum epoch for a training epoch; None during pretraining.
+    fn code_epoch(&self, epoch: usize) -> Option<usize> {
+        match self.pretrain_len {
+            0 => Some(epoch),
+            _ => epoch.checked_sub(self.pretrain_epochs),
+        }
+    }
+    /// Training indices for an epoch: the whole pretraining stage during its
+    /// epochs, then a rotating replay window plus the code curriculum.
     pub fn epoch_indices(&self, epoch: usize) -> Vec<usize> {
-        match (self.docs_len, epoch) {
-            (0, epoch) => self.code_indices(epoch),
-            (docs, 0) => (0..docs).collect(),
-            (_, epoch) => {
-                let mut indices = self.docs_window(epoch - 1);
-                indices.extend(self.code_indices(epoch - 1));
+        match self.code_epoch(epoch) {
+            None => (0..self.pretrain_len).collect(),
+            Some(code) if self.pretrain_len == 0 => self.code_indices(code),
+            Some(code) => {
+                let mut indices = self.pretrain_window(code);
+                indices.extend(self.code_indices(code));
                 indices
             }
         }
@@ -100,25 +109,29 @@ impl PreparedCode {
             .collect()
     }
     pub fn print_plan(&self, epochs: usize, batch_size: usize) {
+        let stage = self.identity["pretrain"]["source"].as_str().unwrap_or("pretraining");
         println!(
-            "Code data: {} train ({} Rust docs), {} held-out; high/excluded/unscored are ineligible in curriculum mode",
+            "Code data: {} train ({} {stage}), {} held-out; high/excluded/unscored are ineligible in curriculum mode",
             self.training.len(),
-            self.docs_len,
+            self.pretrain_len,
             self.validation.len()
         );
         for epoch in 0..epochs {
-            let window = if self.docs_len > 0 && epoch > 0 { self.docs_window(epoch - 1) } else { Vec::new() };
-            let docs = if !window.is_empty() {
-                let tokens: usize = window.iter().map(|&i| self.tokens(i)).sum();
-                let total: usize = self.epoch_indices(epoch).iter().map(|&i| self.tokens(i)).sum();
-                format!("{} docs = {:.0}% of tokens + ", window.len(), 100.0 * tokens as f64 / total.max(1) as f64)
-            } else { String::new() };
-            let code = epoch - (self.docs_len > 0 && epoch > 0) as usize;
-            let label = match (self.docs_len > 0 && epoch == 0, self.tier_ends) {
-                (true, _) => " (Rust docs)".to_owned(),
-                (false, Some(_)) => format!(" ({docs}{})", ["low", "20% low + 80% mild", "10% low + 20% mild + 70% moderate"][code.min(2)]),
-                (false, None) if self.docs_len > 0 => format!(" ({docs}all code)"),
-                _ => String::new(),
+            let label = match self.code_epoch(epoch) {
+                None => format!(" ({stage} pretraining)"),
+                Some(code) => {
+                    let window = if self.pretrain_len > 0 { self.pretrain_window(code) } else { Vec::new() };
+                    let replay = if window.is_empty() { String::new() } else {
+                        let tokens: usize = window.iter().map(|&i| self.tokens(i)).sum();
+                        let total: usize = self.epoch_indices(epoch).iter().map(|&i| self.tokens(i)).sum();
+                        format!("{} {stage} = {:.0}% of tokens + ", window.len(), 100.0 * tokens as f64 / total.max(1) as f64)
+                    };
+                    match self.tier_ends {
+                        Some(_) => format!(" ({replay}{})", ["low", "20% low + 80% mild", "10% low + 20% mild + 70% moderate"][code.min(2)]),
+                        None if self.pretrain_len > 0 => format!(" ({replay}all code)"),
+                        None => String::new(),
+                    }
+                }
             };
             println!(
                 "Epoch {}: {} samples, {} batches{label}",
@@ -138,22 +151,51 @@ pub fn file_sha256(path: &Path) -> Result<String> {
 }
 
 pub fn prepare(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<PreparedCode> {
-    let mut prepared = prepare_code(config, tokenizer)?;
-    if let Some(directory) = &config.docs {
-        let (mut docs, identity) = super::code_docs::load(directory, config, tokenizer)?;
-        let docs_len = docs.len();
-        docs.append(&mut prepared.training);
-        prepared.training = docs;
-        prepared.tier_ends = prepared.tier_ends.map(|ends| ends.map(|end| end + docs_len));
-        prepared.docs_len = docs_len;
-        prepared.docs_share = config.docs_share;
-        prepared.identity["docs"] = identity;
-        prepared.identity["docs"]["share"] = json!(config.docs_share);
+    let (mut prepared, held_out) = prepare_code(config, tokenizer)?;
+    let stage = if let Some(directory) = &config.docs {
+        let (docs, mut identity) = super::code_docs::load(directory, config, tokenizer)?;
+        identity["source"] = json!("Rust docs");
+        Some((docs, identity))
+    } else if config.pretrain_code {
+        Some(load_code_pretraining(config, tokenizer, &held_out)?)
+    } else {
+        None
+    };
+    if let Some((mut samples, mut identity)) = stage {
+        let pretrain_len = samples.len();
+        samples.append(&mut prepared.training);
+        prepared.training = samples;
+        prepared.tier_ends = prepared.tier_ends.map(|ends| ends.map(|end| end + pretrain_len));
+        prepared.pretrain_len = pretrain_len;
+        prepared.pretrain_epochs = config.pretrain_epochs;
+        prepared.pretrain_share = config.pretrain_share;
+        identity["epochs"] = json!(config.pretrain_epochs);
+        identity["share"] = json!(config.pretrain_share);
+        prepared.identity["pretrain"] = identity;
     }
     Ok(prepared)
 }
 
-fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<PreparedCode> {
+/// Every sample in `code.bin` (all tiers, high included, as raw code) except
+/// those from files the curriculum holds out for validation.
+fn load_code_pretraining(config: &CodeConfig, tokenizer: &TokenizerKind, held_out: &HashSet<String>)
+    -> Result<(Vec<Sample>, Value)> {
+    let metadata = sample_cache::read_metadata(&config.cache)
+        .with_context(|| format!("code pretraining reads {}", config.cache.display()))?;
+    let samples = sample_cache::load_cache_with_objective(&config.cache, tokenizer, TrainingStage::Language,
+        config.max_seq_len, CacheObjective::RawCode)?;
+    let total = samples.len();
+    let samples: Vec<_> = samples.into_iter().filter(|s| !held_out.contains(&s.pair.0)).collect();
+    ensure!(!samples.is_empty(), "no code pretraining samples left in {}", config.cache.display());
+    let dropped = total - samples.len();
+    println!("Code pretraining: {} of {total} samples from {} ({dropped} from held-out files dropped)",
+        samples.len(), config.cache.display());
+    let identity = json!({"source": "code.bin", "cache_sha256": file_sha256(&config.cache)?,
+        "tokenizer_sha256": metadata.tokenizer_sha256, "samples": samples.len(), "held_out_dropped": dropped});
+    Ok((samples, identity))
+}
+
+fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<(PreparedCode, HashSet<String>)> {
     config.validate()?;
     let Some(directory) = &config.curriculum else {
         let metadata = sample_cache::read_metadata(&config.cache)?;
@@ -168,17 +210,19 @@ fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<Prepar
             config.max_seq_len,
             CacheObjective::RawCode,
         )?;
-        let (training, validation) = code_corpus::split_validation(samples, config)?;
-        return Ok(PreparedCode {
+        let held_out = code_corpus::validation_files(&samples, config)?;
+        let (validation, training) = samples.into_iter().partition(|s| held_out.contains(&s.pair.0));
+        return Ok((PreparedCode {
             training,
             validation,
             tier_ends: None,
-            docs_len: 0,
-            docs_share: 0.0,
+            pretrain_len: 0,
+            pretrain_epochs: 0,
+            pretrain_share: 0.0,
             seed: config.seed,
             identity: json!({"mode": "full-cache", "cache": metadata, "seed": config.seed,
                 "validation_fraction": config.validation_fraction}),
-        });
+        }, held_out));
     };
     use super::code_data::{self, Kind, TIERS};
     use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
@@ -233,15 +277,16 @@ fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<Prepar
     );
     let identity = json!({"mode": "documented-tiers-v3", "tiers": summary, "context": config.max_seq_len,
         "seed": config.seed, "validation_fraction": config.validation_fraction, "tier_ends": tier_ends});
-    Ok(PreparedCode {
+    Ok((PreparedCode {
         training,
         validation,
         tier_ends: Some(tier_ends),
-        docs_len: 0,
-        docs_share: 0.0,
+        pretrain_len: 0,
+        pretrain_epochs: 0,
+        pretrain_share: 0.0,
         seed: config.seed,
         identity,
-    })
+    }, held_out))
 }
 
 #[cfg(test)]

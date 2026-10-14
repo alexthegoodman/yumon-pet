@@ -39,11 +39,17 @@ pub struct CodeConfig {
     /// `undocumented/` tier files; see `code_data`. Only tiers 1-3 are trained.
     pub curriculum: Option<PathBuf>,
     /// Optional frozen Rust books stage (`cache_samples --rust-docs`), trained
-    /// alone in epoch 1 and kept in every later epoch.
+    /// alone for the first `pretrain_epochs`. Exclusive with `pretrain_code`.
     pub docs: Option<PathBuf>,
-    /// Optional docs replay after epoch 1: target share of each later epoch's
-    /// supervised tokens, as a rotating window. 0 (default) = docs pretraining only.
-    pub docs_share: f64,
+    /// Pretrain on every sample in `cache` (code.bin) for the first
+    /// `pretrain_epochs`, minus the curriculum's held-out files, before the tiers.
+    pub pretrain_code: bool,
+    /// Epochs of the pretraining stage (default 1); they count toward `epochs`.
+    pub pretrain_epochs: usize,
+    /// Optional replay of the pretraining stage afterwards: target share of each
+    /// later epoch's supervised tokens, as a rotating window. 0 (default) = none.
+    #[serde(alias = "docs_share")]
+    pub pretrain_share: f64,
     pub tokenizer: String,
     pub max_seq_len: usize,
     pub exclude_dirs: Vec<String>,
@@ -80,7 +86,8 @@ impl Default for CodeConfig {
     fn default() -> Self {
         Self {
             architecture: CodeArchitecture::DecoderOnly, num_experts: 4, top_k: 1,
-            source: "../rust-code".into(), cache: "training-cache/code.bin".into(), curriculum: None, docs: None, docs_share: 0.0,
+            source: "../rust-code".into(), cache: "training-cache/code.bin".into(), curriculum: None, docs: None,
+            pretrain_code: false, pretrain_epochs: 1, pretrain_share: 0.0,
             tokenizer: "yumon_code_bpe".into(), max_seq_len: 512,
             exclude_dirs: [".git", "target", "node_modules"].map(String::from).to_vec(),
             seed: 4815162342, vocab_size: 16384, embed_dim: 512, n_layers: 16,
@@ -105,7 +112,14 @@ impl CodeConfig {
             "require num_experts > 0 and 1 <= top_k <= num_experts");
         ensure!(self.max_seq_len >= 2, "max_seq_len must be >= 2");
         ensure!(self.overfit_samples != Some(0), "overfit_samples must be positive");
-        ensure!(self.docs_share >= 0.0 && self.docs_share < 1.0, "docs_share must be in [0, 1)");
+        ensure!(self.pretrain_share >= 0.0 && self.pretrain_share < 1.0, "pretrain_share must be in [0, 1)");
+        ensure!(!(self.pretrain_code && self.docs.is_some()), "use either pretrain_code or docs, not both");
+        ensure!(!self.pretrain_code || self.curriculum.is_some(),
+            "pretrain_code needs `curriculum`; without it `cache` is already the whole training set");
+        if self.pretrain_code || self.docs.is_some() {
+            ensure!(self.pretrain_epochs > 0 && self.pretrain_epochs < self.epochs,
+                "pretrain_epochs must be at least 1 and leave epochs for the curriculum");
+        }
         ensure!(self.vocab_size >= 260, "vocab_size must cover 256 bytes and four special tokens");
         ensure!(self.embed_dim > 0 && self.attn_heads > 0 && self.embed_dim % self.attn_heads == 0,
             "embed_dim must be positive and divisible by attn_heads");

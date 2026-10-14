@@ -218,13 +218,13 @@ fn rust_docs_stage_trains_alone_first_then_replays_by_token_share() -> Result<()
         0,
     )?;
     fixture.config.docs = Some(docs);
-    fixture.config.docs_share = 0.0;
+    fixture.config.pretrain_share = 0.0;
     let prepared = prepare(&fixture.config, &fixture.tokenizer)?;
     // Context 128 splits the fixture chapters into several samples.
-    let d = prepared.docs_len;
+    let d = prepared.pretrain_len;
     assert!(d >= 2);
     assert_eq!(prepared.tier_ends, Some([d + 8, d + 16, d + 24]));
-    // docs_share 0: the docs train once, then the code curriculum runs unchanged.
+    // pretrain_share 0: the docs train once, then the code curriculum runs unchanged.
     assert_eq!(
         (0..6).map(|e| prepared.epoch_len(e)).collect::<Vec<_>>(),
         [d, 8, 10, 11, 11, 11]
@@ -242,12 +242,12 @@ fn rust_docs_stage_trains_alone_first_then_replays_by_token_share() -> Result<()
         format!("{:?}", prepared.validation),
         format!("{:?}", without.validation)
     );
-    assert_eq!(prepared.identity["docs"]["toolchain"], "rustc test");
+    assert_eq!(prepared.identity["pretrain"]["toolchain"], "rustc test");
     assert_eq!(prepared.identity["mode"], without.identity["mode"]);
 
     // A docs share rotates through the docs, keeps every code sample, and
     // takes roughly the requested share of supervised tokens.
-    fixture.config.docs_share = 0.5;
+    fixture.config.pretrain_share = 0.5;
     let rotating = prepare(&fixture.config, &fixture.tokenizer)?;
     assert_ne!(rotating.identity, prepared.identity);
     let tokens = |i: usize| rotating.training[i].target_labels.iter().filter(|&&t| t != PAD_TOKEN).count();
@@ -270,5 +270,43 @@ fn rust_docs_stage_trains_alone_first_then_replays_by_token_share() -> Result<()
         seen.extend(docs);
     }
     assert_eq!(seen.len(), d);
+    Ok(())
+}
+
+#[test]
+fn code_pretraining_trains_all_of_code_bin_first_without_held_out_files() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let without = prepare(&fixture.config, &fixture.tokenizer)?;
+    // code.bin has every curriculum file plus code the tiers never stored.
+    let record = |path: &str, text: &str| Record { path: path.into(), location: "line 1".into(), text: text.into() };
+    let mut records: Vec<_> = (0..6).flat_map(|f| SOURCES.map(|s| record(&format!("file-{f}.rs"), s))).collect();
+    records.push(record("high.rs", "fn high() { loop { match 1 { _ => break } } }"));
+    let samples: Vec<_> = records.iter()
+        .map(|r| code_data::to_sample(r, &fixture.tokenizer, fixture.config.max_seq_len).map(Option::unwrap))
+        .collect::<Result<_>>()?;
+    let cache = fixture.directory.join("code.bin");
+    sample_cache::write_cache_with_objective(&cache, &fixture.tokenizer, TrainingStage::Language,
+        fixture.config.max_seq_len, fixture.config.seed, &samples, CacheObjective::RawCode)?;
+    fixture.config.cache = cache;
+    fixture.config.pretrain_code = true;
+    fixture.config.pretrain_epochs = 2;
+    let prepared = prepare(&fixture.config, &fixture.tokenizer)?;
+
+    let held_out: HashSet<_> = without.validation.iter().map(|s| s.pair.0.clone()).collect();
+    let p = prepared.pretrain_len;
+    assert_eq!(p, samples.iter().filter(|s| !held_out.contains(&s.pair.0)).count());
+    assert!(prepared.training[..p].iter().all(|s| !held_out.contains(&s.pair.0)));
+    assert!(prepared.training[..p].iter().any(|s| s.pair.0 == "high.rs"));
+    assert_eq!(prepared.identity["pretrain"]["held_out_dropped"], samples.len() - p);
+    // Two pretraining epochs, then the unchanged curriculum.
+    assert_eq!(prepared.epoch_indices(0), (0..p).collect::<Vec<_>>());
+    assert_eq!(prepared.epoch_indices(1), (0..p).collect::<Vec<_>>());
+    assert_eq!(prepared.epoch_indices(2), without.epoch_indices(0).iter().map(|i| i + p).collect::<Vec<_>>());
+    assert_eq!(prepared.epoch_indices(4), without.epoch_indices(2).iter().map(|i| i + p).collect::<Vec<_>>());
+    assert_eq!(format!("{:?}", &prepared.training[p..]), format!("{:?}", without.training));
+    assert_eq!(format!("{:?}", prepared.validation), format!("{:?}", without.validation));
+
+    fixture.config.docs = Some(fixture.directory.join("docs"));
+    assert!(fixture.config.validate().is_err());
     Ok(())
 }
