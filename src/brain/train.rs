@@ -514,7 +514,8 @@ const MAX_VAL_SAMPLES: usize = 2048;
 
 /// Decoder-only layout: [prompt][separator][reply] packed into one causal
 /// sequence and padded. Targets are next tokens over the separator and reply
-/// only (PAD elsewhere). Returns token ids, targets and the supervised count.
+/// only (PAD elsewhere). Plain-text samples are [BOS][text][EOS] with every
+/// token trained. Returns token ids, targets and the supervised count.
 fn build_moe_batch(
     samples:     &[crate::brain::samples::Sample],
     batch_idx:   &[usize],
@@ -522,7 +523,6 @@ fn build_moe_batch(
     max_seq_len: usize,
     raw_code: bool,
 ) -> (Vec<i32>, Vec<i32>, usize) {
-    let sep_len = sep_tokens.len();
     let mut all_seq_ids: Vec<i32> = Vec::with_capacity(batch_idx.len() * max_seq_len);
     let mut all_targets: Vec<i32> = Vec::with_capacity(batch_idx.len() * max_seq_len);
     let mut supervised = 0usize;
@@ -540,6 +540,8 @@ fn build_moe_batch(
         }
         let input_ids = &sample.input_ids;
         let target_labels = &sample.target_labels;
+        let sep_tokens = if crate::brain::samples::is_plain_text(sample) { &[][..] } else { sep_tokens };
+        let sep_len = sep_tokens.len();
 
         let input_len = input_ids.iter().position(|&t| t == PAD_TOKEN).unwrap_or(input_ids.len())
             .min(max_seq_len - sep_len - 1);
@@ -1722,12 +1724,12 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
         .add("archive/arena_extract.txt",   FileKind::Chats, None)
         // .add("data/distillchatv1.csv",   FileKind::DistillChat, None)
         // Plain text, loss on every token (cleaned extract of the simplewiki XML).
-        // .add("data/wiki_extract.txt",   FileKind::Paragraphs, None) // too dense
+        .add("data/wiki_extract.txt",   FileKind::Paragraphs, None) // too dense
         // .add("data/quotes.csv",   FileKind::QuotesCsv, None) // only 5 prompts used. maybe better used without prompts
         .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
         .add("data/bible_asv.csv", FileKind::BibleCsv, None)
-        // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs — proper
-        // message/reply splits instead of BibleCsv's arbitrary mid-sentence cuts.
+        // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs - real
+        // message/reply splits (ideas, Bible and stories train as plain text).
         .add("archive/synthetic/bible.txt", FileKind::Chats, None)
         .add("archive/synthetic/business.txt", FileKind::Chats, None)
         .add("archive/synthetic/universe.txt", FileKind::Chats, None)
@@ -1737,12 +1739,12 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
         .add("archive/synthetic/puzzles.txt", FileKind::Chats, None)
         .add("archive/synthetic/commands.txt", FileKind::Chats, None)
         .add("archive/synthetic/memory.txt", FileKind::Chats, None)
-        .add("data/creative_stories.txt", FileKind::Stories, None)
+        // .add("data/creative_stories.txt", FileKind::Stories, None)
         // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
         // // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
         // // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, None)
-        .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, None)
+        // .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, None)
+        // .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, None)
         // // .add("archive/ov_chats.txt", FileKind::Chats, None)
         // // .add("archive/ov_chats.txt", FileKind::Chats, None)
         .add("archive/ov_chats.txt", FileKind::Chats, None)
@@ -2315,7 +2317,6 @@ pub fn run_with_architecture(
                 // Decoder-only style: [prompt][separator][reply] packed into one causal sequence
                 let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { " " };
                 let sep_tokens = tokenizer.encode(sep_text);
-                let sep_len = sep_tokens.len();
 
                 for batch_num in 0..num_batches {
                     let current_lr = {
@@ -2331,39 +2332,8 @@ pub fn run_with_architecture(
                     let current_batch_size = batch_idx.len();
                     if current_batch_size == 0 { continue; }
 
-                    let mut all_lang_targets: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
-                    let mut all_seq_ids: Vec<i32> = Vec::with_capacity(current_batch_size * run_cfg.max_seq_len);
-
-                    for &i in batch_idx {
-                        let sample = &training_samples[i];
-                        let input_ids = &sample.input_ids;
-                        let target_labels = &sample.target_labels;
-
-                        let input_len = input_ids.iter().position(|&t| t == PAD_TOKEN).unwrap_or(run_cfg.max_seq_len);
-                        let target_len = target_labels.iter().position(|&t| t == PAD_TOKEN).unwrap_or(run_cfg.max_seq_len);
-
-                        let mut full_seq = Vec::with_capacity(run_cfg.max_seq_len);
-                        full_seq.extend(&input_ids[..input_len]);
-                        full_seq.extend(sep_tokens.iter().map(|&t| t as usize));
-
-                        let remaining_space = run_cfg.max_seq_len.saturating_sub(full_seq.len());
-                        let actual_target_len = target_len.min(remaining_space);
-                        full_seq.extend(&target_labels[..actual_target_len]);
-                        full_seq.resize(run_cfg.max_seq_len, PAD_TOKEN);
-
-                        // Loss only on the separator + target tokens, not the prompt.
-                        let mut loss_targets = vec![PAD_TOKEN as i32; run_cfg.max_seq_len];
-
-                        let start_predict_idx = input_len.saturating_sub(1);
-                        let end_predict_idx = (input_len + sep_len + actual_target_len).saturating_sub(1).min(run_cfg.max_seq_len - 1);
-
-                        for idx in start_predict_idx..end_predict_idx {
-                            loss_targets[idx] = full_seq[idx + 1] as i32;
-                        }
-
-                        all_seq_ids.extend(full_seq.iter().map(|&t| t as i32));
-                        all_lang_targets.extend(loss_targets);
-                    }
+                    let (all_seq_ids, all_lang_targets, _) =
+                        build_moe_batch(&training_samples, batch_idx, &sep_tokens, run_cfg.max_seq_len, false);
 
                     let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), &device);
                     let tokens_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_seq_ids, [current_batch_size, run_cfg.max_seq_len]), &device);
@@ -2613,6 +2583,28 @@ mod language_run_tests {
         let full: Vec<i32> = (1..=4).collect();
         assert_eq!(trim_batch(full.clone(), full.clone(), 1, 4), (full.clone(), full, 4));
     }
+
+    #[test]
+    fn plain_text_trains_every_token_and_pairs_mask_the_prompt() {
+        use crate::brain::{BOS_TOKEN, EOS_TOKEN, samples::{Action, CardinalDir, Sample}};
+        let (p, len) = (PAD_TOKEN as i32, 10);
+        let sample = |input: &[usize], target: &[usize]| {
+            let pad = |ids: &[usize]| { let mut v = ids.to_vec(); v.resize(len, PAD_TOKEN); v };
+            Sample { input_ids: pad(input), target_labels: pad(target), action: Action::Sit,
+                motion_dir: CardinalDir::None, world: Default::default(), target_json: String::new(),
+                pair: Default::default() }
+        };
+        let samples = [sample(&[BOS_TOKEN], &[7, 8, 9, EOS_TOKEN]), sample(&[BOS_TOKEN, 5, 6], &[7, EOS_TOKEN])];
+        let (ids, targets, supervised) = build_moe_batch(&samples, &[0, 1], &[4], len, false);
+        let (bos, eos) = (BOS_TOKEN as i32, EOS_TOKEN as i32);
+        // Plain text: no separator, BOS predicts the first token, loss through EOS.
+        assert_eq!(ids[..len], [bos, 7, 8, 9, eos, p, p, p, p, p]);
+        assert_eq!(targets[..len], [7, 8, 9, eos, p, p, p, p, p, p]);
+        // Prompt-reply: only the separator and reply are supervised.
+        assert_eq!(ids[len..], [bos, 5, 6, 4, 7, eos, p, p, p, p]);
+        assert_eq!(targets[len..], [p, p, 4, 7, eos, p, p, p, p, p]);
+        assert_eq!(supervised, 4 + 3);
+    }
 }
 
 #[cfg(test)]
@@ -2760,8 +2752,8 @@ mod moe_loss_tests {
         println!("\n{:<40} {:>10} {:>10} {:>14} {:>14}", "source", "samples", "dupes", "prompt tok", "trained tok");
         let (mut samples, mut dupes, mut prompt, mut trained) = (0, 0, 0, 0);
         for r in &reports {
-            // Every sample also trains on its separator.
-            let r_trained = r.target_tokens + r.samples * sep_len;
+            // Prompt-reply samples also train on their separator; plain text has none.
+            let r_trained = r.target_tokens + (r.samples - r.plain_samples) * sep_len;
             println!("{:<40} {:>10} {:>10} {:>14} {:>14}", r.path, r.samples, r.duplicates, r.prompt_tokens, r_trained);
             samples += r.samples; dupes += r.duplicates; prompt += r.prompt_tokens; trained += r_trained;
         }

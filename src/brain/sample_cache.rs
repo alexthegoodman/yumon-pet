@@ -29,6 +29,15 @@ pub enum CacheObjective {
     RawCode,
 }
 
+/// Current sample preparation per objective. Pet `plain-text-v1`: ideas, Bible
+/// and stories are whole text with loss on every token.
+fn preparation_tag(objective: CacheObjective) -> &'static str {
+    match objective {
+        CacheObjective::RawCode => "rust-items-v1",
+        CacheObjective::PromptReply => "plain-text-v1",
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CacheMetadata {
     pub version: u32,
@@ -211,7 +220,7 @@ pub fn write_cache_with_objective(
         version: if objective == CacheObjective::RawCode { 2 } else { FORMAT_VERSION },
         objective,
         corpus_sha256: (objective == CacheObjective::RawCode).then(|| code_digest(samples)),
-        preparation: (objective == CacheObjective::RawCode).then(|| "rust-items-v1".to_owned()),
+        preparation: Some(preparation_tag(objective).to_owned()),
         stage,
         max_seq_len,
         tokenizer_sha256: tokenizer_fingerprint(tokenizer)?,
@@ -295,10 +304,10 @@ pub fn load_cache_with_objective(
         File::open(path).with_context(|| format!("opening sample cache {}", path.display()))?;
     let metadata = read_header(&mut file)?;
     ensure!(metadata.objective == objective, "cache objective {:?} does not match {:?}", metadata.objective, objective);
-    if objective == CacheObjective::RawCode {
-        ensure!(metadata.preparation.as_deref() == Some("rust-items-v1"),
-            "code cache uses old chunking; rebuild with cache_samples to use complete Rust items");
-    }
+    ensure!(metadata.preparation.as_deref() == Some(preparation_tag(objective)), match objective {
+        CacheObjective::RawCode => "code cache uses old chunking; rebuild with cache_samples to use complete Rust items",
+        CacheObjective::PromptReply => "Pet cache splits plain text into prompt and reply; rebuild with cache_samples",
+    });
     ensure!(
         metadata.stage == stage,
         "cache stage {:?} does not match {:?}; rebuild locally",

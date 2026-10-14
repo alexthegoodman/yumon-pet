@@ -12,11 +12,13 @@ use crate::brain::chats::load_distilled_chats;
 use crate::brain::am_distill::load_am_distill_chats;
 use crate::brain::mdx::{load_chats_from_csv, load_chats_from_friends_csv};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::brain::mdx::{load_arena_chats, load_csv_bible_pairs, load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_quote_chats, load_quotes_csv, load_story_chats, load_story_texts, load_specific_dict_sentences, load_text_paragraphs, load_txt_lines, load_wiki_chats, load_txt_sentences};
+use crate::brain::mdx::{load_arena_chats, load_csv_bible_chapters, load_csv_bible_pairs, load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_quote_chats, load_quotes_csv, load_story_texts, load_specific_dict_sentences, load_text_paragraphs, load_txt_lines, load_wiki_chats, load_txt_sentences, split_sentences};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::brain::pdf::load_pdfs;
 use crate::brain::samples::{Sample, TrainingStage, prepare_paired_samples_chats, prepare_paired_samples_split, prepare_paired_samples_split_sep};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::brain::samples::prepare_plain_text_samples;
 use crate::brain::PAD_TOKEN;
 
 // ── File-source descriptor ────────────────────────────────────────────────────
@@ -32,12 +34,15 @@ pub struct FileEntry {
 /// Which loader function to dispatch to.
 pub enum FileKind {
     Mdx,
+    /// `id,b,c,v,t` verses. Training: plain text, each chapter packed into
+    /// whole-verse chunks.
     BibleCsv,
     Handcrafted,
     QaPairs,
     Chats,
     JsonChats,
     Txt,
+    /// One line per item. Training: plain text, one sample per line.
     TxtLines,
     SpecificDict,
     PDF,
@@ -54,9 +59,9 @@ pub enum FileKind {
     /// `quote,author,category` CSV. Training: a category request answered by
     /// the quote. Tokenizer corpus: quote text.
     QuotesCsv,
-    /// `===== STORY N =====` sections (creative_stories.txt). Training: one
-    /// conversation per story, whole sentences as Human/Yumon turns after a
-    /// story request. Tokenizer corpus: whole stories.
+    /// `===== STORY N =====` sections (creative_stories.txt). Training: plain
+    /// text with loss on every token, each story packed into whole-sentence
+    /// chunks. Tokenizer corpus: whole stories.
     Stories,
     // extend with WikiXml, Txt, Pdf, … as needed
 }
@@ -395,6 +400,7 @@ impl DataLoader {
                 }
                 let active = |ids: &[usize]| ids.iter().take_while(|&&t| t != PAD_TOKEN).count();
                 report.samples += 1;
+                report.plain_samples += usize::from(crate::brain::samples::is_plain_text(sample));
                 report.prompt_tokens += active(&sample.input_ids);
                 report.target_tokens += active(&sample.target_labels);
             }
@@ -448,17 +454,31 @@ impl DataLoader {
                 )
             }
             FileKind::BibleCsv => {
-                let mut pairs = load_csv_bible_pairs(&entry.path)?;
+                let mut chapters = load_csv_bible_chapters(&entry.path)?;
 
                 // Per-file limit before sample prep to reduce load
                 if let Some(n) = entry.limit {
-                    pairs.shuffle(rng);
-                    pairs.truncate(n);
+                    chapters.shuffle(rng);
+                    chapters.truncate(n);
                 }
 
-                prepare_paired_samples_split_sep(
-                    pairs, tokenizer, keyword_index, rng, self.stage, max_seq_len,
-                )
+                prepare_plain_text_samples(chapters, tokenizer, max_seq_len)
+            }
+            FileKind::TxtLines => {
+                let lines = sentences.into_iter().map(|line| vec![line]).collect();
+                prepare_plain_text_samples(lines, tokenizer, max_seq_len)
+            }
+            FileKind::Stories => {
+                let mut stories = load_story_texts(&entry.path)?;
+
+                // Per-file limit before sample prep to reduce load
+                if let Some(n) = entry.limit {
+                    stories.shuffle(rng);
+                    stories.truncate(n);
+                }
+
+                let documents = stories.iter().map(|story| split_sentences(story)).collect();
+                prepare_plain_text_samples(documents, tokenizer, max_seq_len)
             }
             FileKind::Chats => {
                 let mut chats = load_handcrafted_chats(&entry.path)?;
@@ -535,10 +555,9 @@ impl DataLoader {
                     chats, tokenizer, keyword_index, rng, self.stage, max_seq_len,
                 )
             },
-            FileKind::Paragraphs | FileKind::QuotesCsv | FileKind::Stories => {
+            FileKind::Paragraphs | FileKind::QuotesCsv => {
                 let mut chats = match entry.kind {
                     FileKind::Paragraphs => load_wiki_chats(&entry.path)?,
-                    FileKind::Stories => load_story_chats(&entry.path)?,
                     _ => load_quote_chats(&entry.path)?,
                 };
 
@@ -639,6 +658,8 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
 pub struct SourceReport {
     pub path:          String,
     pub samples:       usize,
+    /// Samples trained on every token, with no separator.
+    pub plain_samples: usize,
     pub duplicates:    usize,
     pub prompt_tokens: usize,
     pub target_tokens: usize,

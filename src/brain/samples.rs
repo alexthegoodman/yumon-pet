@@ -1207,6 +1207,75 @@ pub fn prepare_paired_samples_split_sep(
     .collect()
 }
 
+/// Plain-text samples hold only BOS as their prompt. The batcher adds no
+/// separator and trains every text token.
+pub fn is_plain_text(sample: &Sample) -> bool {
+    sample.input_ids.get(1).is_none_or(|&t| t == PAD_TOKEN)
+}
+
+/// Plain text with loss on every token (idea lines, Bible chapters, stories),
+/// instead of cutting it into an artificial prompt and reply. Each document's
+/// segments are joined in order into chunks of at most `max_seq_len - 2` tokens
+/// (BOS and EOS). A filtered segment, or one too long to fit alone, is dropped
+/// and ends the chunk, so no chunk joins text across a gap.
+pub fn prepare_plain_text_samples(
+    documents:   Vec<Vec<String>>,
+    tokenizer:   &TokenizerKind,
+    max_seq_len: usize,
+) -> Vec<Sample> {
+    println!("prepare plain text samples");
+    let budget = max_seq_len.saturating_sub(2);
+    let bad_words = ["sex", "drug", "kill", "rape", "nazi"];
+
+    map_ordered(documents, |segments| {
+        let mut chunks: Vec<(String, Vec<usize>)> = Vec::new();
+        let mut current: Option<(String, Vec<usize>)> = None;
+        for segment in &segments {
+            let segment = segment.trim();
+            let lower = segment.to_lowercase();
+            if segment.is_empty() || bad_words.iter().any(|&w| lower.contains(w)) {
+                chunks.extend(current.take());
+                continue;
+            }
+            if let Some((text, _)) = &current {
+                // Encode the joined text: BPE merges can cross the joining space.
+                let joined = format!("{text} {segment}");
+                let ids = tokenizer.encode(&joined);
+                if ids.len() <= budget {
+                    current = Some((joined, ids));
+                    continue;
+                }
+                chunks.extend(current.take());
+            }
+            let ids = tokenizer.encode(segment);
+            if ids.len() <= budget { current = Some((segment.to_string(), ids)); }
+        }
+        chunks.extend(current);
+
+        chunks.into_iter()
+            .filter(|(text, ids)| !ids.is_empty() && text.split_whitespace().count() >= 3)
+            .map(|(text, ids)| {
+                let mut input_ids = vec![BOS_TOKEN];
+                input_ids.resize(max_seq_len, PAD_TOKEN);
+                let mut target_labels: Vec<usize> = ids.into_iter().chain(std::iter::once(EOS_TOKEN)).collect();
+                target_labels.resize(max_seq_len, PAD_TOKEN);
+                Sample {
+                    input_ids,
+                    target_labels,
+                    action: Action::Sit,
+                    motion_dir: CardinalDir::None,
+                    world: WorldContext::default(),
+                    target_json: text.clone(),
+                    pair: (String::new(), text),
+                }
+            })
+            .collect::<Vec<_>>()
+    })
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// Render prior turns as plain dialogue, newest complete turns first for budgeting,
 /// then chronological in the prompt. An empty history keeps the original input.
 /// `max_input_tokens` excludes BOS, separator, and the reply (including EOS).
@@ -1655,6 +1724,36 @@ mod parallel_sample_tests {
         let reply = tokenizer.encode("Gravity holds it in orbit.");
         assert_eq!(samples[1].target_labels[..reply.len()], reply);
         assert_eq!(samples[1].target_labels[reply.len()], EOS_TOKEN);
+    }
+
+    #[test]
+    fn plain_text_packs_whole_segments_in_order_and_breaks_at_gaps() {
+        let tokenizer = tokenizer();
+        let documents = vec![
+            vec!["One two three.".into(), "Four five six.".into(), "Seven eight nine.".into(),
+                "A killer line here.".into(), "Ten eleven twelve.".into()],
+            vec!["x".repeat(50), "Short words here.".into(), "Hi there.".into()],
+        ];
+        // 40 tokens of context leaves 38 for text (one character per token here).
+        let samples = prepare_plain_text_samples(documents, &tokenizer, 40);
+        let texts: Vec<_> = samples.iter().map(|s| s.pair.1.as_str()).collect();
+        // The filtered line ends its chunk; the oversized segment is dropped; the
+        // last chunk joins two short segments.
+        assert_eq!(texts, ["One two three. Four five six.", "Seven eight nine.", "Ten eleven twelve.",
+            "Short words here. Hi there."]);
+        for sample in &samples {
+            assert!(is_plain_text(sample));
+            assert_eq!(sample.input_ids[0], BOS_TOKEN);
+            assert_eq!(sample.input_ids.len(), 40);
+            let target: Vec<_> = sample.target_labels.iter().copied().take_while(|&t| t != PAD_TOKEN).collect();
+            let expected: Vec<_> = tokenizer.encode(&sample.pair.1).into_iter().chain([EOS_TOKEN]).collect();
+            assert_eq!(target, expected);
+            assert!(target.len() <= 39);
+        }
+        // Prompt-reply samples are never plain text.
+        let pairs = prepare_paired_samples_split_sep(vec![("Tell me about the moon".into(), "It orbits us.".into())],
+            &tokenizer, &HashMap::new(), &mut StdRng::seed_from_u64(1), TrainingStage::Language, 64);
+        assert!(!is_plain_text(&pairs[0]));
     }
 
     #[test]

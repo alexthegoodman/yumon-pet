@@ -206,6 +206,26 @@ pub fn load_csv_bible_pairs(bible_path: &str) -> Result<Vec<(String, String)>> {
     Ok(pairs)
 }
 
+/// Verses of an `id,b,c,v,t` Bible CSV grouped by book and chapter, in file order.
+pub fn load_csv_bible_chapters(bible_path: &str) -> Result<Vec<Vec<String>>> {
+    println!("📖 Loading bible CSV: {bible_path}");
+    let mut chapters: Vec<Vec<String>> = Vec::new();
+    let mut current = None;
+    for result in csv::Reader::from_path(bible_path)?.records() {
+        let record = result?;
+        let verse = record.get(4).unwrap_or("").trim();
+        if verse.is_empty() { continue; }
+        let chapter = (record.get(1).unwrap_or("").to_string(), record.get(2).unwrap_or("").to_string());
+        if current.as_ref() != Some(&chapter) {
+            chapters.push(Vec::new());
+            current = Some(chapter);
+        }
+        chapters.last_mut().unwrap().push(verse.to_string());
+    }
+    println!("✅ Loaded {} chapters from {bible_path}", chapters.len());
+    Ok(chapters)
+}
+
 pub fn load_dictionary_sentences(dict_path: &str) -> Result<Vec<String>> {
     println!("📖 Loading dictionary: {dict_path}");
 
