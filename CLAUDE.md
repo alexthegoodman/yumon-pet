@@ -79,3 +79,15 @@ still over 2048). `code.bin` stays 512 for captioning. Training and validation t
 each batch to its longest row (`trim_batch`), so short samples skip unused positions.
 Preparation now skips files syn cannot parse instead of aborting. Docker does not copy
 any raw code cache yet, so `pretrain_code` is local-only.
+
+KV cache and GQA (2026-10-14): `decoder_model.rs` has `KvCache`, `cached_attention`
+(prompt through flash, later steps grouped matmuls over the cache) and
+`generate_causal_cached`; MoE and dense `generate_unmasked_parsed` use it
+(`forward_cached`). MoE cached decoding keeps sparse routing and exit gates, and
+exited rows still append frozen K/V. Optional `kv_heads` (CodeConfig, MoE only; run
+name `_gqa<n>`, metadata `kv_heads`) shrinks k/v projections; training repeats K/V
+for flash. Tests check cached logits = full forward (MHA, GQA, depth, MQA, dense).
+Intel UHD 770, context ~1550: lite 196 -> 25 ms/token, mini-depth 1.23 s -> 75
+ms/token. GQA gave no measurable speedup at these sizes. Masking all experts on
+device to avoid routing reads was tried and was slower (more kernel launches).
+

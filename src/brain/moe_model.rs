@@ -3,7 +3,7 @@
 //! Activations/weights stay on device. Benchmark the synchronization overhead.
 use super::{
     bpe::{BpeTokenizer, TokenizerKind},
-    decoder_model::{generate_causal, apply_rope, RopeTables},
+    decoder_model::{KvCache, KvSlot, RopeTables, append_kv, apply_rope, cached_attention, generate_causal_cached, repeat_kv},
     flash_attn::backend::{FlashAttention, causal_flash_attention},
     model::{GenerationResult, MLP, MLPConfig, RMSNorm, RMSNormConfig},
     samples::TrainingStage,
@@ -148,6 +148,20 @@ struct MoeBlock<B: Backend> {
     heads: usize,
 }
 impl<B: FlashAttention> MoeBlock<B> {
+    /// Queries [batch, heads, seq, hd] and keys/values [batch, kv_heads, seq, hd];
+    /// kv_heads < heads is grouped-query attention (from the k/v weight widths).
+    fn qkv(&self, x: &Tensor<B, 3>, rope: &RopeTables<B>) -> (Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 4>) {
+        let [batch, seq, width] = x.dims();
+        let hd = width / self.heads;
+        let norm = self.attn_norm.forward(x.clone());
+        let split = |t: Tensor<B, 3>| {
+            let heads = t.dims()[2] / hd;
+            t.reshape([batch, seq, heads, hd]).swap_dims(1, 2)
+        };
+        let q = apply_rope(split(self.q.forward(norm.clone())), rope);
+        let k = apply_rope(split(self.k.forward(norm.clone())), rope);
+        (q, k, split(self.v.forward(norm)))
+    }
     fn forward(
         &self,
         x: Tensor<B, 3>,
@@ -155,14 +169,12 @@ impl<B: FlashAttention> MoeBlock<B> {
         active: Tensor<B, 1, Int>,
         pad: Option<Tensor<B, 2, Bool>>,
     ) -> (Tensor<B, 3>, Tensor<B, 1>, Tensor<B, 1>, Vec<usize>) {
-        let [batch, seq, width] = x.dims();
+        let [_, seq, width] = x.dims();
         let device = x.device();
         let hd = width / self.heads;
-        let norm = self.attn_norm.forward(x.clone());
-        let split = |t: Tensor<B, 3>| t.reshape([batch, seq, self.heads, hd]).swap_dims(1, 2);
-        let q = apply_rope(split(self.q.forward(norm.clone())), rope);
-        let k = apply_rope(split(self.k.forward(norm.clone())), rope);
-        let v = split(self.v.forward(norm));
+        let (q, k, v) = self.qkv(&x, rope);
+        let groups = self.heads / k.dims()[1];
+        let (k, v) = (repeat_kv(k, groups), repeat_kv(v, groups));
         let attn = if let Some(pad) = pad {
             // Compatibility for left/interior padding. Normal training is right-padded
             // and uses flash; a causal-only kernel cannot mask these PAD keys.
@@ -176,9 +188,20 @@ impl<B: FlashAttention> MoeBlock<B> {
                 .matmul(v.cast(FloatDType::F32)).cast(dtype)
         } else {
             causal_flash_attention(q, k, v)
-        }
-            .swap_dims(1, 2)
-            .reshape([batch, seq, width]);
+        };
+        self.feed_forward(x, attn, active)
+    }
+    /// Output projection and residual for attention [batch, heads, seq, hd], then
+    /// the MoE on the `active` rows of [batch * seq].
+    fn feed_forward(
+        &self,
+        x: Tensor<B, 3>,
+        attn: Tensor<B, 4>,
+        active: Tensor<B, 1, Int>,
+    ) -> (Tensor<B, 3>, Tensor<B, 1>, Tensor<B, 1>, Vec<usize>) {
+        let [batch, seq, width] = x.dims();
+        let device = x.device();
+        let attn = attn.swap_dims(1, 2).reshape([batch, seq, width]);
         let x = x + self.o.forward(attn);
         let selected = self
             .ffn_norm
@@ -190,6 +213,23 @@ impl<B: FlashAttention> MoeBlock<B> {
             .select_assign(0, active, values, IndexingUpdateOp::Add)
             .reshape([batch, seq, width]);
         (x + scattered, balance, z_loss, counts)
+    }
+    /// Decoding step over one sequence: appends this layer's keys/values for all
+    /// new rows to `slot`. Without `active` rows (all exited) only the cache grows.
+    fn forward_cached(
+        &self,
+        x: Tensor<B, 3>,
+        rope: &RopeTables<B>,
+        active: Option<Tensor<B, 1, Int>>,
+        slot: &mut KvSlot<B>,
+    ) -> Tensor<B, 3> {
+        let (q, k, v) = self.qkv(&x, rope);
+        let Some(active) = active else {
+            append_kv(slot, k, v);
+            return x;
+        };
+        let attn = cached_attention(q, k, v, slot);
+        self.feed_forward(x, attn, active).0
     }
 }
 
@@ -255,6 +295,9 @@ pub struct YumonMoeBrainConfig {
     /// Depth tiers with their own experts; replaces num_experts/top_k/ff_dim.
     #[config(default = "None")]
     pub adaptive_depth: Option<AdaptiveDepthConfig>,
+    /// Key/value heads for grouped-query attention; None = attn_heads (MHA).
+    #[config(default = "None")]
+    pub kv_heads: Option<usize>,
 }
 impl YumonMoeBrainConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> YumonMoeBrain<B> {
@@ -268,6 +311,7 @@ impl YumonMoeBrainConfig {
             (self.embed_dim / self.attn_heads) % 2 == 0,
             "RoPE requires even head width"
         );
+        assert!(self.attn_heads % self.effective_kv_heads() == 0, "attn_heads must be a multiple of kv_heads");
         assert!(self.aux_loss_weight.is_finite() && self.aux_loss_weight >= 0.0);
         assert!(self.z_loss_weight.is_finite() && self.z_loss_weight >= 0.0);
         let linear = || {
@@ -275,6 +319,8 @@ impl YumonMoeBrainConfig {
                 .with_bias(false)
                 .init(device)
         };
+        let kv_width = self.effective_kv_heads() * (self.embed_dim / self.attn_heads);
+        let kv_linear = || LinearConfig::new(self.embed_dim, kv_width).with_bias(false).init(device);
         let tiers = self.adaptive_depth.as_ref().map(|d| d.layer_tiers());
         YumonMoeBrain {
             config: Ignored(self.clone()),
@@ -285,8 +331,8 @@ impl YumonMoeBrainConfig {
                 .map(|layer| MoeBlock {
                     attn_norm: RMSNormConfig::new(self.embed_dim).init(device),
                     q: linear(),
-                    k: linear(),
-                    v: linear(),
+                    k: kv_linear(),
+                    v: kv_linear(),
                     o: linear(),
                     ffn_norm: RMSNormConfig::new(self.embed_dim).init(device),
                     moe: match (&self.adaptive_depth, &tiers) {
@@ -313,6 +359,12 @@ impl YumonMoeBrainConfig {
         }
     }
 }
+impl YumonMoeBrainConfig {
+    pub fn effective_kv_heads(&self) -> usize {
+        self.kv_heads.unwrap_or(self.attn_heads)
+    }
+}
+
 impl<B: FlashAttention> YumonMoeBrain<B> {
     pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         self.forward_with_aux(tokens).0
@@ -437,6 +489,45 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         }).collect();
         tokens.iter().map(|&t| if tokens[0] > 0.0 { t / tokens[0] } else { 0.0 }).collect()
     }
+    /// Logits [1, t, vocab] for `t` new tokens after those already in `cache`;
+    /// matches `forward` over the whole sequence. Exit gates decide per position
+    /// as in training: exited rows skip deeper attention and experts but still
+    /// add their frozen keys/values to every deeper layer's cache.
+    pub(crate) fn forward_cached(&self, tokens: Tensor<B, 2, Int>, cache: &mut KvCache<B>) -> Tensor<B, 3> {
+        let [batch, t] = tokens.dims();
+        assert!(batch == 1 && t > 0 && cache.len() + t <= self.config.max_seq_len);
+        let device = tokens.device();
+        let rope = cache.next_rope(t);
+        let mut x = self.embedding.forward(tokens);
+        let layer_tiers = self.config.adaptive_depth.as_ref().map(|d| d.layer_tiers());
+        let tier_of = |layer: usize| layer_tiers.as_ref().map_or(0, |t| t[layer]);
+        let mut continuing = vec![true; t];
+        let mut keep: Option<Tensor<B, 3>> = None;
+        for (layer, block) in self.blocks.iter().enumerate() {
+            let tier = tier_of(layer);
+            if tier > 0 && tier_of(layer - 1) != tier {
+                let gate = &self.exit_gates[tier - 1];
+                let score: Vec<f32> = sigmoid(gate.score.forward(gate.norm.forward(x.clone()))
+                    .reshape([t]).cast(FloatDType::F32))
+                    .into_data().convert::<f32>().to_vec().expect("exit gate scores");
+                continuing.iter_mut().zip(&score).for_each(|(on, &s)| *on &= s >= 0.5);
+                let hard = continuing.iter().map(|&on| on as u8 as f32).collect::<Vec<_>>();
+                keep = Some(Tensor::<B, 1>::from_data_dtype(TensorData::new(hard, [t]), &device,
+                    burn::tensor::DType::F32).reshape([1, t, 1]).cast(x.dtype()));
+            }
+            let rows: Vec<i32> = (0..t as i32).filter(|&r| continuing[r as usize]).collect();
+            let active = (!rows.is_empty())
+                .then(|| Tensor::<B, 1, Int>::from_ints(TensorData::new(rows.clone(), [rows.len()]), &device));
+            let next = block.forward_cached(x.clone(), &rope, active, cache.layer(layer));
+            x = match &keep {
+                Some(keep) if tier > 0 => x.clone() + keep.clone() * (next - x),
+                _ => next,
+            };
+        }
+        cache.advance(t);
+        self.token_head.forward(self.norm.forward(x))
+    }
+
     pub fn generate_unmasked_parsed(
         &self,
         tokenizer: &TokenizerKind,
@@ -444,8 +535,10 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         max_tokens: usize,
         device: &B::Device,
     ) -> GenerationResult {
-        generate_causal(
-            |tokens| self.forward(tokens),
+        let mut cache = KvCache::new(self.blocks.len(), self.config.max_seq_len,
+            self.config.embed_dim / self.config.attn_heads, device);
+        generate_causal_cached(
+            |tokens| self.forward_cached(tokens, &mut cache),
             self.config.training_stage,
             self.config.max_seq_len,
             tokenizer,
@@ -524,6 +617,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             aux_loss_weight: metadata.aux_loss_weight,
             z_loss_weight: metadata.z_loss_weight,
             adaptive_depth: metadata.adaptive_depth,
+            kv_heads: metadata.kv_heads,
         };
 
         let model = config.init::<B>(device).load_record(record);
@@ -559,6 +653,9 @@ pub struct MoeMetadata {
     /// Depth tiers; absent for uniform-depth models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adaptive_depth: Option<AdaptiveDepthConfig>,
+    /// Grouped-query KV heads; absent = attn_heads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_heads: Option<usize>,
 }
 
 #[cfg(test)]
@@ -901,6 +998,7 @@ mod tests {
             ff_dim: config.ff_dim,
             max_seq_len: config.max_seq_len,
             adaptive_depth: None,
+            kv_heads: config.kv_heads,
         };
         model
             .save(path.to_str().unwrap(), &tokenizer, &meta)
@@ -1030,7 +1128,7 @@ mod tests {
                 final_loss: 1.0, val_loss: None, batch_size: 1, training_stage: config.training_stage,
                 embed_dim: config.embed_dim, hidden_units: config.hidden_units, n_layers: config.n_layers,
                 attn_heads: config.attn_heads, ff_dim: config.ff_dim, max_seq_len: config.max_seq_len,
-                adaptive_depth: config.adaptive_depth.clone() };
+                adaptive_depth: config.adaptive_depth.clone(), kv_heads: config.kv_heads };
             model.save(path.to_str().unwrap(), &tokenizer, &meta).unwrap();
             if !depth {
                 // Rewrite the weights in the pre-adaptive-depth record layout.
@@ -1095,6 +1193,116 @@ mod tests {
                     elapsed / 5
                 );
             }
+        }
+    }
+
+    /// Logits of a cached run that feeds `ids` in the given chunk sizes, concatenated.
+    fn cached_logits(model: &YumonMoeBrain<Wgpu>, ids: &[i32], chunks: &[usize]) -> Vec<f32> {
+        let device = Default::default();
+        let config = &model.config;
+        let mut cache = KvCache::new(model.blocks.len(), config.max_seq_len, config.embed_dim / config.attn_heads, &device);
+        let mut out = Vec::new();
+        let mut start = 0;
+        for &n in chunks {
+            let tokens = Tensor::<Wgpu, 2, Int>::from_ints(TensorData::new(ids[start..start + n].to_vec(), [1, n]), &device);
+            out.extend(values(model.forward_cached(tokens, &mut cache)));
+            start += n;
+        }
+        assert_eq!(start, ids.len());
+        assert_eq!(cache.len(), ids.len());
+        out
+    }
+
+    #[test]
+    fn moe_kv_cache_matches_full_forward() {
+        let device = Default::default();
+        let ids: Vec<i32> = (0..14).map(|i| 4 + (i * 7) % 28).collect();
+        let gqa = tiny_config().with_attn_heads(4).with_kv_heads(Some(2));
+        let mqa_depth = depth_config().with_attn_heads(4).with_kv_heads(Some(1));
+        for (name, config) in [("mha", tiny_config()), ("gqa", gqa), ("depth", depth_config()), ("depth-mqa", mqa_depth)] {
+            let config = config.with_max_seq_len(16);
+            let mut model: YumonMoeBrain<Wgpu> = config.init(&device);
+            // Decisive random exit gates, so some positions exit and others continue.
+            for gate in &mut model.exit_gates {
+                gate.score.weight = Param::from_tensor(Tensor::random([16, 1],
+                    burn::tensor::Distribution::Normal(0.0, 3.0), &device));
+            }
+            let tokens = Tensor::<Wgpu, 2, Int>::from_ints(TensorData::new(ids.clone(), [1, ids.len()]), &device);
+            let (full, _, counts) = model.forward_with_aux(tokens);
+            if model.config.adaptive_depth.is_some() {
+                let reach = model.depth_reach(&counts);
+                assert!(reach[1] > 0.0 && reach[1] < 1.0, "{name}: gates should split the tokens, reach {reach:?}");
+            }
+            // Prompt, single steps, then a multi-token chunk on top of the cache.
+            let full = values(full);
+            assert_close(cached_logits(&model, &ids, &[5, 1, 1, 1, 3, 1, 2]), full.clone(), 1e-4);
+            assert_close(cached_logits(&model, &ids, &[1; 14]), full, 1e-4);
+        }
+    }
+
+    #[test]
+    fn moe_gqa_trains_with_fewer_kv_weights() {
+        let device = Default::default();
+        let config = tiny_config().with_attn_heads(4).with_kv_heads(Some(2));
+        let mut model: YumonMoeBrain<B> = config.init(&device);
+        assert_eq!(model.blocks[0].k.weight.val().dims(), [16, 8]);
+        assert_eq!(model.blocks[0].q.weight.val().dims(), [16, 16]);
+        let tokens = Tensor::<B, 2, Int>::from_ints([[1, 4, 5, 6, 7, 8], [9, 10, 11, 2, 0, 0]], &device);
+        let (logits, aux, _) = model.forward_with_aux(tokens);
+        let loss = logits.powf_scalar(2.0).mean() + aux;
+        let grads = GradientsParams::from_grads(loss.backward(), &model);
+        let k_grad = grads.get::<Wgpu, 2>(model.blocks[0].k.weight.id).expect("k gradient");
+        assert_eq!(k_grad.dims(), [16, 8]);
+        let mut optimizer = AdamWConfig::new().init();
+        model = optimizer.step(1e-3, model, grads);
+        assert_eq!(model.blocks[0].v.weight.val().dims(), [16, 8]);
+    }
+
+    #[test]
+    #[ignore = "timing probe on the local GPU"]
+    fn moe_kv_cache_decode_timing() {
+        let device = Default::default();
+        let (prompt, steps) = (1536, 32);
+        let lite = || YumonMoeBrainConfig::new(16384, TrainingStage::Language)
+            .with_embed_dim(128).with_n_layers(8).with_attn_heads(4).with_ff_dim(512)
+            .with_max_seq_len(2048).with_dropout_rate(0.0).with_num_experts(4).with_top_k(1);
+        // configs/yumon-code-moe-mini-depth.json at a 2048 context.
+        let depth: AdaptiveDepthConfig = serde_json::from_str(r#"{"budget_loss_weight": 0.1, "tiers": [
+            {"name": "easy", "layers": 8, "top_k": 2, "experts": [{"count": 16, "ff_dim": 512}]},
+            {"name": "medium", "layers": 8, "capacity": 0.5, "top_k": 2,
+             "experts": [{"count": 12, "ff_dim": 1024}, {"count": 4, "ff_dim": 2048}]},
+            {"name": "hard", "layers": 8, "capacity": 0.25, "top_k": 2, "experts": [{"count": 8, "ff_dim": 3072}]}
+        ]}"#).unwrap();
+        let depth = YumonMoeBrainConfig::new(16384, TrainingStage::Language)
+            .with_embed_dim(256).with_n_layers(24).with_attn_heads(8)
+            .with_max_seq_len(2048).with_dropout_rate(0.0).with_adaptive_depth(Some(depth));
+        for (name, config) in [("lite", lite()), ("lite gqa1", lite().with_kv_heads(Some(1))),
+            ("mini-depth", depth.clone()), ("mini-depth gqa2", depth.with_kv_heads(Some(2)))] {
+            let model: YumonMoeBrain<Wgpu> = config.init(&device);
+            let (layers, hd) = (model.blocks.len(), model.config.embed_dim / model.config.attn_heads);
+            let ids: Vec<i32> = (0..prompt + steps).map(|i| 4 + (i as i32 * 31) % 16000).collect();
+            let tensor = |ids: &[i32]| Tensor::<Wgpu, 2, Int>::from_ints(TensorData::new(ids.to_vec(), [1, ids.len()]), &device);
+            let last = |logits: Tensor<Wgpu, 3>| {
+                let [_, rows, vocab] = logits.dims();
+                let _ = logits.slice([0..1, rows - 1..rows, 0..vocab]).into_data();
+            };
+            // Each path runs twice; the first run compiles/autotunes every shape it meets.
+            let mut timings = Vec::new();
+            for _ in 0..2 {
+                let start = std::time::Instant::now();
+                for n in prompt..prompt + steps { last(model.forward(tensor(&ids[..n + 1]))); }
+                let uncached = start.elapsed() / steps as u32;
+                let mut cache = KvCache::new(layers, 2048, hd, &device);
+                let start = std::time::Instant::now();
+                last(model.forward_cached(tensor(&ids[..prompt]), &mut cache));
+                let prefill = start.elapsed();
+                let start = std::time::Instant::now();
+                for n in prompt..prompt + steps { last(model.forward_cached(tensor(&ids[n..n + 1]), &mut cache)); }
+                timings.push((uncached, prefill, start.elapsed() / steps as u32));
+            }
+            let (uncached, prefill, cached) = timings[1];
+            println!("{name}: context {prompt}-{}: full prefix {uncached:?}/token, KV cache {cached:?}/token ({:.1}x), prefill {prefill:?}",
+                prompt + steps, uncached.as_secs_f64() / cached.as_secs_f64());
         }
     }
 }

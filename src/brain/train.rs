@@ -241,6 +241,8 @@ pub struct RunConfig {
     pub adaptive_loss: Option<crate::brain::adaptive_loss::AdaptiveLossConfig>,
     /// MoE depth tiers with per-tier experts and exit gates.
     pub adaptive_depth: Option<crate::brain::adaptive_depth::AdaptiveDepthConfig>,
+    /// MoE grouped-query attention KV heads; None = attn_heads.
+    pub kv_heads: Option<usize>,
 }
 
 /// Number of held-out prompts run through the model every time we do a
@@ -316,7 +318,8 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 if config.docs.is_some() { "_rust_docs_v1" } else if config.pretrain_code { "_code_pretrain_v1" } else { "" })
                 + &config.overfit_samples.map_or(String::new(), |n| format!("_overfit{n}"))
                 // Separate directories so A/B/C/D experiments never resume each other.
-                + &config.adaptive_loss.as_ref().map_or(String::new(), |a| format!("_alw_{}", a.effective_mode().tag())),
+                + &config.adaptive_loss.as_ref().map_or(String::new(), |a| format!("_alw_{}", a.effective_mode().tag()))
+                + &config.kv_heads.filter(|&kv| kv != config.attn_heads).map_or(String::new(), |kv| format!("_gqa{kv}")),
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
             n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
             max_seq_len: config.max_seq_len, architecture,
@@ -328,6 +331,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             overfit, heatmap_every: config.heatmap_every,
             adaptive_loss: config.adaptive_loss.clone(),
             adaptive_depth: config.adaptive_depth.clone(),
+            kv_heads: config.kv_heads.filter(|&kv| kv != config.attn_heads),
         };
         let run_dir = config.out_dir.join(&run.name);
         std::fs::create_dir_all(&run_dir)?;
@@ -787,7 +791,11 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             .with_ff_dim(run_cfg.ff_dim).with_max_seq_len(run_cfg.max_seq_len)
             .with_dropout_rate(run_cfg.dropout_rate)
             .with_num_experts(num_experts).with_top_k(top_k)
-            .with_adaptive_depth(run_cfg.adaptive_depth.clone());
+            .with_adaptive_depth(run_cfg.adaptive_depth.clone())
+            .with_kv_heads(run_cfg.kv_heads);
+        if let Some(kv) = run_cfg.kv_heads {
+            println!("Grouped-query attention: {kv} KV heads for {} query heads.", run_cfg.attn_heads);
+        }
         if let Some(depth) = &run_cfg.adaptive_depth {
             println!("MoE adaptive depth: {} tiers, budget loss weight {}; Flash Attention, BalancedCheckpointing.",
                 depth.tiers.len(), depth.budget_loss_weight);
@@ -808,7 +816,8 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
             && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
             && saved.num_experts == num_experts && saved.top_k == top_k
-            && saved.adaptive_depth == config.adaptive_depth,
+            && saved.adaptive_depth == config.adaptive_depth
+            && saved.effective_kv_heads() == config.effective_kv_heads(),
             "MoE checkpoint configuration differs from requested run");
         ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
         let meta: MoeMetadata = serde_json::from_str(&std::fs::read_to_string(run_dir.join("metadata.json"))?)?;
@@ -847,6 +856,7 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             ff_dim:          p.run_cfg.ff_dim,
             max_seq_len:     p.run_cfg.max_seq_len,
             adaptive_depth:  self.config.adaptive_depth.clone(),
+            kv_heads:        self.config.kv_heads,
         };
         self.save(dir, tokenizer, &meta)
     }
@@ -1647,6 +1657,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     #[cfg(not(target_arch = "wasm32"))]
                                     adaptive_loss: None,
                                     adaptive_depth: None,
+                                    kv_heads: None,
                                 });
                             }
                         }

@@ -30,6 +30,7 @@ use burn::{
     nn::{Dropout, DropoutConfig, Embedding, EmbeddingConfig, Linear, LinearConfig},
     prelude::*,
     record::{BinFileRecorder, FullPrecisionSettings, Recorder},
+    tensor::{FloatDType, activation::softmax},
 };
 use serde::{Deserialize, Serialize};
 
@@ -80,7 +81,98 @@ pub(super) fn apply_rope<B: Backend>(x: Tensor<B, 4>, rope: &RopeTables<B>) -> T
     Tensor::cat(vec![r0, r1], 4).reshape([batch, heads, seq, dim])
 }
 
+impl<B: Backend> RopeTables<B> {
+    /// Positions `start..start + len` of this table.
+    pub(super) fn slice(&self, start: usize, len: usize) -> Self {
+        Self { cos: self.cos.clone().narrow(2, start, len), sin: self.sin.clone().narrow(2, start, len) }
+    }
+}
+
+/// One layer's cached keys (RoPE applied) and values, each [1, kv_heads, len, head_dim].
+pub(super) type KvSlot<B> = Option<(Tensor<B, 4>, Tensor<B, 4>)>;
+
+/// Keys and values of every token decoded so far, per layer. Generation feeds
+/// the prompt once, then one token per step, instead of rerunning the prefix.
+pub(crate) struct KvCache<B: Backend> {
+    layers: Vec<KvSlot<B>>,
+    len: usize,
+    rope: RopeTables<B>,
+}
+impl<B: Backend> KvCache<B> {
+    pub(crate) fn new(layers: usize, max_seq_len: usize, head_dim: usize, device: &B::Device) -> Self {
+        Self { layers: (0..layers).map(|_| None).collect(), len: 0, rope: RopeTables::new(max_seq_len, head_dim, device) }
+    }
+    /// RoPE for the next `len` positions.
+    pub(super) fn next_rope(&self, len: usize) -> RopeTables<B> { self.rope.slice(self.len, len) }
+    pub(super) fn layer(&mut self, layer: usize) -> &mut KvSlot<B> { &mut self.layers[layer] }
+    pub(super) fn advance(&mut self, len: usize) { self.len += len; }
+    pub(crate) fn len(&self) -> usize { self.len }
+}
+
+/// Grouped-query attention: each KV head serves `groups` consecutive query heads,
+/// [batch, kv_heads, seq, dim] -> [batch, kv_heads * groups, seq, dim].
+pub(super) fn repeat_kv<B: Backend>(x: Tensor<B, 4>, groups: usize) -> Tensor<B, 4> {
+    if groups == 1 { return x; }
+    let [batch, kv_heads, seq, dim] = x.dims();
+    x.unsqueeze_dim::<5>(2).expand([batch, kv_heads, groups, seq, dim]).reshape([batch, kv_heads * groups, seq, dim])
+}
+
+/// Appends new keys/values to a layer's cache; returns all of them and how many came before.
+pub(super) fn append_kv<B: Backend>(slot: &mut KvSlot<B>, k: Tensor<B, 4>, v: Tensor<B, 4>)
+    -> (Tensor<B, 4>, Tensor<B, 4>, usize) {
+    let (k, v, start) = match slot.take() {
+        None => (k, v, 0),
+        Some((past_k, past_v)) => {
+            let start = past_k.dims()[2];
+            (Tensor::cat(vec![past_k, k], 2), Tensor::cat(vec![past_v, v], 2), start)
+        }
+    };
+    *slot = Some((k.clone(), v.clone()));
+    (k, v, start)
+}
+
+/// Causal attention of new queries q [1, heads, t, dim] over the cached and new keys
+/// (k, v: [1, kv_heads, t, dim] for the new positions, appended to `slot`). The prompt
+/// runs through flash attention; later steps use grouped matmuls against the cache,
+/// so the cache stays at kv_heads.
+pub(super) fn cached_attention<B: FlashAttention>(
+    q: Tensor<B, 4>, k: Tensor<B, 4>, v: Tensor<B, 4>, slot: &mut KvSlot<B>,
+) -> Tensor<B, 4> {
+    let [batch, heads, t, dim] = q.dims();
+    assert_eq!(batch, 1, "KV-cached attention decodes one sequence");
+    let kv_heads = k.dims()[1];
+    let groups = heads / kv_heads;
+    let (k, v, start) = append_kv(slot, k, v);
+    if start == 0 {
+        return causal_flash_attention(q, repeat_kv(k, groups), repeat_kv(v, groups));
+    }
+    let len = start + t;
+    let dtype = q.dtype();
+    let device = q.device();
+    // Row g * t + i is query head g of the group at position start + i.
+    let q = q.reshape([1, kv_heads, groups * t, dim]).cast(FloatDType::F32);
+    let mut scores = q.matmul(k.cast(FloatDType::F32).swap_dims(2, 3)) / (dim as f64).sqrt();
+    if t > 1 {
+        let future: Vec<bool> = (0..groups * t).flat_map(|r| (0..len).map(move |c| c > start + r % t)).collect();
+        let future = Tensor::<B, 2, Bool>::from_data(TensorData::new(future, [groups * t, len]), &device);
+        scores = scores.mask_fill(future.unsqueeze::<4>(), -1e9);
+    }
+    softmax(scores, 3).matmul(v.cast(FloatDType::F32)).cast(dtype).reshape([1, heads, t, dim])
+}
+
 impl<B: FlashAttention> DecBlock<B> {
+    fn forward_cached(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, slot: &mut KvSlot<B>) -> Tensor<B, 3> {
+        let [batch, seq, width] = x.dims();
+        let hd = width / self.heads;
+        let norm = self.attn_norm.forward(x.clone());
+        let split = |t: Tensor<B, 3>| t.reshape([batch, seq, self.heads, hd]).swap_dims(1, 2);
+        let q = apply_rope(split(self.q.forward(norm.clone())), rope);
+        let k = apply_rope(split(self.k.forward(norm.clone())), rope);
+        let v = split(self.v.forward(norm));
+        let attn = cached_attention(q, k, v, slot).swap_dims(1, 2).reshape([batch, seq, width]);
+        let x = x + self.o.forward(attn);
+        x.clone() + self.mlp.forward(self.ffn_norm.forward(x))
+    }
     fn forward(&self, x: Tensor<B, 3>, rope: &RopeTables<B>) -> Tensor<B, 3> {
         let [batch, seq, width] = x.dims();
         let hd = width / self.heads;
@@ -178,6 +270,19 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         self.token_head.forward(self.norm.forward(x))
     }
 
+    /// Logits [1, t, vocab] for `t` new tokens after those already in `cache`.
+    pub(crate) fn forward_cached(&self, tokens: Tensor<B, 2, Int>, cache: &mut KvCache<B>) -> Tensor<B, 3> {
+        let [_, t] = tokens.dims();
+        assert!(t > 0 && cache.len() + t <= self.config.max_seq_len);
+        let rope = cache.next_rope(t);
+        let mut x = self.embedding.forward(tokens);
+        for (layer, block) in self.blocks.iter().enumerate() {
+            x = block.forward_cached(x, &rope, cache.layer(layer));
+        }
+        cache.advance(t);
+        self.token_head.forward(self.norm.forward(x))
+    }
+
     pub fn generate_unmasked_parsed(
         &self,
         tokenizer: &TokenizerKind,
@@ -185,8 +290,10 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         max_tokens: usize,
         device: &B::Device,
     ) -> GenerationResult {
-        generate_causal(
-            |tokens| self.forward(tokens),
+        let mut cache = KvCache::new(self.blocks.len(), self.config.max_seq_len,
+            self.config.embed_dim / self.config.attn_heads, device);
+        generate_causal_cached(
+            |tokens| self.forward_cached(tokens, &mut cache),
             self.config.training_stage,
             self.config.max_seq_len,
             tokenizer,
@@ -264,7 +371,7 @@ pub struct DecMetadata {
 
 /// Top-k sampling from BOS + prompt + separator until EOS/PAD, the token
 /// budget, or `max_seq_len`, then JSON-repair and field extraction.
-/// No KV cache: each step reruns the full prefix.
+/// No KV cache: each step reruns the full prefix (models with learned positions).
 pub(crate) fn generate_causal<B: Backend>(
     forward: impl Fn(Tensor<B, 2, Int>) -> Tensor<B, 3>,
     training_stage: TrainingStage,
@@ -273,6 +380,37 @@ pub(crate) fn generate_causal<B: Backend>(
     seed_text: &str,
     max_tokens: usize,
     device: &B::Device,
+) -> GenerationResult {
+    generate_with(|ids, _| forward(ids_tensor(ids, device)), training_stage, max_seq_len, tokenizer, seed_text, max_tokens)
+}
+
+/// `generate_causal` for KV-cached models: `step` gets only the tokens it has
+/// not seen (the whole prompt first, then one token) and returns their logits.
+pub(crate) fn generate_causal_cached<B: Backend>(
+    mut step: impl FnMut(Tensor<B, 2, Int>) -> Tensor<B, 3>,
+    training_stage: TrainingStage,
+    max_seq_len: usize,
+    tokenizer: &TokenizerKind,
+    seed_text: &str,
+    max_tokens: usize,
+    device: &B::Device,
+) -> GenerationResult {
+    generate_with(|ids, done| step(ids_tensor(&ids[done..], device)), training_stage, max_seq_len, tokenizer, seed_text, max_tokens)
+}
+
+fn ids_tensor<B: Backend>(ids: &[usize], device: &B::Device) -> Tensor<B, 2, Int> {
+    Tensor::from_ints(TensorData::new(ids.iter().map(|&t| t as i32).collect::<Vec<_>>(), [1, ids.len()]), device)
+}
+
+/// Sampling loop shared by both: `step(ids, done)` returns logits whose last row
+/// predicts the token after `ids`; the first `done` ids went to earlier steps.
+fn generate_with<B: Backend>(
+    mut step: impl FnMut(&[usize], usize) -> Tensor<B, 3>,
+    training_stage: TrainingStage,
+    max_seq_len: usize,
+    tokenizer: &TokenizerKind,
+    seed_text: &str,
+    max_tokens: usize,
 ) -> GenerationResult {
     let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
     if !seed_text.is_empty() {
@@ -289,6 +427,7 @@ pub(crate) fn generate_causal<B: Backend>(
 
     let prompt_len = dec_ids.len();
     let mut rng = rand::thread_rng();
+    let mut done = 0;
 
     for _ in 0..max_tokens {
         let current_len = dec_ids.len();
@@ -296,19 +435,13 @@ pub(crate) fn generate_causal<B: Backend>(
             break;
         }
 
-        let dec_tokens_t = Tensor::<B, 2, Int>::from_ints(
-            TensorData::new(
-                dec_ids.iter().map(|&t| t as i32).collect::<Vec<_>>(),
-                [1, current_len],
-            ),
-            device,
-        );
+        let token_logits = step(&dec_ids, done);
+        done = current_len;
 
-        let token_logits = forward(dec_tokens_t);
-
+        let rows = token_logits.dims()[1];
         let vocab_size = tokenizer.vocab_size();
         let last_logits = token_logits
-            .slice([0..1, current_len - 1..current_len, 0..vocab_size])
+            .slice([0..1, rows - 1..rows, 0..vocab_size])
             .reshape([vocab_size]);
 
         let logits_vec: Vec<f32> = last_logits.to_data().convert::<f32>().to_vec().unwrap();
@@ -736,5 +869,23 @@ mod tests {
         let config = tiny_config();
         let model: YumonDecBrain<Inner> = config.init(&device);
         assert_eq!(model.num_params(), config.param_count());
+    }
+
+    #[test]
+    fn decoder_kv_cache_matches_full_forward() {
+        let device = Default::default();
+        let model: YumonDecBrain<Inner> = tiny_config().with_max_seq_len(16).init(&device);
+        let ids: Vec<i32> = (0..12).map(|i| 4 + (i * 5) % 28).collect();
+        let tensor = |ids: &[i32]| Tensor::<Inner, 2, Int>::from_ints(TensorData::new(ids.to_vec(), [1, ids.len()]), &device);
+        let full = values(model.forward(tensor(&ids)));
+        let config = &model.config;
+        let mut cache = KvCache::new(config.n_layers, config.max_seq_len, config.embed_dim / config.attn_heads, &device);
+        let mut cached = Vec::new();
+        let mut start = 0;
+        for n in [4, 1, 1, 3, 1, 2] {
+            cached.extend(values(model.forward_cached(tensor(&ids[start..start + n]), &mut cache)));
+            start += n;
+        }
+        assert_close(cached, full, 1e-4, "cached logits");
     }
 }

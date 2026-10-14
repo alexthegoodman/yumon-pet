@@ -151,6 +151,21 @@ Checkpoints from before this change still load.
 cargo run --release --bin train_code -- --config configs/yumon-code-moe-mini-depth.json
 ```
 
+### KV-cached inference and grouped-query attention
+
+MoE and dense decoder generation keeps a KV cache: the prompt runs once through
+flash attention, then each new token attends to cached keys/values. Exit gates
+work as in training: exited positions still add their frozen keys/values. On
+the local Intel UHD 770 at context ~1550, decoding was 7.8x faster for moe-lite
+(196 to 25 ms/token) and 16x faster for moe-mini-depth (1.23 s to 75 ms/token).
+`cargo test --release --lib -- --ignored moe_kv_cache_decode_timing --nocapture`
+reruns the comparison.
+
+Optional `kv_heads` (MoE only) shares each key/value head across
+`attn_heads / kv_heads` query heads. The run name gains `_gqa<n>`, and checkpoints
+without it still load. At these model sizes it made no measurable speed difference
+(the cache is small), so the configs leave it unset.
+
 ## Yumon Nano / InstaCode Edit:
 
 ```

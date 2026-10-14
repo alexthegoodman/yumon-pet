@@ -84,6 +84,9 @@ pub struct CodeConfig {
     /// (docs/ADAPTIVE_DEPTH.md). Replaces num_experts/top_k/ff_dim; tier layers
     /// must add up to n_layers.
     pub adaptive_depth: Option<super::adaptive_depth::AdaptiveDepthConfig>,
+    /// MoE grouped-query attention: key/value heads shared by attn_heads / kv_heads
+    /// query heads each. Absent = one per query head (MHA). Shrinks the KV cache.
+    pub kv_heads: Option<usize>,
 }
 
 impl Default for CodeConfig {
@@ -98,7 +101,7 @@ impl Default for CodeConfig {
             attn_heads: 16, ff_dim: 2048, batch_size: 8, epochs: 15,
             first_lr: 2e-4, last_lr: 2e-5, validation_fraction: 0.01,
             out_dir: "/workspace/checkpoints/yumon-code".into(),
-            overfit_samples: None, heatmap_every: 250, adaptive_loss: None, adaptive_depth: None,
+            overfit_samples: None, heatmap_every: 250, adaptive_loss: None, adaptive_depth: None, kv_heads: None,
         }
     }
 }
@@ -136,6 +139,10 @@ impl CodeConfig {
         ensure!(self.validation_fraction > 0.0 && self.validation_fraction < 1.0,
             "validation_fraction must be between 0 and 1");
         if let Some(adaptive) = &self.adaptive_loss { adaptive.validate()?; }
+        if let Some(kv) = self.kv_heads {
+            ensure!(self.architecture == CodeArchitecture::Moe, "kv_heads requires architecture \"moe\"");
+            ensure!(kv > 0 && self.attn_heads % kv == 0, "attn_heads must be a positive multiple of kv_heads");
+        }
         if let Some(depth) = &self.adaptive_depth {
             depth.validate()?;
             ensure!(self.architecture == CodeArchitecture::Moe, "adaptive_depth requires architecture \"moe\"");
