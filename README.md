@@ -61,7 +61,10 @@ Configure tokenizer and model settings in
 trains only on the official Rust books (see
 [Rust books stage](docs/commands.md#code-rust-books-pretraining-stage); rebuild
 it after step 1). The code curriculum then uses low, adds mild, and adds
-moderate from its third epoch onward. Each tier
+moderate from its third epoch onward. `pretrain_code` pretrains on all of
+`code.bin` instead, or on `pretrain_cache` (`code_long.bin`, 2048 tokens in
+`yumon-code-moe-lite.json`) for a longer context; see
+[code pretraining](docs/commands.md#code-code-pretraining-at-a-longer-context). Each tier
 has equal documented and distinct undocumented samples. Tokenizer fitting
 excludes validation files. Existing artifacts are preserved; use a new output
 directory for subsequent tokenizer runs.

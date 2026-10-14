@@ -67,6 +67,26 @@ Docs never enter validation. `docs_share` (default 0) optionally replays a
 rotating docs window taking that share of tokens in later epochs. After
 `train_bpe`, rebuild the stage: it is tied to the tokenizer and context.
 
+## Code: code pretraining at a longer context
+
+`pretrain_code: true` trains the first `pretrain_epochs` on every chunk in a raw
+code cache (minus held-out files), then runs the tiers. A cache only loads at the
+context it was chunked for, and items over that context were skipped, so a
+longer context needs its own cache: set `pretrain_cache` (e.g.
+`training-cache/code_long.bin`) and build it at the config's `max_seq_len`.
+`code.bin` stays the 512 cache that captioning reads. The tiers tokenize at load,
+so they work at any context.
+
+```sh
+# Chunks rust-code into complete items up to max_seq_len - 1 tokens. CPU only.
+cargo run --release --no-default-features --bin cache_samples -- --code-config configs/yumon-code-moe-lite.json --pretrain-cache --preview-samples 0
+# Header only:
+cargo run --release --no-default-features --bin cache_samples -- --code-config configs/yumon-code-moe-lite.json --pretrain-cache --inspect
+```
+
+`configs/yumon-code-moe-lite.json` uses 2048. Training trims each batch to its
+longest sample, so short samples do not pay for the full context.
+
 ## RunPod Docker
 
 ```sh

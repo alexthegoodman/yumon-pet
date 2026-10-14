@@ -44,6 +44,10 @@ pub struct CodeConfig {
     /// Pretrain on every sample in `cache` (code.bin) for the first
     /// `pretrain_epochs`, minus the curriculum's held-out files, before the tiers.
     pub pretrain_code: bool,
+    /// Raw-code cache for `pretrain_code` (default `cache`). Built at this config's
+    /// `max_seq_len` by `cache_samples --pretrain-cache`, so a longer context can
+    /// pretrain on items `code.bin` skipped while the tiers keep using `code.bin`.
+    pub pretrain_cache: Option<PathBuf>,
     /// Epochs of the pretraining stage (default 1); they count toward `epochs`.
     pub pretrain_epochs: usize,
     /// Optional replay of the pretraining stage afterwards: target share of each
@@ -87,7 +91,7 @@ impl Default for CodeConfig {
         Self {
             architecture: CodeArchitecture::DecoderOnly, num_experts: 4, top_k: 1,
             source: "../rust-code".into(), cache: "training-cache/code.bin".into(), curriculum: None, docs: None,
-            pretrain_code: false, pretrain_epochs: 1, pretrain_share: 0.0,
+            pretrain_code: false, pretrain_cache: None, pretrain_epochs: 1, pretrain_share: 0.0,
             tokenizer: "yumon_code_bpe".into(), max_seq_len: 512,
             exclude_dirs: [".git", "target", "node_modules"].map(String::from).to_vec(),
             seed: 4815162342, vocab_size: 16384, embed_dim: 512, n_layers: 16,
@@ -116,6 +120,7 @@ impl CodeConfig {
         ensure!(!(self.pretrain_code && self.docs.is_some()), "use either pretrain_code or docs, not both");
         ensure!(!self.pretrain_code || self.curriculum.is_some(),
             "pretrain_code needs `curriculum`; without it `cache` is already the whole training set");
+        ensure!(self.pretrain_cache.is_none() || self.pretrain_code, "pretrain_cache needs pretrain_code");
         if self.pretrain_code || self.docs.is_some() {
             ensure!(self.pretrain_epochs > 0 && self.pretrain_epochs < self.epochs,
                 "pretrain_epochs must be at least 1 and leave epochs for the curriculum");
@@ -280,17 +285,24 @@ pub fn chunk_source(text: &str, tokenizer: &TokenizerKind, max_seq_len: usize, s
 pub fn prepare(config: &CodeConfig, files: &[PathBuf], tokenizer: &TokenizerKind, limit: Option<usize>) -> Result<Vec<Sample>> {
     let mut samples = Vec::new();
     let mut seen = HashSet::new();
+    let mut unparsed = 0;
     for path in files {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         if text.trim().is_empty() || !seen.insert(Sha256::digest(text.as_bytes())) { continue; }
         let relative = path.strip_prefix(&config.source)?.to_string_lossy().replace('\\', "/");
+        // Corpora carry deliberately invalid Rust (e.g. syntax-highlighting fixtures).
+        if let Err(e) = syn::parse_file(&text) {
+            eprintln!("[CodeChunks] skipped {relative}: not valid Rust ({e})");
+            unparsed += 1;
+            continue;
+        }
         samples.extend(chunk_source(&text, tokenizer, config.max_seq_len, &relative)
             .with_context(|| format!("chunking {}", path.display()))?);
     }
     samples.shuffle(&mut StdRng::seed_from_u64(config.seed));
     if let Some(limit) = limit { samples.truncate(limit); }
     ensure!(!samples.is_empty(), "No complete Rust structs/functions fit the context; increase max_seq_len or choose another corpus");
-    println!("Prepared {} chunks from {} discovered Rust files (duplicate files removed)", samples.len(), files.len());
+    println!("Prepared {} chunks from {} discovered Rust files (duplicate files removed, {unparsed} unparseable skipped)", samples.len(), files.len());
     Ok(samples)
 }
 

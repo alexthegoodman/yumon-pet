@@ -310,3 +310,40 @@ fn code_pretraining_trains_all_of_code_bin_first_without_held_out_files() -> Res
     assert!(fixture.config.validate().is_err());
     Ok(())
 }
+
+#[test]
+fn code_pretraining_reads_a_longer_pretrain_cache_at_the_config_context() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let record = |path: &str, text: String| Record { path: path.into(), location: "line 1".into(), text };
+    // An item longer than the short cache's context, as the old 512 code.bin skipped.
+    let long = format!("fn long() {{ {} }}", "let x = 1; ".repeat(5));
+    let write = |name: &str, context: usize, records: &[Record]| -> Result<PathBuf> {
+        let samples: Vec<_> = records.iter()
+            .filter_map(|r| code_data::to_sample(r, &fixture.tokenizer, context).transpose())
+            .collect::<Result<_>>()?;
+        let path = fixture.directory.join(name);
+        sample_cache::write_cache_with_objective(&path, &fixture.tokenizer, TrainingStage::Language,
+            context, fixture.config.seed, &samples, CacheObjective::RawCode)?;
+        Ok(path)
+    };
+    let mut records: Vec<_> = (0..6).map(|f| record(&format!("file-{f}.rs"), SOURCES[0].into())).collect();
+    records.push(record("long.rs", long.clone()));
+    assert!(code_data::to_sample(&records[6], &fixture.tokenizer, 32)?.is_none());
+    fixture.config.cache = write("code.bin", 32, &records)?;
+    fixture.config.pretrain_code = true;
+
+    // The short cache cannot serve a longer context.
+    let error = prepare(&fixture.config, &fixture.tokenizer).err().expect("context mismatch");
+    assert!(format!("{error:#}").contains("pretrain_cache"), "{error:#}");
+
+    fixture.config.pretrain_cache = Some(write("code_long.bin", fixture.config.max_seq_len, &records)?);
+    let prepared = prepare(&fixture.config, &fixture.tokenizer)?;
+    let p = prepared.pretrain_len;
+    assert!(prepared.training[..p].iter().any(|s| s.pair.0 == "long.rs"));
+    assert!(prepared.training.iter().all(|s| s.input_ids.len() == fixture.config.max_seq_len));
+    assert_eq!(prepared.identity["pretrain"]["source"], "code_long.bin");
+
+    fixture.config.pretrain_code = false;
+    assert!(fixture.config.validate().is_err());
+    Ok(())
+}

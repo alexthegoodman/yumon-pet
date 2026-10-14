@@ -69,3 +69,13 @@ validation; run names gain `_rust_docs_v1`. The stage is tied to tokenizer and
 context: rebuild after train_bpe. Docker copies it via `CODE_DOCS`. Retrained
 bundle at 512: 5,027 samples / 1.94M tokens (code split is ~0.39M). Smoke
 training passed locally; Docker build/RunPod untested.
+
+Long-context pretraining (2026-10-13): `pretrain_code` reads `pretrain_cache` when set
+(else `cache`). A raw cache only loads at its own context, and items over it were
+skipped, so `cache_samples --code-config <cfg> --pretrain-cache` builds it at the
+config's max_seq_len. `yumon-code-moe-lite.json` is now 2048 with
+`training-cache/code_long.bin` (148,018 items vs 136,591 in the 512 `code.bin`; 842
+still over 2048). `code.bin` stays 512 for captioning. Training and validation trim
+each batch to its longest row (`trim_batch`), so short samples skip unused positions.
+Preparation now skips files syn cannot parse instead of aborting. Docker does not copy
+any raw code cache yet, so `pretrain_code` is local-only.

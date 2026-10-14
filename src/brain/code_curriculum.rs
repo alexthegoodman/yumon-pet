@@ -176,21 +176,27 @@ pub fn prepare(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<Prepare
     Ok(prepared)
 }
 
-/// Every sample in `code.bin` (all tiers, high included, as raw code) except
-/// those from files the curriculum holds out for validation.
+/// Every sample in the pretraining cache (`pretrain_cache`, else `cache`; all
+/// tiers, high included, as raw code) except those from files the curriculum
+/// holds out for validation.
 fn load_code_pretraining(config: &CodeConfig, tokenizer: &TokenizerKind, held_out: &HashSet<String>)
     -> Result<(Vec<Sample>, Value)> {
-    let metadata = sample_cache::read_metadata(&config.cache)
-        .with_context(|| format!("code pretraining reads {}", config.cache.display()))?;
-    let samples = sample_cache::load_cache_with_objective(&config.cache, tokenizer, TrainingStage::Language,
+    let cache = config.pretrain_cache.as_ref().unwrap_or(&config.cache);
+    let metadata = sample_cache::read_metadata(cache)
+        .with_context(|| format!("code pretraining reads {}", cache.display()))?;
+    ensure!(metadata.max_seq_len == config.max_seq_len,
+        "{} was built for context {}, config has {}; set `pretrain_cache` and run cache_samples --pretrain-cache",
+        cache.display(), metadata.max_seq_len, config.max_seq_len);
+    let samples = sample_cache::load_cache_with_objective(cache, tokenizer, TrainingStage::Language,
         config.max_seq_len, CacheObjective::RawCode)?;
     let total = samples.len();
     let samples: Vec<_> = samples.into_iter().filter(|s| !held_out.contains(&s.pair.0)).collect();
-    ensure!(!samples.is_empty(), "no code pretraining samples left in {}", config.cache.display());
+    ensure!(!samples.is_empty(), "no code pretraining samples left in {}", cache.display());
     let dropped = total - samples.len();
     println!("Code pretraining: {} of {total} samples from {} ({dropped} from held-out files dropped)",
-        samples.len(), config.cache.display());
-    let identity = json!({"source": "code.bin", "cache_sha256": file_sha256(&config.cache)?,
+        samples.len(), cache.display());
+    let source = cache.file_name().map_or("code.bin".into(), |n| n.to_string_lossy());
+    let identity = json!({"source": source, "cache_sha256": file_sha256(cache)?,
         "tokenizer_sha256": metadata.tokenizer_sha256, "samples": samples.len(), "held_out_dropped": dropped});
     Ok((samples, identity))
 }

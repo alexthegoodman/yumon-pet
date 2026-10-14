@@ -39,11 +39,13 @@ impl TokenLossStats {
         self.tok_count.fill(0);
     }
 
-    /// `targets` and `losses` are flat [batch * seq_len]; PAD targets are skipped.
-    pub fn add(&mut self, targets: &[i32], losses: &[f32]) {
+    /// `targets` and `losses` are flat [batch * seq_len] for a batch trimmed to
+    /// `seq_len` (at most the context); PAD targets are skipped.
+    pub fn add(&mut self, targets: &[i32], losses: &[f32], seq_len: usize) {
+        assert!(seq_len <= self.seq_len, "batch length exceeds the context");
         for (i, (&target, &loss)) in targets.iter().zip(losses).enumerate() {
             if target == PAD_TOKEN as i32 || !loss.is_finite() { continue; }
-            let pos = i % self.seq_len;
+            let pos = i % seq_len;
             self.pos_sum[pos] += loss as f64;
             self.pos_count[pos] += 1;
             if let Some(sum) = self.tok_sum.get_mut(target as usize) {
@@ -206,7 +208,7 @@ mod tests {
     fn accumulates_by_position_and_token_and_skips_pad() {
         let mut stats = TokenLossStats::new(3, 8);
         // two rows of three positions; the last position of row 2 is PAD
-        stats.add(&[4, 5, 4, 4, 5, 0], &[2.0, 1.0, 3.0, 4.0, 1.0, 9.0]);
+        stats.add(&[4, 5, 4, 4, 5, 0], &[2.0, 1.0, 3.0, 4.0, 1.0, 9.0], 3);
         assert_eq!(stats.position_curve(), vec![(1.0, 3.0), (2.0, 1.0), (3.0, 3.0)]);
         let table = stats.token_table();
         assert_eq!((table[0].0, table[0].1), (4, 3));
@@ -223,7 +225,7 @@ mod tests {
         let (targets, losses): (Vec<i32>, Vec<f32>) = (0..2 * 130).map(|i| ((i % 7) as i32, (i % 5) as f32)).unzip();
         save_batch_heatmap(&dir.join("h.png"), &targets, &losses, 2, 130, 9.0).unwrap();
         let mut stats = TokenLossStats::new(130, 16);
-        stats.add(&targets, &losses);
+        stats.add(&targets, &losses, 130);
         stats.save(&dir, 7).unwrap();
         for f in ["h.png", "position_loss_000007.png", "token_loss_000007.csv"] {
             assert!(dir.join(f).exists(), "{f}");

@@ -564,6 +564,21 @@ fn build_moe_batch(
     (all_seq_ids, all_targets, supervised)
 }
 
+/// Drops the all-PAD columns after the batch's longest row. Attention is causal,
+/// PAD targets carry no loss and MoE routing skips PAD rows, so the result matches
+/// the full context while short batches skip the unused positions (and logits).
+fn trim_batch(ids: Vec<i32>, targets: Vec<i32>, rows: usize, max_seq_len: usize) -> (Vec<i32>, Vec<i32>, usize) {
+    let pad = PAD_TOKEN as i32;
+    let used = |row: &[i32]| row.iter().rposition(|&t| t != pad).map_or(0, |p| p + 1);
+    let seq_len = ids.chunks(max_seq_len).zip(targets.chunks(max_seq_len))
+        .map(|(i, t)| used(i).max(used(t))).max().unwrap_or(0).max(1);
+    if seq_len == max_seq_len { return (ids, targets, seq_len); }
+    let crop = |flat: Vec<i32>| -> Vec<i32> {
+        flat.chunks(max_seq_len).take(rows).flat_map(|row| row[..seq_len].iter().copied()).collect()
+    };
+    (crop(ids), crop(targets), seq_len)
+}
+
 /// Number of supervised targets among the three highest logits. Softmax preserves
 /// their order, so no probability tensor or full vocabulary sort is needed.
 /// Ties prefer the lower token ID. Integer reductions avoid BF16 count rounding.
@@ -690,6 +705,7 @@ fn causal_validation_loss<B: Backend, M: CausalLm<B>>(
         let (seq_ids, targets, supervised) = build_moe_batch(samples, batch_idx, sep_tokens, max_seq_len, raw_code);
         if supervised == 0 { continue; }
         let n = batch_idx.len();
+        let (seq_ids, targets, max_seq_len) = trim_batch(seq_ids, targets, n, max_seq_len);
         let tokens_t = Tensor::<B, 2, Int>::from_ints(TensorData::new(seq_ids, [n, max_seq_len]), device);
         let targets_cpu = per_token.is_some().then(|| targets.clone());
         let targets_t = Tensor::<B, 1, Int>::from_ints(TensorData::new(targets, [n * max_seq_len]), device);
@@ -1220,11 +1236,12 @@ where
                 if current_batch_size == 0 { continue; }
 
                 let (all_seq_ids, all_lang_targets, supervised) = build_moe_batch(&training_samples, batch_idx, &sep_tokens, run_cfg.max_seq_len, raw_code);
+                let (all_seq_ids, all_lang_targets, seq_len) = trim_batch(all_seq_ids, all_lang_targets, current_batch_size, run_cfg.max_seq_len);
 
                 if supervised == 0 { continue; }
                 let targets_cpu = all_lang_targets.clone();
-                let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * run_cfg.max_seq_len]), device);
-                let tokens_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_seq_ids, [current_batch_size, run_cfg.max_seq_len]), device);
+                let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * seq_len]), device);
+                let tokens_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_seq_ids, [current_batch_size, seq_len]), device);
 
                 let (token_logits, aux_loss, reach) = model.forward_train_depth(tokens_t.clone());
                 if !reach.is_empty() {
@@ -1233,7 +1250,7 @@ where
                     depth_window.1 += 1;
                 }
                 let correct = top3_correct(
-                    token_logits.clone().inner().reshape([current_batch_size * run_cfg.max_seq_len, vocab]),
+                    token_logits.clone().inner().reshape([current_batch_size * seq_len, vocab]),
                     lang_target_t.clone().inner(),
                 );
                 epoch_top3_correct += correct;
@@ -1245,7 +1262,7 @@ where
                 let log_probs = burn::tensor::activation::log_softmax(token_logits.clone().detach(), 2);
                 // Per-token loss of this batch (0 at PAD) for the heatmaps; no gradient.
                 let token_nll = per_token_nll(log_probs.clone(), lang_target_t.clone());
-                loss_stats.add(&targets_cpu, &token_nll);
+                loss_stats.add(&targets_cpu, &token_nll, seq_len);
                 let probs = log_probs.clone().exp();
                 let token_entropy = (probs * log_probs).sum_dim(2).neg().squeeze_dim::<2>(2);
                 let non_pad_mask = tokens_t.clone().equal_elem(PAD_TOKEN as u32).bool_not().float();
@@ -1254,12 +1271,12 @@ where
                     .into_data().convert::<f32>().to_vec::<f32>().unwrap()[0];
 
                 // Loss
-                let logits_2d = token_logits.reshape([current_batch_size * run_cfg.max_seq_len, vocab]);
+                let logits_2d = token_logits.reshape([current_batch_size * seq_len, vocab]);
                 // Weights come only from completed windows; lambda 0 (warm-up or
                 // disabled) keeps the plain masked CE path exactly.
                 let bookkeeping = std::time::Instant::now();
                 let lambda = adaptive.as_ref().map_or(0.0, |a| a.config.lambda_at(step, total_steps));
-                let labels = labeler.as_ref().map(|l| l.label(&targets_cpu, run_cfg.max_seq_len));
+                let labels = labeler.as_ref().map(|l| l.label(&targets_cpu, seq_len));
                 let keys = adaptive.as_ref().map(|a| a.keys(&targets_cpu, labels.as_deref()));
                 let row_weights = adaptive.as_ref().zip(keys.as_ref()).filter(|_| lambda > 0.0)
                     .map(|(a, keys)| a.row_weights(keys, lambda));
@@ -1267,7 +1284,7 @@ where
                     window.by_context.add_by_label(labels, &token_nll, row_weights.as_deref());
                 }
                 let weight_sum = row_weights.as_ref().map_or(supervised as f64, |w| w.iter().map(|&x| x as f64).sum());
-                let rows = current_batch_size * run_cfg.max_seq_len;
+                let rows = current_batch_size * seq_len;
                 let row_weights_t = row_weights.map(|w| Tensor::<TrainBackend, 1>::from_floats(TensorData::new(w, [rows]), device));
                 window.overhead += bookkeeping.elapsed();
                 let lang_loss = weighted_token_ce(logits_2d, lang_target_t, row_weights_t, supervised, stage_cfg.smoothing);
@@ -1344,7 +1361,7 @@ where
                     let snapshot = (|| -> Result<()> {
                         std::fs::create_dir_all(&heatmap_dir)?;
                         save_batch_heatmap(&heatmap_dir.join(format!("batch_{step:06}.png")), &targets_cpu,
-                            &token_nll, current_batch_size, run_cfg.max_seq_len, heatmap_ceiling)?;
+                            &token_nll, current_batch_size, seq_len, heatmap_ceiling)?;
                         loss_stats.save(&heatmap_dir, step)?;
                         write_validation_token_view(&model.valid(), tokenizer, &val_samples, run_cfg.max_seq_len,
                             vocab, device, &heatmap_dir.join(format!("tokens_{step:06}.html")), heatmap_ceiling)
@@ -2553,6 +2570,21 @@ mod language_run_tests {
                 assert!(run.stages.iter().all(|s| s.stage == TrainingStage::Language));
             }
         }
+    }
+
+    #[test]
+    fn trim_batch_keeps_the_longest_row_and_its_targets() {
+        let p = PAD_TOKEN as i32;
+        // Row 1 ends at position 3 in its ids; row 2 has a target one past its ids.
+        let ids = vec![1, 7, 8, p, p, p, 1, 9, p, p, p, p];
+        let targets = vec![7, 8, 2, p, p, p, 9, p, 5, p, p, p];
+        let (ids, targets, seq) = trim_batch(ids, targets, 2, 6);
+        assert_eq!(seq, 3);
+        assert_eq!(ids, vec![1, 7, 8, 1, 9, p]);
+        assert_eq!(targets, vec![7, 8, 2, 9, p, 5]);
+        // A full row keeps the whole context untouched.
+        let full: Vec<i32> = (1..=4).collect();
+        assert_eq!(trim_batch(full.clone(), full.clone(), 1, 4), (full.clone(), full, 4));
     }
 }
 

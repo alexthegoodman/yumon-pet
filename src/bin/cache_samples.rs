@@ -40,6 +40,10 @@ struct Args {
     /// Comma-separated book directories (default: the stable books except unstable-book).
     #[arg(long, requires = "rust_docs", value_delimiter = ',')]
     books: Option<Vec<String>>,
+    /// Write (or --inspect) the config's `pretrain_cache` instead of `cache`, chunked
+    /// at the config's max_seq_len (e.g. code_long.bin for a longer context).
+    #[arg(long, requires = "code_config", conflicts_with_all = ["rust_docs", "train_code_tokenizer"])]
+    pretrain_cache: bool,
     #[arg(long, default_value = "training-cache/samples.bin")]
     output: std::path::PathBuf,
     #[arg(long, default_value = "yumon_bpe")]
@@ -84,6 +88,10 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             println!("Cached Rust docs ({toolchain}) to {}", output.display());
             return Ok(());
+        }
+        if args.pretrain_cache {
+            config.cache = config.pretrain_cache.clone()
+                .context("--pretrain-cache needs a \"pretrain_cache\" path in the code config")?;
         }
         if args.inspect {
             println!("{}", serde_json::to_string_pretty(&sample_cache::read_metadata(&config.cache)?)?);
