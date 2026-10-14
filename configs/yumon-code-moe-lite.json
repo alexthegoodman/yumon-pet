@@ -7,12 +7,13 @@
   "n_layers": 8,
   "attn_heads": 4,
   "ff_dim": 512,
-  "max_seq_len": 2048,
+  "max_seq_len": 512,
   "source": "../../rust-code",
   "cache": "training-cache/code.bin",
   "curriculum": "training-cache",
   "pretrain_code": true,
-  "pretrain_cache": "training-cache/code_long.bin",
+  "pretrain_cache": "training-cache/code.bin",
+  "pretrain_min_tokens": 64,
   "pretrain_epochs": 1,
   "tokenizer": "yumon_code_bpe",
   "exclude_dirs": [".git", "target", "node_modules"],
@@ -22,5 +23,5 @@
   "first_lr": 0.0003,
   "last_lr": 0.00003,
   "validation_fraction": 0.01,
-  "out_dir": "D:/models/moe-lite-1"
+  "out_dir": "D:/models/moe-lite-10-14-26"
 }

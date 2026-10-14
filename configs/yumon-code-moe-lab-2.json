@@ -1,0 +1,52 @@
+{
+  "architecture": "moe",
+  "num_experts": 8,
+  "top_k": 2,
+  "vocab_size": 16384,
+  "embed_dim": 512,
+  "n_layers": 24,
+  "attn_heads": 16,
+  "ff_dim": 1024,
+  "max_seq_len": 2048,
+  "source": "../../rust-code",
+  "cache": "training-cache/code.bin",
+  "curriculum": "training-cache",
+  "pretrain_code": true,
+  "pretrain_cache": "training-cache/code_long.bin",
+  "pretrain_min_tokens": 256,
+  "pretrain_epochs": 1,
+  "tokenizer": "yumon_code_bpe",
+  "exclude_dirs": [".git", "target", "node_modules"],
+  "seed": 4815162342,
+  "batch_size": 2,
+  "epochs": 12,
+  "first_lr": 0.0003,
+  "last_lr": 0.00003,
+  "validation_fraction": 0.01,
+  "out_dir": "D:/models/moe-lite-pretrain-lab-2",
+  "adaptive_depth": {
+    "budget_loss_weight": 0.1,
+    "tiers": [
+      { 
+        "name": "easy", 
+        "layers": 8, 
+        "top_k": 1, 
+        "experts": [{ "count": 8, "ff_dim": 512 }] 
+      },
+      { 
+        "name": "medium", 
+        "layers": 8,
+        "capacity": 0.5, 
+        "top_k": 2,
+        "experts": [{ "count": 8, "ff_dim": 1024 }] 
+      },
+      { 
+        "name": "hard", 
+        "layers": 8, 
+        "capacity": 0.25, 
+        "top_k": 2, 
+        "experts": [{ "count": 6, "ff_dim": 2048 }] 
+      }
+    ]
+  }
+}

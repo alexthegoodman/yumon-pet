@@ -87,6 +87,15 @@ cargo run --release --no-default-features --bin cache_samples -- --code-config c
 `configs/yumon-code-moe-lite.json` uses 2048. Training trims each batch to its
 longest sample, so short samples do not pay for the full context.
 
+`pretrain_min_tokens` (0 = off) packs short items with their neighbours from the
+same file, in source order and joined by a blank line, until a block has that
+many tokens. Items already that long stay alone. A file's short remainder joins its
+last block, or is dropped if it doesn't fit. Packing happens at load, so no cache
+rebuild is needed. The run name gains `_min<n>`. On `code_long.bin`: 146,388 items
+(mean 195 tokens) became 89,508 blocks (mean 318) at 128, dropping 998 items
+(0.2% of tokens), or 60,474 blocks (mean 470) at 256, dropping 2,461 items (0.7%).
+moe-lite uses 128.
+
 ## RunPod Docker
 
 ```sh

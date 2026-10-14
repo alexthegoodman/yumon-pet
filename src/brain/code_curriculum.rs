@@ -1,10 +1,10 @@
 //! Model-independent mixed curriculum, restricted to low/mild/moderate.
 use super::{
-    PAD_TOKEN,
+    BOS_TOKEN, EOS_TOKEN, PAD_TOKEN,
     bpe::TokenizerKind,
     code_corpus::{self, CodeConfig},
     sample_cache::{self, CacheObjective},
-    samples::{Sample, TrainingStage},
+    samples::{Action, CardinalDir, Sample, TrainingStage, WorldContext},
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -196,9 +196,94 @@ fn load_code_pretraining(config: &CodeConfig, tokenizer: &TokenizerKind, held_ou
     println!("Code pretraining: {} of {total} samples from {} ({dropped} from held-out files dropped)",
         samples.len(), cache.display());
     let source = cache.file_name().map_or("code.bin".into(), |n| n.to_string_lossy());
-    let identity = json!({"source": source, "cache_sha256": file_sha256(cache)?,
+    let mut identity = json!({"source": source, "cache_sha256": file_sha256(cache)?,
         "tokenizer_sha256": metadata.tokenizer_sha256, "samples": samples.len(), "held_out_dropped": dropped});
+    if config.pretrain_min_tokens == 0 {
+        return Ok((samples, identity));
+    }
+    let (samples, report) = pack_min_tokens(samples, tokenizer, config.max_seq_len, config.pretrain_min_tokens)?;
+    identity["packing"] = report;
     Ok((samples, identity))
+}
+
+/// Code ids of a raw-code sample: its targets up to EOS.
+fn code_ids(sample: &Sample) -> &[usize] {
+    let end = sample.target_labels.iter().position(|&t| t == EOS_TOKEN || t == PAD_TOKEN).unwrap_or(0);
+    &sample.target_labels[..end]
+}
+
+/// Raises every pretraining sample to at least `min` code tokens. Items of one file
+/// are joined in source order with a blank line until a block reaches `min`, never
+/// past the context; items already that long stay alone. A file's short remainder
+/// joins its last block when it fits, otherwise it is dropped.
+fn pack_min_tokens(samples: Vec<Sample>, tokenizer: &TokenizerKind, max_seq_len: usize, min: usize)
+    -> Result<(Vec<Sample>, Value)> {
+    let separator = tokenizer.encode("\n\n");
+    ensure!(!separator.is_empty() && separator.iter().all(|&t| t > 3), "blank-line separator must be plain tokens");
+    let budget = max_seq_len - 1; // input BOS + code; targets code + EOS
+    let line = |s: &Sample| s.pair.1.trim_start_matches("line ").parse::<usize>().unwrap_or(0);
+    let mut by_file: std::collections::BTreeMap<String, Vec<Sample>> = Default::default();
+    for sample in samples {
+        by_file.entry(sample.pair.0.clone()).or_default().push(sample);
+    }
+    let (items, item_tokens): (usize, usize) = by_file.values().flatten()
+        .fold((0, 0), |(n, t), s| (n + 1, t + code_ids(s).len()));
+    let mut blocks: Vec<(String, usize, Vec<usize>)> = Vec::new();
+    let (mut dropped, mut dropped_tokens) = (0usize, 0usize);
+    for (file, mut items) in by_file {
+        items.sort_by_key(|s| line(s));
+        let first_block = blocks.len();
+        // Current block: first line, code, item count.
+        let mut current: Option<(usize, Vec<usize>, usize)> = None;
+        let mut close = |current: Option<(usize, Vec<usize>, usize)>, blocks: &mut Vec<(String, usize, Vec<usize>)>| {
+            let Some((first, code, count)) = current else { return };
+            if code.len() >= min {
+                blocks.push((file.clone(), first, code));
+            } else if let Some(last) = blocks[first_block..].last_mut()
+                .filter(|last| last.2.len() + separator.len() + code.len() <= budget) {
+                last.2.extend(&separator);
+                last.2.extend(code);
+            } else {
+                dropped += count;
+                dropped_tokens += code.len();
+            }
+        };
+        for item in &items {
+            let code = code_ids(item);
+            if current.as_ref().is_some_and(|(_, block, _)| block.len() + separator.len() + code.len() > budget) {
+                close(current.take(), &mut blocks);
+            }
+            match &mut current {
+                Some((_, block, count)) => {
+                    block.extend(&separator);
+                    block.extend(code);
+                    *count += 1;
+                }
+                None => current = Some((line(item), code.to_vec(), 1)),
+            }
+            if current.as_ref().is_some_and(|(_, block, _)| block.len() >= min) {
+                close(current.take(), &mut blocks);
+            }
+        }
+        close(current, &mut blocks);
+    }
+    let samples: Vec<Sample> = blocks.into_iter().map(|(file, first, code)| {
+        let mut input_ids = vec![BOS_TOKEN];
+        input_ids.extend(&code);
+        let mut target_labels = code;
+        target_labels.push(EOS_TOKEN);
+        input_ids.resize(max_seq_len, PAD_TOKEN);
+        target_labels.resize(max_seq_len, PAD_TOKEN);
+        Sample { input_ids, target_labels, action: Action::Sit, motion_dir: CardinalDir::None,
+            world: WorldContext::default(), target_json: String::new(), pair: (file, format!("line {first}")) }
+    }).collect();
+    ensure!(!samples.is_empty(), "no pretraining block reaches {min} tokens");
+    let tokens: usize = samples.iter().map(|s| code_ids(s).len()).sum();
+    println!("Code pretraining packed to >= {min} tokens: {items} items ({item_tokens} tokens) -> {} blocks ({tokens} tokens, mean {}); {dropped} items ({dropped_tokens} tokens) dropped",
+        samples.len(), tokens / samples.len());
+    let report = json!({"min_tokens": min, "blocks": samples.len(), "tokens": tokens,
+        "dropped_items": dropped, "dropped_tokens": dropped_tokens});
+    Ok((samples, report))
 }
 
 fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<(PreparedCode, HashSet<String>)> {

@@ -162,40 +162,99 @@ fn escape(s: &str) -> String {
     out
 }
 
+/// One predicted token in the held-out view: its text, the loss of predicting
+/// it, and (with adaptive depth) the deepest tier index spent on it.
+pub struct TokenView {
+    pub text: String,
+    pub loss: f32,
+    pub tier: Option<u8>,
+}
+
+/// Tier background colors: green (shallowest) through amber to red (deepest).
+fn tier_color(tier: usize, tiers: usize) -> [u8; 3] {
+    const PALETTE: [[u8; 3]; 5] = [[46, 139, 87], [212, 160, 23], [192, 57, 43], [52, 101, 164], [142, 68, 173]];
+    let slot = if tiers <= 3 { tier * 2 / (tiers - 1).max(1) } else { tier % PALETTE.len() };
+    PALETTE[slot.min(PALETTE.len() - 1)]
+}
+
+fn span(html: &mut String, [r, g, b]: [u8; 3], tip: &str, text: &str) {
+    let fg = if (r as u32 * 3 + g as u32 * 6 + b as u32) > 1400 { "#000" } else { "#fff" };
+    let _ = write!(html, "<span style=\"background:rgb({r},{g},{b});color:{fg}\" title=\"{tip}\">{}</span>", escape(text));
+}
+
 /// Colors held-out text token by token with the loss of predicting that token.
-/// `rows` holds (token text, loss) per sample; hover a token for its exact loss.
-pub fn write_token_html(path: &Path, title: &str, rows: &[Vec<(String, f32)>], ceiling: f32) -> Result<()> {
+/// With `tier_names` (adaptive depth), each sample also gets a view colored by
+/// the deepest tier reached, plus per-tier summaries. Hover for exact values.
+pub fn write_token_html(path: &Path, title: &str, rows: &[Vec<TokenView>], tier_names: Option<&[String]>, ceiling: f32) -> Result<()> {
     let mut html = String::new();
     let _ = write!(html, "<!doctype html><meta charset=utf-8><title>{}</title><body style=\"background:#0a0a0f;color:#ddd;font:13px/1.5 monospace\">\
         <h3>{}</h3><p>Color = sqrt(loss / {:.2}); black is ~0 loss, yellow is a uniform-guess loss. Hover for exact values.</p>",
         escape(title), escape(title), ceiling);
-    let mut by_token: HashMap<&str, (f64, u32)> = HashMap::new();
-    for row in rows {
-        for (text, loss) in row {
-            let e = by_token.entry(text.as_str()).or_default();
-            e.0 += *loss as f64;
-            e.1 += 1;
-        }
+    let tiers = tier_names.map_or(0, |n| n.len());
+    let tier_name = |t: Option<u8>| t.and_then(|t| tier_names?.get(t as usize)).map_or("", |s| s.as_str());
+    let tip = |t: &TokenView| match t.tier {
+        Some(_) => format!("loss {:.4}, tier {}", t.loss, escape(tier_name(t.tier))),
+        None => format!("loss {:.4}", t.loss),
+    };
+    // Per token text: loss sum, count, and count per deepest tier.
+    let mut by_token: HashMap<&str, (f64, u32, Vec<u32>)> = HashMap::new();
+    let mut by_tier = vec![(0.0f64, 0usize); tiers];
+    for t in rows.iter().flatten() {
+        let e = by_token.entry(t.text.as_str()).or_insert_with(|| (0.0, 0, vec![0; tiers]));
+        e.0 += t.loss as f64;
+        e.1 += 1;
+        if let Some(slot) = t.tier.and_then(|tier| e.2.get_mut(tier as usize)) { *slot += 1; }
+        if let Some(s) = t.tier.and_then(|tier| by_tier.get_mut(tier as usize)) { s.0 += t.loss as f64; s.1 += 1; }
     }
-    let (sum, n) = rows.iter().flatten().fold((0.0f64, 0usize), |a, t| (a.0 + t.1 as f64, a.1 + 1));
+    let (sum, n) = rows.iter().flatten().fold((0.0f64, 0usize), |a, t| (a.0 + t.loss as f64, a.1 + 1));
     let _ = write!(html, "<p>{n} tokens, mean loss {:.4}</p>", sum / n.max(1) as f64);
+    if let Some(names) = tier_names {
+        html.push_str("<h4>adaptive depth: deepest tier reached per predicted token</h4><table><tr><td>tier</td><td>tokens</td><td>share</td><td>mean loss</td></tr>");
+        for (i, (name, (s, c))) in names.iter().zip(&by_tier).enumerate() {
+            html.push_str("<tr><td>");
+            span(&mut html, tier_color(i, tiers), name, name);
+            let _ = write!(html, "</td><td>{c}</td><td>{:.1}%</td><td>{}</td></tr>",
+                100.0 * *c as f64 / n.max(1) as f64, if *c > 0 { fmt_num(s / *c as f64) } else { "-".into() });
+        }
+        html.push_str("</table>");
+    }
     for (i, row) in rows.iter().enumerate() {
-        let mean = row.iter().map(|t| t.1 as f64).sum::<f64>() / row.len().max(1) as f64;
+        let mean = row.iter().map(|t| t.loss as f64).sum::<f64>() / row.len().max(1) as f64;
         let _ = write!(html, "<h4>sample {i} (mean loss {mean:.4})</h4><pre style=\"white-space:pre-wrap;word-break:break-all\">");
-        for (text, loss) in row {
-            let [r, g, b] = colormap((loss / ceiling).max(0.0).sqrt());
-            let fg = if (r as u32 * 3 + g as u32 * 6 + b as u32) > 1400 { "#000" } else { "#fff" };
-            let _ = write!(html, "<span style=\"background:rgb({r},{g},{b});color:{fg}\" title=\"loss {loss:.4}\">{}</span>", escape(text));
+        for t in row {
+            span(&mut html, colormap((t.loss / ceiling).max(0.0).sqrt()), &tip(t), &t.text);
         }
         html.push_str("</pre>");
+        if tiers > 0 {
+            let _ = write!(html, "<h4>sample {i} depth</h4><pre style=\"white-space:pre-wrap;word-break:break-all\">");
+            for t in row {
+                span(&mut html, tier_color(t.tier.unwrap_or(0) as usize, tiers), &tip(t), &t.text);
+            }
+            html.push_str("</pre>");
+        }
     }
-    let mut worst: Vec<(&str, f64, u32)> = by_token.into_iter().map(|(t, (s, c))| (t, s / c as f64, c)).collect();
+    let tier_mix = |counts: &[u32]| -> String {
+        tier_names.unwrap_or(&[]).iter().zip(counts).filter(|(_, c)| **c > 0)
+            .map(|(name, c)| format!("{} {c}", escape(name))).collect::<Vec<_>>().join(" / ")
+    };
+    let mut worst: Vec<(&str, f64, u32, &[u32])> = by_token.iter().map(|(t, (s, c, k))| (*t, s / *c as f64, *c, k.as_slice())).collect();
     worst.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(b.0)));
     html.push_str("<h4>highest mean loss tokens</h4><table>");
-    for (text, mean, count) in worst.iter().take(20) {
-        let _ = write!(html, "<tr><td><pre style=\"margin:0\">{}</pre></td><td>{}</td><td>x{count}</td></tr>", escape(text), fmt_num(*mean));
+    for (text, mean, count, k) in worst.iter().take(20) {
+        let _ = write!(html, "<tr><td><pre style=\"margin:0\">{}</pre></td><td>{}</td><td>x{count}</td><td>{}</td></tr>", escape(text), fmt_num(*mean), tier_mix(k));
     }
     html.push_str("</table>");
+    if let Some(deepest) = tier_names.and_then(|n| n.last()).filter(|_| tiers > 1) {
+        // Ranked by how often the token went all the way down.
+        let mut deep: Vec<_> = worst.iter().filter(|w| w.3[tiers - 1] > 0).collect();
+        deep.sort_by(|a, b| b.3[tiers - 1].cmp(&a.3[tiers - 1]).then(a.0.cmp(b.0)));
+        let _ = write!(html, "<h4>tokens most often sent to {}</h4><table>", escape(deepest));
+        for (text, mean, count, k) in deep.iter().take(20) {
+            let _ = write!(html, "<tr><td><pre style=\"margin:0\">{}</pre></td><td>{}/{count}</td><td>loss {}</td><td>{}</td></tr>",
+                escape(text), k[tiers - 1], fmt_num(*mean), tier_mix(k));
+        }
+        html.push_str("</table>");
+    }
     std::fs::write(path, html)?;
     Ok(())
 }
@@ -230,7 +289,16 @@ mod tests {
         for f in ["h.png", "position_loss_000007.png", "token_loss_000007.csv"] {
             assert!(dir.join(f).exists(), "{f}");
         }
-        write_token_html(&dir.join("t.html"), "t", &[vec![("a<b".into(), 1.0), ("\n".into(), 0.0)]], 9.0).unwrap();
-        assert!(std::fs::read_to_string(dir.join("t.html")).unwrap().contains("a&lt;b"));
+        let view = |text: &str, loss, tier| TokenView { text: text.into(), loss, tier };
+        write_token_html(&dir.join("t.html"), "t", &[vec![view("a<b", 1.0, None), view("\n", 0.0, None)]], None, 9.0).unwrap();
+        let html = std::fs::read_to_string(dir.join("t.html")).unwrap();
+        assert!(html.contains("a&lt;b") && !html.contains("depth"));
+        let names = ["easy".to_string(), "medium".into(), "hard".into()];
+        let rows = [vec![view("fn", 0.5, Some(0)), view("foo", 6.0, Some(2)), view("foo", 4.0, Some(1))]];
+        write_token_html(&dir.join("d.html"), "d", &rows, Some(&names), 9.0).unwrap();
+        let html = std::fs::read_to_string(dir.join("d.html")).unwrap();
+        for s in ["sample 0 depth", "loss 6.0000, tier hard", "tokens most often sent to hard", "medium 1 / hard 1"] {
+            assert!(html.contains(s), "{s}");
+        }
     }
 }

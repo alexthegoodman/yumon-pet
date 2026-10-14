@@ -48,6 +48,10 @@ pub struct CodeConfig {
     /// `max_seq_len` by `cache_samples --pretrain-cache`, so a longer context can
     /// pretrain on items `code.bin` skipped while the tiers keep using `code.bin`.
     pub pretrain_cache: Option<PathBuf>,
+    /// Minimum code tokens per pretraining sample (0 = off). Shorter items are packed
+    /// with their neighbours from the same file, in source order, until a block
+    /// reaches it; a file's short remainder joins its last block or is dropped.
+    pub pretrain_min_tokens: usize,
     /// Epochs of the pretraining stage (default 1); they count toward `epochs`.
     pub pretrain_epochs: usize,
     /// Optional replay of the pretraining stage afterwards: target share of each
@@ -94,7 +98,7 @@ impl Default for CodeConfig {
         Self {
             architecture: CodeArchitecture::DecoderOnly, num_experts: 4, top_k: 1,
             source: "../rust-code".into(), cache: "training-cache/code.bin".into(), curriculum: None, docs: None,
-            pretrain_code: false, pretrain_cache: None, pretrain_epochs: 1, pretrain_share: 0.0,
+            pretrain_code: false, pretrain_cache: None, pretrain_min_tokens: 0, pretrain_epochs: 1, pretrain_share: 0.0,
             tokenizer: "yumon_code_bpe".into(), max_seq_len: 512,
             exclude_dirs: [".git", "target", "node_modules"].map(String::from).to_vec(),
             seed: 4815162342, vocab_size: 16384, embed_dim: 512, n_layers: 16,
@@ -124,6 +128,8 @@ impl CodeConfig {
         ensure!(!self.pretrain_code || self.curriculum.is_some(),
             "pretrain_code needs `curriculum`; without it `cache` is already the whole training set");
         ensure!(self.pretrain_cache.is_none() || self.pretrain_code, "pretrain_cache needs pretrain_code");
+        ensure!(self.pretrain_min_tokens == 0 || self.pretrain_code, "pretrain_min_tokens needs pretrain_code");
+        ensure!(self.pretrain_min_tokens < self.max_seq_len, "pretrain_min_tokens must be below max_seq_len");
         if self.pretrain_code || self.docs.is_some() {
             ensure!(self.pretrain_epochs > 0 && self.pretrain_epochs < self.epochs,
                 "pretrain_epochs must be at least 1 and leave epochs for the curriculum");

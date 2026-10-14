@@ -24,7 +24,7 @@ use crate::brain::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::brain::{chart::render};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::brain::loss_stats::{TokenLossStats, save_batch_heatmap, write_token_html};
+use crate::brain::loss_stats::{TokenLossStats, TokenView, save_batch_heatmap, write_token_html};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::brain::mdx::{load_dictionary_sentences, load_handcrafted_sentences, load_qa_pairs, load_qa_singles, load_txt_sentences};
@@ -315,7 +315,9 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 if config.adaptive_depth.is_some() { String::new() } else { format!("{}ff_", config.ff_dim) },
                 config.max_seq_len, config.batch_size,
                 if config.curriculum.is_some() { "_curriculum_documented_tiers_v3" } else { "" },
-                if config.docs.is_some() { "_rust_docs_v1" } else if config.pretrain_code { "_code_pretrain_v1" } else { "" })
+                if config.docs.is_some() { "_rust_docs_v1".to_owned() } else if config.pretrain_code {
+                    format!("_code_pretrain_v1{}", if config.pretrain_min_tokens > 0 { format!("_min{}", config.pretrain_min_tokens) } else { String::new() })
+                } else { String::new() })
                 + &config.overfit_samples.map_or(String::new(), |n| format!("_overfit{n}"))
                 // Separate directories so A/B/C/D experiments never resume each other.
                 + &config.adaptive_loss.as_ref().map_or(String::new(), |a| format!("_alw_{}", a.effective_mode().tag()))
@@ -674,16 +676,19 @@ fn write_validation_token_view<B: Backend, M: CausalLm<B>>(
     let n = idx.len();
     let tokens = Tensor::<B, 2, Int>::from_ints(TensorData::new(ids, [n, max_seq_len]), device);
     let target_t = Tensor::<B, 1, Int>::from_ints(TensorData::new(targets.clone(), [n * max_seq_len]), device);
-    let log_probs = burn::tensor::activation::log_softmax(
-        model.logits(tokens).cast(burn::tensor::FloatDType::F32), 2);
+    let (logits, depth) = model.logits_with_depth(tokens);
+    let log_probs = burn::tensor::activation::log_softmax(logits.cast(burn::tensor::FloatDType::F32), 2);
     debug_assert_eq!(log_probs.dims()[2], vocab);
     let nll = per_token_nll(log_probs, target_t);
-    let rows: Vec<Vec<(String, f32)>> = (0..n).map(|r| {
-        (0..max_seq_len).filter(|&p| targets[r * max_seq_len + p] != PAD_TOKEN as i32)
-            .map(|p| (tokenizer.decode(&[targets[r * max_seq_len + p] as usize]), nll[r * max_seq_len + p]))
+    // Row i predicts targets[i], so its tier is the depth spent on that prediction.
+    let rows: Vec<Vec<TokenView>> = (0..n).map(|r| {
+        (0..max_seq_len).map(|p| r * max_seq_len + p).filter(|&i| targets[i] != PAD_TOKEN as i32)
+            .map(|i| TokenView { text: tokenizer.decode(&[targets[i] as usize]), loss: nll[i],
+                tier: depth.as_ref().map(|(_, deepest)| deepest[i]) })
             .collect()
     }).collect();
-    write_token_html(path, &format!("Held-out token loss: {}", path.display()), &rows, ceiling)
+    let tier_names = depth.map(|(names, _)| names);
+    write_token_html(path, &format!("Held-out token loss: {}", path.display()), &rows, tier_names.as_deref(), ceiling)
 }
 
 /// Per-token loss over the held-out samples, without dropout or gradients.
@@ -734,6 +739,11 @@ type InnerBackend = <TrainBackend as AutodiffBackend>::InnerBackend;
 /// What validation and qualitative eval need from a decoder-only model.
 trait CausalLm<B: Backend> {
     fn logits(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3>;
+    /// `logits` plus, with adaptive depth, the tier names and the deepest tier
+    /// index per row (batch * seq, row-major).
+    fn logits_with_depth(&self, tokens: Tensor<B, 2, Int>) -> (Tensor<B, 3>, Option<(Vec<String>, Vec<u8>)>) {
+        (self.logits(tokens), None)
+    }
     fn generate(&self, tokenizer: &TokenizerKind, prompt: &str, max_tokens: usize, device: &B::Device) -> GenerationResult;
 }
 
@@ -777,6 +787,12 @@ fn ensure_same_tokenizer(current: &TokenizerKind, saved: &TokenizerKind) -> Resu
 
 impl<B: FlashAttention> CausalLm<B> for YumonMoeBrain<B> {
     fn logits(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> { self.forward(tokens) }
+    fn logits_with_depth(&self, tokens: Tensor<B, 2, Int>) -> (Tensor<B, 3>, Option<(Vec<String>, Vec<u8>)>) {
+        let Some(depth) = self.config.adaptive_depth.as_ref() else { return (self.forward(tokens), None) };
+        let names = depth.tiers.iter().map(|t| t.name.clone()).collect();
+        let (logits, _, _, deepest) = self.forward_with_depth(tokens);
+        (logits, Some((names, deepest)))
+    }
     fn generate(&self, tokenizer: &TokenizerKind, prompt: &str, max_tokens: usize, device: &B::Device) -> GenerationResult {
         self.generate_unmasked_parsed(tokenizer, prompt, max_tokens, device)
     }

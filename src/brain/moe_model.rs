@@ -374,6 +374,15 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         &self,
         tokens: Tensor<B, 2, Int>,
     ) -> (Tensor<B, 3>, Tensor<B, 1>, Vec<Vec<usize>>) {
+        let (logits, aux, counts, _) = self.forward_with_depth(tokens);
+        (logits, aux, counts)
+    }
+    /// `forward_with_aux` plus the deepest tier index each row (batch * seq,
+    /// row-major) reached; all 0 without adaptive depth or at PAD.
+    pub fn forward_with_depth(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+    ) -> (Tensor<B, 3>, Tensor<B, 1>, Vec<Vec<usize>>, Vec<u8>) {
         let [batch, seq] = tokens.dims();
         assert!(batch > 0 && seq > 0 && seq <= self.config.max_seq_len);
         let device = tokens.device();
@@ -400,14 +409,16 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         let mut x = self.dropout.forward(self.embedding.forward(tokens));
         let mut auxiliary = Tensor::<B, 1>::zeros([1], &device).cast(FloatDType::F32);
         let mut counts = Vec::new();
+        let rows = batch * seq;
+        let mut deepest = vec![0u8; rows];
         if active_count == 0 {
             return (
                 self.token_head.forward(self.norm.forward(x)),
                 auxiliary,
                 self.blocks.iter().map(|b| vec![0; b.moe.num_experts()]).collect(),
+                deepest,
             );
         }
-        let rows = batch * seq;
         let layer_tiers = self.config.adaptive_depth.as_ref().map(|d| d.layer_tiers());
         let tier_of = |layer: usize| layer_tiers.as_ref().map_or(0, |t| t[layer]);
         let mut budget = Tensor::<B, 1>::zeros([1], &device).cast(FloatDType::F32);
@@ -436,6 +447,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                     hard[row as usize] = (s >= 0.5) as u8 as f32;
                 }
                 current.retain(|&row| hard[row as usize] == 1.0);
+                for &row in &current { deepest[row as usize] = tier as u8; }
                 let floats = |v: Vec<f32>| Tensor::<B, 1>::from_data_dtype(
                     TensorData::new(v, [rows]), &device, burn::tensor::DType::F32);
                 // Straight-through: forward is the hard decision, gradient reaches the gate.
@@ -474,6 +486,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             self.token_head.forward(self.norm.forward(x)),
             auxiliary / self.blocks.len() as f64 + budget * budget_weight,
             counts,
+            deepest,
         )
     }
 
@@ -1070,6 +1083,8 @@ mod tests {
         let routed: Vec<usize> = counts.iter().map(|c| c.iter().sum()).collect();
         assert_eq!(routed, vec![18, 9, 9, 9]);
         assert_eq!(all.depth_reach(&counts), vec![1.0, 1.0, 1.0]);
+        let (_, _, _, deepest) = all.forward_with_depth(tokens());
+        assert_eq!(deepest, vec![2, 2, 2, 2, 0, 0, 2, 2, 2, 2, 2, 0]);
 
         // Everyone exits after the easy tier: deeper experts get nothing, and the
         // result equals running only the first block.
@@ -1078,6 +1093,7 @@ mod tests {
         let routed: Vec<usize> = counts.iter().map(|c| c.iter().sum()).collect();
         assert_eq!(routed, vec![18, 0, 0, 0]);
         assert_eq!(none.depth_reach(&counts), vec![1.0, 0.0, 0.0]);
+        assert!(none.forward_with_depth(tokens()).3.iter().all(|&t| t == 0));
         assert!(values(aux)[0].is_finite());
         let mut shallow = none.clone();
         shallow.blocks.truncate(1);

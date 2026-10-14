@@ -91,3 +91,10 @@ Intel UHD 770, context ~1550: lite 196 -> 25 ms/token, mini-depth 1.23 s -> 75
 ms/token. GQA gave no measurable speedup at these sizes. Masking all experts on
 device to avoid routing reads was tried and was slower (more kernel launches).
 
+Pretraining floor (2026-10-14): `pretrain_min_tokens` packs `pretrain_code` items
+per file in source order (blank-line join) until a block reaches the floor (max
+context - 1). A file's short remainder merges into its last block or is dropped.
+Packing is done at load (`pack_min_tokens` in code_curriculum.rs). Run name
+`_code_pretrain_v1_min<n>`. moe-lite: 128 -> 89,508 blocks (mean 318, 0.2% of tokens
+dropped); 256 gives 60,474 blocks (mean 470, 0.7% dropped). Tiers are unaffected.
+

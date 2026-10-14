@@ -347,3 +347,42 @@ fn code_pretraining_reads_a_longer_pretrain_cache_at_the_config_context() -> Res
     assert!(fixture.config.validate().is_err());
     Ok(())
 }
+
+#[test]
+fn code_pretraining_packs_neighbouring_items_up_to_a_minimum() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let record = |path: &str, line: usize, text: &str| Record { path: path.into(), location: format!("line {line}"), text: text.into() };
+    let long = format!("fn long() {{ {} }}", "let x = 1; ".repeat(5));
+    // Out of source order on purpose; packing sorts each file by line.
+    let records = vec![
+        record("pack.rs", 30, SOURCES[2]), record("pack.rs", 10, SOURCES[0]), record("pack.rs", 20, SOURCES[1]),
+        record("pack.rs", 40, SOURCES[0]), record("long.rs", 1, &long), record("tiny.rs", 1, SOURCES[0]),
+    ];
+    let samples: Vec<_> = records.iter()
+        .map(|r| code_data::to_sample(r, &fixture.tokenizer, fixture.config.max_seq_len).map(Option::unwrap))
+        .collect::<Result<_>>()?;
+    let length = |s: &crate::brain::samples::Sample| s.target_labels.iter().position(|&t| t == EOS_TOKEN).unwrap();
+    let min = length(&samples[4]);
+    assert!(samples.iter().enumerate().all(|(i, s)| i == 4 || length(s) < min));
+    let cache = fixture.directory.join("code_long.bin");
+    sample_cache::write_cache_with_objective(&cache, &fixture.tokenizer, TrainingStage::Language,
+        fixture.config.max_seq_len, fixture.config.seed, &samples, CacheObjective::RawCode)?;
+    fixture.config.cache = cache;
+    fixture.config.pretrain_code = true;
+    fixture.config.pretrain_min_tokens = min;
+    let prepared = prepare(&fixture.config, &fixture.tokenizer)?;
+
+    let blocks = &prepared.training[..prepared.pretrain_len];
+    assert!(blocks.iter().all(|s| length(s) >= min && length(s) < fixture.config.max_seq_len));
+    let text = |file: &str| -> Vec<String> {
+        blocks.iter().filter(|s| s.pair.0 == file).map(|s| fixture.tokenizer.decode(&s.target_labels)).collect()
+    };
+    assert_eq!(text("long.rs"), [long.clone()]);
+    assert!(text("tiny.rs").is_empty(), "a file with only a short item is dropped");
+    // pack.rs: lines 10, 20, 30 fill one block; line 40 is too short alone and joins it.
+    let joined = [SOURCES[0], SOURCES[1], SOURCES[2], SOURCES[0]].join("\n\n");
+    let pack = text("pack.rs");
+    assert_eq!(pack.join("\n\n"), joined, "blocks keep source order");
+    assert_eq!(prepared.identity["pretrain"]["packing"]["dropped_items"], 1);
+    Ok(())
+}
