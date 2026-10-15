@@ -1565,9 +1565,9 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
     // See configs/runpod-h100.md; peak memory must be measured on the pod.
     let sizes:       [usize; 1] = [
         // 32,
-        // 64,
+        64,
         // 128,
-        256, // smaller, maybe good seq length of 256
+        // 256, // smaller, maybe good seq length of 256
         // 512 // 220M ideal
         // 1024, // ~1.32B total / ~411M active at 24 layers, 4 experts top-1
         // 1024,
@@ -1578,17 +1578,18 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 4,
         // 8,
         // 8, // stretch: slower on iGPU - each MoE layer forces a host readback
+        12,
         // 16 // discovered minimum (runpod)
-        24
+        // 24
         // 32
     ];
     let head_counts:  [usize; 1] = [
         // 1,
-        // 2,
+        2,
         // 4,
         // 8,
         // 16,
-        32, // head dim 32 at 1024 wide
+        // 32, // head dim 32 at 1024 wide
         // 64
     ];
     let seq_lens:     [usize; 1] = [

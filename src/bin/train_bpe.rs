@@ -29,11 +29,7 @@ fn main() -> anyhow::Result<()> {
             bpe::BpeTokenizer, samples::TrainingStage, train::stage_data_loader,
         };
         let output = args.output.unwrap_or_else(|| "yumon_bpe".into());
-        anyhow::ensure!(
-            !output.exists(),
-            "output already exists: {}",
-            output.display()
-        );
+        
         let sentences = stage_data_loader(TrainingStage::Language)
             .total_limit(1_500_000)
             .seed(4815162342)
@@ -48,7 +44,12 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        BpeTokenizer::train(sentences.iter().collect(), 16384)?.save(
+        BpeTokenizer::train(
+            sentences.iter().collect(), 
+            // 16384 // expressive (runpod)
+            // 2048 // more budget (local)
+            1024
+        )?.save(
             output
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("output path must be UTF-8"))?,
