@@ -258,10 +258,25 @@ fn code_eval_prompts() -> Vec<String> {
     ]
 }
 
+fn kilo_eval_prompts() -> Vec<String> {
+    vec![
+        "# [ derive ( Debug , Clone , Default ) ] pub struct T0 {".to_string(),
+        "impl T0 { pub fn fn0 ( & mut self , arg0 : & T1 ) -> bool {".to_string(),
+        "pub async fn fn0 ( arg0 : & str ) -> Result < T0 , T1 > { let mut v0 =".to_string(),
+        "match v0 { Ok ( v1 ) =>".to_string(),
+        "v0 . iter ( ) . map ( | v1 | v1 . fn0 ( ) ) . filter ( | v1 |".to_string(),
+        "fn fn0 ( mut arg0 : Commands , arg1 : Query < ( Entity , & T0 ) > ) {".to_string(),
+    ]
+}
+
 /// Yumon Code uses the same trainer locally (WGPU) and on RunPod (CUDA).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool) -> Result<()> {
-    let prompts = code_eval_prompts();
+    let prompts = if config.vocab_size == 1024 || config.cache.to_string_lossy().contains("kilo") {
+        kilo_eval_prompts()
+    } else {
+        code_eval_prompts()
+    };
     use crate::brain::{code_corpus, code_curriculum};
     config.validate()?;
     let tokenizer = code_corpus::load_tokenizer(&config.tokenizer)?;
