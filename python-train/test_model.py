@@ -44,10 +44,10 @@ def test_full_model_forward():
     )
     model = YumonPetMoeBrain(config)
 
-    batch_size = 2
-    seq_len = 16
+    batch_size = 8
+    seq_len = 32
     tokens = torch.randint(1, 1000, (batch_size, seq_len))
-    tokens[:, 12:] = PAD_TOKEN  # simulate padding
+    tokens[:, 24:] = PAD_TOKEN  # simulate padding
 
     logits, aux_loss = model(tokens)
     assert logits.shape == (batch_size, seq_len, 1000), f"Logits shape mismatch: {logits.shape}"
@@ -84,7 +84,19 @@ def test_generation():
     generated = model.generate(prompt, max_new_tokens=8, temperature=0.8, top_k=20)
     assert generated.shape[0] == 1, f"Batch dim mismatch: {generated.shape}"
     assert generated.shape[1] > prompt.shape[1], "Did not generate new tokens"
-    print(f"  Generated sequence length {generated.shape[1]} from prompt length {prompt.shape[1]}.")
+
+    # Verify cached generation is identical to un-cached full forward pass
+    cached_greedy = model.generate(prompt, max_new_tokens=5, temperature=0.0)
+    cur_tokens = list(prompt[0].tolist())
+    for _ in range(5):
+        with torch.no_grad():
+            logits, _ = model(torch.tensor([cur_tokens], dtype=torch.long))
+            nxt = torch.argmax(logits[0, -1, :]).item()
+            cur_tokens.append(nxt)
+            if nxt == EOS_TOKEN:
+                break
+    assert cached_greedy[0].tolist() == cur_tokens, "KV cached generation diverged from full forward pass!"
+    print(f"  Generated sequence length {generated.shape[1]} from prompt length {prompt.shape[1]}. Cache parity verified.")
 
 
 def test_samples_cache_loading():

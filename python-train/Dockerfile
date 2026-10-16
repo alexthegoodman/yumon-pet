@@ -15,7 +15,7 @@ ENV PYTHONUNBUFFERED=1 \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     YUMON_SAMPLE_CACHE=/app/training-cache/samples.bin \
     TOKENIZER_PATH=/app/tokenizer.json \
-    CHECKPOINT_DIR=/workspace/checkpoints
+    CHECKPOINT_DIR=/workspace/checkpoints-pet-1
 
 WORKDIR /app
 

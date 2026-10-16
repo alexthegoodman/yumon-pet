@@ -49,10 +49,10 @@ class TrainingConfig:
 
     # Model architecture
     vocab_size: int = 16384
-    embed_dim: int = 1024
-    n_layers: int = 24
-    attn_heads: int = 16
-    ff_dim: int = 4096
+    embed_dim: int = 512
+    n_layers: int = 16
+    attn_heads: int = 8
+    ff_dim: int = 2048
     max_seq_len: int = 256
     num_experts: int = 8
     top_k: int = 2
@@ -312,8 +312,13 @@ class Trainer:
         print("\n" + "=" * 50)
         print("Generating sample model replies:")
         for prompt in self.config.sample_prompts:
-            encoded = self.tokenizer.encode(prompt).ids
-            prompt_tensor = torch.tensor([encoded], dtype=torch.long, device=self.device)
+            encoded = self.tokenizer.encode(prompt, add_special_tokens=False).ids
+            space_ids = self.tokenizer.encode(" ", add_special_tokens=False).ids
+            sep_tokens = space_ids if space_ids else [146]
+            prompt_ids = [BOS_TOKEN] + encoded + sep_tokens
+            prompt_len = len(prompt_ids)
+
+            prompt_tensor = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
             generated_tokens = self.model.generate(
                 prompt_tensor,
                 max_new_tokens=48,
@@ -322,7 +327,7 @@ class Trainer:
                 eos_token_id=EOS_TOKEN,
             )
             out_ids = generated_tokens[0].tolist()
-            reply = self.tokenizer.decode(out_ids)
+            reply = self.tokenizer.decode(out_ids[prompt_len:]).strip()
             print(f"  Prompt: \"{prompt}\"")
             print(f"  Yumon:  \"{reply}\"\n")
         print("=" * 50 + "\n")

@@ -6,7 +6,7 @@ import torch
 from tokenizers import Tokenizer
 
 from model import YumonPetMoeBrain, ModelConfig
-from dataloader import EOS_TOKEN
+from dataloader import BOS_TOKEN, EOS_TOKEN
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -42,8 +42,15 @@ def generate_reply(
     temperature: float = 0.8,
     top_k: int = 40,
 ) -> str:
-    encoded = tokenizer.encode(prompt).ids
-    prompt_tensor = torch.tensor([encoded], dtype=torch.long, device=device)
+    encoded = tokenizer.encode(prompt, add_special_tokens=False).ids
+
+    # Training format: [BOS_TOKEN] + prompt_ids + [SEP_TOKEN (space)] + reply_ids + [EOS_TOKEN]
+    space_ids = tokenizer.encode(" ", add_special_tokens=False).ids
+    sep_tokens = space_ids if space_ids else [146]
+    prompt_ids = [BOS_TOKEN] + encoded + sep_tokens
+    prompt_len = len(prompt_ids)
+
+    prompt_tensor = torch.tensor([prompt_ids], dtype=torch.long, device=device)
 
     generated = model.generate(
         prompt_tensor,
@@ -54,21 +61,17 @@ def generate_reply(
     )
 
     out_ids = generated[0].tolist()
-    full_text = tokenizer.decode(out_ids)
-
-    # If the generation repeats the prompt prefix, strip it for clean reply
-    reply = full_text
-    prompt_clean = tokenizer.decode(encoded).strip()
-    if full_text.startswith(prompt_clean):
-        reply = full_text[len(prompt_clean):].strip()
+    reply_ids = out_ids[prompt_len:]
+    reply = tokenizer.decode(reply_ids).strip()
 
     return reply
 
 
 def main():
+    default_tok = "tokenizer.json" if os.path.exists("tokenizer.json") else "../yumon_bpe/tokenizer-16k-2.json"
     parser = argparse.ArgumentParser(description="Generate replies with trained Yumon Pet Sparse MoE Model")
     parser.add_argument("--checkpoint", type=str, default="checkpoints/best_model.pt", help="Path to checkpoint")
-    parser.add_argument("--tokenizer", type=str, default="../yumon_bpe/tokenizer-16k-2.json", help="Path to tokenizer.json")
+    parser.add_argument("--tokenizer", type=str, default=default_tok, help="Path to tokenizer.json")
     parser.add_argument("--prompt", type=str, default=None, help="Prompt string (if omitted, interactive mode starts)")
     parser.add_argument("--max-new-tokens", type=int, default=64, help="Maximum generated tokens")
     parser.add_argument("--temperature", type=float, default=0.8, help="Sampling temperature")

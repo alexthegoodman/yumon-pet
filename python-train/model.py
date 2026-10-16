@@ -237,6 +237,7 @@ class CausalSelfAttention(nn.Module):
         sin: torch.Tensor,
         kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         offset: int = 0,
+        use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, S, _ = x.shape
 
@@ -253,6 +254,8 @@ class CausalSelfAttention(nn.Module):
             k = torch.cat([past_k, k], dim=2)
             v = torch.cat([past_v, v], dim=2)
             new_cache = (k, v)
+        elif use_cache:
+            new_cache = (k, v)
         else:
             new_cache = None
 
@@ -265,8 +268,8 @@ class CausalSelfAttention(nn.Module):
             v_att = v
 
         # PyTorch Builtin Flash Attention (scaled_dot_product_attention)
-        # When kv_cache is active with length > 1, query length is S, key length is total_seq
-        is_causal = (S > 1)
+        # When kv_cache is active, query length is S, key length is total_seq
+        is_causal = (S > 1 and kv_cache is None)
         dropout_p = self.dropout if self.training else 0.0
         attn_out = F.scaled_dot_product_attention(
             q, k_att, v_att,
@@ -300,12 +303,15 @@ class MoeBlock(nn.Module):
         active_mask: Optional[torch.Tensor] = None,
         kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         offset: int = 0,
+        use_cache: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, S, D = x.shape
 
         # Attention + residual
         norm_x = self.attn_norm(x)
-        attn_out, new_cache = self.attn(norm_x, cos, sin, kv_cache=kv_cache, offset=offset)
+        attn_out, new_cache = self.attn(
+            norm_x, cos, sin, kv_cache=kv_cache, offset=offset, use_cache=use_cache
+        )
         x = x + attn_out
 
         # MoE + residual
@@ -415,11 +421,16 @@ class YumonPetMoeBrain(nn.Module):
 
         x = self.embedding(prompt_tokens)
         for i, block in enumerate(self.blocks):
-            x, _, _, kv_caches[i] = block(x, cos, sin, active_mask=None, kv_cache=None, offset=0)
+            x, _, _, kv_caches[i] = block(
+                x, cos, sin, active_mask=None, kv_cache=None, offset=0, use_cache=True
+            )
 
         logits = self.token_head(self.norm(x[:, -1:, :]))
 
         for step in range(max_new_tokens):
+            if generated.shape[1] >= self.config.max_seq_len:
+                break
+
             if temperature > 0:
                 scaled_logits = logits[:, -1, :] / temperature
                 if top_k > 0:
@@ -439,7 +450,7 @@ class YumonPetMoeBrain(nn.Module):
             x = self.embedding(next_token)
             for i, block in enumerate(self.blocks):
                 x, _, _, kv_caches[i] = block(
-                    x, cos, sin, active_mask=None, kv_cache=kv_caches[i], offset=cur_offset
+                    x, cos, sin, active_mask=None, kv_cache=kv_caches[i], offset=cur_offset, use_cache=True
                 )
             logits = self.token_head(self.norm(x))
 
