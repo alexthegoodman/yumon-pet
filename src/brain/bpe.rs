@@ -95,8 +95,8 @@ impl BpeTokenizer {
 
         let trainer = BpeTrainerBuilder::new()
             .vocab_size(vocab_size)
-            .max_token_length(Some(5))
-            .min_frequency(5)
+            .max_token_length(Some(8))
+            .min_frequency(4)
             // .min_frequency(1)
             // .min_frequency(2)       // better for smaller corpus    
             .special_tokens(special_tokens.clone())

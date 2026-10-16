@@ -49,23 +49,31 @@ class TrainingConfig:
 
     # Model architecture
 
-    # Runpod
+    # Test 1
     # vocab_size: int = 16384
     # embed_dim: int = 512
     # n_layers: int = 16
     # attn_heads: int = 8
     # ff_dim: int = 2048
 
-    # Local
-    vocab_size: int = 4096
-    embed_dim: int = 256
-    n_layers: int = 12
-    attn_heads: int = 8
-    ff_dim: int = 512
+    # Test 2
+    # vocab_size: int = 4096
+    # embed_dim: int = 256
+    # n_layers: int = 12
+    # attn_heads: int = 8
+    # ff_dim: int = 512
+
+    # Test 3
+    vocab_size: int = 16384
+    embed_dim: int = 1024
+    n_layers: int = 8
+    attn_heads: int = 16
+    ff_dim: int = 2048
 
     max_seq_len: int = 256
     num_experts: int = 8
-    top_k: int = 2
+    # top_k: int = 2
+    top_k: int = 1
     dropout: float = 0.05
     aux_loss_weight: float = 0.01
     z_loss_weight: float = 0.001
@@ -87,6 +95,7 @@ class TrainingConfig:
     log_every: int = 50
     eval_every: int = int(os.environ.get("EVAL_EVERY", "500"))
     generate_samples: bool = True
+    sample_log_file: str = "sample_outputs.txt"
     sample_prompts: List[str] = field(
         default_factory=lambda: [
             "Tell me about yourself.",
@@ -205,7 +214,13 @@ class Trainer:
         self.last_val_metrics = None
         print(f"Resumed at epoch {self.start_epoch}, step {self.global_step}, best val loss {self.best_val_loss:.4f}")
 
-    def save_checkpoint(self, path: Optional[str] = None, epoch: int = 0, is_best: bool = False):
+    def save_checkpoint(
+        self,
+        path: Optional[str] = None,
+        epoch: int = 0,
+        is_best: bool = False,
+        val_metrics: Optional[Tuple[float, float, float]] = None,
+    ):
         state = {
             "epoch": epoch,
             "global_step": self.global_step,
@@ -214,12 +229,23 @@ class Trainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "config": asdict(self.config),
         }
+        saved_names: List[str] = []
         if path:
             torch.save(state, path)
+            saved_names.append(os.path.basename(path))
         if is_best:
             best_path = os.path.join(self.config.checkpoint_dir, "best_model.pt")
             torch.save(state, best_path)
             tqdm.write(f"[BEST] Saved new best model to {best_path} (step {self.global_step}, val loss {self.best_val_loss:.4f})")
+            if "best_model.pt" not in saved_names:
+                saved_names.append("best_model.pt")
+
+        if saved_names and self.config.generate_samples:
+            self.sample_generation(
+                checkpoint_names=saved_names,
+                val_metrics=val_metrics or self.last_val_metrics,
+                epoch=epoch,
+            )
 
     def train_epoch(self, epoch: int) -> Tuple[float, float, float]:
         self.model.train()
@@ -300,7 +326,7 @@ class Trainer:
                     + (" [BEST]" if is_best else "")
                 )
                 if is_best:
-                    self.save_checkpoint(path=None, epoch=epoch, is_best=True)
+                    self.save_checkpoint(path=None, epoch=epoch, is_best=True, val_metrics=self.last_val_metrics)
 
         mean_loss = epoch_loss / max(1, batches_processed)
         mean_lm = epoch_lm_loss / max(1, batches_processed)
@@ -342,32 +368,97 @@ class Trainer:
             if was_training:
                 self.model.train()
 
-    def sample_generation(self):
-        if not self.tokenizer:
-            return
+    def sample_generation(
+        self,
+        checkpoint_names: Optional[List[str]] = None,
+        val_metrics: Optional[Tuple[float, float, float]] = None,
+        epoch: Optional[int] = None,
+    ) -> List[Tuple[str, str]]:
+        if not self.tokenizer or not self.config.generate_samples:
+            return []
 
-        print("\n" + "=" * 50)
-        print("Generating sample model replies:")
-        for prompt in self.config.sample_prompts:
-            encoded = self.tokenizer.encode(prompt, add_special_tokens=False).ids
-            space_ids = self.tokenizer.encode(" ", add_special_tokens=False).ids
-            sep_tokens = space_ids if space_ids else [146]
-            prompt_ids = [BOS_TOKEN] + encoded + sep_tokens
-            prompt_len = len(prompt_ids)
+        was_training = self.model.training
+        self.model.eval()
+        results: List[Tuple[str, str]] = []
 
-            prompt_tensor = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
-            generated_tokens = self.model.generate(
-                prompt_tensor,
-                max_new_tokens=48,
-                temperature=0.8,
-                top_k=40,
-                eos_token_id=EOS_TOKEN,
-            )
-            out_ids = generated_tokens[0].tolist()
-            reply = self.tokenizer.decode(out_ids[prompt_len:]).strip()
-            print(f"  Prompt: \"{prompt}\"")
-            print(f"  Yumon:  \"{reply}\"\n")
-        print("=" * 50 + "\n")
+        try:
+            with torch.no_grad():
+                for prompt in self.config.sample_prompts:
+                    encoded = self.tokenizer.encode(prompt, add_special_tokens=False).ids
+                    space_ids = self.tokenizer.encode(" ", add_special_tokens=False).ids
+                    sep_tokens = space_ids if space_ids else [146]
+                    prompt_ids = [BOS_TOKEN] + encoded + sep_tokens
+                    prompt_len = len(prompt_ids)
+
+                    prompt_tensor = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
+                    generated_tokens = self.model.generate(
+                        prompt_tensor,
+                        max_new_tokens=48,
+                        temperature=0.8,
+                        top_k=40,
+                        eos_token_id=EOS_TOKEN,
+                    )
+                    out_ids = generated_tokens[0].tolist()
+                    reply = self.tokenizer.decode(out_ids[prompt_len:]).strip()
+                    results.append((prompt, reply))
+        finally:
+            if was_training:
+                self.model.train()
+
+        tqdm.write("\n" + "=" * 50)
+        tqdm.write("Generating sample model replies:")
+        for prompt, reply in results:
+            tqdm.write(f"  Prompt: \"{prompt}\"")
+            tqdm.write(f"  Yumon:  \"{reply}\"\n")
+        tqdm.write("=" * 50 + "\n")
+
+        now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+        lines = ["=" * 60]
+        header_parts = [f"Step {self.global_step}"]
+        if epoch is not None:
+            header_parts.append(f"Epoch {epoch + 1}")
+        if checkpoint_names:
+            header_parts.append(f"Checkpoint: {', '.join(checkpoint_names)}")
+        lines.append(" | ".join(header_parts))
+
+        active_metrics = val_metrics if val_metrics is not None else self.last_val_metrics
+        if active_metrics is not None:
+            v_loss, v_top3, v_ppl = active_metrics
+            lines.append(f"Val Loss: {v_loss:.4f} | Perplexity: {v_ppl:.2f} | Top-3 Acc: {v_top3:.1%}")
+
+        lines.append(f"Timestamp: {now_str}")
+        lines.append("-" * 60)
+        for prompt, reply in results:
+            lines.append(f"Prompt: \"{prompt}\"")
+            lines.append(f"Yumon:  \"{reply}\"")
+            lines.append("")
+        lines.append("=" * 60)
+        lines.append("")
+
+        log_entry = "\n".join(lines) + "\n"
+
+        # Append to cumulative sample outputs log
+        log_file = self.config.sample_log_file
+        log_path = log_file if os.path.isabs(log_file) else os.path.join(self.config.checkpoint_dir, log_file)
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(log_entry)
+            tqdm.write(f"[Samples] Logged sample outputs to {log_path}")
+        except Exception as e:
+            tqdm.write(f"[Samples] Warning: Failed to write to {log_path}: {e}")
+
+        # Also write to checkpoint-specific txt files (e.g. best_model_samples.txt)
+        if checkpoint_names:
+            for ckpt_name in checkpoint_names:
+                base, _ = os.path.splitext(ckpt_name)
+                ckpt_sample_path = os.path.join(self.config.checkpoint_dir, f"{base}_samples.txt")
+                try:
+                    with open(ckpt_sample_path, "w", encoding="utf-8") as f:
+                        f.write(log_entry)
+                except Exception as e:
+                    tqdm.write(f"[Samples] Warning: Failed to write to {ckpt_sample_path}: {e}")
+
+        return results
 
     def train(self):
         print(f"\nStarting training for {self.config.epochs} epochs on device: {self.device}")
@@ -397,13 +488,9 @@ class Trainer:
                 + (" [BEST]" if (is_best or val_loss == self.best_val_loss) else "")
             )
 
-            # Save epoch checkpoint
+            # Save epoch checkpoint (and sample prompt outputs if generate_samples is True)
             ckpt_path = os.path.join(self.config.checkpoint_dir, f"checkpoint_epoch_{epoch + 1}.pt")
-            self.save_checkpoint(ckpt_path, epoch=epoch, is_best=is_best)
-
-            # Sample text generation
-            if self.config.generate_samples:
-                self.sample_generation()
+            self.save_checkpoint(ckpt_path, epoch=epoch, is_best=is_best, val_metrics=self.last_val_metrics)
 
         total_time = time.time() - start_time
         print(f"\nTraining complete in {total_time / 60:.1f} minutes. Best Val Loss: {self.best_val_loss:.4f}")
@@ -429,6 +516,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-samples", type=int, default=None, help="Cap dataset sample count for quick runs")
     parser.add_argument("--precision", type=str, default=None, choices=["bf16", "fp16", "fp32"], help="Precision")
     parser.add_argument("--eval-every", type=int, default=None, help="Save best model checkpoint every N batches (default: 500, set 0 to evaluate only at epoch end)")
+    parser.add_argument("--sample-log-file", type=str, default=None, help="File name for sample prompt output logs in checkpoint-dir (default: sample_outputs.txt)")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume")
     parser.add_argument("--no-samples", action="store_true", help="Disable text sample generation during training")
     return parser.parse_args()
@@ -474,6 +562,8 @@ def main():
         config.max_samples = args.max_samples
     if args.precision is not None:
         config.precision = args.precision
+    if args.sample_log_file is not None:
+        config.sample_log_file = args.sample_log_file
     if args.no_samples:
         config.generate_samples = False
 

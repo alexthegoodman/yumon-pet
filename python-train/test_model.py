@@ -299,6 +299,67 @@ def test_trainer_mid_epoch_checkpoint():
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def test_trainer_sample_prompt_logging():
+    import tempfile
+    import shutil
+    from train import Trainer, TrainingConfig
+
+    print("Testing Trainer checkpoint sample prompt logging to txt...")
+    sample_paths = [
+        "../training-cache/samples.bin",
+        "../../yumon-pet/training-cache/samples.bin",
+        "training-cache/samples.bin",
+    ]
+    path = next((p for p in sample_paths if os.path.exists(p)), None)
+    if not path:
+        print("  samples.bin not found, skipping sample logging test.")
+        return
+
+    tmp_dir = tempfile.mkdtemp(prefix="yumon_test_sample_log_")
+    try:
+        config = TrainingConfig(
+            data_path=path,
+            checkpoint_dir=tmp_dir,
+            embed_dim=32,
+            n_layers=1,
+            attn_heads=2,
+            ff_dim=64,
+            num_experts=2,
+            top_k=1,
+            max_seq_len=32,
+            max_samples=16,
+            batch_size=4,
+            epochs=1,
+            eval_every=2,
+            generate_samples=True,
+            sample_prompts=["Hi Yumon!", "What is the universe?"],
+            precision="fp32",
+        )
+        trainer = Trainer(config)
+        trainer.train()
+
+        log_path = os.path.join(tmp_dir, "sample_outputs.txt")
+        best_samples_path = os.path.join(tmp_dir, "best_model_samples.txt")
+        epoch_samples_path = os.path.join(tmp_dir, "checkpoint_epoch_1_samples.txt")
+
+        assert os.path.exists(log_path), f"Cumulative sample log not found: {log_path}"
+        assert os.path.exists(best_samples_path), f"Best model sample file not found: {best_samples_path}"
+        assert os.path.exists(epoch_samples_path), f"Epoch sample file not found: {epoch_samples_path}"
+
+        with open(log_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        assert "Hi Yumon!" in content, "Prompt missing from sample log"
+        assert "What is the universe?" in content, "Prompt missing from sample log"
+        assert "Yumon:" in content, "Yumon reply label missing from sample log"
+        assert "Step" in content, "Step metadata missing from sample log"
+        assert "Val Loss" in content, "Val Loss missing from sample log"
+
+        print("  Trainer checkpoint sample prompt output logging verified successfully.")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     print("=== Running Yumon Pet PyTorch Unit Tests ===")
     test_sparse_moe()
@@ -307,5 +368,7 @@ if __name__ == "__main__":
     test_samples_cache_loading()
     test_memories_and_chat_prompt()
     test_trainer_mid_epoch_checkpoint()
+    test_trainer_sample_prompt_logging()
     print("All tests passed successfully!")
+
 

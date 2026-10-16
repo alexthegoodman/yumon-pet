@@ -46,10 +46,10 @@ fn main() -> anyhow::Result<()> {
 
         BpeTokenizer::train(
             sentences.iter().collect(), 
-            // 16384 // expressive (runpod)
+            16384 // expressive (runpod)
             // 2048 // more budget (local)
             // 1024
-            4096 // medium
+            // 4096 // medium
         )?.save(
             output
                 .to_str()
