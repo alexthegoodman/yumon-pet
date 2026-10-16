@@ -64,16 +64,28 @@ class TrainingConfig:
     # ff_dim: int = 512
 
     # Test 3
+    # vocab_size: int = 16384
+    # embed_dim: int = 1024
+    # n_layers: int = 8
+    # attn_heads: int = 16
+    # ff_dim: int = 2048
+
+    # vocab_size: int = 16384
+    # embed_dim: int = 64
+    # n_layers: int = 24
+    # attn_heads: int = 4
+    # ff_dim: int = 256
+
     vocab_size: int = 16384
     embed_dim: int = 1024
-    n_layers: int = 8
-    attn_heads: int = 16
+    n_layers: int = 4
+    attn_heads: int = 32
     ff_dim: int = 2048
 
     max_seq_len: int = 256
     num_experts: int = 8
-    # top_k: int = 2
-    top_k: int = 1
+    top_k: int = 2
+    # top_k: int = 4
     dropout: float = 0.05
     aux_loss_weight: float = 0.01
     z_loss_weight: float = 0.001

@@ -20,6 +20,10 @@ name = "yumon_rss"
 path = "src/bin/yumon_rss.rs"
 required-features = ["desktop"]
 
+[[bin]]
+name = "cache_kilo"
+path = "src/bin/cache_kilo.rs"
+
 [features]
 # Desktop/GUI bits (native window + webview + 3D engine + gamepad input) used by
 # the yumon_desktop/yumon_world/yumon_civ/train_ui/chat_ui bins. Not needed for
@@ -67,7 +71,8 @@ pdf-extract = "0.10.0"
 outlines-core = "0.2.14"
 walkdir = "2"
 scraper = { version = "=0.27.0", default-features = false }
-syn = { version = "=2.0.117", features = ["full", "parsing", "visit"] }
+syn = { version = "=2.0.117", features = ["full", "parsing", "visit", "visit-mut"] }
+quote = "=1.0.45"
 proc-macro2 = { version = "=1.0.106", features = ["span-locations"] }
 zstd = "0.13"
 csv = "1.4.0"

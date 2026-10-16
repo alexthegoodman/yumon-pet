@@ -19,6 +19,8 @@ pub mod sample_cache;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod code_corpus;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod kilo;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod code_complexity;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod code_curriculum;
