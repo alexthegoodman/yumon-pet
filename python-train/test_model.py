@@ -142,7 +142,7 @@ def test_samples_cache_loading():
 
 def test_memories_and_chat_prompt():
     print("Testing memory formatting and chat prompt parity with yumon_rss.rs...")
-    tok_path = "tokenizer.json" if os.path.exists("tokenizer.json") else "../yumon_bpe/tokenizer-16k-2.json"
+    tok_path = "tokenizer.json" if os.path.exists("tokenizer.json") else "../yumon_bpe/tokenizer.json"
     if not os.path.exists(tok_path):
         print(f"  Tokenizer not found at {tok_path}, skipping chat prompt test.")
         return

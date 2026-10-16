@@ -12,3 +12,4 @@ example.rs
 .venv
 training-cache
 __pycache__
+checkpoints

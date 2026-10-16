@@ -33,26 +33,36 @@ class TrainingConfig:
     tokenizer_path: str = field(
         default_factory=lambda: os.environ.get(
             "TOKENIZER_PATH",
-            "../yumon_bpe/tokenizer-16k-2.json"
-            if os.path.exists("../yumon_bpe/tokenizer-16k-2.json")
-            else "yumon_bpe/tokenizer-16k-2.json",
+            "../yumon_bpe/tokenizer.json"
+            if os.path.exists("../yumon_bpe/tokenizer.json")
+            else "yumon_bpe/tokenizer.json",
         )
     )
     checkpoint_dir: str = field(
         default_factory=lambda: os.environ.get(
             "CHECKPOINT_DIR",
-            "/workspace/checkpoints"
+            "/workspace/checkpoints/checkpoint-new"
             if os.path.exists("/workspace")
             else "checkpoints",
         )
     )
 
     # Model architecture
-    vocab_size: int = 16384
-    embed_dim: int = 512
-    n_layers: int = 16
+
+    # Runpod
+    # vocab_size: int = 16384
+    # embed_dim: int = 512
+    # n_layers: int = 16
+    # attn_heads: int = 8
+    # ff_dim: int = 2048
+
+    # Local
+    vocab_size: int = 4096
+    embed_dim: int = 256
+    n_layers: int = 12
     attn_heads: int = 8
-    ff_dim: int = 2048
+    ff_dim: int = 512
+
     max_seq_len: int = 256
     num_experts: int = 8
     top_k: int = 2

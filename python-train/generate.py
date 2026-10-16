@@ -229,7 +229,7 @@ def generate_reply(
 
 
 def main():
-    default_tok = "tokenizer.json" if os.path.exists("tokenizer.json") else "../yumon_bpe/tokenizer-16k-2.json"
+    default_tok = "tokenizer.json" if os.path.exists("tokenizer.json") else "../yumon_bpe/tokenizer.json"
     parser = argparse.ArgumentParser(description="Generate replies with trained Yumon Pet Sparse MoE Model")
     parser.add_argument("--checkpoint", type=str, default="checkpoints/best_model.pt", help="Path to checkpoint")
     parser.add_argument("--tokenizer", type=str, default=default_tok, help="Path to tokenizer.json")

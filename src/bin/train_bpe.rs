@@ -48,7 +48,8 @@ fn main() -> anyhow::Result<()> {
             sentences.iter().collect(), 
             // 16384 // expressive (runpod)
             // 2048 // more budget (local)
-            1024
+            // 1024
+            4096 // medium
         )?.save(
             output
                 .to_str()
