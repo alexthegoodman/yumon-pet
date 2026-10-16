@@ -9,3 +9,6 @@
 !/training-cache/.gitkeep
 
 example.rs
+.venv
+training-cache
+__pycache__
