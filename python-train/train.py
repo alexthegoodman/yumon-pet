@@ -365,18 +365,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-path", type=str, default=None, help="Path to samples.bin")
     parser.add_argument("--tokenizer-path", type=str, default=None, help="Path to tokenizer.json")
     parser.add_argument("--checkpoint-dir", type=str, default=None, help="Output directory for checkpoints")
-    parser.add_argument("--epochs", type=int, default=15, help="Number of training epochs")
-    parser.add_argument("--batch-size", type=int, default=16, help="Batch size per step")
-    parser.add_argument("--embed-dim", type=int, default=256, help="Transformer embedding dimension")
-    parser.add_argument("--n-layers", type=int, default=12, help="Number of transformer layers")
-    parser.add_argument("--attn-heads", type=int, default=8, help="Number of attention heads")
-    parser.add_argument("--ff-dim", type=int, default=1024, help="SwiGLU expert hidden dimension")
-    parser.add_argument("--num-experts", type=int, default=4, help="Number of experts per MoE layer")
-    parser.add_argument("--top-k", type=int, default=1, help="Top-k experts routed per token")
-    parser.add_argument("--first-lr", type=float, default=1e-4, help="Starting learning rate")
-    parser.add_argument("--last-lr", type=float, default=1e-5, help="Ending learning rate")
-    parser.add_argument("--weight-decay", type=float, default=0.01, help="Weight decay")
-    parser.add_argument("--max-seq-len", type=int, default=256, help="Max sequence length")
+    parser.add_argument("--epochs", type=int, default=None, help="Number of training epochs")
+    parser.add_argument("--batch-size", type=int, default=None, help="Batch size per step")
+    parser.add_argument("--embed-dim", type=int, default=None, help="Transformer embedding dimension")
+    parser.add_argument("--n-layers", type=int, default=None, help="Number of transformer layers")
+    parser.add_argument("--attn-heads", type=int, default=None, help="Number of attention heads")
+    parser.add_argument("--ff-dim", type=int, default=None, help="SwiGLU expert hidden dimension")
+    parser.add_argument("--num-experts", type=int, default=None, help="Number of experts per MoE layer")
+    parser.add_argument("--top-k", type=int, default=None, help="Top-k experts routed per token")
+    parser.add_argument("--first-lr", type=float, default=None, help="Starting learning rate")
+    parser.add_argument("--last-lr", type=float, default=None, help="Ending learning rate")
+    parser.add_argument("--weight-decay", type=float, default=None, help="Weight decay")
+    parser.add_argument("--max-seq-len", type=int, default=None, help="Max sequence length")
     parser.add_argument("--max-samples", type=int, default=None, help="Cap dataset sample count for quick runs")
     parser.add_argument("--precision", type=str, default=None, choices=["bf16", "fp16", "fp32"], help="Precision")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume")
@@ -388,39 +388,39 @@ def main():
     args = parse_args()
     config = TrainingConfig()
 
-    if args.data_path:
+    if args.data_path is not None:
         config.data_path = args.data_path
-    if args.tokenizer_path:
+    if args.tokenizer_path is not None:
         config.tokenizer_path = args.tokenizer_path
-    if args.checkpoint_dir:
+    if args.checkpoint_dir is not None:
         config.checkpoint_dir = args.checkpoint_dir
-    if args.epochs:
+    if args.epochs is not None:
         config.epochs = args.epochs
-    if args.batch_size:
+    if args.batch_size is not None:
         config.batch_size = args.batch_size
-    if args.embed_dim:
+    if args.embed_dim is not None:
         config.embed_dim = args.embed_dim
-    if args.n_layers:
+    if args.n_layers is not None:
         config.n_layers = args.n_layers
-    if args.attn_heads:
+    if args.attn_heads is not None:
         config.attn_heads = args.attn_heads
-    if args.ff_dim:
+    if args.ff_dim is not None:
         config.ff_dim = args.ff_dim
-    if args.num_experts:
+    if args.num_experts is not None:
         config.num_experts = args.num_experts
-    if args.top_k:
+    if args.top_k is not None:
         config.top_k = args.top_k
-    if args.first_lr:
+    if args.first_lr is not None:
         config.first_lr = args.first_lr
-    if args.last_lr:
+    if args.last_lr is not None:
         config.last_lr = args.last_lr
-    if args.weight_decay:
+    if args.weight_decay is not None:
         config.weight_decay = args.weight_decay
-    if args.max_seq_len:
+    if args.max_seq_len is not None:
         config.max_seq_len = args.max_seq_len
-    if args.max_samples:
+    if args.max_samples is not None:
         config.max_samples = args.max_samples
-    if args.precision:
+    if args.precision is not None:
         config.precision = args.precision
     if args.no_samples:
         config.generate_samples = False
