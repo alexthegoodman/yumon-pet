@@ -107,6 +107,7 @@ All hyperparameters can be adjusted in Python via `TrainingConfig` in `train.py`
 | `aux_loss_weight` | N/A | `0.01` | Weight for MoE load-balancing loss |
 | `z_loss_weight` | N/A | `0.001` | Weight for router z-loss |
 | `precision` | `--precision` | `bf16` | Training precision (`bf16`, `fp16`, `fp32`) |
+| `eval_every` | `--eval-every` | `500` | Batches between evaluation and best model checkpoint saves |
 | `checkpoint_dir` | `--checkpoint-dir` | `checkpoints` | Directory to save checkpoints (defaults to `/workspace/checkpoints` on RunPod) |
 
 ---

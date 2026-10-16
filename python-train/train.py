@@ -75,6 +75,7 @@ class TrainingConfig:
     max_samples: Optional[int] = None
     val_fraction: float = 0.01
     log_every: int = 50
+    eval_every: int = int(os.environ.get("EVAL_EVERY", "500"))
     generate_samples: bool = True
     sample_prompts: List[str] = field(
         default_factory=lambda: [
@@ -171,6 +172,8 @@ class Trainer:
         self.start_epoch = 0
         self.global_step = 0
         self.best_val_loss = float("inf")
+        self.last_eval_step = -1
+        self.last_val_metrics: Optional[Tuple[float, float, float]] = None
 
         if resume_path:
             self.load_checkpoint(resume_path)
@@ -188,9 +191,11 @@ class Trainer:
         self.start_epoch = ckpt.get("epoch", 0) + 1
         self.global_step = ckpt.get("global_step", 0)
         self.best_val_loss = ckpt.get("best_val_loss", float("inf"))
+        self.last_eval_step = -1
+        self.last_val_metrics = None
         print(f"Resumed at epoch {self.start_epoch}, step {self.global_step}, best val loss {self.best_val_loss:.4f}")
 
-    def save_checkpoint(self, path: str, epoch: int, is_best: bool = False):
+    def save_checkpoint(self, path: Optional[str] = None, epoch: int = 0, is_best: bool = False):
         state = {
             "epoch": epoch,
             "global_step": self.global_step,
@@ -199,11 +204,12 @@ class Trainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "config": asdict(self.config),
         }
-        torch.save(state, path)
+        if path:
+            torch.save(state, path)
         if is_best:
             best_path = os.path.join(self.config.checkpoint_dir, "best_model.pt")
             torch.save(state, best_path)
-            print(f"[BEST] Saved new best model to {best_path}")
+            tqdm.write(f"[BEST] Saved new best model to {best_path} (step {self.global_step}, val loss {self.best_val_loss:.4f})")
 
     def train_epoch(self, epoch: int) -> Tuple[float, float, float]:
         self.model.train()
@@ -270,6 +276,22 @@ class Trainer:
                     "lr": f"{current_lr:.2e}",
                 })
 
+            if self.config.eval_every > 0 and (batch_idx + 1) % self.config.eval_every == 0:
+                val_loss, val_top3, perplexity = self.evaluate()
+                self.last_eval_step = self.global_step
+                self.last_val_metrics = (val_loss, val_top3, perplexity)
+                is_best = val_loss < self.best_val_loss
+                if is_best:
+                    self.best_val_loss = val_loss
+
+                tqdm.write(
+                    f"\n[Batch {batch_idx + 1}/{total_batches} (Step {self.global_step})] "
+                    f"Val Loss: {val_loss:.4f} (PPL: {perplexity:.2f}, Top3: {val_top3:.1%})"
+                    + (" [BEST]" if is_best else "")
+                )
+                if is_best:
+                    self.save_checkpoint(path=None, epoch=epoch, is_best=True)
+
         mean_loss = epoch_loss / max(1, batches_processed)
         mean_lm = epoch_lm_loss / max(1, batches_processed)
         mean_top3 = epoch_top3 / max(1, batches_processed)
@@ -277,33 +299,38 @@ class Trainer:
 
     @torch.no_grad()
     def evaluate(self) -> Tuple[float, float, float]:
+        was_training = self.model.training
         self.model.eval()
-        total_loss = 0.0
-        total_top3 = 0.0
-        batches = 0
+        try:
+            total_loss = 0.0
+            total_top3 = 0.0
+            batches = 0
 
-        for tokens, targets in self.val_loader:
-            tokens = tokens.to(self.device, non_blocking=True)
-            targets = targets.to(self.device, non_blocking=True)
+            for tokens, targets in self.val_loader:
+                tokens = tokens.to(self.device, non_blocking=True)
+                targets = targets.to(self.device, non_blocking=True)
 
-            with torch.amp.autocast(device_type=self.device.type, enabled=self.use_amp, dtype=self.amp_dtype):
-                logits, aux_loss = self.model(tokens)
-                B, S, V = logits.shape
-                lm_loss = F.cross_entropy(
-                    logits.reshape(B * S, V),
-                    targets.reshape(B * S),
-                    ignore_index=PAD_TOKEN,
-                )
-                loss = lm_loss + aux_loss
+                with torch.amp.autocast(device_type=self.device.type, enabled=self.use_amp, dtype=self.amp_dtype):
+                    logits, aux_loss = self.model(tokens)
+                    B, S, V = logits.shape
+                    lm_loss = F.cross_entropy(
+                        logits.reshape(B * S, V),
+                        targets.reshape(B * S),
+                        ignore_index=PAD_TOKEN,
+                    )
+                    loss = lm_loss + aux_loss
 
-            total_loss += loss.item()
-            total_top3 += compute_top3_accuracy(logits, targets)
-            batches += 1
+                total_loss += loss.item()
+                total_top3 += compute_top3_accuracy(logits, targets)
+                batches += 1
 
-        val_loss = total_loss / max(1, batches)
-        val_top3 = total_top3 / max(1, batches)
-        perplexity = float(torch.exp(torch.tensor(val_loss)).item())
-        return val_loss, val_top3, perplexity
+            val_loss = total_loss / max(1, batches)
+            val_top3 = total_top3 / max(1, batches)
+            perplexity = float(torch.exp(torch.tensor(val_loss)).item())
+            return val_loss, val_top3, perplexity
+        finally:
+            if was_training:
+                self.model.train()
 
     def sample_generation(self):
         if not self.tokenizer:
@@ -339,18 +366,25 @@ class Trainer:
         for epoch in range(self.start_epoch, self.config.epochs):
             epoch_start = time.time()
             train_loss, train_lm, train_top3 = self.train_epoch(epoch)
-            val_loss, val_top3, perplexity = self.evaluate()
+
+            # Evaluate at epoch end if not just evaluated at the final batch
+            if self.last_eval_step == self.global_step and self.last_val_metrics is not None:
+                val_loss, val_top3, perplexity = self.last_val_metrics
+                is_best = False
+            else:
+                val_loss, val_top3, perplexity = self.evaluate()
+                self.last_eval_step = self.global_step
+                self.last_val_metrics = (val_loss, val_top3, perplexity)
+                is_best = val_loss < self.best_val_loss
+                if is_best:
+                    self.best_val_loss = val_loss
+
             epoch_time = time.time() - epoch_start
-
-            is_best = val_loss < self.best_val_loss
-            if is_best:
-                self.best_val_loss = val_loss
-
             print(
                 f"\nEpoch {epoch + 1}/{self.config.epochs} ({epoch_time:.1f}s) | "
                 f"Train Loss: {train_loss:.4f} (Top3: {train_top3:.1%}) | "
                 f"Val Loss: {val_loss:.4f} (PPL: {perplexity:.2f}, Top3: {val_top3:.1%})"
-                + (" [BEST]" if is_best else "")
+                + (" [BEST]" if (is_best or val_loss == self.best_val_loss) else "")
             )
 
             # Save epoch checkpoint
@@ -384,6 +418,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-seq-len", type=int, default=None, help="Max sequence length")
     parser.add_argument("--max-samples", type=int, default=None, help="Cap dataset sample count for quick runs")
     parser.add_argument("--precision", type=str, default=None, choices=["bf16", "fp16", "fp32"], help="Precision")
+    parser.add_argument("--eval-every", type=int, default=None, help="Save best model checkpoint every N batches (default: 500, set 0 to evaluate only at epoch end)")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume")
     parser.add_argument("--no-samples", action="store_true", help="Disable text sample generation during training")
     return parser.parse_args()
@@ -403,6 +438,8 @@ def main():
         config.epochs = args.epochs
     if args.batch_size is not None:
         config.batch_size = args.batch_size
+    if args.eval_every is not None:
+        config.eval_every = args.eval_every
     if args.embed_dim is not None:
         config.embed_dim = args.embed_dim
     if args.n_layers is not None:
