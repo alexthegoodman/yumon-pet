@@ -530,7 +530,7 @@ where
         let (prompt_to_model, yumon_prompt_str, ctx) = match crate::brain::yumon_talk::english_to_yumon_with_map(p) {
             Ok((yt_prompt, ctx)) => (yt_prompt.clone(), Some(yt_prompt), Some(ctx)),
             Err(e) => {
-                eprintln!("[Yumon Talk] Eval prompt translation fallback for \"{p}\": {e}");
+                // eprintln!("[Yumon Talk] Eval prompt translation fallback for \"{p}\": {e}");
                 (p.to_string(), None, None)
             }
         };
@@ -543,7 +543,7 @@ where
             match crate::brain::yumon_talk::yumon_to_english_with_context(&raw_reply_trimmed, c, &mut rng) {
                 Ok(eng) => eng,
                 Err(e) => {
-                    eprintln!("[Yumon Talk] Eval reply translation fallback: {e}");
+                    // eprintln!("[Yumon Talk] Eval reply translation fallback: {e}");
                     crate::brain::yumon_talk::yumon_to_english(&raw_reply_trimmed).unwrap_or_else(|_| raw_reply_trimmed.clone())
                 }
             }
@@ -1347,7 +1347,7 @@ where
                     "ce": loss, "top3": top3, "tokens": tokens,
                     "ce_by_train_frequency": by_frequency.to_json(&FrequencyBuckets::LABELS, false),
                     "ce_by_context": by_context.to_json(&CONTEXT_LABELS, false)}});
-                if print { println!("adaptive validation: {line}"); }
+                // if print { println!("adaptive validation: {line}"); }
                 crate::brain::adaptive_loss::append_log(run_dir, &line)?;
             }
             Ok(val)
@@ -1576,7 +1576,7 @@ where
                     }
                     if let Some((loss, top3, tokens)) = val {
                         let line = format!("val_loss {loss:.4} val_top3 {:.2}% over {tokens} held-out tokens", top3 * 100.0);
-                        println!("{line}");
+                        // println!("{line}");
                         if let Err(e) = append_log_line(&inference_log_path, &line) {
                             eprintln!("⚠️  Failed to append inference log: {}", e);
                         }
@@ -1638,7 +1638,7 @@ where
             }
             if let Some((loss, top3, tokens)) = val {
                 let line = format!("val_loss {loss:.4} val_top3 {:.2}% over {tokens} held-out tokens (epoch end)", top3 * 100.0);
-                if heavy || !run_cfg.overfit { println!("{line}"); }
+                // if heavy || !run_cfg.overfit { println!("{line}"); }
                 if heavy {
                     if let Err(e) = append_log_line(&inference_log_path, &line) {
                         eprintln!("⚠️  Failed to append inference log: {}", e);

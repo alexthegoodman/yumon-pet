@@ -47,7 +47,7 @@ uv run python test_model.py
 To train with default hyperparameters:
 
 ```bash
-uv run python train.py
+uv run python train.py --tokenizer-path "../training-cache/yumon_talk_tokenizer" --data-path "../training-cache/yumon_talk_samples.bin"
 ```
 
 To train with custom hyperparameters from CLI:

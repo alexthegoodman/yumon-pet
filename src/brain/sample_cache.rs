@@ -90,17 +90,39 @@ impl StoredSample {
         })
     }
 
-    fn into_sample(self, max_seq_len: usize) -> Result<Sample> {
-        ensure!(
-            self.input_ids.len() <= max_seq_len && self.target_labels.len() <= max_seq_len,
-            "cached sample exceeds the context length"
-        );
+    // fn into_sample(self, max_seq_len: usize) -> Result<Sample> {
+    //     ensure!(
+    //         self.input_ids.len() <= max_seq_len && self.target_labels.len() <= max_seq_len,
+    //         "cached sample exceeds the context length"
+    //     );
+    //     let pad = |ids: Vec<u32>| {
+    //         let mut ids: Vec<usize> = ids.into_iter().map(|id| id as usize).collect();
+    //         ids.resize(max_seq_len, PAD_TOKEN);
+    //         ids
+    //     };
+    //     Ok(Sample {
+    //         input_ids: pad(self.input_ids),
+    //         target_labels: pad(self.target_labels),
+    //         action: self.action,
+    //         motion_dir: self.motion_dir,
+    //         world: self.world,
+    //         target_json: self.target_json,
+    //         pair: self.pair,
+    //     })
+    // }
+
+    fn into_sample(self, max_seq_len: usize) -> Option<Sample> {
+        if self.input_ids.len() > max_seq_len || self.target_labels.len() > max_seq_len {
+            return None;
+        }
+
         let pad = |ids: Vec<u32>| {
             let mut ids: Vec<usize> = ids.into_iter().map(|id| id as usize).collect();
             ids.resize(max_seq_len, PAD_TOKEN);
             ids
         };
-        Ok(Sample {
+
+        Some(Sample {
             input_ids: pad(self.input_ids),
             target_labels: pad(self.target_labels),
             action: self.action,
@@ -337,7 +359,10 @@ pub fn load_cache_with_objective(
             .with_limit(64 << 20)
             .deserialize_from(&mut reader)
             .with_context(|| format!("reading cached sample {index}"))?;
-        let sample = stored.into_sample(max_seq_len)?;
+        // let sample = stored.into_sample(max_seq_len)?;
+        let Some(sample) = stored.into_sample(max_seq_len) else {
+            continue;
+        };
         validate_sample(&sample, max_seq_len, tokenizer.vocab_size())
             .with_context(|| format!("cached sample {index}"))?;
         if objective == CacheObjective::RawCode { validate_code_sample(&sample)?; }
@@ -391,7 +416,10 @@ pub fn load_cache_lenient_limit(
             .with_limit(64 << 20)
             .deserialize_from(&mut reader)
             .with_context(|| format!("reading cached sample {index}"))?;
-        let sample = stored.into_sample(max_seq_len)?;
+        // let sample = stored.into_sample(max_seq_len)?;
+        let Some(sample) = stored.into_sample(max_seq_len) else {
+            continue;
+        };
         samples.push(sample);
     }
     Ok((metadata, samples))
