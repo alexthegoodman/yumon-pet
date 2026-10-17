@@ -1,13 +1,13 @@
-//! The Yumon Talk Language (1024 total tokens).
+//! The Yumon Talk Language (4096 total tokens).
 //!
 //! Yumon Talk is a compact, canonical natural language designed for classic Pet.
 //! It addresses vocabulary explosion by enforcing:
-//! - Exactly 1024 total tokens in the vocabulary (IDs 0..1023).
+//! - Exactly 4096 total tokens in the vocabulary (IDs 0..4095).
 //! - Dynamic loading from `training-cache/yumon_talk_vocab.json` built from real training data.
 //! - Semantic clustering: each canonical word maps to a rich set of English synonyms.
 //! - Bidirectional translation: English <-> Yumon Talk.
 //! - Dynamic expansion via the `thesaurus` crate and morphological stemming.
-//! - Placeholder slots (`<NAME_0>`..`<NAME_31>`, `<NUM_0>`..`<NUM_7>`) for entities, brand names, and numbers.
+//! - Placeholder slots (`<NAME_0>`..`<NAME_47>`, `<NUM_0>`..`<NUM_19>`) for entities, brand names, and numbers.
 //! - Random synonym sampling during translation back to English.
 
 use std::collections::HashMap;
@@ -16,7 +16,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
-pub const VOCAB_SIZE: usize = 1024;
+pub const VOCAB_SIZE: usize = 4096;
 pub const PAD_ID: usize = 0;
 pub const BOS_ID: usize = 1;
 pub const EOS_ID: usize = 2;
@@ -83,6 +83,23 @@ pub const SEALED_WORDS: &[(&str, &[&str])] = &[
     ("from", &["from"]),
     ("to", &["to"]),
     ("of", &["of"]),
+    ("through", &["through", "thru"]),
+    ("between", &["between"]),
+    ("among", &["among", "amongst"]),
+    ("against", &["against"]),
+    ("during", &["during"]),
+    ("under", &["under", "underneath", "beneath"]),
+    ("above", &["above", "overhead"]),
+    ("behind", &["behind"]),
+    ("beyond", &["beyond"]),
+    ("across", &["across"]),
+    ("while", &["while", "whilst"]),
+    ("until", &["until", "till"]),
+    ("although", &["although"]),
+    ("unless", &["unless"]),
+    ("except", &["except", "besides"]),
+    ("toward", &["toward", "towards"]),
+    ("along", &["along"]),
     ("be", &["be", "am", "is", "are", "was", "were", "been", "being"]),
     ("have", &["have", "has", "had", "having"]),
     ("do", &["do", "does", "did", "done", "doing"]),
@@ -222,6 +239,20 @@ pub fn morphological_variants(lower: &str) -> Vec<String> {
             variants.push(format!("{s}e"));
         }
     }
+    if let Some(s) = lower.strip_suffix("ship") {
+        if s.len() >= 2 { variants.push(s.to_string()); }
+    }
+    if let Some(s) = lower.strip_suffix("ness") {
+        if s.len() >= 2 {
+            variants.push(s.to_string());
+            if s.ends_with('i') {
+                variants.push(format!("{}y", &s[..s.len() - 1])); // happiness -> happy
+            }
+        }
+    }
+    if let Some(s) = lower.strip_suffix("ment") {
+        if s.len() >= 2 { variants.push(s.to_string()); }
+    }
 
     // 2. Inflection expansion (when canonical word in dictionary is inflected)
     if lower.len() >= 2 {
@@ -254,7 +285,7 @@ impl TranslationContext {
     }
 }
 
-/// Comprehensive, dynamically loadable Yumon Talk Vocabulary (1024 tokens).
+/// Comprehensive, dynamically loadable Yumon Talk Vocabulary (4096 tokens).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YumonTalkVocab {
     pub version: usize,
@@ -454,6 +485,11 @@ impl YumonTalkVocab {
         for variant in morphological_variants(&lower) {
             if variant != lower && !variant.is_empty() {
                 if let Some(&id) = self.word_to_id.get(&variant) {
+                    if let Some(canon) = self.id_to_token(id) {
+                        if is_sealed(canon) && !is_sealed(&lower) {
+                            continue;
+                        }
+                    }
                     if let Ok(mut c) = self.dynamic_cache.write() {
                         c.insert(lower.clone(), Some(id));
                     }
@@ -577,7 +613,7 @@ impl YumonTalkVocab {
                     let ent_idx = entity_map.entry(word.clone()).or_insert_with(|| {
                         let curr = ctx.entities.len();
                         ctx.entities.push(word);
-                        curr % 32
+                        curr % 48
                     });
                     let slot = format!("<NAME_{ent_idx}>");
                     tokens.push(self.token_to_id(&slot).unwrap_or(UNK_ID));
@@ -597,7 +633,7 @@ impl YumonTalkVocab {
                 let idx = num_map.entry(num_str.clone()).or_insert_with(|| {
                     let curr = ctx.numbers.len();
                     ctx.numbers.push(num_str);
-                    curr % 8
+                    curr % 20
                 });
                 let slot = format!("<NUM_{idx}>");
                 tokens.push(self.token_to_id(&slot).unwrap_or(UNK_ID));
@@ -939,10 +975,15 @@ mod tests {
 
     fn sample_test_vocab() -> YumonTalkVocab {
         let special = vec!["<PAD>".into(), "<BOS>".into(), "<EOS>".into(), "<UNK>".into()];
-        let punct = vec![".", ",", "!", "?", ";", ":", "-", "'", "\"", "(", ")", "[", "]", "/", "\n"]
-            .into_iter().map(String::from).collect();
-        let placeholders = (0..32).map(|i| format!("<NAME_{i}>"))
-            .chain((0..8).map(|i| format!("<NUM_{i}>"))).collect();
+        let punct = vec![
+            ".", ",", "!", "?", ";", ":", "-", "'", "\"", "(", ")", "[", "]", "/", "\n",
+            "*", "&", "_", "+", "=", "%", "$", "#", "@",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let placeholders = (0..48).map(|i| format!("<NAME_{i}>"))
+            .chain((0..20).map(|i| format!("<NUM_{i}>"))).collect();
         let canonical = vec![
             "hello".into(), "i".into(), "am".into(), "happy".into(), "to".into(), "see".into(),
             "my".into(), "good".into(), "friend".into(), "today".into(), "the".into(), "sun".into(),
@@ -964,8 +1005,8 @@ mod tests {
         let vocab = sample_test_vocab();
         assert_eq!(vocab.token_to_id("<PAD>"), Some(0));
         assert_eq!(vocab.token_to_id("<BOS>"), Some(1));
-        assert_eq!(vocab.token_to_id("hello"), Some(59));
-        assert_eq!(vocab.id_to_token(59), Some("hello"));
+        assert_eq!(vocab.token_to_id("hello"), Some(96));
+        assert_eq!(vocab.id_to_token(96), Some("hello"));
         assert!(vocab.resolve_english_word("delighted").is_some());
     }
 
@@ -1022,8 +1063,8 @@ mod tests {
     fn test_two_way_lemmatization_and_capitalized_entities_gating() {
         let mut special = vec!["<PAD>".into(), "<BOS>".into(), "<EOS>".into(), "<UNK>".into()];
         let punct = vec!["."].into_iter().map(String::from).collect();
-        let placeholders = (0..32).map(|i| format!("<NAME_{i}>"))
-            .chain((0..8).map(|i| format!("<NUM_{i}>"))).collect();
+        let placeholders = (0..48).map(|i| format!("<NAME_{i}>"))
+            .chain((0..20).map(|i| format!("<NUM_{i}>"))).collect();
         let canonical = vec![
             "created".into(), "built".into(), "friends".into(), "make".into(),
         ];

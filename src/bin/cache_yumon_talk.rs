@@ -19,7 +19,7 @@ use {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser)]
-#[command(about = "Convert natural language samples into the Yumon Talk language (1024 tokens) and save to yumon_talk_samples.bin")]
+#[command(about = "Convert natural language samples into the Yumon Talk language (4096 tokens) and save to yumon_talk_samples.bin")]
 struct Args {
     /// Existing natural language cache (default: training-cache/samples.bin).
     #[arg(long, default_value = "training-cache/samples.bin")]

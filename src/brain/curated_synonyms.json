@@ -1,4 +1,13 @@
 {
+  "afraid": [
+    "alarmed",
+    "fearful",
+    "frightened",
+    "panicked",
+    "scared",
+    "spooked",
+    "terrified"
+  ],
   "agree": [
     "accord",
     "assent",
@@ -19,9 +28,16 @@
   "angry": [
     "annoyed",
     "cross",
+    "enraged",
     "furious",
+    "heated",
+    "incensed",
     "irritated",
-    "mad"
+    "livid",
+    "mad",
+    "outraged",
+    "provoked",
+    "wrathful"
   ],
   "answer": [
     "counter",
@@ -44,6 +60,25 @@
     "territory",
     "zone"
   ],
+  "art": [
+    "aesthetic",
+    "artistic",
+    "arts",
+    "artwork",
+    "craft",
+    "craftsmanship",
+    "creation",
+    "creativity",
+    "fine art"
+  ],
+  "artist": [
+    "artisan",
+    "creator",
+    "designer",
+    "illustrator",
+    "painter",
+    "sculptor"
+  ],
   "ask": [
     "inquire",
     "query",
@@ -59,12 +94,31 @@
     "poor",
     "terrible"
   ],
+  "bark": [
+    "bay",
+    "growl",
+    "howl",
+    "snarl",
+    "woof",
+    "yap",
+    "yelp"
+  ],
   "beautiful": [
     "attractive",
     "gorgeous",
     "handsome",
     "lovely",
     "pretty"
+  ],
+  "beep": [
+    "buzz",
+    "chime",
+    "honk",
+    "peep",
+    "ping",
+    "ring",
+    "signal",
+    "sound"
   ],
   "big": [
     "enormous",
@@ -107,9 +161,27 @@
     "volume"
   ],
   "bored": [
+    "apathetic",
+    "disinterested",
+    "dull",
+    "listless",
+    "monotonous",
     "tired",
+    "uninspired",
     "uninterested",
     "weary"
+  ],
+  "box": [
+    "bin",
+    "carton",
+    "case",
+    "casket",
+    "chest",
+    "coffer",
+    "container",
+    "crate",
+    "package",
+    "trunk"
   ],
   "break": [
     "crack",
@@ -161,11 +233,18 @@
     "summon"
   ],
   "calm": [
+    "at ease",
+    "composed",
     "peaceful",
+    "placid",
     "quiet",
+    "relaxed",
+    "restful",
     "serene",
     "soothing",
-    "tranquil"
+    "still",
+    "tranquil",
+    "untroubled"
   ],
   "car": [
     "auto",
@@ -216,6 +295,14 @@
     "toddler",
     "youth"
   ],
+  "chirp": [
+    "peep",
+    "pipe",
+    "trill",
+    "tweet",
+    "twitter",
+    "warble"
+  ],
   "city": [
     "metropolis",
     "municipality",
@@ -264,6 +351,10 @@
     "enter",
     "visit"
   ],
+  "comma": [
+    "caesura",
+    "pause"
+  ],
   "common": [
     "familiar",
     "frequent",
@@ -271,10 +362,51 @@
     "usual",
     "widespread"
   ],
+  "compare": [
+    "analogize",
+    "bracket",
+    "collate",
+    "contrast",
+    "correlate",
+    "equate",
+    "liken",
+    "match",
+    "parallel"
+  ],
   "complex": [
     "complicated",
     "elaborate",
     "intricate"
+  ],
+  "computer": [
+    "laptop",
+    "mainframe",
+    "microcomputer",
+    "pc",
+    "processor",
+    "server",
+    "workstation"
+  ],
+  "confused": [
+    "baffled",
+    "bewildered",
+    "disoriented",
+    "mixed up",
+    "muddled",
+    "mystified",
+    "perplexed",
+    "puzzled"
+  ],
+  "copy": [
+    "clone",
+    "duplicate",
+    "forge",
+    "imitate",
+    "mimic",
+    "mirror",
+    "replicate",
+    "reproduce",
+    "transcribe"
   ],
   "country": [
     "land",
@@ -289,6 +421,15 @@
     "critter",
     "organism"
   ],
+  "curious": [
+    "inquiring",
+    "inquisitive",
+    "interested",
+    "intrigued",
+    "nosy",
+    "prying",
+    "wondering"
+  ],
   "cut": [
     "chop",
     "sever",
@@ -300,6 +441,15 @@
     "charming",
     "lovely",
     "sweet"
+  ],
+  "dance": [
+    "groove",
+    "hop",
+    "leap",
+    "prance",
+    "step",
+    "sway",
+    "waltz"
   ],
   "dangerous": [
     "hazardous",
@@ -337,6 +487,15 @@
     "bottomless",
     "profound"
   ],
+  "design": [
+    "blueprint",
+    "composition",
+    "draft",
+    "layout",
+    "pattern",
+    "plan",
+    "scheme"
+  ],
   "destroy": [
     "demolish",
     "ruin",
@@ -368,15 +527,28 @@
     "puppy"
   ],
   "door": [
+    "doorway",
     "entrance",
+    "entry",
     "entryway",
     "gate",
-    "portal"
+    "gateway",
+    "portal",
+    "threshold"
   ],
   "draw": [
+    "depict",
+    "doodle",
+    "drawing",
+    "drawings",
+    "drawn",
+    "drew",
     "illustrate",
+    "outline",
     "paint",
+    "render",
     "sketch",
+    "sketches",
     "trace"
   ],
   "drink": [
@@ -423,17 +595,40 @@
     "termination",
     "tip"
   ],
+  "evening": [
+    "dusk",
+    "eventide",
+    "nightfall",
+    "sundown",
+    "sunset",
+    "twilight"
+  ],
   "exact": [
     "accurate",
     "correct",
     "meticulous",
     "precise"
   ],
+  "excited": [
+    "animated",
+    "eager",
+    "enthusiastic",
+    "hyped",
+    "pumped",
+    "thrilled",
+    "vibrant"
+  ],
   "explain": [
     "clarify",
+    "define",
+    "demonstrate",
     "describe",
+    "elucidate",
+    "expound",
     "illustrate",
-    "interpret"
+    "interpret",
+    "rationalize",
+    "spell out"
   ],
   "eye": [
     "optic",
@@ -479,6 +674,15 @@
     "rapid",
     "speedy",
     "swift"
+  ],
+  "feed": [
+    "dine",
+    "feast",
+    "nourish",
+    "nurture",
+    "serve",
+    "snack",
+    "treat"
   ],
   "feel": [
     "experience",
@@ -558,8 +762,12 @@
     "vigor"
   ],
   "forget": [
+    "disremember",
+    "ignore",
     "neglect",
-    "overlook"
+    "omit",
+    "overlook",
+    "slip mind"
   ],
   "free": [
     "available",
@@ -574,9 +782,32 @@
     "pal",
     "partner"
   ],
+  "friendship": [
+    "alliance",
+    "amity",
+    "camaraderie",
+    "closeness",
+    "companionship",
+    "comradeship",
+    "fellowship",
+    "fraternity"
+  ],
   "frog": [
     "amphibian",
     "toad"
+  ],
+  "fruit": [
+    "apple",
+    "banana",
+    "berry",
+    "cherry",
+    "grape",
+    "lemon",
+    "melon",
+    "orange",
+    "peach",
+    "pear",
+    "plum"
   ],
   "full": [
     "brimming",
@@ -625,6 +856,20 @@
     "present",
     "supply"
   ],
+  "glow": [
+    "beam",
+    "blaze",
+    "flare",
+    "flicker",
+    "gleam",
+    "glimmer",
+    "glisten",
+    "glitter",
+    "illuminate",
+    "radiate",
+    "shine",
+    "sparkle"
+  ],
   "go": [
     "head",
     "journey",
@@ -641,6 +886,14 @@
     "pleasant",
     "superb",
     "wonderful"
+  ],
+  "goodbye": [
+    "adieu",
+    "bye",
+    "cya",
+    "farewell",
+    "later",
+    "parting"
   ],
   "gray": [
     "ash",
@@ -686,13 +939,20 @@
     "transpire"
   ],
   "happy": [
+    "bliss",
+    "blissful",
     "cheerful",
     "content",
     "delighted",
+    "ecstatic",
+    "elated",
     "glad",
+    "gleeful",
     "joyful",
+    "joyous",
     "merry",
-    "pleased"
+    "pleased",
+    "thrilled"
   ],
   "hard": [
     "demanding",
@@ -725,6 +985,16 @@
     "burdensome",
     "dense",
     "weighty"
+  ],
+  "hello": [
+    "greetings",
+    "hey",
+    "hi",
+    "howdy",
+    "salutations",
+    "sup",
+    "welcome",
+    "yo"
   ],
   "help": [
     "aid",
@@ -774,6 +1044,22 @@
     "home",
     "residence"
   ],
+  "hug": [
+    "clasp",
+    "cuddle",
+    "embrace",
+    "enfold",
+    "hold tight",
+    "snuggle"
+  ],
+  "hungry": [
+    "appetite",
+    "craving",
+    "famished",
+    "peckish",
+    "ravenous",
+    "starving"
+  ],
   "idea": [
     "concept",
     "notion",
@@ -787,6 +1073,12 @@
     "essential",
     "significant",
     "vital"
+  ],
+  "instead": [
+    "in lieu",
+    "in place of",
+    "preferably",
+    "rather"
   ],
   "involved": [
     "complex",
@@ -836,6 +1128,15 @@
     "belated",
     "delayed",
     "tardy"
+  ],
+  "laugh": [
+    "cackle",
+    "chuckle",
+    "giggle",
+    "guffaw",
+    "howl",
+    "roar",
+    "snicker"
   ],
   "lead": [
     "conduct",
@@ -892,12 +1193,29 @@
     "stripe",
     "stroke"
   ],
+  "listen": [
+    "attend",
+    "eavesdrop",
+    "hear",
+    "hearken",
+    "heed",
+    "tune in"
+  ],
   "live": [
     "dwell",
     "exist",
     "inhabit",
     "reside",
     "survive"
+  ],
+  "lonely": [
+    "abandoned",
+    "alone",
+    "deserted",
+    "forlorn",
+    "isolated",
+    "lonesome",
+    "solitary"
   ],
   "long": [
     "extended",
@@ -958,11 +1276,25 @@
     "guy",
     "male"
   ],
+  "masterpiece": [
+    "classic",
+    "gem",
+    "magnum opus",
+    "masterwork",
+    "monument",
+    "showpiece",
+    "tour de force"
+  ],
   "meet": [
     "encounter",
     "gather",
     "greet",
     "join"
+  ],
+  "meow": [
+    "mew",
+    "miaow",
+    "yowl"
   ],
   "message": [
     "communication",
@@ -983,8 +1315,11 @@
     "lunar"
   ],
   "morning": [
+    "aurora",
     "dawn",
     "daybreak",
+    "forenoon",
+    "morn",
     "sunrise"
   ],
   "move": [
@@ -1000,9 +1335,14 @@
     "motion-picture"
   ],
   "music": [
+    "audio",
     "harmony",
     "melody",
+    "musical",
     "rhythm",
+    "soundtrack",
+    "symphony",
+    "tune",
     "tunes"
   ],
   "name": [
@@ -1067,6 +1407,38 @@
     "peach",
     "tangerine"
   ],
+  "order": [
+    "align",
+    "alignment",
+    "arrange",
+    "arrangement",
+    "format",
+    "method",
+    "organization",
+    "progression",
+    "rank",
+    "sequence",
+    "series",
+    "structure",
+    "system"
+  ],
+  "otherwise": [
+    "alternatively",
+    "else",
+    "or else"
+  ],
+  "paint": [
+    "brush",
+    "canvas",
+    "color",
+    "colour",
+    "hue",
+    "painter",
+    "painting",
+    "paintings",
+    "pigment",
+    "tint"
+  ],
   "part": [
     "fraction",
     "piece",
@@ -1113,15 +1485,24 @@
   "pet": [
     "animal",
     "beast",
+    "caress",
     "companion",
-    "critter"
+    "critter",
+    "fondle",
+    "pat",
+    "petting",
+    "stroke"
   ],
   "picture": [
     "drawing",
+    "graphic",
+    "illustration",
     "image",
+    "images",
     "photo",
     "photograph",
-    "portrait"
+    "portrait",
+    "visual"
   ],
   "pink": [
     "blush",
@@ -1146,7 +1527,21 @@
     "entertain",
     "frolic",
     "game",
+    "romp",
     "sport"
+  ],
+  "please": [
+    "kindly"
+  ],
+  "poem": [
+    "ballad",
+    "haiku",
+    "lyrics",
+    "poetry",
+    "rhyme",
+    "sonnet",
+    "stanza",
+    "verse"
   ],
   "point": [
     "detail",
@@ -1172,6 +1567,15 @@
     "might",
     "strength"
   ],
+  "praise": [
+    "applaud",
+    "bravo",
+    "commend",
+    "compliment",
+    "congratulate",
+    "congratulations",
+    "kudos"
+  ],
   "problem": [
     "challenge",
     "difficulty",
@@ -1186,9 +1590,13 @@
     "shield"
   ],
   "proud": [
+    "dignified",
     "glad",
     "honored",
-    "pleased"
+    "pleased",
+    "pride",
+    "satisfied",
+    "triumphant"
   ],
   "provide": [
     "equip",
@@ -1209,6 +1617,12 @@
     "magenta",
     "plum",
     "violet"
+  ],
+  "purr": [
+    "drone",
+    "hum",
+    "vibrate",
+    "whir"
   ],
   "push": [
     "press",
@@ -1283,9 +1697,22 @@
     "scarlet"
   ],
   "remember": [
+    "memorize",
     "recall",
     "recollect",
-    "reminisce"
+    "reminisce",
+    "retain",
+    "retrieve"
+  ],
+  "reverse": [
+    "backward",
+    "backwards",
+    "converse",
+    "invert",
+    "inverted",
+    "opposite",
+    "transpose",
+    "turn back"
   ],
   "rich": [
     "affluent",
@@ -1313,6 +1740,14 @@
     "trail",
     "way"
   ],
+  "robot": [
+    "android",
+    "automaton",
+    "bot",
+    "cyborg",
+    "droid",
+    "machine"
+  ],
   "room": [
     "chamber",
     "quarters",
@@ -1328,10 +1763,17 @@
   ],
   "sad": [
     "blue",
+    "depressed",
     "down",
     "gloomy",
+    "grief",
+    "heartbroken",
+    "melancholy",
+    "mournful",
+    "sorrow",
     "sorrowful",
-    "unhappy"
+    "unhappy",
+    "woeful"
   ],
   "safe": [
     "protected",
@@ -1371,6 +1813,14 @@
     "college",
     "institute"
   ],
+  "sculpture": [
+    "bust",
+    "carving",
+    "figurine",
+    "monument",
+    "statue",
+    "statues"
+  ],
   "sea": [
     "deep",
     "ocean",
@@ -1400,6 +1850,24 @@
     "ship",
     "transmit"
   ],
+  "separate": [
+    "detach",
+    "disconnect",
+    "disjoin",
+    "divide",
+    "isolate",
+    "part",
+    "partition",
+    "segregate",
+    "split"
+  ],
+  "shelf": [
+    "bracket",
+    "ledge",
+    "mantel",
+    "rack",
+    "shelves"
+  ],
   "short": [
     "brief",
     "concise",
@@ -1426,9 +1894,13 @@
     "straightforward"
   ],
   "sing": [
+    "carol",
     "chant",
     "croon",
-    "hum"
+    "hum",
+    "serenade",
+    "vocalize",
+    "whistle"
   ],
   "sit": [
     "perch",
@@ -1440,7 +1912,10 @@
     "heavens"
   ],
   "sleep": [
+    "catnap",
     "doze",
+    "drowse",
+    "hibernate",
     "nap",
     "rest",
     "slumber",
@@ -1460,12 +1935,23 @@
     "tiny"
   ],
   "smart": [
+    "astute",
+    "brainy",
     "bright",
+    "brilliant",
     "clever",
+    "genius",
     "intelligent",
+    "knowledgeable",
+    "quick",
     "sharp",
     "shrewd",
     "wise"
+  ],
+  "smile": [
+    "beam",
+    "grin",
+    "smirk"
   ],
   "snow": [
     "blizzard",
@@ -1480,9 +1966,24 @@
   ],
   "song": [
     "anthem",
+    "ballad",
+    "carol",
+    "chant",
+    "hymn",
+    "lullaby",
     "melody",
     "track",
+    "tracks",
     "tune"
+  ],
+  "sorry": [
+    "apologies",
+    "apologize",
+    "apology",
+    "excuse",
+    "forgive",
+    "pardon",
+    "regret"
   ],
   "sound": [
     "audio",
@@ -1497,10 +1998,17 @@
     "void"
   ],
   "speak": [
+    "articulate",
     "chat",
     "converse",
     "discuss",
-    "talk"
+    "pronounce",
+    "say",
+    "talk",
+    "tell",
+    "utter",
+    "verbalize",
+    "voice"
   ],
   "special": [
     "exceptional",
@@ -1555,9 +2063,15 @@
   ],
   "story": [
     "account",
+    "anecdote",
     "chronicle",
+    "fable",
+    "legend",
+    "myth",
     "narrative",
+    "plot",
     "tale",
+    "tales",
     "yarn"
   ],
   "strange": [
@@ -1583,6 +2097,17 @@
     "research",
     "review"
   ],
+  "summarize": [
+    "abridge",
+    "abstract",
+    "capsulize",
+    "condense",
+    "digest",
+    "encapsulate",
+    "outline",
+    "recap",
+    "sum up"
+  ],
   "sun": [
     "star",
     "sunlight",
@@ -1603,6 +2128,13 @@
     "dive",
     "float",
     "paddle"
+  ],
+  "table": [
+    "bench",
+    "counter",
+    "desk",
+    "stand",
+    "surface"
   ],
   "take": [
     "accept",
@@ -1634,6 +2166,14 @@
     "relate",
     "say"
   ],
+  "thanks": [
+    "appreciate",
+    "appreciation",
+    "grateful",
+    "gratitude",
+    "thank",
+    "thankful"
+  ],
   "think": [
     "believe",
     "consider",
@@ -1642,6 +2182,11 @@
     "reckon",
     "reflect",
     "suppose"
+  ],
+  "thirsty": [
+    "dehydrated",
+    "dry",
+    "parched"
   ],
   "throw": [
     "fling",
@@ -1658,9 +2203,12 @@
     "season"
   ],
   "tired": [
+    "drained",
+    "drowsy",
     "exhausted",
     "fatigued",
     "sleepy",
+    "spent",
     "weary"
   ],
   "tool": [
@@ -1670,6 +2218,15 @@
     "implement",
     "instrument",
     "utensil"
+  ],
+  "touch": [
+    "contact",
+    "feel",
+    "finger",
+    "graze",
+    "handle",
+    "press",
+    "tap"
   ],
   "town": [
     "hamlet",
@@ -1724,7 +2281,9 @@
   "wake": [
     "arise",
     "awaken",
-    "rouse"
+    "get up",
+    "rouse",
+    "stir"
   ],
   "walk": [
     "march",
@@ -1740,6 +2299,18 @@
     "fighting",
     "struggle"
   ],
+  "watch": [
+    "behold",
+    "gaze",
+    "glance",
+    "inspect",
+    "look",
+    "observe",
+    "regard",
+    "see",
+    "stare",
+    "view"
+  ],
   "water": [
     "aqua",
     "fluid",
@@ -1751,6 +2322,13 @@
     "faint",
     "feeble",
     "frail"
+  ],
+  "welcome": [
+    "greet",
+    "greeting",
+    "hail",
+    "hospitality",
+    "receive"
   ],
   "white": [
     "ivory",

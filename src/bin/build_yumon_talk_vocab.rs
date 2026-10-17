@@ -1,8 +1,8 @@
-//! Build a dynamic, reproducible Yumon Talk vocabulary (1024 tokens) from training-cache/samples.bin.
+//! Build a dynamic, reproducible Yumon Talk vocabulary (4096 tokens) from training-cache/samples.bin.
 //!
 //! 1. Scans training-cache/samples.bin and computes word frequencies across real training data.
 //! 2. Programmatically uses the `thesaurus` crate and morphological stemming to deduplicate synonyms against higher-frequency words.
-//! 3. Selects the top canonical words needed to hit the exact 1024-token budget.
+//! 3. Selects the top canonical words needed to hit the exact 4096-token budget.
 //! 4. Builds forward and reverse synonym mapping clusters.
 //! 5. Saves the generated vocabulary to training-cache/yumon_talk_vocab.json.
 
@@ -20,7 +20,7 @@ use {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser, Debug)]
-#[command(about = "Build a reproducible 1024-token Yumon Talk vocabulary from samples.bin using thesaurus deduplication")]
+#[command(about = "Build a reproducible 4096-token Yumon Talk vocabulary from samples.bin using thesaurus deduplication")]
 struct Args {
     /// Path to input training cache (default: training-cache/samples.bin)
     #[arg(long, default_value = "training-cache/samples.bin")]
@@ -30,12 +30,12 @@ struct Args {
     #[arg(long, default_value = "training-cache/yumon_talk_vocab.json")]
     output_vocab: PathBuf,
 
-    /// Number of canonical words to choose (default: 965, matching 1024 total tokens with 59 non-word tokens)
-    #[arg(long, default_value_t = 965)]
+    /// Number of canonical words to choose (default: 4000, matching 4096 total tokens with 96 non-word tokens)
+    #[arg(long, default_value_t = 4000)]
     target_words: usize,
 
-    /// Total target vocabulary size including special, punctuation and placeholders (default: 1024)
-    #[arg(long, default_value_t = 1024)]
+    /// Total target vocabulary size including special, punctuation and placeholders (default: 4096)
+    #[arg(long, default_value_t = 4096)]
     vocab_size: usize,
 
     /// Minimum word frequency to consider in the corpus (filters out 1-off typos)
@@ -46,8 +46,8 @@ struct Args {
     #[arg(long)]
     sample_limit: Option<usize>,
 
-    /// Size of top candidate word pool to deduplicate (default: 4096)
-    #[arg(long, default_value_t = 4096)]
+    /// Size of top candidate word pool to deduplicate (default: 35000)
+    #[arg(long, default_value_t = 35000)]
     candidate_pool: usize,
 
     /// Number of sample clusters to preview
@@ -361,12 +361,21 @@ fn main() -> Result<()> {
         "]".to_string(),
         "/".to_string(),
         "\n".to_string(),
+        "*".to_string(),
+        "&".to_string(),
+        "_".to_string(),
+        "+".to_string(),
+        "=".to_string(),
+        "%".to_string(),
+        "$".to_string(),
+        "#".to_string(),
+        "@".to_string(),
     ];
-    let mut placeholders = Vec::with_capacity(40);
-    for i in 0..32 {
+    let mut placeholders = Vec::with_capacity(68);
+    for i in 0..48 {
         placeholders.push(format!("<NAME_{i}>"));
     }
-    for i in 0..8 {
+    for i in 0..20 {
         placeholders.push(format!("<NUM_{i}>"));
     }
 
