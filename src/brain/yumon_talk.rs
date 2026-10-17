@@ -29,6 +29,78 @@ pub struct TranslationContext {
     pub numbers: Vec<String>,
 }
 
+/// Fixed closed-class words (pronouns, basic prepositions, conjunctions, determiners, auxiliary verbs).
+/// These words have strict, sealed forms and NEVER absorb arbitrary thesaurus synonyms.
+pub const SEALED_WORDS: &[(&str, &[&str])] = &[
+    ("i", &["i", "me", "myself"]),
+    ("you", &["you", "thee", "thou", "yourself", "yourselves"]),
+    ("he", &["he", "him", "himself"]),
+    ("she", &["she", "her", "herself"]),
+    ("it", &["it", "itself"]),
+    ("we", &["we", "us", "ourselves"]),
+    ("they", &["they", "them", "themselves"]),
+    ("my", &["my", "mine"]),
+    ("your", &["your", "yours", "thy", "thine"]),
+    ("his", &["his"]),
+    ("her", &["her", "hers"]),
+    ("its", &["its"]),
+    ("our", &["our", "ours"]),
+    ("their", &["their", "theirs"]),
+    ("this", &["this"]),
+    ("that", &["that"]),
+    ("these", &["these"]),
+    ("those", &["those"]),
+    ("who", &["who", "whom", "whose", "whoever"]),
+    ("which", &["which", "whichever"]),
+    ("what", &["what", "whatever"]),
+    ("where", &["where", "wherever"]),
+    ("when", &["when", "whenever"]),
+    ("why", &["why"]),
+    ("how", &["how"]),
+    ("all", &["all", "everybody", "everyone", "everything"]),
+    ("every", &["every", "each"]),
+    ("any", &["any", "anybody", "anyone", "anything"]),
+    ("some", &["some", "somebody", "someone", "something"]),
+    ("none", &["none", "nobody", "nothing", "neither"]),
+    ("both", &["both"]),
+    ("the", &["the"]),
+    ("a", &["a", "an"]),
+    ("and", &["and", "also"]),
+    ("or", &["or", "either"]),
+    ("but", &["but", "however", "though", "yet"]),
+    ("so", &["so", "therefore", "thus"]),
+    ("because", &["because", "since"]),
+    ("if", &["if", "whether"]),
+    ("then", &["then"]),
+    ("in", &["in", "inside", "within"]),
+    ("on", &["on", "upon"]),
+    ("at", &["at"]),
+    ("by", &["by"]),
+    ("for", &["for"]),
+    ("with", &["with"]),
+    ("without", &["without"]),
+    ("about", &["about", "around", "regarding", "concerning"]),
+    ("from", &["from"]),
+    ("to", &["to"]),
+    ("of", &["of"]),
+    ("be", &["be", "am", "is", "are", "was", "were", "been", "being"]),
+    ("have", &["have", "has", "had", "having"]),
+    ("do", &["do", "does", "did", "done", "doing"]),
+    ("will", &["will", "shall", "would"]),
+    ("can", &["can", "could", "able"]),
+    ("may", &["may", "might"]),
+    ("must", &["must", "should", "ought"]),
+    ("not", &["not", "never"]),
+    ("no", &["no", "nay"]),
+    ("yes", &["yes", "yeah", "aye"]),
+];
+
+/// Check if a word is a member of the sealed closed-class vocabulary.
+pub fn is_sealed(word: &str) -> bool {
+    let lower = word.to_lowercase();
+    SEALED_WORDS.iter().any(|(c, syns)| *c == lower || syns.iter().any(|&s| s == lower))
+}
+
 impl TranslationContext {
     pub fn new() -> Self {
         Self::default()
@@ -233,15 +305,26 @@ impl YumonTalkVocab {
             }
         }
 
-        // 4. Query `thesaurus` crate
+        // 4. Query `thesaurus` crate with mutual confirmation and sealed word exclusion
         let syns = thesaurus::synonyms(&lower);
         for syn in syns.iter() {
             let clean = syn.trim().to_lowercase();
+            // Never map an unknown word to a sealed closed-class word (e.g. can, i, be, in)
+            if is_sealed(&clean) {
+                continue;
+            }
             if let Some(&id) = self.word_to_id.get(&clean) {
-                if let Ok(mut c) = self.dynamic_cache.write() {
-                    c.insert(lower.clone(), Some(id));
+                if let Some(canon) = self.id_to_token(id) {
+                    if !is_sealed(canon) {
+                        // Mutual check: does canonical word's thesaurus entry contain lower?
+                        if thesaurus::synonyms(canon).iter().any(|s| s.trim().to_lowercase() == lower) {
+                            if let Ok(mut c) = self.dynamic_cache.write() {
+                                c.insert(lower.clone(), Some(id));
+                            }
+                            return Some(id);
+                        }
+                    }
                 }
-                return Some(id);
             }
         }
 

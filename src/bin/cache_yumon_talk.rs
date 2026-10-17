@@ -111,7 +111,6 @@ fn main() -> Result<()> {
 
     println!("Processing {} / {} samples into Yumon Talk language...", samples_to_process, total_available);
 
-    let budget = args.max_seq_len - 1; // 1 for BOS, 1 for EOS
     let mut yumon_samples = Vec::new();
     let mut preview_list = Vec::new();
 
@@ -147,67 +146,100 @@ fn main() -> Result<()> {
             (p, r)
         };
 
-        let combined_english = if !prompt_raw.is_empty() && !reply_raw.is_empty() {
-            format!("{} {}", prompt_raw.trim(), reply_raw.trim())
-        } else if !reply_raw.is_empty() {
-            reply_raw.trim().to_string()
-        } else {
-            prompt_raw.trim().to_string()
-        };
+        let mut ctx = yumon_talk::TranslationContext::new();
 
-        if combined_english.is_empty() {
-            empty_count += 1;
-            continue;
-        }
-
-        // Convert English to Yumon Talk
-        let (yumon_str, ctx) = match yumon_talk::english_to_yumon_with_map(&combined_english) {
-            Ok(res) => res,
-            Err(e) => {
-                if unk_token_count < 5 {
-                    eprintln!("[DEBUG ERROR sample {idx}] {e}");
+        let (prompt_tokens, reply_tokens, prompt_yumon, reply_yumon, prompt_recon, reply_recon) = if !prompt_raw.trim().is_empty() && !reply_raw.trim().is_empty() {
+            let p_tokens = match yumon_talk::english_to_yumon_tokens(&prompt_raw, &mut ctx) {
+                Ok(t) => t,
+                Err(_) => {
+                    unk_token_count += 1;
+                    continue;
                 }
-                unk_token_count += 1;
+            };
+            let r_tokens = match yumon_talk::english_to_yumon_tokens(&reply_raw, &mut ctx) {
+                Ok(t) => t,
+                Err(_) => {
+                    unk_token_count += 1;
+                    continue;
+                }
+            };
+
+            let p_yumon = yumon_talk::detokenize_yumon(&p_tokens);
+            let r_yumon = yumon_talk::detokenize_yumon(&r_tokens);
+
+            let p_recon = match yumon_talk::yumon_to_english_with_context(&p_yumon, &ctx, &mut rng) {
+                Ok(eng) => eng,
+                Err(_) => {
+                    roundtrip_failed_count += 1;
+                    continue;
+                }
+            };
+            let r_recon = match yumon_talk::yumon_to_english_with_context(&r_yumon, &ctx, &mut rng) {
+                Ok(eng) => eng,
+                Err(_) => {
+                    roundtrip_failed_count += 1;
+                    continue;
+                }
+            };
+
+            (p_tokens, r_tokens, p_yumon, r_yumon, p_recon, r_recon)
+        } else {
+            let text = if !reply_raw.trim().is_empty() { reply_raw.trim() } else { prompt_raw.trim() };
+            if text.is_empty() {
+                empty_count += 1;
                 continue;
             }
+            let r_tokens = match yumon_talk::english_to_yumon_tokens(text, &mut ctx) {
+                Ok(t) => t,
+                Err(_) => {
+                    unk_token_count += 1;
+                    continue;
+                }
+            };
+            let r_yumon = yumon_talk::detokenize_yumon(&r_tokens);
+            let r_recon = match yumon_talk::yumon_to_english_with_context(&r_yumon, &ctx, &mut rng) {
+                Ok(eng) => eng,
+                Err(_) => {
+                    roundtrip_failed_count += 1;
+                    continue;
+                }
+            };
+            (Vec::new(), r_tokens, String::new(), r_yumon, String::new(), r_recon)
         };
 
-        // Roundtrip back to English with random synonym sampling
-        let reconstructed_english = match yumon_talk::yumon_to_english_with_context(&yumon_str, &ctx, &mut rng) {
-            Ok(eng) => eng,
-            Err(_) => {
-                roundtrip_failed_count += 1;
-                continue;
-            }
-        };
-
-        // Tokenize Yumon Talk into IDs
-        let token_ids = yumon_talk::tokenize_yumon(&yumon_str);
-        if token_ids.len() > budget {
-            oversized_count += 1;
+        if prompt_tokens.iter().any(|&id| id == yumon_talk::UNK_ID) || reply_tokens.iter().any(|&id| id == yumon_talk::UNK_ID) {
+            unk_token_count += 1;
             continue;
         }
 
-        if token_ids.iter().any(|&id| id == yumon_talk::UNK_ID) {
-            if unk_token_count < 3 {
-                eprintln!("[DEBUG UNK sample {idx}] yumon_str = {:?}", yumon_str);
-            }
-            unk_token_count += 1;
+        // Budget check: BOS (1) + prompt + sep (1) + reply + EOS (1) <= max_seq_len
+        let total_active_len = if prompt_tokens.is_empty() {
+            1 + reply_tokens.len() + 1
+        } else {
+            1 + prompt_tokens.len() + 1 + reply_tokens.len() + 1
+        };
+
+        if total_active_len > args.max_seq_len {
+            oversized_count += 1;
             continue;
         }
 
         if preview_list.len() < args.preview_samples {
             preview_list.push((
-                combined_english.clone(),
-                yumon_str.clone(),
-                reconstructed_english.clone(),
-                token_ids.len(),
+                prompt_raw.clone(),
+                prompt_yumon.clone(),
+                prompt_recon.clone(),
+                reply_raw.clone(),
+                reply_yumon.clone(),
+                reply_recon.clone(),
+                prompt_tokens.len(),
+                reply_tokens.len(),
             ));
         }
 
         let mut input_ids = vec![BOS_TOKEN];
-        input_ids.extend(token_ids.iter().copied());
-        let mut target_labels: Vec<usize> = token_ids.iter().copied().collect();
+        input_ids.extend(prompt_tokens.iter().copied());
+        let mut target_labels: Vec<usize> = reply_tokens.iter().copied().collect();
         target_labels.push(EOS_TOKEN);
 
         input_ids.resize(args.max_seq_len, PAD_TOKEN);
@@ -220,7 +252,7 @@ fn main() -> Result<()> {
             motion_dir: sample.motion_dir,
             world: sample.world,
             target_json: sample.target_json.clone(),
-            pair: (combined_english, yumon_str),
+            pair: (prompt_yumon, reply_yumon),
         });
 
         if (idx + 1) % 5000 == 0 || idx + 1 == samples_to_process {
@@ -237,7 +269,7 @@ fn main() -> Result<()> {
     println!("Successfully converted to Yumon Talk: {} ({:.2}% coverage)", yumon_samples.len(), coverage_pct);
     println!("Skipped due to UNK tokens: {}", unk_token_count);
     println!("Skipped due to roundtrip failure: {}", roundtrip_failed_count);
-    println!("Skipped due to sequence length > {}: {}", budget, oversized_count);
+    println!("Skipped due to sequence length > {}: {}", args.max_seq_len, oversized_count);
     println!("Skipped due to empty text: {}", empty_count);
     println!("Total processing time: {:.2}s ({:.1} samples/s)", elapsed, samples_to_process as f64 / elapsed.max(0.001));
 
@@ -249,11 +281,16 @@ fn main() -> Result<()> {
     );
 
     println!("\n=== Converted Sample Previews ===");
-    for (i, (original, yumon, reconstructed, n_toks)) in preview_list.iter().enumerate() {
-        println!("\n--- Sample {} ({} Yumon Talk tokens) ---", i + 1, n_toks);
-        println!(">>> ORIGINAL ENGLISH <<<\n{}", original.trim());
-        println!("\n>>> YUMON TALK <<<\n{}", yumon.trim());
-        println!("\n>>> RECONSTRUCTED ENGLISH (RANDOM SYNONYM SAMPLING) <<<\n{}", reconstructed.trim());
+    for (i, (p_orig, p_yum, p_rec, r_orig, r_yum, r_rec, n_p, n_r)) in preview_list.iter().enumerate() {
+        println!("\n--- Sample {} (Prompt: {} toks, Reply: {} toks) ---", i + 1, n_p, n_r);
+        if !p_orig.is_empty() {
+            println!(">>> ORIGINAL PROMPT <<<\n{}", p_orig.trim());
+            println!(">>> YUMON TALK PROMPT <<<\n{}", p_yum.trim());
+            println!(">>> RECONSTRUCTED PROMPT <<<\n{}", p_rec.trim());
+        }
+        println!(">>> ORIGINAL REPLY <<<\n{}", r_orig.trim());
+        println!(">>> YUMON TALK REPLY <<<\n{}", r_yum.trim());
+        println!(">>> RECONSTRUCTED REPLY (RANDOM SYNONYM SAMPLING) <<<\n{}", r_rec.trim());
     }
 
     println!("\nWriting Yumon Talk cache to {} ...", args.output.display());
