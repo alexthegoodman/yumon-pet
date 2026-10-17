@@ -1702,8 +1702,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 32,
         // 64,
         // 128,
-        // 256,
-        512, // matching configs/yumon-talk-moe.json
+        256, // matching configs/yumon-talk-moe.json
+        // 512, 
         // 1024,
     ];
     let layer_counts: [usize; 1] = [

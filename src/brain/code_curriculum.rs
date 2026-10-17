@@ -299,7 +299,7 @@ fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<(Prepa
             tokenizer,
             TrainingStage::Language,
             config.max_seq_len,
-            CacheObjective::RawCode,
+            metadata.objective,
         )?;
         let held_out = code_corpus::validation_files(&samples, config)?;
         let (validation, training) = samples.into_iter().partition(|s| held_out.contains(&s.pair.0));
