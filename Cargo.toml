@@ -100,7 +100,7 @@ sha2 = "0.10"
 stop-words = "0.8.0"
 sentiment = "0.1.1"
 ureq = { version = "2", features = ["json"] }
-thesaurus = "0.5"
+thesaurus = { version = "0.5", features = ["static"] }
 
 # Desktop-only (native window / webview / 3D engine / gamepad). Gated behind
 # the "desktop" feature (on by default) so a headless training build can skip

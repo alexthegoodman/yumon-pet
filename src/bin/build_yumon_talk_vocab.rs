@@ -46,6 +46,10 @@ struct Args {
     #[arg(long)]
     sample_limit: Option<usize>,
 
+    /// Size of top candidate word pool to deduplicate (default: 4096)
+    #[arg(long, default_value_t = 4096)]
+    candidate_pool: usize,
+
     /// Number of sample clusters to preview
     #[arg(long, default_value_t = 15)]
     preview_clusters: usize,
@@ -82,6 +86,9 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     println!("=== Building Dynamic Yumon Talk Vocabulary ===");
+    println!("Initializing thesaurus dictionary (static feature)...");
+    thesaurus::init();
+
     println!("Input cache:        {}", args.input_cache.display());
     println!("Output vocab:       {}", args.output_vocab.display());
     println!("Target words:       {}", args.target_words);
@@ -120,15 +127,16 @@ fn main() -> Result<()> {
         sample_count, total_tokens, word_counts.len(), scan_elapsed, sample_count as f64 / scan_elapsed.max(0.001)
     );
 
-    // 2. Sort words by frequency descending
-    println!("\n[2/4] Sorting words and filtering frequency >= {} ...", args.min_word_freq);
+    // 2. Sort words by frequency descending and keep top candidate pool
+    println!("\n[2/4] Sorting words and keeping top {} most frequent candidate words...", args.candidate_pool);
     let mut sorted_words: Vec<(String, usize)> = word_counts
         .into_iter()
         .filter(|(_, count)| *count >= args.min_word_freq)
         .collect();
     sorted_words.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    sorted_words.truncate(args.candidate_pool);
 
-    println!("Filtered candidate pool: {} words", sorted_words.len());
+    println!("Candidate pool truncated to top {} most frequent words", sorted_words.len());
 
     // 3. Deduplicate using thesaurus and select canonical words
     println!("\n[3/4] Deduplicating synonyms via thesaurus to select {} canonical words...", args.target_words);
@@ -306,21 +314,53 @@ fn main() -> Result<()> {
 
     // 4. Enrich synonym clusters with any remaining corpus words
     println!("\n[4/4] Mapping remaining corpus words to canonical clusters...");
+    let mut mapped_inflections = 0usize;
+    let mut mapped_thesaurus = 0usize;
+
+    // First pass: morphological stemming across sorted words (instant string operations)
     for (word, _freq) in sorted_words.iter() {
         if word_to_canonical.contains_key(word) {
             continue;
         }
-        // Query thesaurus
+        let stems = [
+            word.strip_suffix("ing").unwrap_or(word),
+            word.strip_suffix("ed").unwrap_or(word),
+            word.strip_suffix("es").unwrap_or(word),
+            word.strip_suffix("s").unwrap_or(word),
+            word.strip_suffix("ly").unwrap_or(word),
+            word.strip_suffix("er").unwrap_or(word),
+            word.strip_suffix("est").unwrap_or(word),
+        ];
+        for &stem in stems.iter() {
+            if stem != word && !stem.is_empty() {
+                if let Some(canon) = word_to_canonical.get(stem).cloned() {
+                    word_to_canonical.insert(word.clone(), canon.clone());
+                    canonical_synonyms.entry(canon).or_default().insert(word.clone());
+                    mapped_inflections += 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Second pass: query thesaurus for top 10,000 words that remain unmapped
+    for (word, _freq) in sorted_words.iter().take(10000) {
+        if word_to_canonical.contains_key(word) {
+            continue;
+        }
         let syns = thesaurus::synonyms(word);
         for syn in syns.iter() {
             let clean = syn.trim().to_lowercase();
             if let Some(canon) = word_to_canonical.get(&clean).cloned() {
                 word_to_canonical.insert(word.clone(), canon.clone());
                 canonical_synonyms.entry(canon).or_default().insert(word.clone());
+                mapped_thesaurus += 1;
                 break;
             }
         }
     }
+
+    println!("Enriched clusters: mapped {} inflections and {} high-frequency synonyms", mapped_inflections, mapped_thesaurus);
 
     // Convert synonym sets to sorted Vecs
     let mut final_synonym_clusters: HashMap<String, Vec<String>> = HashMap::new();
