@@ -88,10 +88,20 @@ fn main() -> Result<()> {
         args.max_seq_len,
     )?;
 
-    let bpe_tokenizer = TokenizerKind::Bpe(
-        BpeTokenizer::load(&args.tokenizer)
-            .with_context(|| format!("loading tokenizer from {}", args.tokenizer))?
-    );
+    let talk_tokenizer_dir = args.vocab.parent().unwrap_or(std::path::Path::new(".")).join("yumon_talk_tokenizer");
+    let target_tokenizer = if talk_tokenizer_dir.join("tokenizer.json").exists() {
+        println!("Using Yumon Talk tokenizer from {} ...", talk_tokenizer_dir.display());
+        TokenizerKind::Bpe(
+            BpeTokenizer::load(talk_tokenizer_dir.to_str().unwrap())
+                .with_context(|| format!("loading tokenizer from {}", talk_tokenizer_dir.display()))?
+        )
+    } else {
+        println!("Using base tokenizer from {} ...", args.tokenizer);
+        TokenizerKind::Bpe(
+            BpeTokenizer::load(&args.tokenizer)
+                .with_context(|| format!("loading tokenizer from {}", args.tokenizer))?
+        )
+    };
 
     let total_available = input_samples.len();
     let samples_to_process = match args.limit {
@@ -126,11 +136,11 @@ fn main() -> Result<()> {
                 .take_while(|&&id| id != PAD_TOKEN)
                 .map(|&id| id as u32)
                 .collect();
-            let p = match bpe_tokenizer {
+            let p = match target_tokenizer {
                 TokenizerKind::Bpe(ref bpe) => bpe.decode(&p_ids).unwrap_or_default(),
                 _ => String::new(),
             };
-            let r = match bpe_tokenizer {
+            let r = match target_tokenizer {
                 TokenizerKind::Bpe(ref bpe) => bpe.decode(&r_ids).unwrap_or_default(),
                 _ => String::new(),
             };
@@ -153,7 +163,10 @@ fn main() -> Result<()> {
         // Convert English to Yumon Talk
         let (yumon_str, ctx) = match yumon_talk::english_to_yumon_with_map(&combined_english) {
             Ok(res) => res,
-            Err(_) => {
+            Err(e) => {
+                if unk_token_count < 5 {
+                    eprintln!("[DEBUG ERROR sample {idx}] {e}");
+                }
                 unk_token_count += 1;
                 continue;
             }
@@ -176,6 +189,9 @@ fn main() -> Result<()> {
         }
 
         if token_ids.iter().any(|&id| id == yumon_talk::UNK_ID) {
+            if unk_token_count < 3 {
+                eprintln!("[DEBUG UNK sample {idx}] yumon_str = {:?}", yumon_str);
+            }
             unk_token_count += 1;
             continue;
         }
@@ -243,7 +259,7 @@ fn main() -> Result<()> {
     println!("\nWriting Yumon Talk cache to {} ...", args.output.display());
     let metadata = sample_cache::write_cache_with_objective(
         &args.output,
-        &bpe_tokenizer,
+        &target_tokenizer,
         input_meta.stage,
         args.max_seq_len,
         args.seed,

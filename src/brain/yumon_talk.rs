@@ -53,7 +53,7 @@ pub struct YumonTalkVocab {
     #[serde(skip)]
     pub word_to_id: HashMap<String, usize>,
     #[serde(skip)]
-    pub dynamic_cache: Arc<RwLock<HashMap<String, usize>>>,
+    pub dynamic_cache: Arc<RwLock<HashMap<String, Option<usize>>>>,
 }
 
 impl YumonTalkVocab {
@@ -146,6 +146,48 @@ impl YumonTalkVocab {
         Ok(())
     }
 
+    /// Save as standard HuggingFace WordLevel tokenizer.json for training and inference.
+    pub fn save_tokenizer_json(&self, dir_or_file: &Path) -> Result<()> {
+        let file_path = if dir_or_file.extension().map_or(false, |ext| ext == "json") {
+            dir_or_file.to_path_buf()
+        } else {
+            dir_or_file.join("tokenizer.json")
+        };
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let added_tokens = serde_json::json!([
+            { "id": 0, "content": "<PAD>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
+            { "id": 1, "content": "<BOS>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
+            { "id": 2, "content": "<EOS>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
+            { "id": 3, "content": "<UNK>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true }
+        ]);
+        let mut vocab_map = serde_json::Map::new();
+        for (i, tok) in self.id_to_token.iter().enumerate() {
+            vocab_map.insert(tok.clone(), serde_json::Value::Number(serde_json::Number::from(i)));
+        }
+        let root = serde_json::json!({
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": added_tokens,
+            "normalizer": null,
+            "pre_tokenizer": {
+                "type": "WhitespaceSplit"
+            },
+            "post_processor": null,
+            "decoder": null,
+            "model": {
+                "type": "WordLevel",
+                "vocab": vocab_map,
+                "unk_token": "<UNK>"
+            }
+        });
+        let json = serde_json::to_string_pretty(&root)?;
+        std::fs::write(&file_path, json)?;
+        Ok(())
+    }
+
     pub fn token_to_id(&self, tok: &str) -> Option<usize> {
         self.token_to_id.get(tok).copied()
     }
@@ -162,10 +204,10 @@ impl YumonTalkVocab {
             return Some(id);
         }
 
-        // 2. Dynamic cache lookup
+        // 2. Dynamic cache lookup (with negative caching!)
         if let Ok(c) = self.dynamic_cache.read() {
-            if let Some(&id) = c.get(&lower) {
-                return Some(id);
+            if let Some(cached) = c.get(&lower) {
+                return *cached;
             }
         }
 
@@ -184,7 +226,7 @@ impl YumonTalkVocab {
             if stem != lower.as_str() && !stem.is_empty() {
                 if let Some(&id) = self.word_to_id.get(stem) {
                     if let Ok(mut c) = self.dynamic_cache.write() {
-                        c.insert(lower.clone(), id);
+                        c.insert(lower.clone(), Some(id));
                     }
                     return Some(id);
                 }
@@ -197,10 +239,15 @@ impl YumonTalkVocab {
             let clean = syn.trim().to_lowercase();
             if let Some(&id) = self.word_to_id.get(&clean) {
                 if let Ok(mut c) = self.dynamic_cache.write() {
-                    c.insert(lower.clone(), id);
+                    c.insert(lower.clone(), Some(id));
                 }
                 return Some(id);
             }
+        }
+
+        // Cache failure so we never re-query thesaurus for this word!
+        if let Ok(mut c) = self.dynamic_cache.write() {
+            c.insert(lower.clone(), None);
         }
 
         None
@@ -227,34 +274,8 @@ impl YumonTalkVocab {
                 continue;
             }
 
-            // Punctuation
-            let ch = chars[i];
-            let punct_str = ch.to_string();
-            if let Some(id) = self.token_to_id(&punct_str) {
-                tokens.push(id);
-                i += 1;
-                continue;
-            }
-
-            // Numbers
-            if ch.is_ascii_digit() {
-                let start = i;
-                while i < len && (chars[i].is_ascii_digit() || chars[i] == '.') {
-                    i += 1;
-                }
-                let num_str: String = chars[start..i].iter().collect();
-                let idx = num_map.entry(num_str.clone()).or_insert_with(|| {
-                    let curr = ctx.numbers.len();
-                    ctx.numbers.push(num_str);
-                    curr % 8
-                });
-                let slot = format!("<NUM_{idx}>");
-                tokens.push(self.token_to_id(&slot).unwrap_or(UNK_ID));
-                continue;
-            }
-
-            // Word (alphanumeric + apostrophe)
-            if ch.is_alphabetic() || ch == '_' {
+            // Word (alphanumeric + apostrophe) - must be checked BEFORE single-char punctuation!
+            if chars[i].is_alphabetic() || chars[i] == '_' {
                 let start = i;
                 while i < len && (chars[i].is_alphanumeric() || chars[i] == '_' || (chars[i] == '\'' && i + 1 < len && chars[i + 1].is_alphabetic())) {
                     i += 1;
@@ -276,6 +297,34 @@ impl YumonTalkVocab {
                 let slot = format!("<NAME_{ent_idx}>");
                 tokens.push(self.token_to_id(&slot).unwrap_or(UNK_ID));
                 continue;
+            }
+
+            // Numbers
+            if chars[i].is_ascii_digit() {
+                let start = i;
+                while i < len && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                    i += 1;
+                }
+                let num_str: String = chars[start..i].iter().collect();
+                let idx = num_map.entry(num_str.clone()).or_insert_with(|| {
+                    let curr = ctx.numbers.len();
+                    ctx.numbers.push(num_str);
+                    curr % 8
+                });
+                let slot = format!("<NUM_{idx}>");
+                tokens.push(self.token_to_id(&slot).unwrap_or(UNK_ID));
+                continue;
+            }
+
+            // Punctuation (strictly non-alphanumeric!)
+            let ch = chars[i];
+            let punct_str = ch.to_string();
+            if self.punctuation.iter().any(|p| p == &punct_str) {
+                if let Some(id) = self.token_to_id(&punct_str) {
+                    tokens.push(id);
+                    i += 1;
+                    continue;
+                }
             }
 
             // Other character: fallback
@@ -318,28 +367,30 @@ impl YumonTalkVocab {
                 }
             }
 
-            // Punctuation
-            let ch = chars[i];
-            let punct_str = ch.to_string();
-            if let Some(id) = self.token_to_id(&punct_str) {
-                tokens.push(id);
-                i += 1;
-                continue;
-            }
-
-            // Word
-            if ch.is_alphanumeric() || ch == '_' {
+            // Word - must be checked BEFORE single-char punctuation!
+            if chars[i].is_alphanumeric() || chars[i] == '_' {
                 let start = i;
                 while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
                 let word: String = chars[start..i].iter().collect();
-                if let Some(id) = self.token_to_id(&word) {
+                if let Some(id) = self.token_to_id(&word.to_lowercase()) {
                     tokens.push(id);
                 } else {
                     tokens.push(UNK_ID);
                 }
                 continue;
+            }
+
+            // Punctuation (strictly non-alphanumeric!)
+            let ch = chars[i];
+            let punct_str = ch.to_string();
+            if self.punctuation.iter().any(|p| p == &punct_str) {
+                if let Some(id) = self.token_to_id(&punct_str) {
+                    tokens.push(id);
+                    i += 1;
+                    continue;
+                }
             }
 
             i += 1;

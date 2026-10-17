@@ -33,6 +33,7 @@ mod desktop {
         moe_model::YumonMoeBrain,
         samples::{TrainingStage, language_prompt},
         xlstm_model::YumonXLstmBrain,
+        yumon_talk,
     };
 
     #[derive(Clone, Copy, ValueEnum)]
@@ -64,6 +65,12 @@ mod desktop {
         /// Print today's cached Product Hunt descriptions without a model or window.
         #[arg(long)]
         check_feeds: bool,
+        /// Enable Yumon Talk bidirectional translation (English -> Yumon Talk prompt, Yumon Talk -> English reply).
+        #[arg(long)]
+        yumon_talk: bool,
+        /// Path to Yumon Talk vocabulary JSON (defaults to training-cache/yumon_talk_vocab.json).
+        #[arg(long, default_value = "training-cache/yumon_talk_vocab.json")]
+        yumon_talk_vocab: PathBuf,
     }
 
     #[derive(Clone, Serialize)]
@@ -346,6 +353,15 @@ mod desktop {
             metadata["training_stage"] == "Language",
             "RSS requires a Language-stage checkpoint"
         );
+        let use_yumon_talk = args.yumon_talk;
+        if use_yumon_talk {
+            if args.yumon_talk_vocab.exists() {
+                println!("[Yumon RSS] Loading Yumon Talk vocabulary from {} ...", args.yumon_talk_vocab.display());
+                yumon_talk::load_global_vocab_file(&args.yumon_talk_vocab)?;
+            } else {
+                eprintln!("[Yumon RSS] Warning: Yumon Talk vocab file {} not found; using default vocab.", args.yumon_talk_vocab.display());
+            }
+        }
         let device = Default::default();
         macro_rules! load {
             ($model:ty, $generate:expr) => {{
@@ -358,12 +374,24 @@ mod desktop {
                 comment_prompt("idea", config.max_seq_len, &tokenizer)?;
                 Ok(Box::new(
                     move |text: &str, kind: PromptKind, history: &[ChatMessage]| {
+                        let (prompt_text, ctx) = if use_yumon_talk {
+                            match yumon_talk::english_to_yumon_with_map(text) {
+                                Ok((talk, context)) => (talk, context),
+                                Err(e) => {
+                                    eprintln!("[Yumon RSS] English -> Yumon Talk translation fallback: {e}");
+                                    (text.to_string(), yumon_talk::TranslationContext::new())
+                                }
+                            }
+                        } else {
+                            (text.to_string(), yumon_talk::TranslationContext::new())
+                        };
+
                         let prompt = match kind {
                             PromptKind::Product => {
-                                comment_prompt(text, config.max_seq_len, &tokenizer)?
+                                comment_prompt(&prompt_text, config.max_seq_len, &tokenizer)?
                             }
                             PromptKind::Chat => {
-                                chat_prompt(text, history, config.max_seq_len, &tokenizer)?
+                                chat_prompt(&prompt_text, history, config.max_seq_len, &tokenizer)?
                             }
                         };
                         let generate: fn(&$model, &TokenizerKind, &str, usize, &_) -> String =
@@ -377,7 +405,21 @@ mod desktop {
                         );
                         let reply = reply.trim().to_owned();
                         anyhow::ensure!(!reply.is_empty(), "Yumon returned an empty reply");
-                        Ok(reply)
+
+                        let final_reply = if use_yumon_talk {
+                            let mut rng = rand::thread_rng();
+                            match yumon_talk::yumon_to_english_with_context(&reply, &ctx, &mut rng) {
+                                Ok(eng) => eng,
+                                Err(e) => {
+                                    eprintln!("[Yumon RSS] Yumon Talk -> English translation fallback: {e}");
+                                    reply
+                                }
+                            }
+                        } else {
+                            reply
+                        };
+
+                        Ok(final_reply)
                     },
                 ) as Responder)
             }};

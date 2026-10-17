@@ -444,8 +444,12 @@ fn main() -> Result<()> {
     println!("\nSaving dynamic vocabulary to {} ...", args.output_vocab.display());
     vocab.save_to_file(&args.output_vocab)?;
 
+    let tokenizer_dir = args.output_vocab.parent().unwrap_or(std::path::Path::new(".")).join("yumon_talk_tokenizer");
+    println!("Saving HuggingFace WordLevel tokenizer to {} ...", tokenizer_dir.display());
+    vocab.save_tokenizer_json(&tokenizer_dir)?;
+
     let file_size_kb = std::fs::metadata(&args.output_vocab)?.len() as f64 / 1024.0;
-    println!("Successfully saved dynamic Yumon Talk vocabulary ({:.1} KB)!\n", file_size_kb);
+    println!("Successfully saved dynamic Yumon Talk vocabulary ({:.1} KB) and tokenizer!\n", file_size_kb);
 
     Ok(())
 }
