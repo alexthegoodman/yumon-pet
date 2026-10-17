@@ -1228,6 +1228,9 @@ where
 {
     let is_prepared = prepared_code.is_some();
     let raw_code = prepared_code.as_ref().map_or(false, |p| p.objective == crate::brain::sample_cache::CacheObjective::RawCode);
+
+    println!("raw_code: {:?}", raw_code);
+
     let is_yumon_talk = is_yumon_talk_run(&run_cfg.name, tokenizer, raw_code);
     let run_dir_str = run_dir.to_str().unwrap();
     let (mut model, mut epochs_already_done) = M::init_or_resume(run_cfg, tokenizer, run_dir, device)?;
