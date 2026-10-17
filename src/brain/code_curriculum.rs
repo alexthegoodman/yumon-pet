@@ -25,6 +25,7 @@ pub struct PreparedCode {
     pub pretrain_share: f64,
     pub identity: Value,
     pub seed: u64,
+    pub objective: CacheObjective,
 }
 impl PreparedCode {
     /// Training index range of a tier (offsets include any pretraining prefix).
@@ -311,6 +312,7 @@ fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<(Prepa
             pretrain_epochs: 0,
             pretrain_share: 0.0,
             seed: config.seed,
+            objective: metadata.objective,
             identity: json!({"mode": "full-cache", "cache": metadata, "seed": config.seed,
                 "validation_fraction": config.validation_fraction}),
         }, held_out));
@@ -376,6 +378,7 @@ fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<(Prepa
         pretrain_epochs: 0,
         pretrain_share: 0.0,
         seed: config.seed,
+        objective: CacheObjective::RawCode,
         identity,
     }, held_out))
 }

@@ -200,7 +200,8 @@ pub fn write_token_html(path: &Path, title: &str, rows: &[Vec<TokenView>], tier_
     let mut by_token: HashMap<&str, (f64, u32, Vec<u32>)> = HashMap::new();
     let mut by_tier = vec![(0.0f64, 0usize); tiers];
     for t in rows.iter().flatten() {
-        let e = by_token.entry(t.text.as_str()).or_insert_with(|| (0.0, 0, vec![0; tiers]));
+        let key = if t.text.trim().is_empty() { t.text.as_str() } else { t.text.trim() };
+        let e = by_token.entry(key).or_insert_with(|| (0.0, 0, vec![0; tiers]));
         e.0 += t.loss as f64;
         e.1 += 1;
         if let Some(slot) = t.tier.and_then(|tier| e.2.get_mut(tier as usize)) { *slot += 1; }

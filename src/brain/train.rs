@@ -292,17 +292,21 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
         anyhow::ensure!(prepared.training.len() >= count, "overfit_samples {count} exceeds {} training samples", prepared.training.len());
         prepared.training.truncate(count);
         prepared.validation = prepared.training.clone();
-        let (mut matching, mut total) = (0usize, 0usize);
-        for s in &prepared.training {
-            for i in 0..s.target_labels.len().saturating_sub(1) {
-                // The final target (e.g. EOS) has no following input token.
-                if s.target_labels[i] == PAD_TOKEN || s.input_ids[i + 1] == PAD_TOKEN { continue; }
-                total += 1;
-                matching += (s.target_labels[i] == s.input_ids[i + 1]) as usize;
+        if prepared.objective == crate::brain::sample_cache::CacheObjective::RawCode {
+            let (mut matching, mut total) = (0usize, 0usize);
+            for s in &prepared.training {
+                for i in 0..s.target_labels.len().saturating_sub(1) {
+                    // The final target (e.g. EOS) has no following input token.
+                    if s.target_labels[i] == PAD_TOKEN || s.input_ids[i + 1] == PAD_TOKEN { continue; }
+                    total += 1;
+                    matching += (s.target_labels[i] == s.input_ids[i + 1]) as usize;
+                }
             }
+            println!("Overfit run: {count} fixed sequences, dropout 0, constant LR {}. Label shift check: {matching}/{total} targets equal the next input token.", config.first_lr);
+            anyhow::ensure!(matching == total, "targets are not input shifted by one position");
+        } else {
+            println!("Overfit run: {count} fixed sequences, dropout 0, constant LR {}.", config.first_lr);
         }
-        println!("Overfit run: {count} fixed sequences, dropout 0, constant LR {}. Label shift check: {matching}/{total} targets equal the next input token.", config.first_lr);
-        anyhow::ensure!(matching == total, "targets are not input shifted by one position");
     }
     prepared.print_plan(config.epochs, config.batch_size);
     if check_only { return Ok(()); }
@@ -792,22 +796,33 @@ fn per_token_nll<B: Backend>(log_probs: Tensor<B, 3>, targets: Tensor<B, 1, Int>
 fn write_validation_token_view<B: Backend, M: CausalLm<B>>(
     model: &M, tokenizer: &TokenizerKind, samples: &[crate::brain::samples::Sample],
     max_seq_len: usize, vocab: usize, device: &B::Device, path: &std::path::Path, ceiling: f32,
+    raw_code: bool, sep_tokens: &[usize], is_yumon_talk: bool,
 ) -> Result<()> {
     let idx: Vec<usize> = (0..samples.len().min(3)).collect();
-    let (ids, targets, supervised) = build_moe_batch(samples, &idx, &[], max_seq_len, true);
+    let (ids, targets, supervised) = build_moe_batch(samples, &idx, sep_tokens, max_seq_len, raw_code);
     if supervised == 0 { return Ok(()); }
     let n = idx.len();
-    let tokens = Tensor::<B, 2, Int>::from_ints(TensorData::new(ids, [n, max_seq_len]), device);
-    let target_t = Tensor::<B, 1, Int>::from_ints(TensorData::new(targets.clone(), [n * max_seq_len]), device);
+    let (ids, targets, cur_seq_len) = trim_batch(ids, targets, n, max_seq_len);
+    let tokens = Tensor::<B, 2, Int>::from_ints(TensorData::new(ids, [n, cur_seq_len]), device);
+    let target_t = Tensor::<B, 1, Int>::from_ints(TensorData::new(targets.clone(), [n * cur_seq_len]), device);
     let (logits, depth) = model.logits_with_depth(tokens);
     let log_probs = burn::tensor::activation::log_softmax(logits.cast(burn::tensor::FloatDType::F32), 2);
     debug_assert_eq!(log_probs.dims()[2], vocab);
     let nll = per_token_nll(log_probs, target_t);
     // Row i predicts targets[i], so its tier is the depth spent on that prediction.
     let rows: Vec<Vec<TokenView>> = (0..n).map(|r| {
-        (0..max_seq_len).map(|p| r * max_seq_len + p).filter(|&i| targets[i] != PAD_TOKEN as i32)
-            .map(|i| TokenView { text: tokenizer.decode(&[targets[i] as usize]), loss: nll[i],
-                tier: depth.as_ref().map(|(_, deepest)| deepest[i]) })
+        let mut prev_token: Option<String> = None;
+        (0..cur_seq_len).map(|p| r * cur_seq_len + p).filter(|&i| targets[i] != PAD_TOKEN as i32)
+            .map(|i| {
+                let raw = tokenizer.decode(&[targets[i] as usize]);
+                let needs_space = is_yumon_talk && prev_token.as_deref().is_some_and(|prev| {
+                    !matches!(prev, "(" | "[") && !matches!(raw.as_str(), "." | "," | "!" | "?" | ";" | ":" | ")" | "]" | "\n")
+                });
+                let text = if needs_space { format!(" {raw}") } else { raw.clone() };
+                prev_token = Some(raw);
+                TokenView { text, loss: nll[i],
+                    tier: depth.as_ref().map(|(_, deepest)| deepest[i]) }
+            })
             .collect()
     }).collect();
     let tier_names = depth.map(|(names, _)| names);
@@ -1211,12 +1226,13 @@ where
     M: CausalLmTrain,
     M::InnerModule: CausalLm<InnerBackend>,
 {
-    let raw_code = prepared_code.is_some();
+    let is_prepared = prepared_code.is_some();
+    let raw_code = prepared_code.as_ref().map_or(false, |p| p.objective == crate::brain::sample_cache::CacheObjective::RawCode);
     let is_yumon_talk = is_yumon_talk_run(&run_cfg.name, tokenizer, raw_code);
     let run_dir_str = run_dir.to_str().unwrap();
     let (mut model, mut epochs_already_done) = M::init_or_resume(run_cfg, tokenizer, run_dir, device)?;
-    if raw_code && epochs_already_done >= run_cfg.stages[0].epochs {
-        println!("Code epoch budget already completed: {epochs_already_done}");
+    if is_prepared && epochs_already_done >= run_cfg.stages[0].epochs {
+        println!("Epoch budget already completed: {epochs_already_done}");
         return Ok(());
     }
 
@@ -1353,8 +1369,8 @@ where
             Ok(val)
         };
 
-        let start_epoch = if raw_code { epochs_already_done } else { 0 };
-        let epoch_offset = if raw_code { 0 } else { epochs_already_done };
+        let start_epoch = if is_prepared { epochs_already_done } else { 0 };
+        let epoch_offset = if is_prepared { 0 } else { epochs_already_done };
         'epoch_loop: for epoch in start_epoch..stage_cfg.epochs {
             state.epoch = epoch + 1;
             let mut idx: Vec<usize> = epoch_indices.as_ref()
@@ -1515,7 +1531,8 @@ where
                             &token_nll, current_batch_size, seq_len, heatmap_ceiling)?;
                         loss_stats.save(&heatmap_dir, step)?;
                         write_validation_token_view(&model.valid(), tokenizer, &val_samples, run_cfg.max_seq_len,
-                            vocab, device, &heatmap_dir.join(format!("tokens_{step:06}.html")), heatmap_ceiling)
+                            vocab, device, &heatmap_dir.join(format!("tokens_{step:06}.html")), heatmap_ceiling,
+                            raw_code, &sep_tokens, is_yumon_talk)
                     })();
                     if let Err(e) = snapshot { eprintln!("⚠️  Failed to save loss heatmaps: {e}"); }
                     loss_stats.reset();
@@ -1601,7 +1618,7 @@ where
             // Early stop on held-out loss when available.
             let stop_loss = val_loss.unwrap_or(final_loss);
             if let Some(prev) = prev_epoch_loss {
-                if !raw_code && prev - stop_loss < MIN_EPOCH_LOSS_DROP {
+                if !is_prepared && prev - stop_loss < MIN_EPOCH_LOSS_DROP {
                     println!(
                         "\n⏹️  Epoch loss drop {:.4} < {:.4} (prev {:.4} -> {:.4}). Finishing run early.",
                         prev - stop_loss, MIN_EPOCH_LOSS_DROP, prev, stop_loss,
@@ -1653,7 +1670,7 @@ where
 
             if run_should_stop || final_loss < stage_cfg.loss_threshold { break 'epoch_loop; }
         }
-        if raw_code { epochs_already_done = state.epoch; } else { epochs_already_done += state.epoch; }
+        if is_prepared { epochs_already_done = state.epoch; } else { epochs_already_done += state.epoch; }
         if let Some(term) = terminal.as_mut() {
             term.clear()?;
         }
@@ -2891,10 +2908,10 @@ mod moe_loss_tests {
         let runs = generate_run_configs(16, Architecture::Moe { num_experts: 4, top_k: 1 });
         assert_eq!(runs.len(), 1);
         let run = &runs[0];
-        assert_eq!((run.embed_dim, run.n_layers, run.attn_heads, run.ff_dim), (512, 12, 16, 1536));
+        assert_eq!((run.embed_dim, run.n_layers, run.attn_heads, run.ff_dim), (256, 12, 16, 1024));
         assert!(matches!(run.architecture, Architecture::Moe { num_experts: 4, top_k: 1 }));
         assert_eq!(run.stages[0].batch_size, 16);
-        assert_eq!(run.name, "512h_12l_16a_512len_b16_Moe_e4_k1_Language_f32");
+        assert_eq!(run.name, "256h_12l_16a_512len_b16_Moe_e4_k1_Language_f32");
         let custom = generate_run_configs(8, Architecture::Moe { num_experts: 8, top_k: 2 });
         assert!(matches!(custom[0].architecture, Architecture::Moe { num_experts: 8, top_k: 2 }));
     }

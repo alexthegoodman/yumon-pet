@@ -115,6 +115,7 @@ where
         pretrain_share: 0.0,
         identity: serde_json::json!({}),
         seed: 42,
+        objective: crate::brain::sample_cache::CacheObjective::RawCode,
     };
     let train = |run: &RunConfig| {
         train_causal_lm::<M>(
