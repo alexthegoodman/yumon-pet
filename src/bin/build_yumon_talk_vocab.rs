@@ -267,23 +267,14 @@ fn main() -> Result<()> {
     let mut mapped_inflections = 0usize;
     let mut mapped_thesaurus = 0usize;
 
-    // First pass: morphological stemming across sorted words
+    // First pass: two-way morphological stemming and lemmatization across sorted words
     for (word, _freq) in sorted_words.iter() {
         if word_to_canonical.contains_key(word) {
             continue;
         }
-        let stems = [
-            word.strip_suffix("ing").unwrap_or(word),
-            word.strip_suffix("ed").unwrap_or(word),
-            word.strip_suffix("es").unwrap_or(word),
-            word.strip_suffix("s").unwrap_or(word),
-            word.strip_suffix("ly").unwrap_or(word),
-            word.strip_suffix("er").unwrap_or(word),
-            word.strip_suffix("est").unwrap_or(word),
-        ];
-        for &stem in stems.iter() {
-            if stem != word && !stem.is_empty() {
-                if let Some(canon) = word_to_canonical.get(stem).cloned() {
+        for variant in yumon_pet::brain::yumon_talk::morphological_variants(word) {
+            if variant != *word && !variant.is_empty() {
+                if let Some(canon) = word_to_canonical.get(&variant).cloned() {
                     if !sealed_set.contains(&canon) {
                         word_to_canonical.insert(word.clone(), canon.clone());
                         canonical_synonyms.entry(canon).or_default().insert(word.clone());
@@ -295,8 +286,8 @@ fn main() -> Result<()> {
         }
     }
 
-    // Second pass: query thesaurus with mutual confirmation for remaining high-frequency corpus words
-    for (word, _freq) in sorted_words.iter().take(10000) {
+    // Second pass: query thesaurus with mutual confirmation and stem/prefix match for remaining corpus words
+    for (word, _freq) in sorted_words.iter().take(20000) {
         if word_to_canonical.contains_key(word) {
             continue;
         }
@@ -306,7 +297,9 @@ fn main() -> Result<()> {
             if clean.len() >= 2 && !sealed_set.contains(&clean) {
                 if let Some(canon) = word_to_canonical.get(&clean).cloned() {
                     if !sealed_set.contains(&canon) && canonical_set.contains(&canon) {
-                        if thesaurus::synonyms(&canon).iter().any(|s| s.trim().to_lowercase() == *word) {
+                        let is_mutual = thesaurus::synonyms(&canon).iter().any(|s| s.trim().to_lowercase() == *word);
+                        let is_prefix = clean.starts_with(word) || word.starts_with(&clean);
+                        if is_mutual || is_prefix {
                             word_to_canonical.insert(word.clone(), canon.clone());
                             canonical_synonyms.entry(canon).or_default().insert(word.clone());
                             mapped_thesaurus += 1;
@@ -330,14 +323,14 @@ fn main() -> Result<()> {
             l.sort();
             l
         } else {
-            // Rank synonyms by frequency in the corpus descending, keeping top 10 most common
+            // Rank synonyms by frequency in the corpus descending, keeping top 35 most common
             let mut ranked: Vec<String> = set.into_iter().collect();
             ranked.sort_by(|a, b| {
                 let fa = if a == &canon { usize::MAX } else { word_counts.get(a).copied().unwrap_or(0) };
                 let fb = if b == &canon { usize::MAX } else { word_counts.get(b).copied().unwrap_or(0) };
                 fb.cmp(&fa).then_with(|| a.cmp(b))
             });
-            ranked.truncate(10);
+            ranked.truncate(35);
             ranked.sort();
             ranked
         };

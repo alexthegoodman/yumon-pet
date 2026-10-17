@@ -3,7 +3,7 @@
   "num_experts": 8,
   "top_k": 2,
   "source": "../rust-code",
-  "cache": "training-cache/yumon_talk_samples-256.bin",
+  "cache": "training-cache/yumon_talk_samples.bin",
   "tokenizer": "training-cache/yumon_talk_tokenizer",
   "max_seq_len": 256,
   "exclude_dirs": [".git", "target", "node_modules"],
@@ -18,5 +18,5 @@
   "first_lr": 0.0003,
   "last_lr": 0.00003,
   "validation_fraction": 0.01,
-  "out_dir": "checkpoints/yumon-talk-moe-fly-1"
+  "out_dir": "checkpoints/yumon-talk-moe-fly-2"
 }

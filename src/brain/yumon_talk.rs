@@ -101,6 +101,137 @@ pub fn is_sealed(word: &str) -> bool {
     SEALED_WORDS.iter().any(|(c, syns)| *c == lower || syns.iter().any(|&s| s == lower))
 }
 
+pub const IRREGULAR_LEMMAS: &[(&str, &str)] = &[
+    ("build", "built"),
+    ("built", "build"),
+    ("run", "ran"),
+    ("ran", "run"),
+    ("see", "saw"),
+    ("saw", "see"),
+    ("seen", "see"),
+    ("go", "went"),
+    ("went", "go"),
+    ("gone", "go"),
+    ("come", "came"),
+    ("came", "come"),
+    ("tell", "told"),
+    ("told", "tell"),
+    ("know", "knew"),
+    ("knew", "know"),
+    ("known", "know"),
+    ("give", "gave"),
+    ("gave", "give"),
+    ("given", "give"),
+    ("take", "took"),
+    ("took", "take"),
+    ("taken", "take"),
+    ("find", "found"),
+    ("found", "find"),
+    ("think", "thought"),
+    ("thought", "think"),
+    ("buy", "bought"),
+    ("bought", "buy"),
+    ("feel", "felt"),
+    ("felt", "feel"),
+    ("hold", "held"),
+    ("held", "hold"),
+    ("leave", "left"),
+    ("left", "leave"),
+    ("speak", "spoke"),
+    ("spoke", "speak"),
+    ("bring", "brought"),
+    ("brought", "bring"),
+    ("begin", "began"),
+    ("began", "begin"),
+    ("begun", "begin"),
+    ("say", "said"),
+    ("said", "say"),
+    ("make", "made"),
+    ("made", "make"),
+    ("hear", "heard"),
+    ("heard", "hear"),
+    ("child", "children"),
+    ("children", "child"),
+    ("person", "people"),
+    ("people", "person"),
+    ("man", "men"),
+    ("men", "man"),
+    ("woman", "women"),
+    ("women", "woman"),
+];
+
+/// Generate two-way morphological candidates (suffix stripping, inflection expansion, irregular verbs).
+pub fn morphological_variants(lower: &str) -> Vec<String> {
+    let mut variants = Vec::new();
+
+    // 1. Suffix stripping (handling silent 'e' and consonant doubling)
+    if let Some(s) = lower.strip_suffix("'s") { variants.push(s.to_string()); }
+    if let Some(s) = lower.strip_suffix("s") {
+        if !s.is_empty() { variants.push(s.to_string()); }
+    }
+    if let Some(s) = lower.strip_suffix("es") {
+        if !s.is_empty() { variants.push(s.to_string()); }
+    }
+    if let Some(s) = lower.strip_suffix("ies") {
+        variants.push(format!("{s}y"));
+    }
+    if let Some(s) = lower.strip_suffix("ied") {
+        variants.push(format!("{s}y"));
+    }
+    if let Some(s) = lower.strip_suffix("ed") {
+        if !s.is_empty() {
+            variants.push(s.to_string());
+            variants.push(format!("{s}e")); // created -> create, closed -> close
+        }
+    }
+    if let Some(s) = lower.strip_suffix("ing") {
+        if !s.is_empty() {
+            variants.push(s.to_string());
+            variants.push(format!("{s}e")); // creating -> create, making -> make
+            let bytes = s.as_bytes();
+            if bytes.len() >= 2 && bytes[bytes.len() - 1] == bytes[bytes.len() - 2] {
+                variants.push(s[..s.len() - 1].to_string()); // running -> run, stopping -> stop
+            }
+        }
+    }
+    if let Some(s) = lower.strip_suffix("ly") {
+        if !s.is_empty() { variants.push(s.to_string()); }
+    }
+    if let Some(s) = lower.strip_suffix("er") {
+        if !s.is_empty() {
+            variants.push(s.to_string());
+            variants.push(format!("{s}e"));
+        }
+    }
+    if let Some(s) = lower.strip_suffix("est") {
+        if !s.is_empty() {
+            variants.push(s.to_string());
+            variants.push(format!("{s}e"));
+        }
+    }
+
+    // 2. Inflection expansion (when canonical word in dictionary is inflected)
+    variants.push(format!("{lower}s"));
+    variants.push(format!("{lower}es"));
+    variants.push(format!("{lower}d"));
+    variants.push(format!("{lower}ed"));
+    if let Some(s) = lower.strip_suffix('e') {
+        variants.push(format!("{s}ed"));
+        variants.push(format!("{s}ing"));
+    } else {
+        variants.push(format!("{lower}ing"));
+    }
+
+    // 3. Irregular verbs and nouns
+    for &(a, b) in IRREGULAR_LEMMAS {
+        if lower == a {
+            variants.push(b.to_string());
+        }
+    }
+
+    variants
+}
+
 impl TranslationContext {
     pub fn new() -> Self {
         Self::default()
@@ -193,6 +324,14 @@ impl YumonTalkVocab {
                 }
             }
         }
+        for &(canon, syns) in SEALED_WORDS {
+            if let Some(&id) = token_to_id.get(canon) {
+                word_to_id.insert(canon.to_lowercase(), id);
+                for &syn in syns {
+                    word_to_id.insert(syn.to_lowercase(), id);
+                }
+            }
+        }
         self.vocab_size = total;
         self.token_to_id = token_to_id;
         self.id_to_token = id_to_token;
@@ -268,6 +407,10 @@ impl YumonTalkVocab {
         self.id_to_token.get(id).map(|s| s.as_str())
     }
 
+    pub fn is_name_token(&self, id: usize) -> bool {
+        self.id_to_token.get(id).map_or(false, |tok| tok.starts_with("<NAME_") && tok.ends_with('>'))
+    }
+
     pub fn resolve_english_word(&self, word: &str) -> Option<usize> {
         let lower = word.to_lowercase();
 
@@ -283,20 +426,10 @@ impl YumonTalkVocab {
             }
         }
 
-        // 3. Morphological Stemming
-        let stems = [
-            lower.strip_suffix("'s").unwrap_or(&lower),
-            lower.strip_suffix("s").unwrap_or(&lower),
-            lower.strip_suffix("es").unwrap_or(&lower),
-            lower.strip_suffix("ed").unwrap_or(&lower),
-            lower.strip_suffix("ing").unwrap_or(&lower),
-            lower.strip_suffix("ly").unwrap_or(&lower),
-            lower.strip_suffix("er").unwrap_or(&lower),
-            lower.strip_suffix("est").unwrap_or(&lower),
-        ];
-        for &stem in stems.iter() {
-            if stem != lower.as_str() && !stem.is_empty() {
-                if let Some(&id) = self.word_to_id.get(stem) {
+        // 3. Morphological Stemming and Two-Way Lemmatization
+        for variant in morphological_variants(&lower) {
+            if variant != lower && !variant.is_empty() {
+                if let Some(&id) = self.word_to_id.get(&variant) {
                     if let Ok(mut c) = self.dynamic_cache.write() {
                         c.insert(lower.clone(), Some(id));
                     }
@@ -308,19 +441,56 @@ impl YumonTalkVocab {
         // 4. Query `thesaurus` crate with mutual confirmation and sealed word exclusion
         let dict = get_thesaurus_dict();
         if let Some(syns) = dict.get(&lower) {
+            // High precision: mutual confirmation
             for syn in syns.iter() {
                 let clean = syn.trim().to_lowercase();
-                // Never map an unknown word to a sealed closed-class word (e.g. can, i, be, in)
                 if is_sealed(&clean) {
                     continue;
                 }
                 if let Some(&id) = self.word_to_id.get(&clean) {
                     if let Some(canon) = self.id_to_token(id) {
                         if !is_sealed(canon) {
-                            // Mutual check: does canonical word's thesaurus entry contain lower?
                             if dict.get(canon).map_or(false, |canon_syns| {
                                 canon_syns.iter().any(|s| s.trim().to_lowercase() == lower)
                             }) {
+                                if let Ok(mut c) = self.dynamic_cache.write() {
+                                    c.insert(lower.clone(), Some(id));
+                                }
+                                return Some(id);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // High precision fallback: direct prefix/stem or top synonym into open-class canonical word
+            for (idx, syn) in syns.iter().enumerate() {
+                let clean = syn.trim().to_lowercase();
+                if is_sealed(&clean) {
+                    continue;
+                }
+                if let Some(&id) = self.word_to_id.get(&clean) {
+                    if let Some(canon) = self.id_to_token(id) {
+                        if !is_sealed(canon) && (clean.starts_with(&lower) || lower.starts_with(&clean) || idx < 3) {
+                            if let Ok(mut c) = self.dynamic_cache.write() {
+                                c.insert(lower.clone(), Some(id));
+                            }
+                            return Some(id);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also check if any morphological variant of `lower` has a direct thesaurus match
+        for variant in morphological_variants(&lower) {
+            if let Some(syns) = dict.get(&variant) {
+                for syn in syns.iter().take(3) {
+                    let clean = syn.trim().to_lowercase();
+                    if is_sealed(&clean) { continue; }
+                    if let Some(&id) = self.word_to_id.get(&clean) {
+                        if let Some(canon) = self.id_to_token(id) {
+                            if !is_sealed(canon) {
                                 if let Ok(mut c) = self.dynamic_cache.write() {
                                     c.insert(lower.clone(), Some(id));
                                 }
@@ -375,14 +545,21 @@ impl YumonTalkVocab {
                     continue;
                 }
 
-                // If capitalized / brand name / out of vocabulary entity:
-                let ent_idx = entity_map.entry(word.clone()).or_insert_with(|| {
-                    let curr = ctx.entities.len();
-                    ctx.entities.push(word);
-                    curr % 32
-                });
-                let slot = format!("<NAME_{ent_idx}>");
-                tokens.push(self.token_to_id(&slot).unwrap_or(UNK_ID));
+                // Only assign <NAME_x> placeholder if word is capitalized (proper name / entity / acronym)
+                let is_entity = chars[start].is_uppercase()
+                    && (i - start > 1 || (chars[start] != 'A' && chars[start] != 'I'));
+
+                if is_entity {
+                    let ent_idx = entity_map.entry(word.clone()).or_insert_with(|| {
+                        let curr = ctx.entities.len();
+                        ctx.entities.push(word);
+                        curr % 32
+                    });
+                    let slot = format!("<NAME_{ent_idx}>");
+                    tokens.push(self.token_to_id(&slot).unwrap_or(UNK_ID));
+                } else {
+                    tokens.push(UNK_ID);
+                }
                 continue;
             }
 
@@ -747,7 +924,8 @@ mod tests {
             "my".into(), "good".into(), "friend".into(), "today".into(), "the".into(), "sun".into(),
             "shines".into(), "bright".into(), "in".into(), "blue".into(), "sky".into(), "please".into(),
             "give".into(), "me".into(), "some".into(), "water".into(), "because".into(), "thirsty".into(),
-            "device".into(), "announced".into(), "new".into(),
+            "device".into(), "announced".into(), "new".into(), "and".into(), "pet".into(),
+            "very".into(), "a".into(), "yumon".into(),
         ];
         let mut clusters = HashMap::new();
         clusters.insert("happy".into(), vec!["happy".into(), "delighted".into(), "glad".into(), "joyful".into()]);
@@ -814,5 +992,36 @@ mod tests {
         let vocab = sample_test_vocab();
         assert!(vocab.verify_yumon_roundtrip("The sun shines bright in the blue sky.").unwrap());
         assert!(vocab.verify_yumon_roundtrip("Please give me some water because I am thirsty.").unwrap());
+    }
+
+    #[test]
+    fn test_two_way_lemmatization_and_capitalized_entities_gating() {
+        let mut special = vec!["<PAD>".into(), "<BOS>".into(), "<EOS>".into(), "<UNK>".into()];
+        let punct = vec!["."].into_iter().map(String::from).collect();
+        let placeholders = (0..32).map(|i| format!("<NAME_{i}>"))
+            .chain((0..8).map(|i| format!("<NUM_{i}>"))).collect();
+        let canonical = vec![
+            "created".into(), "built".into(), "friends".into(), "make".into(),
+        ];
+        let vocab = YumonTalkVocab::new(special, punct, placeholders, canonical, HashMap::new());
+
+        // Base forms resolve to inflected canonical words:
+        assert!(vocab.resolve_english_word("create").is_some(), "create should resolve to created");
+        assert!(vocab.resolve_english_word("build").is_some(), "build should resolve to built");
+        assert!(vocab.resolve_english_word("friend").is_some(), "friend should resolve to friends");
+
+        // Capitalized unknown word becomes NAME:
+        let mut ctx = TranslationContext::new();
+        let tokens_cap = vocab.english_to_yumon_tokens("Diego", &mut ctx).unwrap();
+        assert_eq!(tokens_cap.len(), 1);
+        assert_eq!(vocab.id_to_token(tokens_cap[0]), Some("<NAME_0>"));
+        assert_eq!(ctx.entities, vec!["Diego"]);
+
+        // Lowercase unknown word becomes UNK:
+        let mut ctx2 = TranslationContext::new();
+        let tokens_lower = vocab.english_to_yumon_tokens("tadpoles", &mut ctx2).unwrap();
+        assert_eq!(tokens_lower.len(), 1);
+        assert_eq!(tokens_lower[0], UNK_ID);
+        assert!(ctx2.entities.is_empty(), "Lowercase word must not be added to entities");
     }
 }
