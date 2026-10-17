@@ -24,6 +24,14 @@ required-features = ["desktop"]
 name = "cache_kilo"
 path = "src/bin/cache_kilo.rs"
 
+[[bin]]
+name = "cache_yumon_talk"
+path = "src/bin/cache_yumon_talk.rs"
+
+[[bin]]
+name = "build_yumon_talk_vocab"
+path = "src/bin/build_yumon_talk_vocab.rs"
+
 [features]
 # Desktop/GUI bits (native window + webview + 3D engine + gamepad input) used by
 # the yumon_desktop/yumon_world/yumon_civ/train_ui/chat_ui bins. Not needed for
@@ -92,6 +100,7 @@ sha2 = "0.10"
 stop-words = "0.8.0"
 sentiment = "0.1.1"
 ureq = { version = "2", features = ["json"] }
+thesaurus = "0.5"
 
 # Desktop-only (native window / webview / 3D engine / gamepad). Gated behind
 # the "desktop" feature (on by default) so a headless training build can skip

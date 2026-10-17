@@ -360,6 +360,56 @@ pub fn load_cache_with_objective(
     Ok(samples)
 }
 
+/// Read cached samples directly without requiring a matching tokenizer hash.
+pub fn load_cache_lenient(path: &Path, max_seq_len: usize) -> Result<(CacheMetadata, Vec<Sample>)> {
+    let mut file =
+        File::open(path).with_context(|| format!("opening sample cache {}", path.display()))?;
+    let metadata = read_header(&mut file)?;
+    let decoder = zstd::stream::read::Decoder::new(file)?;
+    let mut reader = BufReader::with_capacity(BUFFER_SIZE, decoder);
+    let mut samples = Vec::new();
+    samples
+        .try_reserve_exact(metadata.samples)
+        .context("allocating cached samples")?;
+    for index in 0..metadata.samples {
+        let stored: StoredSample = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_little_endian()
+            .with_limit(64 << 20)
+            .deserialize_from(&mut reader)
+            .with_context(|| format!("reading cached sample {index}"))?;
+        let sample = stored.into_sample(max_seq_len)?;
+        samples.push(sample);
+    }
+    Ok((metadata, samples))
+}
+
+/// Stream sample text pairs directly from a cache file without strict tokenizer verification.
+pub fn stream_pairs_lenient<F>(path: &Path, limit: Option<usize>, mut callback: F) -> Result<usize>
+where
+    F: FnMut((String, String)) -> Result<()>,
+{
+    let mut file =
+        File::open(path).with_context(|| format!("opening sample cache {}", path.display()))?;
+    let metadata = read_header(&mut file)?;
+    let decoder = zstd::stream::read::Decoder::new(file)?;
+    let mut reader = BufReader::with_capacity(BUFFER_SIZE, decoder);
+    let total = match limit {
+        Some(lim) => lim.min(metadata.samples),
+        None => metadata.samples,
+    };
+    for index in 0..total {
+        let stored: StoredSample = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_little_endian()
+            .with_limit(64 << 20)
+            .deserialize_from(&mut reader)
+            .with_context(|| format!("reading cached sample {index}"))?;
+        callback(stored.pair)?;
+    }
+    Ok(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,5 +615,33 @@ mod tests {
         .unwrap();
         let loaded = load_cache(&fixture.path(), &restored, TrainingStage::Language, 128).unwrap();
         assert_eq!(format!("{loaded:?}"), format!("{samples:?}"));
+    }
+
+    #[test]
+    fn test_stream_pairs_lenient_works() {
+        let fixture = Fixture::new();
+        let tokenizer = tokenizer();
+        let samples = samples(&tokenizer);
+        write_cache(
+            &fixture.path(),
+            &tokenizer,
+            TrainingStage::Language,
+            128,
+            42,
+            &samples,
+        )
+        .unwrap();
+
+        let mut collected = Vec::new();
+        let count = stream_pairs_lenient(&fixture.path(), None, |pair| {
+            collected.push(pair);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].0, "Tell me about the moon");
+        assert_eq!(collected[0].1, "The moon orbits the Earth.");
     }
 }

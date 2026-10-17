@@ -34,6 +34,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "adler32"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aae1277d39aeec15cb388266ecc24b11c80469deae6067e17a1a7aa9e5c1f234"
+
+[[package]]
 name = "adobe-cmap-parser"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4952,6 +4958,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "libflate"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ff4ae71b685bbad2f2f391fe74f6b7659a34871c08b210fdc039e43bee07d18"
+dependencies = [
+ "adler32",
+ "crc32fast",
+ "libflate_lz77",
+]
+
+[[package]]
+name = "libflate_lz77"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a52d3a8bfc85f250440e4424db7d857e241a3aebbbe301f3eb606ab15c39acbf"
+dependencies = [
+ "rle-decode-fast",
+]
+
+[[package]]
 name = "libfuzzer-sys"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7321,6 +7347,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rle-decode-fast"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3582f63211428f83597b51b2ddb88e2a91a9d52d12831f9d08f5e624e8977422"
+
+[[package]]
 name = "rmp"
 version = "0.8.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8469,6 +8501,26 @@ dependencies = [
  "smawk",
  "unicode-linebreak",
  "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "thesaurus"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e33ea271e53da683cd3439c04ff3b734f3d6052ea33a65ec9e0fa89a4f96369"
+dependencies = [
+ "lazy_static 1.5.0",
+ "thesaurus-wordnet",
+]
+
+[[package]]
+name = "thesaurus-wordnet"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e0b5b98479fc7554a0cedad4c03264b1caeecc7af51b4e44945c759bab43e35"
+dependencies = [
+ "libflate",
+ "serde_json 1.0.149",
 ]
 
 [[package]]
@@ -10878,6 +10930,7 @@ dependencies = [
  "syn 2.0.117",
  "tao",
  "textwrap",
+ "thesaurus",
  "three-d",
  "three-d-asset",
  "tokenizers 0.19.1",
