@@ -659,9 +659,11 @@ static GLOBAL_VOCAB: OnceLock<RwLock<YumonTalkVocab>> = OnceLock::new();
 pub fn get_global_vocab() -> std::sync::RwLockReadGuard<'static, YumonTalkVocab> {
     let rw = GLOBAL_VOCAB.get_or_init(|| {
         thesaurus::init();
+        let env_path = std::env::var("YUMON_TALK_VOCAB").ok().map(std::path::PathBuf::from);
         let default_path = Path::new("training-cache/yumon_talk_vocab.json");
-        if default_path.exists() {
-            if let Ok(v) = YumonTalkVocab::load_from_file(default_path) {
+        let path = env_path.as_deref().unwrap_or(default_path);
+        if path.exists() {
+            if let Ok(v) = YumonTalkVocab::load_from_file(path) {
                 return RwLock::new(v);
             }
         }

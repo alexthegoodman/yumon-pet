@@ -272,7 +272,9 @@ fn kilo_eval_prompts() -> Vec<String> {
 /// Yumon Code uses the same trainer locally (WGPU) and on RunPod (CUDA).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool) -> Result<()> {
-    let prompts = if config.vocab_size == 1024 || config.cache.to_string_lossy().contains("kilo") {
+    let prompts = if config.cache.to_string_lossy().contains("talk") {
+        eval_prompts()
+    } else if config.vocab_size == 1024 || config.cache.to_string_lossy().contains("kilo") {
         kilo_eval_prompts()
     } else {
         code_eval_prompts()
@@ -332,6 +334,8 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 if config.curriculum.is_some() { "_curriculum_documented_tiers_v3" } else { "" },
                 if config.docs.is_some() { "_rust_docs_v1".to_owned() } else if config.pretrain_code {
                     format!("_code_pretrain_v1{}", if config.pretrain_min_tokens > 0 { format!("_min{}", config.pretrain_min_tokens) } else { String::new() })
+                } else if config.cache.to_string_lossy().contains("talk") {
+                    "_yumon_talk_v1".to_owned()
                 } else { String::new() })
                 + &config.overfit_samples.map_or(String::new(), |n| format!("_overfit{n}"))
                 // Separate directories so A/B/C/D experiments never resume each other.
@@ -483,20 +487,102 @@ fn build_inference_prompt(stage: TrainingStage, message: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct EvalLogEntry {
+    pub prompt: String,
+    pub reply: String,
+    pub yumon_prompt: Option<String>,
+    pub yumon_reply: Option<String>,
+}
+
+pub fn is_yumon_talk_run(run_name: &str, tokenizer: &TokenizerKind, raw_code: bool) -> bool {
+    let name_lower = run_name.to_lowercase();
+    if name_lower.contains("kilo") {
+        return false;
+    }
+    if name_lower.contains("talk") {
+        return true;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::env::var_os("YUMON_SAMPLE_CACHE").map_or(false, |c| c.to_string_lossy().to_lowercase().contains("talk")) {
+        return true;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::env::var("YUMON_TALK").map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true")) {
+        return true;
+    }
+    if !raw_code && tokenizer.vocab_size() == crate::brain::yumon_talk::VOCAB_SIZE {
+        return true;
+    }
+    false
+}
+
+fn evaluate_prompt<F>(
+    p: &str,
+    stage: TrainingStage,
+    is_yumon_talk: bool,
+    mut generate_fn: F,
+) -> EvalLogEntry
+where
+    F: FnMut(&str) -> String,
+{
+    if is_yumon_talk {
+        let (prompt_to_model, yumon_prompt_str, ctx) = match crate::brain::yumon_talk::english_to_yumon_with_map(p) {
+            Ok((yt_prompt, ctx)) => (yt_prompt.clone(), Some(yt_prompt), Some(ctx)),
+            Err(e) => {
+                eprintln!("[Yumon Talk] Eval prompt translation fallback for \"{p}\": {e}");
+                (p.to_string(), None, None)
+            }
+        };
+        let inference_prompt = build_inference_prompt(stage, &prompt_to_model);
+        let raw_reply = generate_fn(&inference_prompt);
+        let raw_reply_trimmed = raw_reply.trim().to_string();
+
+        let mut rng = rand::thread_rng();
+        let english_reply = if let Some(ref c) = ctx {
+            match crate::brain::yumon_talk::yumon_to_english_with_context(&raw_reply_trimmed, c, &mut rng) {
+                Ok(eng) => eng,
+                Err(e) => {
+                    eprintln!("[Yumon Talk] Eval reply translation fallback: {e}");
+                    crate::brain::yumon_talk::yumon_to_english(&raw_reply_trimmed).unwrap_or_else(|_| raw_reply_trimmed.clone())
+                }
+            }
+        } else {
+            crate::brain::yumon_talk::yumon_to_english(&raw_reply_trimmed).unwrap_or_else(|_| raw_reply_trimmed.clone())
+        };
+
+        EvalLogEntry {
+            prompt: p.to_string(),
+            reply: english_reply,
+            yumon_prompt: yumon_prompt_str,
+            yumon_reply: Some(raw_reply_trimmed),
+        }
+    } else {
+        let prompt = build_inference_prompt(stage, p);
+        let reply = generate_fn(&prompt);
+        EvalLogEntry {
+            prompt: p.to_string(),
+            reply,
+            yumon_prompt: None,
+            yumon_reply: None,
+        }
+    }
+}
+
 /// Appends one qualitative-eval snapshot (all `entries` prompt/reply pairs)
 /// to the run's inference log. Appends rather than overwrites so the log
 /// reads as a history of how replies evolved over the run.
 fn append_inference_log(
-    log_path:     &str,
-    run_name:     &str,
-    stage_idx:    usize,
-    stage:        TrainingStage,
-    epoch:        usize,
-    total_epochs: usize,
-    batch:        usize,
+    log_path:      &str,
+    run_name:      &str,
+    stage_idx:     usize,
+    stage:         TrainingStage,
+    epoch:         usize,
+    total_epochs:  usize,
+    batch:         usize,
     total_batches: usize,
-    avg_loss:     f32,
-    entries:      &[(String, String)],
+    avg_loss:      f32,
+    entries:       &[EvalLogEntry],
 ) -> Result<()> {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
@@ -509,9 +595,29 @@ fn append_inference_log(
         "\n=== {} | stage {} ({:?}) | epoch {}/{} batch {}/{} | avg_loss {:.4} ===",
         run_name, stage_idx + 1, stage, epoch, total_epochs, batch, total_batches, avg_loss,
     )?;
-    for (i, (prompt, reply)) in entries.iter().enumerate() {
-        writeln!(file, "[{}] PROMPT: {}", i + 1, prompt)?;
-        writeln!(file, "[{}] REPLY:  {}", i + 1, reply)?;
+    for (i, entry) in entries.iter().enumerate() {
+        match (&entry.yumon_prompt, &entry.yumon_reply) {
+            (Some(yp), Some(yr)) => {
+                writeln!(file, "[{}] PROMPT (English):    {}", i + 1, entry.prompt)?;
+                writeln!(file, "[{}] PROMPT (Yumon Talk): {}", i + 1, yp)?;
+                writeln!(file, "[{}] REPLY  (Yumon Talk): {}", i + 1, yr)?;
+                writeln!(file, "[{}] REPLY  (English):    {}", i + 1, entry.reply)?;
+            }
+            (Some(yp), None) => {
+                writeln!(file, "[{}] PROMPT (English):    {}", i + 1, entry.prompt)?;
+                writeln!(file, "[{}] PROMPT (Yumon Talk): {}", i + 1, yp)?;
+                writeln!(file, "[{}] REPLY:               {}", i + 1, entry.reply)?;
+            }
+            (None, Some(yr)) => {
+                writeln!(file, "[{}] PROMPT:              {}", i + 1, entry.prompt)?;
+                writeln!(file, "[{}] REPLY  (Yumon Talk): {}", i + 1, yr)?;
+                writeln!(file, "[{}] REPLY  (English):    {}", i + 1, entry.reply)?;
+            }
+            (None, None) => {
+                writeln!(file, "[{}] PROMPT: {}", i + 1, entry.prompt)?;
+                writeln!(file, "[{}] REPLY:  {}", i + 1, entry.reply)?;
+            }
+        }
     }
     Ok(())
 }
@@ -1073,18 +1179,19 @@ code_model_adapter!(YumonBrain, YumonBrainConfig, BrainMetadata);
 /// Qualitative eval: every prompt through the inference model.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_eval_prompts<M: CausalLm<InnerBackend>>(
-    model:       &M,
-    tokenizer:   &TokenizerKind,
-    prompts:     &[String],
-    stage:       TrainingStage,
-    max_seq_len: usize,
-    device:      &<TrainBackend as Backend>::Device,
-) -> Vec<(String, String)> {
+    model:         &M,
+    tokenizer:     &TokenizerKind,
+    prompts:       &[String],
+    stage:         TrainingStage,
+    max_seq_len:   usize,
+    device:        &<TrainBackend as Backend>::Device,
+    is_yumon_talk: bool,
+) -> Vec<EvalLogEntry> {
     prompts.iter().map(|p| {
-        let prompt = build_inference_prompt(stage, p);
-        let result = model.generate(tokenizer, &prompt, max_seq_len, device);
-        let reply = if stage == TrainingStage::Structured { result.reply } else { result.raw_output };
-        (p.clone(), reply)
+        evaluate_prompt(p, stage, is_yumon_talk, |prompt| {
+            let result = model.generate(tokenizer, prompt, max_seq_len, device);
+            if stage == TrainingStage::Structured { result.reply } else { result.raw_output }
+        })
     }).collect()
 }
 
@@ -1105,6 +1212,7 @@ where
     M::InnerModule: CausalLm<InnerBackend>,
 {
     let raw_code = prepared_code.is_some();
+    let is_yumon_talk = is_yumon_talk_run(&run_cfg.name, tokenizer, raw_code);
     let run_dir_str = run_dir.to_str().unwrap();
     let (mut model, mut epochs_already_done) = M::init_or_resume(run_cfg, tokenizer, run_dir, device)?;
     if raw_code && epochs_already_done >= run_cfg.stages[0].epochs {
@@ -1455,8 +1563,14 @@ where
                         stage:          stage_cfg.stage,
                     })?;
 
-                    let entries = run_eval_prompts(&inference_model, tokenizer, prompts, stage_cfg.stage, run_cfg.max_seq_len, device);
-                    state.last_reply = entries.first().map(|entry| entry.1.clone()).unwrap_or_default();
+                    let entries = run_eval_prompts(&inference_model, tokenizer, prompts, stage_cfg.stage, run_cfg.max_seq_len, device, is_yumon_talk);
+                    state.last_reply = entries.first().map(|entry| {
+                        if let Some(yr) = &entry.yumon_reply {
+                            format!("{} [{}]", entry.reply, yr)
+                        } else {
+                            entry.reply.clone()
+                        }
+                    }).unwrap_or_default();
                     if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
                         eprintln!("⚠️  Failed to append inference log: {}", e);
                     }
@@ -1510,8 +1624,14 @@ where
                     stage:      stage_cfg.stage,
                 })?;
 
-                let entries = run_eval_prompts(&inference_model, tokenizer, prompts, stage_cfg.stage, run_cfg.max_seq_len, device);
-                state.last_reply = entries.first().map(|entry| entry.1.clone()).unwrap_or_default();
+                let entries = run_eval_prompts(&inference_model, tokenizer, prompts, stage_cfg.stage, run_cfg.max_seq_len, device, is_yumon_talk);
+                state.last_reply = entries.first().map(|entry| {
+                    if let Some(yr) = &entry.yumon_reply {
+                        format!("{} [{}]", entry.reply, yr)
+                    } else {
+                        entry.reply.clone()
+                    }
+                }).unwrap_or_default();
                 if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
                     eprintln!("⚠️  Failed to append inference log: {}", e);
                 }
@@ -1834,7 +1954,20 @@ pub fn run_with_architecture(
     println!("Training precision: FP32 (local WGPU backend).");
     let label_keywords   = build_label_keywords();
     let keyword_index    = build_keyword_index(&label_keywords);
-    let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe")?);
+    let tokenizer_path = std::env::var("YUMON_TOKENIZER")
+        .or_else(|_| std::env::var("TOKENIZER_PATH"))
+        .unwrap_or_else(|_| {
+            if let Some(cache) = std::env::var_os("YUMON_SAMPLE_CACHE") {
+                if cache.to_string_lossy().contains("yumon_talk") {
+                    let talk_tok = std::path::Path::new("training-cache/yumon_talk_tokenizer");
+                    if talk_tok.exists() {
+                        return "training-cache/yumon_talk_tokenizer".to_string();
+                    }
+                }
+            }
+            "yumon_bpe".to_string()
+        });
+    let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load(&tokenizer_path)?);
 
     // ── Configure Runs ──────────────────────────────────────────────────────────
     // Full grid search (see generate_run_configs) instead of a hand-picked list -
@@ -2111,15 +2244,22 @@ pub fn run_with_architecture(
                         // logged to disk (appended) and the loss chart re-saved (overwritten)
                         // right away rather than only at the end of the run.
                         let inference_model = model.valid();
+                        let is_yumon_talk = is_yumon_talk_run(&run_cfg.name, &tokenizer, false);
                         let mut entries = Vec::with_capacity(prompts.len());
                         for p in &prompts {
-                            let prompt = build_inference_prompt(stage_cfg.stage, p);
-                            let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
-                            // let result = inference_model.generate_unmasked_parsed::<CudaTrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device); // runpod
-                            let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
-                            entries.push((p.clone(), reply));
+                            let entry = evaluate_prompt(p, stage_cfg.stage, is_yumon_talk, |prompt| {
+                                let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, prompt, run_cfg.max_seq_len, &device);
+                                if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output }
+                            });
+                            entries.push(entry);
                         }
-                        state.last_reply = entries[0].1.clone();
+                        state.last_reply = entries.first().map(|entry| {
+                            if let Some(yr) = &entry.yumon_reply {
+                                format!("{} [{}]", entry.reply, yr)
+                            } else {
+                                entry.reply.clone()
+                            }
+                        }).unwrap_or_default();
                         if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
                             eprintln!("⚠️  Failed to append inference log: {}", e);
                         }
@@ -2171,15 +2311,22 @@ pub fn run_with_architecture(
                 // periodic inference — same 5-prompt log + chart save as above
                 {
                     let inference_model = model.valid();
+                    let is_yumon_talk = is_yumon_talk_run(&run_cfg.name, &tokenizer, false);
                     let mut entries = Vec::with_capacity(prompts.len());
                     for p in &prompts {
-                        let prompt = build_inference_prompt(stage_cfg.stage, p);
-                        let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
-                        // let result = inference_model.generate_unmasked_parsed::<CudaTrainRuntime>(&tokenizer, &prompt, run_cfg.max_seq_len, &device); // runpod
-                        let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
-                        entries.push((p.clone(), reply));
+                        let entry = evaluate_prompt(p, stage_cfg.stage, is_yumon_talk, |prompt| {
+                            let result = inference_model.generate_unmasked_parsed::<TrainRuntime>(&tokenizer, prompt, run_cfg.max_seq_len, &device);
+                            if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output }
+                        });
+                        entries.push(entry);
                     }
-                    state.last_reply = entries[0].1.clone();
+                    state.last_reply = entries.first().map(|entry| {
+                        if let Some(yr) = &entry.yumon_reply {
+                            format!("{} [{}]", entry.reply, yr)
+                        } else {
+                            entry.reply.clone()
+                        }
+                    }).unwrap_or_default();
                     if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
                         eprintln!("⚠️  Failed to append inference log: {}", e);
                     }
@@ -2416,14 +2563,22 @@ pub fn run_with_architecture(
                         model.save(run_dir_str, &tokenizer, &meta)?;
 
                         let inference_model = model.valid();
+                        let is_yumon_talk = is_yumon_talk_run(&run_cfg.name, &tokenizer, false);
                         let mut entries = Vec::with_capacity(prompts.len());
                         for p in &prompts {
-                            let prompt = build_inference_prompt(stage_cfg.stage, p);
-                            let result = inference_model.generate_unmasked_parsed(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
-                            let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
-                            entries.push((p.clone(), reply));
+                            let entry = evaluate_prompt(p, stage_cfg.stage, is_yumon_talk, |prompt| {
+                                let result = inference_model.generate_unmasked_parsed(&tokenizer, prompt, run_cfg.max_seq_len, &device);
+                                if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output }
+                            });
+                            entries.push(entry);
                         }
-                        state.last_reply = entries[0].1.clone();
+                        state.last_reply = entries.first().map(|entry| {
+                            if let Some(yr) = &entry.yumon_reply {
+                                format!("{} [{}]", entry.reply, yr)
+                            } else {
+                                entry.reply.clone()
+                            }
+                        }).unwrap_or_default();
                         if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
                             eprintln!("⚠️  Failed to append inference log: {}", e);
                         }
@@ -2469,14 +2624,22 @@ pub fn run_with_architecture(
 
                 {
                     let inference_model = model.valid();
+                    let is_yumon_talk = is_yumon_talk_run(&run_cfg.name, &tokenizer, false);
                     let mut entries = Vec::with_capacity(prompts.len());
                     for p in &prompts {
-                        let prompt = build_inference_prompt(stage_cfg.stage, p);
-                        let result = inference_model.generate_unmasked_parsed(&tokenizer, &prompt, run_cfg.max_seq_len, &device);
-                        let reply = if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output };
-                        entries.push((p.clone(), reply));
+                        let entry = evaluate_prompt(p, stage_cfg.stage, is_yumon_talk, |prompt| {
+                            let result = inference_model.generate_unmasked_parsed(&tokenizer, prompt, run_cfg.max_seq_len, &device);
+                            if stage_cfg.stage == TrainingStage::Structured { result.reply } else { result.raw_output }
+                        });
+                        entries.push(entry);
                     }
-                    state.last_reply = entries[0].1.clone();
+                    state.last_reply = entries.first().map(|entry| {
+                        if let Some(yr) = &entry.yumon_reply {
+                            format!("{} [{}]", entry.reply, yr)
+                        } else {
+                            entry.reply.clone()
+                        }
+                    }).unwrap_or_default();
                     if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
                         eprintln!("⚠️  Failed to append inference log: {}", e);
                     }
