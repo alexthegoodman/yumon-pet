@@ -53,6 +53,18 @@ struct Args {
     /// Number of sample clusters to preview
     #[arg(long, default_value_t = 15)]
     preview_clusters: usize,
+
+    /// Dump sorted word frequencies to JSON and exit
+    #[arg(long)]
+    dump_word_counts: Option<PathBuf>,
+
+    /// Path to curated synonyms JSON (defaults to built-in curated dictionary)
+    #[arg(long)]
+    curated_synonyms: Option<PathBuf>,
+
+    /// Enable legacy WordNet thesaurus expansion (default: false)
+    #[arg(long, default_value_t = false)]
+    enable_thesaurus: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -86,8 +98,6 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     println!("=== Building Dynamic Yumon Talk Vocabulary ===");
-    println!("Initializing thesaurus dictionary (static feature)...");
-    thesaurus::init();
 
     println!("Input cache:        {}", args.input_cache.display());
     println!("Output vocab:       {}", args.output_vocab.display());
@@ -138,9 +148,16 @@ fn main() -> Result<()> {
     sorted_words.truncate(args.candidate_pool);
 
     println!("Candidate pool truncated to top {} most frequent words", sorted_words.len());
+    if let Some(dump_path) = &args.dump_word_counts {
+        println!("Dumping {} word counts to {}...", sorted_words.len(), dump_path.display());
+        let file = std::fs::File::create(dump_path)?;
+        serde_json::to_writer_pretty(file, &sorted_words)?;
+        println!("Successfully dumped word counts to {}!", dump_path.display());
+        return Ok(());
+    }
 
-    // 3. Deduplicate using thesaurus and select canonical words
-    println!("\n[3/4] Deduplicating synonyms via thesaurus to select {} canonical words...", args.target_words);
+    // 3. Deduplicate using curated synonyms and morphological variants to select canonical words
+    println!("\n[3/4] Selecting {} canonical words using curated synonyms & morphological variants...", args.target_words);
 
     let mut canonical_words: Vec<String> = Vec::with_capacity(args.target_words);
     let mut canonical_set: HashSet<String> = HashSet::with_capacity(args.target_words);
@@ -166,62 +183,65 @@ fn main() -> Result<()> {
         }
     }
 
+    // Load curated synonyms (from args or built-in)
+    let curated_map: HashMap<String, Vec<String>> = if let Some(path) = &args.curated_synonyms {
+        println!("Loading custom curated synonyms from {} ...", path.display());
+        let text = std::fs::read_to_string(path)?;
+        serde_json::from_str(&text)?
+    } else {
+        println!("Using built-in curated synonyms ({} clusters)...", yumon_pet::brain::yumon_talk::get_curated_synonyms().len());
+        yumon_pet::brain::yumon_talk::get_curated_synonyms().clone()
+    };
+
+    // Seed curated canonical words and their vetted synonyms
+    for (canon, syns) in curated_map.iter() {
+        if canonical_words.len() >= args.target_words {
+            break;
+        }
+        if sealed_set.contains(canon) || canonical_set.contains(canon) {
+            continue;
+        }
+        canonical_words.push(canon.clone());
+        canonical_set.insert(canon.clone());
+        word_to_canonical.insert(canon.clone(), canon.clone());
+        let entry = canonical_synonyms.entry(canon.clone()).or_default();
+        entry.insert(canon.clone());
+        for s in syns {
+            let clean = s.trim().to_lowercase();
+            if !sealed_set.contains(&clean) {
+                word_to_canonical.insert(clean.clone(), canon.clone());
+                entry.insert(clean);
+            }
+        }
+    }
+
+    if args.enable_thesaurus {
+        println!("Initializing thesaurus dictionary (static feature)...");
+        thesaurus::init();
+    }
+
     let mut deduplicated_count = 0usize;
 
+    // Fill remaining canonical budget with highest-frequency open-class corpus words
     for (word, _freq) in sorted_words.iter() {
         if canonical_words.len() >= args.target_words {
             break;
         }
 
-        // Already covered?
+        // Already covered by sealed or curated cluster?
         if word_to_canonical.contains_key(word) {
             deduplicated_count += 1;
             continue;
         }
 
-        // Check morphological stem against open-class canonical words
-        let stems = [
-            word.strip_suffix("ing").unwrap_or(word),
-            word.strip_suffix("ed").unwrap_or(word),
-            word.strip_suffix("es").unwrap_or(word),
-            word.strip_suffix("s").unwrap_or(word),
-            word.strip_suffix("ly").unwrap_or(word),
-            word.strip_suffix("er").unwrap_or(word),
-            word.strip_suffix("est").unwrap_or(word),
-        ];
-
-        let mut matched_stem = None;
-        for &stem in stems.iter() {
-            if stem != word && !stem.is_empty() {
-                if let Some(canon) = word_to_canonical.get(stem) {
-                    if !sealed_set.contains(canon) {
-                        matched_stem = Some(canon.clone());
-                        break;
-                    }
-                }
-            }
-        }
-
-        if let Some(canon) = matched_stem {
-            word_to_canonical.insert(word.clone(), canon.clone());
-            canonical_synonyms.entry(canon).or_default().insert(word.clone());
-            deduplicated_count += 1;
-            continue;
-        }
-
-        // Check if `word` is a direct mutual synonym of an EXISTING open-class canonical word
-        let syns = thesaurus::synonyms(word);
+        // Check full morphological variants (handles -ied -> -y, irregular verbs, -s, -es, -ed, -ing, etc.)
         let mut matched_canon = None;
-        for syn in syns.iter() {
-            let clean = syn.trim().to_lowercase();
-            if clean.len() >= 2 && !sealed_set.contains(&clean) {
-                if let Some(canon) = word_to_canonical.get(&clean) {
-                    if !sealed_set.contains(canon) && canonical_set.contains(canon) {
-                        // Mutual verification: canon's synonyms must directly contain word
-                        if thesaurus::synonyms(canon).iter().any(|s| s.trim().to_lowercase() == *word) {
-                            matched_canon = Some(canon.clone());
-                            break;
-                        }
+        for variant in yumon_pet::brain::yumon_talk::morphological_variants(word) {
+            if variant != *word && !variant.is_empty() {
+                if let Some(canon) = word_to_canonical.get(&variant) {
+                    if !sealed_set.contains(canon) {
+                        matched_canon = Some(canon.clone());
+                        break;
                     }
                 }
             }
@@ -234,40 +254,45 @@ fn main() -> Result<()> {
             continue;
         }
 
+        // Optional legacy thesaurus deduplication
+        if args.enable_thesaurus {
+            let syns = thesaurus::synonyms(word);
+            let mut matched = None;
+            for syn in syns.iter() {
+                let clean = syn.trim().to_lowercase();
+                if clean.len() >= 2 && !sealed_set.contains(&clean) {
+                    if let Some(canon) = word_to_canonical.get(&clean) {
+                        if !sealed_set.contains(canon) && canonical_set.contains(canon) {
+                            if thesaurus::synonyms(canon).iter().any(|s| s.trim().to_lowercase() == *word) {
+                                matched = Some(canon.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(canon) = matched {
+                word_to_canonical.insert(word.clone(), canon.clone());
+                canonical_synonyms.entry(canon).or_default().insert(word.clone());
+                deduplicated_count += 1;
+                continue;
+            }
+        }
+
         // Word becomes a NEW CANONICAL WORD!
         canonical_words.push(word.clone());
         canonical_set.insert(word.clone());
         word_to_canonical.insert(word.clone(), word.clone());
         let cluster = canonical_synonyms.entry(word.clone()).or_default();
         cluster.insert(word.clone());
-
-        // Add direct synonyms from thesaurus for this new canonical word (corpus-grounded & mutually confirmed)
-        for syn in syns.iter() {
-            let clean = syn.trim().to_lowercase();
-            if clean.len() >= 2
-                && clean.chars().all(|c| c.is_ascii_lowercase())
-                && !sealed_set.contains(&clean)
-                && word_counts.get(&clean).copied().unwrap_or(0) >= args.min_word_freq
-                && !word_to_canonical.contains_key(&clean)
-            {
-                let is_mutual = thesaurus::synonyms(&clean).iter().any(|s| s.trim().to_lowercase() == *word);
-                let is_inflection = clean.starts_with(word) || word.starts_with(&clean);
-                if is_mutual || is_inflection {
-                    word_to_canonical.insert(clean.clone(), word.clone());
-                    cluster.insert(clean);
-                }
-            }
-        }
     }
 
     println!("Selected {} canonical words (deduplicated {} words during selection)", canonical_words.len(), deduplicated_count);
 
-    // 4. Enrich synonym clusters with any remaining corpus words (strict 1-hop, mutual confirmation only)
+    // 4. Enrich synonym clusters with remaining corpus words via morphological lemmatization
     println!("\n[4/4] Mapping remaining corpus words to canonical clusters...");
     let mut mapped_inflections = 0usize;
-    let mut mapped_thesaurus = 0usize;
 
-    // First pass: two-way morphological stemming and lemmatization across sorted words
     for (word, _freq) in sorted_words.iter() {
         if word_to_canonical.contains_key(word) {
             continue;
@@ -286,32 +311,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // Second pass: query thesaurus with mutual confirmation and stem/prefix match for remaining corpus words
-    for (word, _freq) in sorted_words.iter().take(20000) {
-        if word_to_canonical.contains_key(word) {
-            continue;
-        }
-        let syns = thesaurus::synonyms(word);
-        for syn in syns.iter() {
-            let clean = syn.trim().to_lowercase();
-            if clean.len() >= 2 && !sealed_set.contains(&clean) {
-                if let Some(canon) = word_to_canonical.get(&clean).cloned() {
-                    if !sealed_set.contains(&canon) && canonical_set.contains(&canon) {
-                        let is_mutual = thesaurus::synonyms(&canon).iter().any(|s| s.trim().to_lowercase() == *word);
-                        let is_prefix = clean.starts_with(word) || word.starts_with(&clean);
-                        if is_mutual || is_prefix {
-                            word_to_canonical.insert(word.clone(), canon.clone());
-                            canonical_synonyms.entry(canon).or_default().insert(word.clone());
-                            mapped_thesaurus += 1;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    println!("Enriched clusters: mapped {} inflections and {} high-frequency mutual synonyms", mapped_inflections, mapped_thesaurus);
+    println!("Enriched clusters: mapped {} inflections across the corpus", mapped_inflections);
 
     // Convert synonym sets to sorted, capped Vecs
     let mut final_synonym_clusters: HashMap<String, Vec<String>> = HashMap::new();

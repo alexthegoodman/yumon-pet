@@ -1,0 +1,1841 @@
+{
+  "agree": [
+    "accord",
+    "assent",
+    "concur",
+    "consent"
+  ],
+  "air": [
+    "atmosphere",
+    "breeze",
+    "wind"
+  ],
+  "allow": [
+    "enable",
+    "let",
+    "permit",
+    "sanction"
+  ],
+  "angry": [
+    "annoyed",
+    "cross",
+    "furious",
+    "irritated",
+    "mad"
+  ],
+  "answer": [
+    "counter",
+    "feedback",
+    "reply",
+    "response",
+    "retort"
+  ],
+  "appear": [
+    "emerge",
+    "look",
+    "materialize",
+    "seem",
+    "surface"
+  ],
+  "area": [
+    "district",
+    "region",
+    "sector",
+    "territory",
+    "zone"
+  ],
+  "ask": [
+    "inquire",
+    "query",
+    "question",
+    "request",
+    "wonder"
+  ],
+  "bad": [
+    "awful",
+    "dreadful",
+    "horrible",
+    "nasty",
+    "poor",
+    "terrible"
+  ],
+  "beautiful": [
+    "attractive",
+    "gorgeous",
+    "handsome",
+    "lovely",
+    "pretty"
+  ],
+  "big": [
+    "enormous",
+    "giant",
+    "grand",
+    "huge",
+    "large",
+    "massive"
+  ],
+  "bird": [
+    "avian",
+    "fowl",
+    "songbird"
+  ],
+  "black": [
+    "charcoal",
+    "dark",
+    "ebony",
+    "pitch",
+    "sable"
+  ],
+  "blue": [
+    "azure",
+    "cobalt",
+    "cyan",
+    "indigo",
+    "navy",
+    "sapphire"
+  ],
+  "body": [
+    "form",
+    "frame",
+    "physique"
+  ],
+  "book": [
+    "novel",
+    "publication",
+    "text",
+    "tome",
+    "volume"
+  ],
+  "bored": [
+    "tired",
+    "uninterested",
+    "weary"
+  ],
+  "break": [
+    "crack",
+    "damage",
+    "fracture",
+    "smash",
+    "snap"
+  ],
+  "bright": [
+    "brilliant",
+    "luminous",
+    "radiant",
+    "shining",
+    "vivid"
+  ],
+  "bring": [
+    "carry",
+    "deliver",
+    "fetch",
+    "transport"
+  ],
+  "brown": [
+    "bronze",
+    "chestnut",
+    "copper",
+    "russet",
+    "tan"
+  ],
+  "build": [
+    "assemble",
+    "construct",
+    "craft",
+    "erect"
+  ],
+  "busy": [
+    "active",
+    "hectic",
+    "occupied"
+  ],
+  "buy": [
+    "acquire",
+    "purchase",
+    "shop"
+  ],
+  "call": [
+    "name",
+    "phone",
+    "shout",
+    "summon"
+  ],
+  "calm": [
+    "peaceful",
+    "quiet",
+    "serene",
+    "soothing",
+    "tranquil"
+  ],
+  "car": [
+    "auto",
+    "automobile",
+    "motorcar",
+    "vehicle"
+  ],
+  "carry": [
+    "bear",
+    "haul",
+    "tote",
+    "transport"
+  ],
+  "case": [
+    "example",
+    "instance",
+    "matter",
+    "situation"
+  ],
+  "cat": [
+    "feline",
+    "kitten",
+    "kitty"
+  ],
+  "catch": [
+    "capture",
+    "grab",
+    "snag",
+    "trap"
+  ],
+  "change": [
+    "alter",
+    "modify",
+    "shift",
+    "transform",
+    "vary"
+  ],
+  "check": [
+    "examine",
+    "inspect",
+    "monitor",
+    "verify"
+  ],
+  "child": [
+    "baby",
+    "infant",
+    "kid",
+    "toddler",
+    "youth"
+  ],
+  "city": [
+    "metropolis",
+    "municipality",
+    "town"
+  ],
+  "clean": [
+    "neat",
+    "pure",
+    "spotless",
+    "tidy"
+  ],
+  "clear": [
+    "lucid",
+    "obvious",
+    "plain",
+    "transparent"
+  ],
+  "close": [
+    "lock",
+    "seal",
+    "shut"
+  ],
+  "clothes": [
+    "apparel",
+    "attire",
+    "garments",
+    "outfit"
+  ],
+  "cloud": [
+    "fog",
+    "haze",
+    "mist",
+    "vapor"
+  ],
+  "cold": [
+    "chilly",
+    "cool",
+    "freezing",
+    "frosty",
+    "icy"
+  ],
+  "come": [
+    "appear",
+    "approach",
+    "arrive",
+    "enter",
+    "visit"
+  ],
+  "common": [
+    "familiar",
+    "frequent",
+    "ordinary",
+    "usual",
+    "widespread"
+  ],
+  "complex": [
+    "complicated",
+    "elaborate",
+    "intricate"
+  ],
+  "country": [
+    "land",
+    "nation",
+    "realm",
+    "state"
+  ],
+  "creature": [
+    "animal",
+    "beast",
+    "being",
+    "critter",
+    "organism"
+  ],
+  "cut": [
+    "chop",
+    "sever",
+    "slice",
+    "trim"
+  ],
+  "cute": [
+    "adorable",
+    "charming",
+    "lovely",
+    "sweet"
+  ],
+  "dangerous": [
+    "hazardous",
+    "perilous",
+    "risky",
+    "unsafe"
+  ],
+  "dark": [
+    "dim",
+    "gloomy",
+    "murky",
+    "shadowy"
+  ],
+  "darkness": [
+    "blackness",
+    "gloom",
+    "shadow"
+  ],
+  "day": [
+    "daylight",
+    "daytime"
+  ],
+  "death": [
+    "demise",
+    "mortality",
+    "passing"
+  ],
+  "decide": [
+    "choose",
+    "determine",
+    "resolve",
+    "settle"
+  ],
+  "deep": [
+    "bottomless",
+    "profound"
+  ],
+  "destroy": [
+    "demolish",
+    "ruin",
+    "shatter",
+    "wreck"
+  ],
+  "die": [
+    "expire",
+    "pass",
+    "perish"
+  ],
+  "different": [
+    "distinct",
+    "diverse",
+    "separate",
+    "unlike",
+    "varied"
+  ],
+  "dirty": [
+    "filthy",
+    "grimy",
+    "messy",
+    "soiled"
+  ],
+  "dog": [
+    "canine",
+    "hound",
+    "pooch",
+    "puppy"
+  ],
+  "door": [
+    "entrance",
+    "entryway",
+    "gate",
+    "portal"
+  ],
+  "draw": [
+    "illustrate",
+    "paint",
+    "sketch",
+    "trace"
+  ],
+  "drink": [
+    "gulp",
+    "hydrate",
+    "sip",
+    "swallow"
+  ],
+  "early": [
+    "initial",
+    "premature",
+    "prior"
+  ],
+  "earth": [
+    "dirt",
+    "ground",
+    "planet",
+    "soil"
+  ],
+  "easy": [
+    "effortless",
+    "simple",
+    "smooth",
+    "straightforward"
+  ],
+  "eat": [
+    "chew",
+    "consume",
+    "dine",
+    "feed",
+    "munch",
+    "snack",
+    "taste"
+  ],
+  "empty": [
+    "bare",
+    "blank",
+    "hollow",
+    "vacant"
+  ],
+  "end": [
+    "conclusion",
+    "finish",
+    "termination",
+    "tip"
+  ],
+  "exact": [
+    "accurate",
+    "correct",
+    "meticulous",
+    "precise"
+  ],
+  "explain": [
+    "clarify",
+    "describe",
+    "illustrate",
+    "interpret"
+  ],
+  "eye": [
+    "optic",
+    "peeper",
+    "vision"
+  ],
+  "face": [
+    "countenance",
+    "expression",
+    "visage"
+  ],
+  "fact": [
+    "certainty",
+    "datum",
+    "reality"
+  ],
+  "fall": [
+    "collapse",
+    "drop",
+    "plunge",
+    "tumble"
+  ],
+  "false": [
+    "bogus",
+    "fake",
+    "incorrect",
+    "untrue"
+  ],
+  "family": [
+    "clan",
+    "household",
+    "kin",
+    "relatives"
+  ],
+  "far": [
+    "distant",
+    "outlying",
+    "remote"
+  ],
+  "fast": [
+    "brisk",
+    "quick",
+    "rapid",
+    "speedy",
+    "swift"
+  ],
+  "feel": [
+    "experience",
+    "perceive",
+    "sense"
+  ],
+  "fight": [
+    "battle",
+    "clash",
+    "combat",
+    "contend",
+    "struggle"
+  ],
+  "final": [
+    "concluding",
+    "last",
+    "terminal",
+    "ultimate"
+  ],
+  "find": [
+    "detect",
+    "discover",
+    "locate",
+    "spot",
+    "uncover"
+  ],
+  "fine": [
+    "acceptable",
+    "delicate",
+    "satisfactory",
+    "subtle"
+  ],
+  "fire": [
+    "blaze",
+    "flame",
+    "inferno"
+  ],
+  "fish": [
+    "minnow",
+    "swimmer"
+  ],
+  "fix": [
+    "mend",
+    "patch",
+    "repair",
+    "restore"
+  ],
+  "flower": [
+    "bloom",
+    "blossom",
+    "petal"
+  ],
+  "fly": [
+    "glide",
+    "hover",
+    "soar"
+  ],
+  "follow": [
+    "pursue",
+    "shadow",
+    "succeed",
+    "trail"
+  ],
+  "food": [
+    "cuisine",
+    "dish",
+    "fare",
+    "meal",
+    "nourishment",
+    "snack",
+    "treat"
+  ],
+  "force": [
+    "might",
+    "power",
+    "strength",
+    "vigor"
+  ],
+  "forget": [
+    "neglect",
+    "overlook"
+  ],
+  "free": [
+    "available",
+    "independent",
+    "unrestricted"
+  ],
+  "friend": [
+    "ally",
+    "buddy",
+    "companion",
+    "mate",
+    "pal",
+    "partner"
+  ],
+  "frog": [
+    "amphibian",
+    "toad"
+  ],
+  "full": [
+    "brimming",
+    "loaded",
+    "packed",
+    "stuffed"
+  ],
+  "fun": [
+    "amusement",
+    "enjoyment",
+    "entertainment",
+    "pleasure"
+  ],
+  "funny": [
+    "amusing",
+    "comic",
+    "hilarious",
+    "humorous",
+    "silly",
+    "witty"
+  ],
+  "game": [
+    "competition",
+    "contest",
+    "match",
+    "sport"
+  ],
+  "get": [
+    "acquire",
+    "fetch",
+    "gain",
+    "obtain",
+    "receive"
+  ],
+  "gift": [
+    "offering",
+    "present",
+    "reward",
+    "treat"
+  ],
+  "give": [
+    "donate",
+    "grant",
+    "hand",
+    "offer",
+    "present",
+    "supply"
+  ],
+  "go": [
+    "head",
+    "journey",
+    "move",
+    "proceed",
+    "travel",
+    "walk"
+  ],
+  "good": [
+    "excellent",
+    "fine",
+    "great",
+    "nice",
+    "pleasant",
+    "superb",
+    "wonderful"
+  ],
+  "gray": [
+    "ash",
+    "grey",
+    "silver",
+    "slate"
+  ],
+  "great": [
+    "grand",
+    "immense",
+    "magnificent",
+    "wonderful"
+  ],
+  "green": [
+    "emerald",
+    "jade",
+    "lime",
+    "olive",
+    "verdant"
+  ],
+  "group": [
+    "assembly",
+    "band",
+    "circle",
+    "gathering",
+    "pack",
+    "party"
+  ],
+  "grow": [
+    "develop",
+    "expand",
+    "flourish",
+    "sprout"
+  ],
+  "hand": [
+    "fist",
+    "palm",
+    "paw"
+  ],
+  "happen": [
+    "befall",
+    "occur",
+    "transpire"
+  ],
+  "happy": [
+    "cheerful",
+    "content",
+    "delighted",
+    "glad",
+    "joyful",
+    "merry",
+    "pleased"
+  ],
+  "hard": [
+    "demanding",
+    "difficult",
+    "firm",
+    "tough"
+  ],
+  "hate": [
+    "despise",
+    "detest",
+    "dislike",
+    "loathe"
+  ],
+  "head": [
+    "crown",
+    "mind",
+    "skull"
+  ],
+  "hear": [
+    "attend",
+    "catch",
+    "listen"
+  ],
+  "heart": [
+    "core",
+    "soul",
+    "spirit"
+  ],
+  "heavy": [
+    "burdensome",
+    "dense",
+    "weighty"
+  ],
+  "help": [
+    "aid",
+    "assist",
+    "boost",
+    "serve",
+    "support"
+  ],
+  "hide": [
+    "cloak",
+    "conceal",
+    "cover",
+    "mask"
+  ],
+  "high": [
+    "elevated",
+    "lofty",
+    "tall"
+  ],
+  "history": [
+    "annals",
+    "chronicle",
+    "past",
+    "record"
+  ],
+  "hold": [
+    "clasp",
+    "clutch",
+    "grasp",
+    "grip"
+  ],
+  "hope": [
+    "aspire",
+    "expect",
+    "wish"
+  ],
+  "hot": [
+    "boiling",
+    "heated",
+    "scorching",
+    "warm"
+  ],
+  "house": [
+    "abode",
+    "cottage",
+    "dwelling",
+    "home",
+    "residence"
+  ],
+  "idea": [
+    "concept",
+    "notion",
+    "plan",
+    "scheme",
+    "thought"
+  ],
+  "important": [
+    "critical",
+    "crucial",
+    "essential",
+    "significant",
+    "vital"
+  ],
+  "involved": [
+    "complex",
+    "complicated",
+    "elaborate",
+    "intricate"
+  ],
+  "job": [
+    "career",
+    "occupation",
+    "profession",
+    "task",
+    "vocation"
+  ],
+  "join": [
+    "combine",
+    "connect",
+    "link",
+    "unite"
+  ],
+  "jump": [
+    "bound",
+    "hop",
+    "leap",
+    "spring"
+  ],
+  "keep": [
+    "hold",
+    "preserve",
+    "retain",
+    "save"
+  ],
+  "king": [
+    "majesty",
+    "monarch",
+    "ruler",
+    "sovereign"
+  ],
+  "know": [
+    "comprehend",
+    "perceive",
+    "realize",
+    "recognize",
+    "understand"
+  ],
+  "late": [
+    "belated",
+    "delayed",
+    "tardy"
+  ],
+  "lead": [
+    "conduct",
+    "direct",
+    "guide",
+    "pilot"
+  ],
+  "leader": [
+    "boss",
+    "captain",
+    "chief",
+    "commander",
+    "head"
+  ],
+  "learn": [
+    "absorb",
+    "grasp",
+    "master"
+  ],
+  "leave": [
+    "depart",
+    "exit",
+    "go",
+    "retire",
+    "vacate",
+    "withdraw"
+  ],
+  "lie": [
+    "fabrication",
+    "falsehood",
+    "fib",
+    "untruth"
+  ],
+  "life": [
+    "existence",
+    "living",
+    "vitality"
+  ],
+  "light": [
+    "beam",
+    "glow",
+    "illumination",
+    "radiance"
+  ],
+  "like": [
+    "appreciate",
+    "enjoy",
+    "fancy",
+    "prefer"
+  ],
+  "line": [
+    "queue",
+    "row",
+    "stripe",
+    "stroke"
+  ],
+  "live": [
+    "dwell",
+    "exist",
+    "inhabit",
+    "reside",
+    "survive"
+  ],
+  "long": [
+    "extended",
+    "lengthy",
+    "prolonged"
+  ],
+  "look": [
+    "gaze",
+    "glance",
+    "observe",
+    "peer",
+    "scan",
+    "see",
+    "view",
+    "watch"
+  ],
+  "lose": [
+    "drop",
+    "forfeit",
+    "misplace"
+  ],
+  "loud": [
+    "booming",
+    "noisy",
+    "roaring",
+    "thunderous"
+  ],
+  "love": [
+    "adore",
+    "care",
+    "cherish",
+    "treasure"
+  ],
+  "low": [
+    "shallow",
+    "short",
+    "sunken"
+  ],
+  "main": [
+    "central",
+    "chief",
+    "major",
+    "primary",
+    "principal"
+  ],
+  "make": [
+    "build",
+    "construct",
+    "craft",
+    "create",
+    "fashion",
+    "form",
+    "produce"
+  ],
+  "man": [
+    "fellow",
+    "gentleman",
+    "guy",
+    "male"
+  ],
+  "meet": [
+    "encounter",
+    "gather",
+    "greet",
+    "join"
+  ],
+  "message": [
+    "communication",
+    "dispatch",
+    "letter",
+    "memo",
+    "note"
+  ],
+  "money": [
+    "cash",
+    "coins",
+    "currency",
+    "funds",
+    "wealth"
+  ],
+  "moon": [
+    "crescent",
+    "lunar"
+  ],
+  "morning": [
+    "dawn",
+    "daybreak",
+    "sunrise"
+  ],
+  "move": [
+    "budge",
+    "relocate",
+    "shift",
+    "stir"
+  ],
+  "movie": [
+    "cinema",
+    "film",
+    "flick",
+    "motion-picture"
+  ],
+  "music": [
+    "harmony",
+    "melody",
+    "rhythm",
+    "tunes"
+  ],
+  "name": [
+    "designation",
+    "label",
+    "moniker",
+    "title"
+  ],
+  "narrow": [
+    "slender",
+    "slim",
+    "thin",
+    "tight"
+  ],
+  "near": [
+    "adjacent",
+    "close",
+    "nearby",
+    "neighboring"
+  ],
+  "necessary": [
+    "essential",
+    "mandatory",
+    "needed",
+    "required"
+  ],
+  "new": [
+    "fresh",
+    "latest",
+    "modern",
+    "novel",
+    "recent"
+  ],
+  "night": [
+    "darkness",
+    "dusk",
+    "evening",
+    "nighttime"
+  ],
+  "number": [
+    "amount",
+    "digit",
+    "figure",
+    "numeral",
+    "quantity"
+  ],
+  "old": [
+    "aged",
+    "ancient",
+    "elderly",
+    "vintage"
+  ],
+  "open": [
+    "spread",
+    "uncover",
+    "unlock",
+    "unseal"
+  ],
+  "orange": [
+    "apricot",
+    "coral",
+    "peach",
+    "tangerine"
+  ],
+  "part": [
+    "fraction",
+    "piece",
+    "portion",
+    "section",
+    "segment"
+  ],
+  "pass": [
+    "cross",
+    "elapse",
+    "hand",
+    "proceed"
+  ],
+  "path": [
+    "course",
+    "route",
+    "trail",
+    "walkway"
+  ],
+  "peace": [
+    "calm",
+    "harmony",
+    "tranquility",
+    "truce"
+  ],
+  "people": [
+    "citizens",
+    "crowd",
+    "folks",
+    "humans",
+    "public"
+  ],
+  "perfect": [
+    "flawless",
+    "ideal",
+    "impeccable"
+  ],
+  "person": [
+    "being",
+    "human",
+    "individual",
+    "someone"
+  ],
+  "pet": [
+    "animal",
+    "beast",
+    "companion",
+    "critter"
+  ],
+  "picture": [
+    "drawing",
+    "image",
+    "photo",
+    "photograph",
+    "portrait"
+  ],
+  "pink": [
+    "blush",
+    "rose",
+    "salmon"
+  ],
+  "place": [
+    "area",
+    "location",
+    "site",
+    "spot",
+    "venue"
+  ],
+  "plant": [
+    "flora",
+    "herb",
+    "shrub",
+    "vegetation"
+  ],
+  "play": [
+    "amuse",
+    "entertain",
+    "frolic",
+    "game",
+    "sport"
+  ],
+  "point": [
+    "detail",
+    "dot",
+    "moment",
+    "spot",
+    "tip"
+  ],
+  "poor": [
+    "broke",
+    "needy",
+    "penniless"
+  ],
+  "possible": [
+    "achievable",
+    "feasible",
+    "potential"
+  ],
+  "power": [
+    "authority",
+    "energy",
+    "force",
+    "might",
+    "strength"
+  ],
+  "problem": [
+    "challenge",
+    "difficulty",
+    "dilemma",
+    "issue",
+    "trouble"
+  ],
+  "protect": [
+    "defend",
+    "guard",
+    "shelter",
+    "shield"
+  ],
+  "proud": [
+    "glad",
+    "honored",
+    "pleased"
+  ],
+  "provide": [
+    "equip",
+    "furnish",
+    "give",
+    "offer",
+    "present",
+    "supply"
+  ],
+  "pull": [
+    "drag",
+    "draw",
+    "haul",
+    "tug"
+  ],
+  "purple": [
+    "lavender",
+    "magenta",
+    "plum",
+    "violet"
+  ],
+  "push": [
+    "press",
+    "propel",
+    "shove",
+    "thrust"
+  ],
+  "queen": [
+    "majesty",
+    "monarch",
+    "ruler",
+    "sovereign"
+  ],
+  "question": [
+    "inquiry",
+    "puzzle",
+    "query",
+    "quiz"
+  ],
+  "quiet": [
+    "hushed",
+    "peaceful",
+    "silent",
+    "still"
+  ],
+  "rain": [
+    "downpour",
+    "drizzle",
+    "precipitation",
+    "shower"
+  ],
+  "raise": [
+    "boost",
+    "elevate",
+    "hoist",
+    "lift"
+  ],
+  "rare": [
+    "infrequent",
+    "precious",
+    "scarce",
+    "uncommon"
+  ],
+  "reach": [
+    "arrive",
+    "attain",
+    "contact",
+    "extend"
+  ],
+  "read": [
+    "browse",
+    "peruse",
+    "scan"
+  ],
+  "ready": [
+    "equipped",
+    "prepared",
+    "set"
+  ],
+  "reason": [
+    "basis",
+    "cause",
+    "explanation",
+    "motive"
+  ],
+  "red": [
+    "cherry",
+    "crimson",
+    "maroon",
+    "reddish",
+    "ruby",
+    "scarlet"
+  ],
+  "remember": [
+    "recall",
+    "recollect",
+    "reminisce"
+  ],
+  "rich": [
+    "affluent",
+    "prosperous",
+    "wealthy"
+  ],
+  "right": [
+    "accurate",
+    "correct",
+    "proper",
+    "suitable"
+  ],
+  "river": [
+    "brook",
+    "creek",
+    "stream",
+    "waterway"
+  ],
+  "road": [
+    "avenue",
+    "highway",
+    "lane",
+    "path",
+    "street",
+    "trail",
+    "way"
+  ],
+  "room": [
+    "chamber",
+    "quarters",
+    "space"
+  ],
+  "run": [
+    "bolt",
+    "dash",
+    "jog",
+    "race",
+    "rush",
+    "sprint"
+  ],
+  "sad": [
+    "blue",
+    "down",
+    "gloomy",
+    "sorrowful",
+    "unhappy"
+  ],
+  "safe": [
+    "protected",
+    "secure",
+    "sheltered"
+  ],
+  "same": [
+    "equal",
+    "equivalent",
+    "identical",
+    "matching"
+  ],
+  "save": [
+    "preserve",
+    "protect",
+    "rescue",
+    "store"
+  ],
+  "say": [
+    "express",
+    "mention",
+    "remark",
+    "state",
+    "utter",
+    "voice"
+  ],
+  "scared": [
+    "afraid",
+    "fearful",
+    "frightened",
+    "spooked",
+    "terrified"
+  ],
+  "school": [
+    "academy",
+    "class",
+    "college",
+    "institute"
+  ],
+  "sea": [
+    "deep",
+    "ocean",
+    "waters"
+  ],
+  "secret": [
+    "covert",
+    "hidden",
+    "mystery"
+  ],
+  "see": [
+    "behold",
+    "glimpse",
+    "notice",
+    "perceive",
+    "spot"
+  ],
+  "sell": [
+    "market",
+    "trade",
+    "vend"
+  ],
+  "send": [
+    "dispatch",
+    "forward",
+    "mail",
+    "ship",
+    "transmit"
+  ],
+  "short": [
+    "brief",
+    "concise",
+    "fleeting",
+    "petite"
+  ],
+  "show": [
+    "demonstrate",
+    "display",
+    "exhibit",
+    "present",
+    "reveal"
+  ],
+  "side": [
+    "aspect",
+    "edge",
+    "facet",
+    "flank"
+  ],
+  "simple": [
+    "basic",
+    "elementary",
+    "plain",
+    "straightforward"
+  ],
+  "sing": [
+    "chant",
+    "croon",
+    "hum"
+  ],
+  "sit": [
+    "perch",
+    "rest",
+    "settle"
+  ],
+  "sky": [
+    "firmament",
+    "heavens"
+  ],
+  "sleep": [
+    "doze",
+    "nap",
+    "rest",
+    "slumber",
+    "snooze"
+  ],
+  "slow": [
+    "gradual",
+    "leisurely",
+    "sluggish",
+    "unhurried"
+  ],
+  "small": [
+    "compact",
+    "little",
+    "miniature",
+    "petite",
+    "tiny"
+  ],
+  "smart": [
+    "bright",
+    "clever",
+    "intelligent",
+    "sharp",
+    "shrewd",
+    "wise"
+  ],
+  "snow": [
+    "blizzard",
+    "flurry",
+    "frost"
+  ],
+  "soft": [
+    "cushioned",
+    "gentle",
+    "smooth",
+    "tender"
+  ],
+  "song": [
+    "anthem",
+    "melody",
+    "track",
+    "tune"
+  ],
+  "sound": [
+    "audio",
+    "echo",
+    "noise",
+    "tone"
+  ],
+  "space": [
+    "area",
+    "expanse",
+    "room",
+    "void"
+  ],
+  "speak": [
+    "chat",
+    "converse",
+    "discuss",
+    "talk"
+  ],
+  "special": [
+    "exceptional",
+    "exclusive",
+    "particular",
+    "unique"
+  ],
+  "spend": [
+    "consume",
+    "disburse",
+    "expend",
+    "use"
+  ],
+  "stand": [
+    "endure",
+    "remain",
+    "rise"
+  ],
+  "star": [
+    "celestial"
+  ],
+  "start": [
+    "beginning",
+    "commencement",
+    "opening",
+    "origin"
+  ],
+  "state": [
+    "condition",
+    "situation",
+    "status"
+  ],
+  "stay": [
+    "abide",
+    "linger",
+    "remain",
+    "wait"
+  ],
+  "stone": [
+    "boulder",
+    "gravel",
+    "pebble",
+    "rock"
+  ],
+  "stop": [
+    "cease",
+    "end",
+    "freeze",
+    "halt",
+    "pause",
+    "quit"
+  ],
+  "story": [
+    "account",
+    "chronicle",
+    "narrative",
+    "tale",
+    "yarn"
+  ],
+  "strange": [
+    "bizarre",
+    "curious",
+    "odd",
+    "peculiar",
+    "unusual",
+    "weird"
+  ],
+  "strong": [
+    "mighty",
+    "powerful",
+    "robust",
+    "sturdy",
+    "tough"
+  ],
+  "study": [
+    "examine",
+    "explore",
+    "investigate",
+    "learn",
+    "research",
+    "review"
+  ],
+  "sun": [
+    "star",
+    "sunlight",
+    "sunshine"
+  ],
+  "surprised": [
+    "amazed",
+    "astonished",
+    "shocked",
+    "stunned"
+  ],
+  "sweet": [
+    "delicious",
+    "sugary",
+    "tasty"
+  ],
+  "swim": [
+    "dive",
+    "float",
+    "paddle"
+  ],
+  "take": [
+    "accept",
+    "collect",
+    "grab",
+    "hold",
+    "pick",
+    "seize"
+  ],
+  "teach": [
+    "educate",
+    "guide",
+    "instruct",
+    "train",
+    "tutor"
+  ],
+  "team": [
+    "club",
+    "crew",
+    "group",
+    "squad",
+    "unit"
+  ],
+  "tell": [
+    "describe",
+    "explain",
+    "inform",
+    "narrate",
+    "relate",
+    "say"
+  ],
+  "think": [
+    "believe",
+    "consider",
+    "imagine",
+    "ponder",
+    "reckon",
+    "reflect",
+    "suppose"
+  ],
+  "throw": [
+    "fling",
+    "hurl",
+    "pitch",
+    "toss"
+  ],
+  "time": [
+    "duration",
+    "era",
+    "hour",
+    "moment",
+    "period",
+    "season"
+  ],
+  "tired": [
+    "exhausted",
+    "fatigued",
+    "sleepy",
+    "weary"
+  ],
+  "tool": [
+    "apparatus",
+    "device",
+    "gadget",
+    "implement",
+    "instrument",
+    "utensil"
+  ],
+  "town": [
+    "hamlet",
+    "settlement",
+    "village"
+  ],
+  "tree": [
+    "sapling",
+    "timber",
+    "wood"
+  ],
+  "true": [
+    "actual",
+    "authentic",
+    "factual",
+    "genuine",
+    "real"
+  ],
+  "truth": [
+    "certainty",
+    "fact",
+    "reality",
+    "veracity"
+  ],
+  "try": [
+    "attempt",
+    "endeavor",
+    "strive",
+    "test"
+  ],
+  "ugly": [
+    "hideous",
+    "unattractive",
+    "unsightly"
+  ],
+  "use": [
+    "apply",
+    "employ",
+    "operate",
+    "utilize"
+  ],
+  "voice": [
+    "speech",
+    "tone",
+    "vocal"
+  ],
+  "wait": [
+    "await",
+    "linger",
+    "pause"
+  ],
+  "wake": [
+    "arise",
+    "awaken",
+    "rouse"
+  ],
+  "walk": [
+    "march",
+    "step",
+    "stride",
+    "stroll",
+    "wander"
+  ],
+  "war": [
+    "battle",
+    "combat",
+    "conflict",
+    "fighting",
+    "struggle"
+  ],
+  "water": [
+    "aqua",
+    "fluid",
+    "liquid",
+    "moisture"
+  ],
+  "weak": [
+    "delicate",
+    "faint",
+    "feeble",
+    "frail"
+  ],
+  "white": [
+    "ivory",
+    "milky",
+    "pale",
+    "pearl",
+    "snow"
+  ],
+  "wide": [
+    "broad",
+    "expansive",
+    "spacious"
+  ],
+  "win": [
+    "conquer",
+    "prevail",
+    "succeed",
+    "triumph"
+  ],
+  "wind": [
+    "breeze",
+    "draft",
+    "gale",
+    "gust"
+  ],
+  "window": [
+    "casement",
+    "pane",
+    "skylight"
+  ],
+  "wish": [
+    "crave",
+    "desire",
+    "long",
+    "yearn"
+  ],
+  "woman": [
+    "female",
+    "lady"
+  ],
+  "word": [
+    "expression",
+    "phrase",
+    "term",
+    "utterance"
+  ],
+  "work": [
+    "function",
+    "labor",
+    "operate",
+    "perform",
+    "toil"
+  ],
+  "world": [
+    "earth",
+    "globe",
+    "planet",
+    "universe"
+  ],
+  "write": [
+    "compose",
+    "draft",
+    "inscribe",
+    "pen",
+    "record"
+  ],
+  "wrong": [
+    "erroneous",
+    "improper",
+    "incorrect",
+    "mistaken"
+  ],
+  "year": [
+    "annual",
+    "calendar"
+  ],
+  "yellow": [
+    "amber",
+    "blonde",
+    "golden",
+    "lemon"
+  ],
+  "young": [
+    "junior",
+    "juvenile",
+    "youthful"
+  ]
+}

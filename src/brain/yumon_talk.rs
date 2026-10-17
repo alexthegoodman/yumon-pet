@@ -101,6 +101,17 @@ pub fn is_sealed(word: &str) -> bool {
     SEALED_WORDS.iter().any(|(c, syns)| *c == lower || syns.iter().any(|&s| s == lower))
 }
 
+/// Curated, hardcoded high-precision synonym dictionary tracked in git.
+pub const CURATED_SYNONYMS_JSON: &str = include_str!("curated_synonyms.json");
+
+/// Load the curated synonym clusters.
+pub fn get_curated_synonyms() -> &'static HashMap<String, Vec<String>> {
+    static CURATED: OnceLock<HashMap<String, Vec<String>>> = OnceLock::new();
+    CURATED.get_or_init(|| {
+        serde_json::from_str(CURATED_SYNONYMS_JSON).expect("curated_synonyms.json must be valid JSON")
+    })
+}
+
 pub const IRREGULAR_LEMMAS: &[(&str, &str)] = &[
     ("build", "built"),
     ("built", "build"),
@@ -165,27 +176,29 @@ pub fn morphological_variants(lower: &str) -> Vec<String> {
     let mut variants = Vec::new();
 
     // 1. Suffix stripping (handling silent 'e' and consonant doubling)
-    if let Some(s) = lower.strip_suffix("'s") { variants.push(s.to_string()); }
+    if let Some(s) = lower.strip_suffix("'s") {
+        if s.len() >= 2 { variants.push(s.to_string()); }
+    }
     if let Some(s) = lower.strip_suffix("s") {
-        if !s.is_empty() { variants.push(s.to_string()); }
+        if s.len() >= 2 && !lower.ends_with("ss") { variants.push(s.to_string()); }
     }
     if let Some(s) = lower.strip_suffix("es") {
-        if !s.is_empty() { variants.push(s.to_string()); }
+        if s.len() >= 2 { variants.push(s.to_string()); }
     }
     if let Some(s) = lower.strip_suffix("ies") {
-        variants.push(format!("{s}y"));
+        if !s.is_empty() { variants.push(format!("{s}y")); }
     }
     if let Some(s) = lower.strip_suffix("ied") {
-        variants.push(format!("{s}y"));
+        if !s.is_empty() { variants.push(format!("{s}y")); }
     }
     if let Some(s) = lower.strip_suffix("ed") {
-        if !s.is_empty() {
+        if s.len() >= 2 {
             variants.push(s.to_string());
             variants.push(format!("{s}e")); // created -> create, closed -> close
         }
     }
     if let Some(s) = lower.strip_suffix("ing") {
-        if !s.is_empty() {
+        if s.len() >= 2 {
             variants.push(s.to_string());
             variants.push(format!("{s}e")); // creating -> create, making -> make
             let bytes = s.as_bytes();
@@ -195,31 +208,34 @@ pub fn morphological_variants(lower: &str) -> Vec<String> {
         }
     }
     if let Some(s) = lower.strip_suffix("ly") {
-        if !s.is_empty() { variants.push(s.to_string()); }
+        if s.len() >= 2 { variants.push(s.to_string()); }
     }
     if let Some(s) = lower.strip_suffix("er") {
-        if !s.is_empty() {
+        if s.len() >= 2 {
             variants.push(s.to_string());
             variants.push(format!("{s}e"));
         }
     }
     if let Some(s) = lower.strip_suffix("est") {
-        if !s.is_empty() {
+        if s.len() >= 2 {
             variants.push(s.to_string());
             variants.push(format!("{s}e"));
         }
     }
 
     // 2. Inflection expansion (when canonical word in dictionary is inflected)
-    variants.push(format!("{lower}s"));
-    variants.push(format!("{lower}es"));
-    variants.push(format!("{lower}d"));
-    variants.push(format!("{lower}ed"));
-    if let Some(s) = lower.strip_suffix('e') {
-        variants.push(format!("{s}ed"));
-        variants.push(format!("{s}ing"));
-    } else {
-        variants.push(format!("{lower}ing"));
+    if lower.len() >= 2 {
+        variants.push(format!("{lower}s"));
+        variants.push(format!("{lower}es"));
+        if lower.len() >= 3 && lower.ends_with('e') {
+            variants.push(format!("{lower}d"));
+            if let Some(s) = lower.strip_suffix('e') {
+                variants.push(format!("{s}ing"));
+            }
+        } else if lower.len() >= 2 {
+            variants.push(format!("{lower}ed"));
+            variants.push(format!("{lower}ing"));
+        }
     }
 
     // 3. Irregular verbs and nouns
@@ -317,6 +333,14 @@ impl YumonTalkVocab {
             id_to_token.push(tok.clone());
         }
         for (canon, syns) in &self.synonym_clusters {
+            if let Some(&id) = token_to_id.get(canon) {
+                word_to_id.insert(canon.to_lowercase(), id);
+                for syn in syns {
+                    word_to_id.insert(syn.to_lowercase(), id);
+                }
+            }
+        }
+        for (canon, syns) in get_curated_synonyms() {
             if let Some(&id) = token_to_id.get(canon) {
                 word_to_id.insert(canon.to_lowercase(), id);
                 for syn in syns {
