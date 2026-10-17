@@ -1700,11 +1700,10 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
     // See configs/runpod-h100.md; peak memory must be measured on the pod.
     let sizes:       [usize; 1] = [
         // 32,
-        64,
+        // 64,
         // 128,
-        // 256, // smaller, maybe good seq length of 256
-        // 512 // 220M ideal
-        // 1024, // ~1.32B total / ~411M active at 24 layers, 4 experts top-1
+        // 256,
+        512, // matching configs/yumon-talk-moe.json
         // 1024,
     ];
     let layer_counts: [usize; 1] = [
@@ -1712,31 +1711,25 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
         // 2,
         // 4,
         // 8,
-        // 8, // stretch: slower on iGPU - each MoE layer forces a host readback
         12,
-        // 16 // discovered minimum (runpod)
-        // 24
-        // 32
+        // 16,
+        // 24,
+        // 32,
     ];
     let head_counts:  [usize; 1] = [
         // 1,
-        2,
+        // 2,
         // 4,
         // 8,
-        // 16,
-        // 32, // head dim 32 at 1024 wide
-        // 64
+        16,
+        // 32,
+        // 64,
     ];
     let seq_lens:     [usize; 1] = [
-        256, // good for memories and conversation
-        // 512 // good starting seq length for code
+        512,
     ];
     let batch_sizes:     [usize; 1] = [
-        // 2,
-        // 8
-        if matches!(architecture, Architecture::Moe { .. } | Architecture::DecoderOnly) { batch_size_option } else { 16 }
-        // 32
-        // 64
+        if matches!(architecture, Architecture::Moe { .. } | Architecture::DecoderOnly) { batch_size_option } else { 4 }
     ];
     // Honor the CLI expert count and routing choice.
     let architectures = vec![architecture];
@@ -1756,18 +1749,10 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                         for &architecture in &architectures {
                             for &stage in &stages {
                                 let (first_lr, last_lr) = match architecture {
-                                    // Architecture::Moe { .. } => (3e-4, 3e-5),
-                                    Architecture::Moe { .. } => (1e-4, 1e-5),
-                                    // 24 layers, no warmup, 8k tokens/step: below the usual 3e-4.
+                                    Architecture::Moe { .. } => (3e-4, 3e-5),
                                     Architecture::DecoderOnly    => (2e-4, 2e-5),
                                     Architecture::EncoderDecoder => (1e-3, 1e-4),
-                                    // xLSTM's exponential gating is more sensitive to a hot LR
-                                    // than plain attention softmax — starting below DecoderOnly's
-                                    // own rate is the standard recurrent-net-with-gating caution,
-                                    // not a benchmarked-optimal number.
-                                    // Architecture::XLstm          => (1e-4, 1e-5),
                                     Architecture::XLstm          => (1e-3, 1e-4),
-                                    // Architecture::XLstm          => (1e-2, 1e-6),
                                     Architecture::Reference      => (3e-4, 3e-5),
                                 };
                                 let arch_tag = match architecture {
@@ -1791,13 +1776,13 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     hidden_units: size,
                                     n_layers,
                                     attn_heads,
-                                    ff_dim: size * 4,
+                                    ff_dim: if size == 512 && n_layers == 12 { 1536 } else { size * 4 },
                                     max_seq_len,
                                     architecture,
                                     stages: vec![StageConfig {
                                         stage,
                                         loss_threshold: 0.01,
-                                        epochs: 15,
+                                        epochs: 10,
                                         batch_size,
                                         first_lr,
                                         last_lr,
@@ -2787,6 +2772,70 @@ mod language_run_tests {
 }
 
 #[cfg(test)]
+mod yumon_talk_log_tests {
+    use super::*;
+
+    #[test]
+    fn test_is_yumon_talk_run_detection() {
+        let tok = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe").unwrap());
+        // Run name checks
+        assert!(is_yumon_talk_run("512h_12l_16a_512len_b4_Moe_e8_k2_talk_Language_f32", &tok, false));
+        assert!(is_yumon_talk_run("yumon_talk_moe", &tok, false));
+        assert!(!is_yumon_talk_run("kilo_code_moe", &tok, false));
+        assert!(!is_yumon_talk_run("code_512h_12l_16a_Language_f32", &tok, true));
+    }
+
+    #[test]
+    fn test_append_inference_log_dual_format() {
+        let temp_dir = std::env::temp_dir();
+        let log_path = temp_dir.join("test_yumon_inference_log.txt");
+        let log_path_str = log_path.to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&log_path);
+
+        let entries = vec![
+            EvalLogEntry {
+                prompt: "Tell me about yourself.".to_string(),
+                reply: "I am a small pet.".to_string(),
+                yumon_prompt: Some("talk self".to_string()),
+                yumon_reply: Some("me tiny yumon".to_string()),
+            },
+        ];
+
+        append_inference_log(
+            &log_path_str,
+            "test_run",
+            0,
+            TrainingStage::Language,
+            1,
+            10,
+            50,
+            100,
+            2.345,
+            &entries,
+        ).unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("[1] PROMPT (English):    Tell me about yourself."));
+        assert!(content.contains("[1] PROMPT (Yumon Talk): talk self"));
+        assert!(content.contains("[1] REPLY  (Yumon Talk): me tiny yumon"));
+        assert!(content.contains("[1] REPLY  (English):    I am a small pet."));
+        let _ = std::fs::remove_file(&log_path);
+    }
+
+    #[test]
+    fn test_evaluate_prompt_roundtrip() {
+        let p = "Hello world";
+        let entry = evaluate_prompt(p, TrainingStage::Language, true, |prompt| {
+            format!("{prompt} response")
+        });
+        assert_eq!(entry.prompt, "Hello world");
+        assert!(entry.yumon_prompt.is_some());
+        assert!(entry.yumon_reply.is_some());
+        assert!(!entry.reply.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod moe_loss_tests {
     #[test]
     fn moe_tiny_training_smoke_local() {
@@ -2838,14 +2887,14 @@ mod moe_loss_tests {
     }
 
     #[test]
-    fn moe_grid_is_1024_wide_24_layers_four_experts_top1() {
+    fn moe_grid_matches_yumon_talk_moe_shape() {
         let runs = generate_run_configs(16, Architecture::Moe { num_experts: 4, top_k: 1 });
         assert_eq!(runs.len(), 1);
         let run = &runs[0];
-        assert_eq!((run.embed_dim, run.n_layers, run.attn_heads, run.ff_dim), (1024, 24, 32, 4096));
+        assert_eq!((run.embed_dim, run.n_layers, run.attn_heads, run.ff_dim), (512, 12, 16, 1536));
         assert!(matches!(run.architecture, Architecture::Moe { num_experts: 4, top_k: 1 }));
         assert_eq!(run.stages[0].batch_size, 16);
-        assert_eq!(run.name, "1024h_24l_32a_256len_b16_Moe_e4_k1_Language_f32");
+        assert_eq!(run.name, "512h_12l_16a_512len_b16_Moe_e4_k1_Language_f32");
         let custom = generate_run_configs(8, Architecture::Moe { num_experts: 8, top_k: 2 });
         assert!(matches!(custom[0].architecture, Architecture::Moe { num_experts: 8, top_k: 2 }));
     }
