@@ -1861,11 +1861,11 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
 
     loader = loader
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
-        .add("data/ideas.txt",   FileKind::TxtLines, None)
-        .add("archive/arena_extract.txt",   FileKind::Chats, None)
+        // .add("data/ideas.txt",   FileKind::TxtLines, None)
+        // .add("archive/arena_extract.txt",   FileKind::Chats, None)
         // .add("data/distillchatv1.csv",   FileKind::DistillChat, None)
         // Plain text, loss on every token (cleaned extract of the simplewiki XML).
-        .add("data/wiki_extract.txt",   FileKind::Paragraphs, None) // too dense
+        // .add("data/wiki_extract.txt",   FileKind::Paragraphs, None) // too dense
         // .add("data/quotes.csv",   FileKind::QuotesCsv, None) // only 5 prompts used. maybe better used without prompts
         .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
         .add("data/bible_asv.csv", FileKind::BibleCsv, None)
