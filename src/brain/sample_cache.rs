@@ -362,16 +362,29 @@ pub fn load_cache_with_objective(
 
 /// Read cached samples directly without requiring a matching tokenizer hash.
 pub fn load_cache_lenient(path: &Path, max_seq_len: usize) -> Result<(CacheMetadata, Vec<Sample>)> {
+    load_cache_lenient_limit(path, max_seq_len, None)
+}
+
+/// Read cached samples directly with an optional limit without requiring a matching tokenizer hash.
+pub fn load_cache_lenient_limit(
+    path: &Path,
+    max_seq_len: usize,
+    limit: Option<usize>,
+) -> Result<(CacheMetadata, Vec<Sample>)> {
     let mut file =
         File::open(path).with_context(|| format!("opening sample cache {}", path.display()))?;
     let metadata = read_header(&mut file)?;
     let decoder = zstd::stream::read::Decoder::new(file)?;
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, decoder);
+    let total = match limit {
+        Some(lim) => lim.min(metadata.samples),
+        None => metadata.samples,
+    };
     let mut samples = Vec::new();
     samples
-        .try_reserve_exact(metadata.samples)
+        .try_reserve_exact(total)
         .context("allocating cached samples")?;
-    for index in 0..metadata.samples {
+    for index in 0..total {
         let stored: StoredSample = bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .with_little_endian()

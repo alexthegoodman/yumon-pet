@@ -5,13 +5,15 @@ use {
     anyhow::{Context, Result, ensure},
     clap::Parser,
     rand::SeedableRng,
+    rayon::prelude::*,
     std::path::PathBuf,
+    std::sync::atomic::{AtomicUsize, Ordering},
     yumon_pet::brain::{
         BOS_TOKEN, EOS_TOKEN, PAD_TOKEN,
         bpe::{BpeTokenizer, TokenizerKind},
         sample_cache,
         samples::Sample,
-        yumon_talk,
+        yumon_talk::{self, YumonTalkVocab},
     },
 };
 
@@ -55,6 +57,162 @@ struct Args {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+type PreviewItem = (String, String, String, String, String, String, usize, usize);
+
+#[cfg(not(target_arch = "wasm32"))]
+enum ConversionResult {
+    Converted {
+        sample: Sample,
+        preview: Option<PreviewItem>,
+    },
+    SkippedUnk,
+    SkippedRoundtripFailed,
+    SkippedOversized,
+    SkippedEmpty,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn convert_single_sample(
+    idx: usize,
+    sample: &Sample,
+    vocab: &YumonTalkVocab,
+    target_tokenizer: &TokenizerKind,
+    max_seq_len: usize,
+    seed: u64,
+    capture_preview: bool,
+) -> ConversionResult {
+    // Extract original text from pair or token decode
+    let (prompt_raw, reply_raw) = if !sample.pair.0.is_empty() || !sample.pair.1.is_empty() {
+        (sample.pair.0.clone(), sample.pair.1.clone())
+    } else {
+        let p_ids: Vec<u32> = sample.input_ids.iter()
+            .take_while(|&&id| id != PAD_TOKEN)
+            .map(|&id| id as u32)
+            .collect();
+        let r_ids: Vec<u32> = sample.target_labels.iter()
+            .take_while(|&&id| id != PAD_TOKEN)
+            .map(|&id| id as u32)
+            .collect();
+        let p = match target_tokenizer {
+            TokenizerKind::Bpe(bpe) => bpe.decode(&p_ids).unwrap_or_default(),
+            _ => String::new(),
+        };
+        let r = match target_tokenizer {
+            TokenizerKind::Bpe(bpe) => bpe.decode(&r_ids).unwrap_or_default(),
+            _ => String::new(),
+        };
+        (p, r)
+    };
+
+    let mut ctx = yumon_talk::TranslationContext::new();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed.wrapping_add(idx as u64));
+
+    let (prompt_tokens, reply_tokens, prompt_yumon, reply_yumon, prompt_recon, reply_recon) =
+        if !prompt_raw.trim().is_empty() && !reply_raw.trim().is_empty() {
+            let p_tokens = match vocab.english_to_yumon_tokens(&prompt_raw, &mut ctx) {
+                Ok(t) => t,
+                Err(_) => return ConversionResult::SkippedUnk,
+            };
+            let r_tokens = match vocab.english_to_yumon_tokens(&reply_raw, &mut ctx) {
+                Ok(t) => t,
+                Err(_) => return ConversionResult::SkippedUnk,
+            };
+
+            let p_yumon = vocab.detokenize_yumon(&p_tokens);
+            let r_yumon = vocab.detokenize_yumon(&r_tokens);
+
+            let p_recon = match vocab.yumon_to_english_with_context(&p_yumon, &ctx, &mut rng) {
+                Ok(eng) => eng,
+                Err(_) => return ConversionResult::SkippedRoundtripFailed,
+            };
+            let r_recon = match vocab.yumon_to_english_with_context(&r_recon_source(&r_yumon), &ctx, &mut rng) {
+                Ok(eng) => eng,
+                Err(_) => return ConversionResult::SkippedRoundtripFailed,
+            };
+
+            (p_tokens, r_tokens, p_yumon, r_yumon, p_recon, r_recon)
+        } else {
+            let text = if !reply_raw.trim().is_empty() {
+                reply_raw.trim()
+            } else {
+                prompt_raw.trim()
+            };
+            if text.is_empty() {
+                return ConversionResult::SkippedEmpty;
+            }
+            let r_tokens = match vocab.english_to_yumon_tokens(text, &mut ctx) {
+                Ok(t) => t,
+                Err(_) => return ConversionResult::SkippedUnk,
+            };
+            let r_yumon = vocab.detokenize_yumon(&r_tokens);
+            let r_recon = match vocab.yumon_to_english_with_context(&r_yumon, &ctx, &mut rng) {
+                Ok(eng) => eng,
+                Err(_) => return ConversionResult::SkippedRoundtripFailed,
+            };
+            (Vec::new(), r_tokens, String::new(), r_yumon, String::new(), r_recon)
+        };
+
+    if prompt_tokens.iter().any(|&id| id == yumon_talk::UNK_ID)
+        || reply_tokens.iter().any(|&id| id == yumon_talk::UNK_ID)
+    {
+        return ConversionResult::SkippedUnk;
+    }
+
+    // Budget check: BOS (1) + prompt + sep (1) + reply + EOS (1) <= max_seq_len
+    let total_active_len = if prompt_tokens.is_empty() {
+        1 + reply_tokens.len() + 1
+    } else {
+        1 + prompt_tokens.len() + 1 + reply_tokens.len() + 1
+    };
+
+    if total_active_len > max_seq_len {
+        return ConversionResult::SkippedOversized;
+    }
+
+    let preview = if capture_preview {
+        Some((
+            prompt_raw,
+            prompt_yumon.clone(),
+            prompt_recon,
+            reply_raw,
+            reply_yumon.clone(),
+            reply_recon,
+            prompt_tokens.len(),
+            reply_tokens.len(),
+        ))
+    } else {
+        None
+    };
+
+    let mut input_ids = vec![BOS_TOKEN];
+    input_ids.extend(prompt_tokens.iter().copied());
+    let mut target_labels: Vec<usize> = reply_tokens.iter().copied().collect();
+    target_labels.push(EOS_TOKEN);
+
+    input_ids.resize(max_seq_len, PAD_TOKEN);
+    target_labels.resize(max_seq_len, PAD_TOKEN);
+
+    ConversionResult::Converted {
+        sample: Sample {
+            input_ids,
+            target_labels,
+            action: sample.action,
+            motion_dir: sample.motion_dir,
+            world: sample.world,
+            target_json: sample.target_json.clone(),
+            pair: (prompt_yumon, reply_yumon),
+        },
+        preview,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn r_recon_source(s: &str) -> &str {
+    s
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -75,6 +233,10 @@ fn main() -> Result<()> {
     ensure!(args.input_cache.exists(), "Input cache does not exist: {}", args.input_cache.display());
     ensure!(args.max_seq_len >= 2, "max_seq_len must be >= 2");
 
+    println!("Initializing thesaurus dictionary (static feature)...");
+    thesaurus::init();
+    yumon_talk::get_thesaurus_dict();
+
     if args.vocab.exists() {
         println!("Loading Yumon Talk dynamic vocabulary from {} ...", args.vocab.display());
         yumon_talk::load_global_vocab_file(&args.vocab)?;
@@ -83,9 +245,10 @@ fn main() -> Result<()> {
     }
 
     println!("Loading input samples from {} ...", args.input_cache.display());
-    let (input_meta, input_samples) = sample_cache::load_cache_lenient(
+    let (input_meta, input_samples) = sample_cache::load_cache_lenient_limit(
         &args.input_cache,
         args.max_seq_len,
+        args.limit,
     )?;
 
     let talk_tokenizer_dir = args.vocab.parent().unwrap_or(std::path::Path::new(".")).join("yumon_talk_tokenizer");
@@ -103,15 +266,56 @@ fn main() -> Result<()> {
         )
     };
 
-    let total_available = input_samples.len();
-    let samples_to_process = match args.limit {
-        Some(lim) => lim.min(total_available),
-        None => total_available,
-    };
+    let total_available = input_meta.samples;
+    let samples_to_process = input_samples.len();
 
-    println!("Processing {} / {} samples into Yumon Talk language...", samples_to_process, total_available);
+    println!("Processing {} / {} samples into Yumon Talk language with rayon...", samples_to_process, total_available);
 
-    let mut yumon_samples = Vec::new();
+    let started = std::time::Instant::now();
+    let processed_counter = AtomicUsize::new(0);
+    let converted_counter = AtomicUsize::new(0);
+
+    let vocab_guard = yumon_talk::get_global_vocab();
+    let vocab_ref = &*vocab_guard;
+
+    let preview_capture_limit = args.preview_samples.max(10) * 5;
+
+    let results: Vec<ConversionResult> = input_samples
+        .par_iter()
+        .enumerate()
+        .map(|(idx, sample)| {
+            let capture_preview = idx < preview_capture_limit;
+            let res = convert_single_sample(
+                idx,
+                sample,
+                vocab_ref,
+                &target_tokenizer,
+                args.max_seq_len,
+                args.seed,
+                capture_preview,
+            );
+
+            let is_conv = matches!(res, ConversionResult::Converted { .. });
+            let done = processed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            let conv = if is_conv {
+                converted_counter.fetch_add(1, Ordering::Relaxed) + 1
+            } else {
+                converted_counter.load(Ordering::Relaxed)
+            };
+
+            if done % 5000 == 0 || done == samples_to_process {
+                let pct = (conv as f64 / done as f64) * 100.0;
+                println!(
+                    "  [{:>6} / {:>6}] Converted: {:>6} (Coverage: {:.2}%)",
+                    done, samples_to_process, conv, pct
+                );
+            }
+
+            res
+        })
+        .collect();
+
+    let mut yumon_samples = Vec::with_capacity(results.len());
     let mut preview_list = Vec::new();
 
     let mut unk_token_count = 0;
@@ -119,145 +323,20 @@ fn main() -> Result<()> {
     let mut empty_count = 0;
     let mut roundtrip_failed_count = 0;
 
-    let started = std::time::Instant::now();
-    let mut rng = rand::rngs::StdRng::seed_from_u64(args.seed);
-
-    for (idx, sample) in input_samples.iter().take(samples_to_process).enumerate() {
-        // Extract original text from pair or token decode
-        let (prompt_raw, reply_raw) = if !sample.pair.0.is_empty() || !sample.pair.1.is_empty() {
-            (sample.pair.0.clone(), sample.pair.1.clone())
-        } else {
-            let p_ids: Vec<u32> = sample.input_ids.iter()
-                .take_while(|&&id| id != PAD_TOKEN)
-                .map(|&id| id as u32)
-                .collect();
-            let r_ids: Vec<u32> = sample.target_labels.iter()
-                .take_while(|&&id| id != PAD_TOKEN)
-                .map(|&id| id as u32)
-                .collect();
-            let p = match target_tokenizer {
-                TokenizerKind::Bpe(ref bpe) => bpe.decode(&p_ids).unwrap_or_default(),
-                _ => String::new(),
-            };
-            let r = match target_tokenizer {
-                TokenizerKind::Bpe(ref bpe) => bpe.decode(&r_ids).unwrap_or_default(),
-                _ => String::new(),
-            };
-            (p, r)
-        };
-
-        let mut ctx = yumon_talk::TranslationContext::new();
-
-        let (prompt_tokens, reply_tokens, prompt_yumon, reply_yumon, prompt_recon, reply_recon) = if !prompt_raw.trim().is_empty() && !reply_raw.trim().is_empty() {
-            let p_tokens = match yumon_talk::english_to_yumon_tokens(&prompt_raw, &mut ctx) {
-                Ok(t) => t,
-                Err(_) => {
-                    unk_token_count += 1;
-                    continue;
+    for res in results {
+        match res {
+            ConversionResult::Converted { sample, preview } => {
+                if let Some(prev) = preview {
+                    if preview_list.len() < args.preview_samples {
+                        preview_list.push(prev);
+                    }
                 }
-            };
-            let r_tokens = match yumon_talk::english_to_yumon_tokens(&reply_raw, &mut ctx) {
-                Ok(t) => t,
-                Err(_) => {
-                    unk_token_count += 1;
-                    continue;
-                }
-            };
-
-            let p_yumon = yumon_talk::detokenize_yumon(&p_tokens);
-            let r_yumon = yumon_talk::detokenize_yumon(&r_tokens);
-
-            let p_recon = match yumon_talk::yumon_to_english_with_context(&p_yumon, &ctx, &mut rng) {
-                Ok(eng) => eng,
-                Err(_) => {
-                    roundtrip_failed_count += 1;
-                    continue;
-                }
-            };
-            let r_recon = match yumon_talk::yumon_to_english_with_context(&r_yumon, &ctx, &mut rng) {
-                Ok(eng) => eng,
-                Err(_) => {
-                    roundtrip_failed_count += 1;
-                    continue;
-                }
-            };
-
-            (p_tokens, r_tokens, p_yumon, r_yumon, p_recon, r_recon)
-        } else {
-            let text = if !reply_raw.trim().is_empty() { reply_raw.trim() } else { prompt_raw.trim() };
-            if text.is_empty() {
-                empty_count += 1;
-                continue;
+                yumon_samples.push(sample);
             }
-            let r_tokens = match yumon_talk::english_to_yumon_tokens(text, &mut ctx) {
-                Ok(t) => t,
-                Err(_) => {
-                    unk_token_count += 1;
-                    continue;
-                }
-            };
-            let r_yumon = yumon_talk::detokenize_yumon(&r_tokens);
-            let r_recon = match yumon_talk::yumon_to_english_with_context(&r_yumon, &ctx, &mut rng) {
-                Ok(eng) => eng,
-                Err(_) => {
-                    roundtrip_failed_count += 1;
-                    continue;
-                }
-            };
-            (Vec::new(), r_tokens, String::new(), r_yumon, String::new(), r_recon)
-        };
-
-        if prompt_tokens.iter().any(|&id| id == yumon_talk::UNK_ID) || reply_tokens.iter().any(|&id| id == yumon_talk::UNK_ID) {
-            unk_token_count += 1;
-            continue;
-        }
-
-        // Budget check: BOS (1) + prompt + sep (1) + reply + EOS (1) <= max_seq_len
-        let total_active_len = if prompt_tokens.is_empty() {
-            1 + reply_tokens.len() + 1
-        } else {
-            1 + prompt_tokens.len() + 1 + reply_tokens.len() + 1
-        };
-
-        if total_active_len > args.max_seq_len {
-            oversized_count += 1;
-            continue;
-        }
-
-        if preview_list.len() < args.preview_samples {
-            preview_list.push((
-                prompt_raw.clone(),
-                prompt_yumon.clone(),
-                prompt_recon.clone(),
-                reply_raw.clone(),
-                reply_yumon.clone(),
-                reply_recon.clone(),
-                prompt_tokens.len(),
-                reply_tokens.len(),
-            ));
-        }
-
-        let mut input_ids = vec![BOS_TOKEN];
-        input_ids.extend(prompt_tokens.iter().copied());
-        let mut target_labels: Vec<usize> = reply_tokens.iter().copied().collect();
-        target_labels.push(EOS_TOKEN);
-
-        input_ids.resize(args.max_seq_len, PAD_TOKEN);
-        target_labels.resize(args.max_seq_len, PAD_TOKEN);
-
-        yumon_samples.push(Sample {
-            input_ids,
-            target_labels,
-            action: sample.action,
-            motion_dir: sample.motion_dir,
-            world: sample.world,
-            target_json: sample.target_json.clone(),
-            pair: (prompt_yumon, reply_yumon),
-        });
-
-        if (idx + 1) % 5000 == 0 || idx + 1 == samples_to_process {
-            let pct = (yumon_samples.len() as f64 / (idx + 1) as f64) * 100.0;
-            println!("  [{:>6} / {:>6}] Converted: {:>6} (Coverage: {:.2}%)", idx + 1, samples_to_process, yumon_samples.len(), pct);
+            ConversionResult::SkippedUnk => unk_token_count += 1,
+            ConversionResult::SkippedRoundtripFailed => roundtrip_failed_count += 1,
+            ConversionResult::SkippedOversized => oversized_count += 1,
+            ConversionResult::SkippedEmpty => empty_count += 1,
         }
     }
 

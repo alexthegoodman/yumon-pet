@@ -306,22 +306,26 @@ impl YumonTalkVocab {
         }
 
         // 4. Query `thesaurus` crate with mutual confirmation and sealed word exclusion
-        let syns = thesaurus::synonyms(&lower);
-        for syn in syns.iter() {
-            let clean = syn.trim().to_lowercase();
-            // Never map an unknown word to a sealed closed-class word (e.g. can, i, be, in)
-            if is_sealed(&clean) {
-                continue;
-            }
-            if let Some(&id) = self.word_to_id.get(&clean) {
-                if let Some(canon) = self.id_to_token(id) {
-                    if !is_sealed(canon) {
-                        // Mutual check: does canonical word's thesaurus entry contain lower?
-                        if thesaurus::synonyms(canon).iter().any(|s| s.trim().to_lowercase() == lower) {
-                            if let Ok(mut c) = self.dynamic_cache.write() {
-                                c.insert(lower.clone(), Some(id));
+        let dict = get_thesaurus_dict();
+        if let Some(syns) = dict.get(&lower) {
+            for syn in syns.iter() {
+                let clean = syn.trim().to_lowercase();
+                // Never map an unknown word to a sealed closed-class word (e.g. can, i, be, in)
+                if is_sealed(&clean) {
+                    continue;
+                }
+                if let Some(&id) = self.word_to_id.get(&clean) {
+                    if let Some(canon) = self.id_to_token(id) {
+                        if !is_sealed(canon) {
+                            // Mutual check: does canonical word's thesaurus entry contain lower?
+                            if dict.get(canon).map_or(false, |canon_syns| {
+                                canon_syns.iter().any(|s| s.trim().to_lowercase() == lower)
+                            }) {
+                                if let Ok(mut c) = self.dynamic_cache.write() {
+                                    c.insert(lower.clone(), Some(id));
+                                }
+                                return Some(id);
                             }
-                            return Some(id);
                         }
                     }
                 }
@@ -639,6 +643,15 @@ impl YumonTalkVocab {
             Err(_) => Ok(false),
         }
     }
+}
+
+static THESAURUS_DICT: OnceLock<HashMap<String, Vec<String>>> = OnceLock::new();
+
+pub fn get_thesaurus_dict() -> &'static HashMap<String, Vec<String>> {
+    THESAURUS_DICT.get_or_init(|| {
+        thesaurus::init();
+        thesaurus::dict()
+    })
 }
 
 static GLOBAL_VOCAB: OnceLock<RwLock<YumonTalkVocab>> = OnceLock::new();
