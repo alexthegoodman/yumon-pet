@@ -23,6 +23,10 @@ pub mod kilo;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod yumon_talk;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod decompressor;
+#[cfg(not(target_arch = "wasm32"))]
+pub use decompressor::NGramDecompressor;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod code_complexity;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod code_curriculum;

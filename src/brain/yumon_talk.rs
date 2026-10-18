@@ -880,6 +880,51 @@ impl YumonTalkVocab {
             Err(_) => Ok(false),
         }
     }
+
+    /// Return all allowable English words (synonyms, inflections, sealed variants, and canonical word itself)
+    /// that can be used to decompress this canonical token.
+    pub fn allowable_words(&self, tok: &str) -> Vec<String> {
+        let lower = tok.to_lowercase();
+        let mut words = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        let mut add = |w: &str| {
+            let clean = w.trim().to_lowercase();
+            if !clean.is_empty() && seen.insert(clean.clone()) {
+                words.push(clean);
+            }
+        };
+
+        // 1. Canonical word itself
+        add(&lower);
+
+        // 2. Sealed closed-class words (pronouns, auxiliaries)
+        for &(canon, syns) in SEALED_WORDS {
+            if canon == lower || syns.contains(&lower.as_str()) {
+                add(canon);
+                for &s in syns {
+                    add(s);
+                }
+                break;
+            }
+        }
+
+        // 3. Synonym clusters from loaded vocabulary
+        if let Some(cluster) = self.synonym_clusters.get(&lower) {
+            for s in cluster {
+                add(s);
+            }
+        }
+
+        // 4. Curated synonyms
+        if let Some(curated) = get_curated_synonyms().get(&lower) {
+            for s in curated {
+                add(s);
+            }
+        }
+
+        words
+    }
 }
 
 static THESAURUS_DICT: OnceLock<HashMap<String, Vec<String>>> = OnceLock::new();
@@ -967,6 +1012,10 @@ pub fn yumon_to_english_with_context(yumon_text: &str, ctx: &TranslationContext,
 
 pub fn verify_yumon_roundtrip(english_text: &str) -> Result<bool> {
     get_global_vocab().verify_yumon_roundtrip(english_text)
+}
+
+pub fn allowable_words(tok: &str) -> Vec<String> {
+    get_global_vocab().allowable_words(tok)
 }
 
 #[cfg(test)]

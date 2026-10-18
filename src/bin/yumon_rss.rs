@@ -28,6 +28,7 @@ mod desktop {
     use wry::WebViewBuilder;
     use yumon_pet::brain::{
         bpe::TokenizerKind,
+        decompressor::NGramDecompressor,
         decoder_model::YumonDecBrain,
         model::YumonBrain,
         moe_model::YumonMoeBrain,
@@ -73,6 +74,12 @@ mod desktop {
         /// Path to Yumon Talk vocabulary JSON (defaults to training-cache/yumon_talk_vocab.json).
         #[arg(long, default_value = "training-cache/yumon_talk_vocab.json")]
         yumon_talk_vocab: PathBuf,
+        /// Path to N-gram statistical decompressor model (defaults to training-cache/ngram_decompressor.bin).
+        #[arg(long, default_value = "training-cache/ngram_decompressor.bin")]
+        decompressor: PathBuf,
+        /// Disable decompressor and output raw Yumon Talk tokens.
+        #[arg(long)]
+        no_decompressor: bool,
     }
 
     #[derive(Clone, Serialize)]
@@ -355,7 +362,8 @@ mod desktop {
             metadata["training_stage"] == "Language",
             "RSS requires a Language-stage checkpoint"
         );
-        let use_yumon_talk = args.yumon_talk;
+        let vocab_size_is_4k = metadata["vocab_size"].as_u64() == Some(4096);
+        let use_yumon_talk = args.yumon_talk || vocab_size_is_4k;
         if use_yumon_talk {
             if args.yumon_talk_vocab.exists() {
                 println!("[Yumon RSS] Loading Yumon Talk vocabulary from {} ...", args.yumon_talk_vocab.display());
@@ -364,6 +372,36 @@ mod desktop {
                 eprintln!("[Yumon RSS] Warning: Yumon Talk vocab file {} not found; using default vocab.", args.yumon_talk_vocab.display());
             }
         }
+        let decompressor: Option<std::sync::Arc<NGramDecompressor>> = if use_yumon_talk && !args.no_decompressor {
+            if args.decompressor.exists() {
+                println!("[Yumon RSS] Loading N-gram decompressor from {} ...", args.decompressor.display());
+                match NGramDecompressor::load_from_file(&args.decompressor) {
+                    Ok(d) => Some(std::sync::Arc::new(d)),
+                    Err(e) => {
+                        eprintln!("[Yumon RSS] Warning: Failed to load decompressor: {e}");
+                        None
+                    }
+                }
+            } else {
+                let default_samples = std::path::Path::new("training-cache/samples.bin");
+                if default_samples.exists() {
+                    println!("[Yumon RSS] Decompressor not found at {}; training from {} ...", args.decompressor.display(), default_samples.display());
+                    let mut d = NGramDecompressor::new(3);
+                    if let Ok(count) = d.train_on_cache(default_samples, None) {
+                        println!("[Yumon RSS] Trained decompressor on {count} samples; saving to {} ...", args.decompressor.display());
+                        let _ = d.save_to_file(&args.decompressor);
+                        Some(std::sync::Arc::new(d))
+                    } else {
+                        None
+                    }
+                } else {
+                    eprintln!("[Yumon RSS] Notice: Decompressor model not found; raw tokens will be shown.");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let device = Default::default();
         macro_rules! load {
             ($model:ty, $generate:expr) => {{
@@ -374,6 +412,7 @@ mod desktop {
                 );
                 // Check before fetching so an unusable context produces one visible error.
                 comment_prompt("idea", config.max_seq_len, &tokenizer)?;
+                let dec_clone = decompressor.clone();
                 Ok(Box::new(
                     move |text: &str, kind: PromptKind, history: &[ChatMessage]| {
                         let (prompt_text, ctx) = if use_yumon_talk {
@@ -408,29 +447,35 @@ mod desktop {
                         let reply = reply.trim().to_owned();
                         anyhow::ensure!(!reply.is_empty(), "Yumon returned an empty reply");
 
-                        // let final_reply = if use_yumon_talk {
-                        //     let mut rng = rand::thread_rng();
-                        //     match yumon_talk::yumon_to_english_with_context(&reply, &ctx, &mut rng) {
-                        //         Ok(eng) => eng,
-                        //         Err(e) => {
-                        //             eprintln!("[Yumon RSS] Yumon Talk -> English translation fallback: {e}");
-                        //             reply
-                        //         }
-                        //     }
-                        // } else {
-                        //     reply
-                        // };
-
-                        // lets not translate back to English until we do the Decompressor model
-                        // so we just copy the Yumon Talk / Kilo Talk as final reply for now
-                        let final_reply = reply.clone();
+                        let final_reply = if use_yumon_talk {
+                            if let Some(dec) = &dec_clone {
+                                let vocab = yumon_talk::get_global_vocab();
+                                match dec.decompress_with_context(&reply, &vocab, &ctx) {
+                                    Ok(decompressed) => decompressed,
+                                    Err(e) => {
+                                        eprintln!("[Yumon RSS] Decompressor fallback: {e}");
+                                        reply
+                                    }
+                                }
+                            } else {
+                                reply
+                            }
+                        } else {
+                            reply
+                        };
 
                         Ok(final_reply)
                     },
                 ) as Responder)
             }};
         }
-        match args.architecture {
+        let arch = if metadata.get("num_experts").is_some() && matches!(args.architecture, Architecture::DecoderOnly) {
+            println!("[Yumon RSS] Auto-detected MoE checkpoint metadata; using MoE architecture.");
+            Architecture::Moe
+        } else {
+            args.architecture
+        };
+        match arch {
             // The decoder's custom FlashAttention ops require an unfused backend.
             Architecture::DecoderOnly => load!(
                 YumonDecBrain<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>,
