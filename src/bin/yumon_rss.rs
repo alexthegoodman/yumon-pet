@@ -52,7 +52,8 @@ mod desktop {
             // default_value = "D:/models/runpod/large1/512h_16l_8a_256len_b32_Moe_e4_k1_Language_1m"
             // default_value = "D:/models/runpod/run1024h/1024h_24l_32a_256len_b16_DecoderOnly_Language_200k"
             // default_value = "D:/models/runpod/bf16-1/1024h_24l_32a_256len_b16_DecoderOnly_Language_bf16_150k"
-            default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide/code_256h_12l_8a_1024ff_256len_b4_Moe_e4_k1_f32_yumon_talk_v1"
+            // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide/code_256h_12l_8a_1024ff_256len_b4_Moe_e4_k1_f32_yumon_talk_v1"
+            default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-2/code_256h_12l_8a_1024ff_256len_b4_Moe_e4_k1_f32_yumon_talk_v1"
         )]
         checkpoint: String,
         #[arg(long, value_enum, default_value = "decoder-only")]
@@ -407,18 +408,22 @@ mod desktop {
                         let reply = reply.trim().to_owned();
                         anyhow::ensure!(!reply.is_empty(), "Yumon returned an empty reply");
 
-                        let final_reply = if use_yumon_talk {
-                            let mut rng = rand::thread_rng();
-                            match yumon_talk::yumon_to_english_with_context(&reply, &ctx, &mut rng) {
-                                Ok(eng) => eng,
-                                Err(e) => {
-                                    eprintln!("[Yumon RSS] Yumon Talk -> English translation fallback: {e}");
-                                    reply
-                                }
-                            }
-                        } else {
-                            reply
-                        };
+                        // let final_reply = if use_yumon_talk {
+                        //     let mut rng = rand::thread_rng();
+                        //     match yumon_talk::yumon_to_english_with_context(&reply, &ctx, &mut rng) {
+                        //         Ok(eng) => eng,
+                        //         Err(e) => {
+                        //             eprintln!("[Yumon RSS] Yumon Talk -> English translation fallback: {e}");
+                        //             reply
+                        //         }
+                        //     }
+                        // } else {
+                        //     reply
+                        // };
+
+                        // lets not translate back to English until we do the Decompressor model
+                        // so we just copy the Yumon Talk / Kilo Talk as final reply for now
+                        let final_reply = reply.clone();
 
                         Ok(final_reply)
                     },
