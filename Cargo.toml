@@ -14,6 +14,7 @@ path = "src/bin/cache_samples.rs"
 [[bin]]
 name = "train_ui"
 path = "src/bin/train_ui.rs"
+required-features = ["desktop"]
 
 [[bin]]
 name = "yumon_rss"

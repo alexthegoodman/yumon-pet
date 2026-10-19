@@ -398,6 +398,33 @@ impl NGramDecompressor {
                 continue;
             }
 
+            if tok.starts_with("<SLOT_") && tok.ends_with('>') {
+                let num_part = &tok[6..tok.len() - 1];
+                let slot_str = if let Ok(idx) = num_part.parse::<usize>() {
+                    ctx.slots.get(idx).cloned().unwrap_or_else(|| format!("Slot_{idx}"))
+                } else {
+                    tok.to_string()
+                };
+
+                for h in beam.iter_mut() {
+                    let formatted = if h.cap_next {
+                        capitalize_word(&slot_str)
+                    } else {
+                        slot_str.clone()
+                    };
+                    h.words.push(formatted);
+                    for part in slot_str.split(|c: char| !c.is_alphabetic()) {
+                        let clean = part.to_lowercase();
+                        if !clean.is_empty() {
+                            let wid = self.get_word_id(&clean).unwrap_or(UNK_ID);
+                            h.ctx = [h.ctx[1], h.ctx[2], wid];
+                        }
+                    }
+                    h.cap_next = false;
+                }
+                continue;
+            }
+
             // 3. Canonical Word: Disambiguation across allowable synonyms & inflections
             let allowable = vocab.allowable_words(tok);
             let candidates: &[String] = if allowable.is_empty() {

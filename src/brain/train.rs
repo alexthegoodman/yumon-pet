@@ -471,12 +471,14 @@ fn eval_prompts() -> Vec<String> {
         "How do plants grow?".to_string(),
         "Tell me about friendship.".to_string(),
         "What should I do today?".to_string(),
-        "The key was in the box. I moved it to the shelf. Where is the key?".to_string(),
-        "Mia finished before Jo. Jo finished before Lee. Who finished last?".to_string(),
-        "Copy these words in reverse order, separated by commas: pear, apple, plum.".to_string(),
-        "If the door is closed, wait; otherwise enter. The door is closed. What will you do?".to_string(),
-        "Bring me the cup. There are two cups, one blue and one red.".to_string(),
-        "Human: My favorite color is blue.\nYumon: I will remember that.\nHuman: My favorite color is now green.\nYumon: I will remember green.\nHuman: What is my favorite color?".to_string(),
+        "Do you love God?".to_string(),
+        "Tell me about the future.".to_string(),
+        // "The key was in the box. I moved it to the shelf. Where is the key?".to_string(),
+        // "Mia finished before Jo. Jo finished before Lee. Who finished last?".to_string(),
+        // "Copy these words in reverse order, separated by commas: pear, apple, plum.".to_string(),
+        // "If the door is closed, wait; otherwise enter. The door is closed. What will you do?".to_string(),
+        // "Bring me the cup. There are two cups, one blue and one red.".to_string(),
+        // "Human: My favorite color is blue.\nYumon: I will remember that.\nHuman: My favorite color is now green.\nYumon: I will remember green.\nHuman: What is my favorite color?".to_string(),
     ]
 }
 

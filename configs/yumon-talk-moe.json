@@ -1,7 +1,7 @@
 {
   "architecture": "moe",
-  "num_experts": 4,
-  "top_k": 1,
+  "num_experts": 16,
+  "top_k": 4,
   "source": "../rust-code",
   "cache": "training-cache/yumon_talk_samples.bin",
   "tokenizer": "training-cache/yumon_talk_tokenizer",
@@ -9,14 +9,14 @@
   "exclude_dirs": [".git", "target", "node_modules"],
   "seed": 4815162342,
   "vocab_size": 4096,
-  "embed_dim": 256,
-  "n_layers": 12,
-  "attn_heads": 8,
-  "ff_dim": 1024,
+  "embed_dim": 64,
+  "n_layers": 4,
+  "attn_heads": 4,
+  "ff_dim": 256,
   "batch_size": 4,
   "epochs": 10,
   "first_lr": 0.0003,
   "last_lr": 0.00003,
   "validation_fraction": 0.01,
-  "out_dir": "checkpoints/yumon-talk-moe-glide-4k-long-1"
+  "out_dir": "checkpoints/yumon-talk-moe-glide-4k-deep-2"
 }
