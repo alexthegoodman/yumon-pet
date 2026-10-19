@@ -504,17 +504,17 @@ fn format_sentence(tokens: &[String]) -> String {
     out
 }
 
-static GLOBAL_DECOMPRESSOR: OnceLock<RwLock<Option<NGramDecompressor>>> = OnceLock::new();
+static GLOBAL_DECOMPRESSOR: OnceLock<RwLock<Option<Arc<NGramDecompressor>>>> = OnceLock::new();
 
 /// Retrieve or lazy-initialize the global N-gram decompressor.
-pub fn get_global_decompressor() -> Option<NGramDecompressor> {
+pub fn get_global_decompressor() -> Option<Arc<NGramDecompressor>> {
     let rw = GLOBAL_DECOMPRESSOR.get_or_init(|| {
         let env_path = std::env::var("YUMON_DECOMPRESSOR").ok().map(std::path::PathBuf::from);
         let default_path = Path::new("training-cache/ngram_decompressor.bin");
         let path = env_path.as_deref().unwrap_or(default_path);
         if path.exists() {
             if let Ok(model) = NGramDecompressor::load_from_file(path) {
-                return RwLock::new(Some(model));
+                return RwLock::new(Some(Arc::new(model)));
             }
         }
         // Try building from samples.bin if available
@@ -523,7 +523,7 @@ pub fn get_global_decompressor() -> Option<NGramDecompressor> {
             let mut model = NGramDecompressor::new(3);
             if model.train_on_cache(samples_path, None).is_ok() {
                 let _ = model.save_to_file(path);
-                return RwLock::new(Some(model));
+                return RwLock::new(Some(Arc::new(model)));
             }
         }
         RwLock::new(None)
@@ -535,7 +535,7 @@ pub fn get_global_decompressor() -> Option<NGramDecompressor> {
 pub fn set_global_decompressor(decompressor: NGramDecompressor) {
     let rw = GLOBAL_DECOMPRESSOR.get_or_init(|| RwLock::new(None));
     if let Ok(mut guard) = rw.write() {
-        *guard = Some(decompressor);
+        *guard = Some(Arc::new(decompressor));
     }
 }
 

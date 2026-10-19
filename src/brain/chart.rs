@@ -1,6 +1,8 @@
 pub struct TrainingState {
     pub loss_history: Vec<(f64, f64)>,   // (batch_global, loss)
     pub avg_loss_history: Vec<(f64, f64)>,
+    pub val_loss_history: Vec<(f64, f64)>, // (batch_global, val_loss)
+    pub val_top3_history: Vec<(f64, f64)>, // (batch_global, val_top3)
     pub current_loss: f32,
     pub avg_loss: f32,
     pub epoch: usize,
@@ -67,13 +69,15 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
         (Some(batch), Some(avg)) => format!(" | Top-3: {:.2}% (epoch {:.2}%)", batch * 100.0, avg * 100.0),
         _ => String::new(),
     };
+    let val_str = state.val_loss_history.last().map_or(String::new(), |&(_, v)| format!(" | Val: {:.4}", v));
     let stats = format!(
-        " Epoch {}/{} │ Batch {}/{} │ LR {:.2e} │ Loss {:.4} │ Avg {:.4} | Entropy: {:.4} {} | Last Reply: {:?}",
+        " Epoch {}/{} │ Batch {}/{} │ LR {:.2e} │ Loss {:.4} │ Avg {:.4}{} | Entropy: {:.4} {} | Last Reply: {:?}",
         state.epoch, state.total_epochs,
         state.batch, state.total_batches,
         state.current_lr,
         state.current_loss,
         state.avg_loss,
+        val_str,
         state.entropy,
         top3,
         state.last_reply,
@@ -82,13 +86,14 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
         .block(Block::default().borders(Borders::ALL).title("Training"));
     frame.render_widget(para, chunks[0]);
 
-    // ── Loss: raw (dim), EMA, epoch average and entropy on log10 axes ──────
+    // ── Loss: raw (dim), EMA, epoch average, entropy, and validation on log10 axes ──────
     let raw = log_xy(&state.loss_history);
     let smooth = log_xy(&ema(&state.loss_history, EMA_ALPHA));
     let avg = log_xy(&state.avg_loss_history);
     let entropy = log_xy(&state.entropy_history);
+    let val_loss = log_xy(&state.val_loss_history);
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-    for &(_, y) in raw.iter().chain(&entropy).chain(&avg) {
+    for &(_, y) in raw.iter().chain(&entropy).chain(&avg).chain(&val_loss) {
         lo = lo.min(y);
         hi = hi.max(y);
     }
@@ -100,13 +105,17 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
             .graph_type(GraphType::Line).style(Style::default().fg(color)).data(data)
     }
     let n = (state.global_step.max(2) as f64).ln();
-    let chart = Chart::new(vec![
+    let mut loss_datasets = vec![
         datasets("raw", Color::DarkGray, &raw),
         datasets("entropy", Color::Magenta, &entropy),
         datasets("avg", Color::Yellow, &avg),
         datasets("ema", Color::Cyan, &smooth),
-    ])
-        .block(Block::default().title("Loss (log-log; ema over raw)").borders(Borders::ALL))
+    ];
+    if !val_loss.is_empty() {
+        loss_datasets.push(datasets("val", Color::Red, &val_loss));
+    }
+    let chart = Chart::new(loss_datasets)
+        .block(Block::default().title("Loss (log-log; ema over raw; red=val)").borders(Borders::ALL))
         .x_axis(
             Axis::default()
                 .bounds([0.0, n])
@@ -130,8 +139,13 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
     frame.render_widget(lr_chart, chunks[2]);
 
     let top3_data: Vec<(f64, f64)> = state.top3_history.iter().map(|&(x, y)| (x.max(1.0).ln(), y)).collect();
-    let chart = Chart::new(vec![datasets("top-3", Color::Blue, &top3_data)])
-        .block(Block::default().title("Top-3 token accuracy").borders(Borders::ALL))
+    let val_top3_data: Vec<(f64, f64)> = state.val_top3_history.iter().map(|&(x, y)| (x.max(1.0).ln(), y)).collect();
+    let mut top3_datasets = vec![datasets("top-3", Color::Blue, &top3_data)];
+    if !val_top3_data.is_empty() {
+        top3_datasets.push(datasets("val-top3", Color::Red, &val_top3_data));
+    }
+    let chart = Chart::new(top3_datasets)
+        .block(Block::default().title("Top-3 token accuracy (red=val)").borders(Borders::ALL))
         .x_axis(Axis::default().bounds([0.0, n]))
         .y_axis(Axis::default().bounds([0.0, 1.0]).labels(["0%", "50%", "100%"]));
     frame.render_widget(chart, chunks[3]);
@@ -309,6 +323,17 @@ pub mod plot {
     /// Fraction of a color kept for de-emphasised "raw" series.
     pub fn dim(c: Rgb<u8>, f: f32) -> Rgb<u8> { Rgb(c.0.map(|v| (v as f32 * f) as u8)) }
 
+    /// Draw a filled circular marker disk.
+    pub fn draw_marker(img: &mut RgbImage, x: i32, y: i32, radius: i32, color: Rgb<u8>) {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx * dx + dy * dy <= radius * radius + 1 {
+                    put(img, x + dx, y + dy, color);
+                }
+            }
+        }
+    }
+
     /// Single-panel plot saved to `path`.
     pub fn save_plot(path: &std::path::Path, width: u32, height: u32, panel: Panel, series: &[Series]) -> anyhow::Result<()> {
         let mut img = RgbImage::from_pixel(width, height, BACKGROUND);
@@ -334,7 +359,7 @@ pub mod plot {
 #[cfg(not(target_arch = "wasm32"))]
 impl TrainingState {
     /// Writes the training dashboard PNG (log-log loss with EMA over raw points,
-    /// entropy, epoch average; LR and top-3 on their own panels) plus CSVs.
+    /// entropy, epoch average, validation runs; LR and top-3 on their own panels) plus CSVs.
     pub fn save_chart_image(&self, path: &str) -> anyhow::Result<()> {
         use self::plot::{Panel, dim, Series};
         use image::Rgb;
@@ -344,20 +369,42 @@ impl TrainingState {
 
         let smooth = ema(&self.loss_history, EMA_ALPHA);
         let cyan = Rgb([0, 255, 255]);
-        let loss_series: [Series; 4] = [
+        let val_color = Rgb([255, 80, 80]);
+        let mut loss_series: Vec<Series> = vec![
             (&self.loss_history, dim(cyan, 0.35)),
             (&self.entropy_history, Rgb([150, 0, 150])),
             (&self.avg_loss_history, Rgb([255, 220, 0])),
             (&smooth, cyan),
         ];
-        Panel::new(left, 20, panel_w, 560, true, true).fit(&loss_series, false).draw(&mut img, &loss_series);
+        if !self.val_loss_history.is_empty() {
+            loss_series.push((&self.val_loss_history, val_color));
+        }
+        let loss_panel = Panel::new(left, 20, panel_w, 560, true, true).fit(&loss_series, false);
+        loss_panel.draw(&mut img, &loss_series);
+        for &(x, y) in &self.val_loss_history {
+            if x.is_finite() && y.is_finite() && x > 0.0 && y > 0.0 {
+                let p = loss_panel.map(x, y);
+                plot::draw_marker(&mut img, p.0, p.1, 4, val_color);
+            }
+        }
 
         let lr_series: [Series; 1] = [(&self.lr_history, Rgb([0, 255, 0]))];
         Panel::new(left, 625, panel_w, 170, true, false).fit(&lr_series, true).draw(&mut img, &lr_series);
 
-        let top3_series: [Series; 1] = [(&self.top3_history, Rgb([80, 140, 255]))];
-        Panel::new(left, 840, panel_w, 120, true, false).fit(&top3_series, true)
-            .y_range(0.0, 1.0).draw(&mut img, &top3_series);
+        let mut top3_series: Vec<Series> = vec![(&self.top3_history, Rgb([80, 140, 255]))];
+        let val_top3_color = Rgb([255, 100, 70]);
+        if !self.val_top3_history.is_empty() {
+            top3_series.push((&self.val_top3_history, val_top3_color));
+        }
+        let top3_panel = Panel::new(left, 840, panel_w, 120, true, false).fit(&top3_series, true)
+            .y_range(0.0, 1.0);
+        top3_panel.draw(&mut img, &top3_series);
+        for &(x, y) in &self.val_top3_history {
+            if x.is_finite() && y.is_finite() && x > 0.0 {
+                let p = top3_panel.map(x, y);
+                plot::draw_marker(&mut img, p.0, p.1, 4, val_top3_color);
+            }
+        }
 
         img.save(path)?;
 
@@ -371,6 +418,16 @@ impl TrainingState {
                 get(&self.lr_history, i), get(&self.entropy_history, i), get(&self.top3_history, i))?;
         }
         csv.flush()?;
+        if !self.val_loss_history.is_empty() {
+            let csv_path = std::path::Path::new(path).with_extension("val.csv");
+            let mut csv = std::io::BufWriter::new(std::fs::File::create(csv_path)?);
+            writeln!(csv, "step,val_loss,val_top3")?;
+            for (i, &(step, val_loss)) in self.val_loss_history.iter().enumerate() {
+                let val_top3 = self.val_top3_history.get(i).map_or(String::new(), |p| p.1.to_string());
+                writeln!(csv, "{step},{val_loss},{val_top3}")?;
+            }
+            csv.flush()?;
+        }
         if !self.top3_history.is_empty() {
             let csv_path = std::path::Path::new(path).with_extension("top3.csv");
             let mut csv = std::io::BufWriter::new(std::fs::File::create(csv_path)?);

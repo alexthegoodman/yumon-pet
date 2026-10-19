@@ -542,17 +542,30 @@ where
         let raw_reply = generate_fn(&inference_prompt);
         let raw_reply_trimmed = raw_reply.trim().to_string();
 
-        let mut rng = rand::thread_rng();
-        let english_reply = if let Some(ref c) = ctx {
-            match crate::brain::yumon_talk::yumon_to_english_with_context(&raw_reply_trimmed, c, &mut rng) {
+        let english_reply = if let Some(dec) = crate::brain::decompressor::get_global_decompressor() {
+            let vocab = crate::brain::yumon_talk::get_global_vocab();
+            let default_ctx = crate::brain::yumon_talk::TranslationContext::new();
+            let c = ctx.as_ref().unwrap_or(&default_ctx);
+            match dec.decompress_with_context(&raw_reply_trimmed, &vocab, c) {
                 Ok(eng) => eng,
-                Err(e) => {
-                    // eprintln!("[Yumon Talk] Eval reply translation fallback: {e}");
-                    crate::brain::yumon_talk::yumon_to_english(&raw_reply_trimmed).unwrap_or_else(|_| raw_reply_trimmed.clone())
+                Err(_e) => {
+                    let mut rng = rand::thread_rng();
+                    crate::brain::yumon_talk::yumon_to_english_with_context(&raw_reply_trimmed, c, &mut rng)
+                        .unwrap_or_else(|_| raw_reply_trimmed.clone())
                 }
             }
         } else {
-            crate::brain::yumon_talk::yumon_to_english(&raw_reply_trimmed).unwrap_or_else(|_| raw_reply_trimmed.clone())
+            let mut rng = rand::thread_rng();
+            if let Some(ref c) = ctx {
+                match crate::brain::yumon_talk::yumon_to_english_with_context(&raw_reply_trimmed, c, &mut rng) {
+                    Ok(eng) => eng,
+                    Err(_) => {
+                        crate::brain::yumon_talk::yumon_to_english(&raw_reply_trimmed).unwrap_or_else(|_| raw_reply_trimmed.clone())
+                    }
+                }
+            } else {
+                crate::brain::yumon_talk::yumon_to_english(&raw_reply_trimmed).unwrap_or_else(|_| raw_reply_trimmed.clone())
+            }
         };
 
         EvalLogEntry {
@@ -1288,6 +1301,8 @@ where
         let mut state = TrainingState {
             loss_history: vec![],
             avg_loss_history: vec![],
+            val_loss_history: vec![],
+            val_top3_history: vec![],
             current_loss: 0.0,
             avg_loss: 0.0,
             epoch: 0,
@@ -1310,7 +1325,8 @@ where
         let chart_path = format!("{}/{}_stage_{}.png", run_dir_str, run_cfg.name, stage_idx + 1);
         let mut prev_epoch_loss: Option<f32> = None;
         let mut run_should_stop = false;
-        let mut val_loss: Option<f32>;
+        let mut val_loss: Option<f32> = None;
+        let mut last_val_step: Option<usize> = None;
         let vocab = tokenizer.vocab_size();
         let mut loss_stats = TokenLossStats::new(run_cfg.max_seq_len, vocab);
         let heatmap_dir = std::path::Path::new(run_dir_str).join("heatmaps");
@@ -1568,12 +1584,31 @@ where
                     depth_window = (Vec::new(), 0);
                 }
 
-                // Periodic save and inference every 500 batches
-                if (batch_num + 1) % 500 == 0 {
+                // Periodic save and inference every 500 batches; validation every 2000 batches
+                let is_periodic = (batch_num + 1) % 500 == 0;
+                let run_val = (batch_num + 1) % 2000 == 0;
+                if is_periodic || run_val {
                     let inference_model = model.valid();
-                    let val = validate(&inference_model, epoch + 1, step + 1, terminal.is_none())?;
+                    let val = if run_val {
+                        let v = validate(&inference_model, epoch + 1, step + 1, terminal.is_none())?;
+                        val_loss = v.map(|(loss, _, _)| loss);
+                        if let Some((loss, top3, tokens)) = v {
+                            state.val_loss_history.push((state.global_step as f64, loss as f64));
+                            state.val_top3_history.push((state.global_step as f64, top3));
+                            last_val_step = Some(state.global_step);
+                            let line = format!("val_loss {loss:.4} val_top3 {:.2}% over {tokens} held-out tokens", top3 * 100.0);
+                            if terminal.is_none() {
+                                println!("{line}");
+                            }
+                            if let Err(e) = append_log_line(&inference_log_path, &line) {
+                                eprintln!("⚠️  Failed to append inference log: {}", e);
+                            }
+                        }
+                        v
+                    } else {
+                        None
+                    };
                     if let Some(a) = adaptive.as_ref() { a.save(run_dir)?; }
-                    val_loss = val.map(|(loss, _, _)| loss);
                     model.save_run(run_dir_str, tokenizer, &RunProgress {
                         run_cfg,
                         epochs_trained: epoch_offset + epoch,
@@ -1594,13 +1629,6 @@ where
                     if let Err(e) = append_inference_log(&inference_log_path, &run_cfg.name, stage_idx, stage_cfg.stage, state.epoch, state.total_epochs, state.batch, state.total_batches, state.avg_loss, &entries) {
                         eprintln!("⚠️  Failed to append inference log: {}", e);
                     }
-                    if let Some((loss, top3, tokens)) = val {
-                        let line = format!("val_loss {loss:.4} val_top3 {:.2}% over {tokens} held-out tokens", top3 * 100.0);
-                        // println!("{line}");
-                        if let Err(e) = append_log_line(&inference_log_path, &line) {
-                            eprintln!("⚠️  Failed to append inference log: {}", e);
-                        }
-                    }
                     if let Err(e) = state.save_chart_image(&chart_path) {
                         eprintln!("⚠️  Failed to save chart image: {}", e);
                     }
@@ -1615,8 +1643,18 @@ where
             anyhow::ensure!(processed_batches > 0, "epoch contains no supervised tokens");
             final_loss = epoch_loss / processed_batches as f32;
             let inference_model = model.valid();
-            let val = validate(&inference_model, epoch + 1, step_base + num_batches, terminal.is_none())?;
-            val_loss = val.map(|(loss, _, _)| loss);
+            let val = if last_val_step == Some(state.global_step) {
+                None
+            } else {
+                let v = validate(&inference_model, epoch + 1, step_base + num_batches, terminal.is_none())?;
+                val_loss = v.map(|(loss, _, _)| loss);
+                if let Some((loss, top3, _tokens)) = v {
+                    state.val_loss_history.push((state.global_step as f64, loss as f64));
+                    state.val_top3_history.push((state.global_step as f64, top3));
+                    last_val_step = Some(state.global_step);
+                }
+                v
+            };
 
             // Early stop on held-out loss when available.
             let stop_loss = val_loss.unwrap_or(final_loss);
@@ -1658,7 +1696,7 @@ where
             }
             if let Some((loss, top3, tokens)) = val {
                 let line = format!("val_loss {loss:.4} val_top3 {:.2}% over {tokens} held-out tokens (epoch end)", top3 * 100.0);
-                // if heavy || !run_cfg.overfit { println!("{line}"); }
+                if terminal.is_none() && (heavy || !run_cfg.overfit) { println!("{line}"); }
                 if heavy {
                     if let Err(e) = append_log_line(&inference_log_path, &line) {
                         eprintln!("⚠️  Failed to append inference log: {}", e);
@@ -1861,14 +1899,14 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
 
     loader = loader
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
-        .add("data/ideas.txt",   FileKind::TxtLines, Some(10_000))
-        .add("archive/arena_extract.txt",   FileKind::Chats, Some(10_000))
+        .add("data/ideas.txt",   FileKind::TxtLines, None)
+        .add("archive/arena_extract.txt",   FileKind::Chats, None)
         // .add("data/distillchatv1.csv",   FileKind::DistillChat, None)
         // Plain text, loss on every token (cleaned extract of the simplewiki XML).
-        // .add("data/wiki_extract.txt",   FileKind::Paragraphs, None) // too dense
-        // .add("data/quotes.csv",   FileKind::QuotesCsv, None) // only 5 prompts used. maybe better used without prompts
-        // .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
-        // .add("data/bible_asv.csv", FileKind::BibleCsv, None)
+        .add("data/wiki_extract.txt",   FileKind::Paragraphs, None) // too dense
+        .add("data/quotes.csv",   FileKind::QuotesCsv, None) // only 5 prompts used. maybe better used without prompts
+        .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
+        .add("data/bible_asv.csv", FileKind::BibleCsv, None)
         // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs - real
         // message/reply splits (ideas, Bible and stories train as plain text).
         .add("archive/synthetic/bible.txt", FileKind::Chats, None)
@@ -1884,8 +1922,8 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
         // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
         // // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
         // // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, None)
-        // .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, None)
+        .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, None)
+        .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, None)
         // // .add("archive/ov_chats.txt", FileKind::Chats, None)
         // // .add("archive/ov_chats.txt", FileKind::Chats, None)
         .add("archive/ov_chats.txt", FileKind::Chats, None)
@@ -2096,6 +2134,8 @@ pub fn run_with_architecture(
             let mut state = TrainingState {
                 loss_history: vec![],
                 avg_loss_history: vec![],
+                val_loss_history: vec![],
+                val_top3_history: vec![],
                 current_loss: 0.0,
                 avg_loss: 0.0,
                 epoch: 0,
@@ -2452,6 +2492,8 @@ pub fn run_with_architecture(
             let mut state = TrainingState {
                 loss_history: vec![],
                 avg_loss_history: vec![],
+                val_loss_history: vec![],
+                val_top3_history: vec![],
                 current_loss: 0.0,
                 avg_loss: 0.0,
                 epoch: 0,

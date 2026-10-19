@@ -54,7 +54,9 @@ mod desktop {
             // default_value = "D:/models/runpod/run1024h/1024h_24l_32a_256len_b16_DecoderOnly_Language_200k"
             // default_value = "D:/models/runpod/bf16-1/1024h_24l_32a_256len_b16_DecoderOnly_Language_bf16_150k"
             // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide/code_256h_12l_8a_1024ff_256len_b4_Moe_e4_k1_f32_yumon_talk_v1"
-            default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-2/code_256h_12l_8a_1024ff_256len_b4_Moe_e4_k1_f32_yumon_talk_v1"
+            default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-2/code_256h_12l_8a_1024ff_256len_b4_Moe_e4_k1_f32_yumon_talk_v1" // quite good
+            // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-large-1/code_512h_16l_8a_2048ff_256len_b2_Moe_e4_k1_f32_yumon_talk_v1" // bad
+            // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-small-1/code_128h_8l_4a_512ff_256len_b4_Moe_e4_k1_f32_yumon_talk_v1" // also quite bad
         )]
         checkpoint: String,
         #[arg(long, value_enum, default_value = "decoder-only")]
