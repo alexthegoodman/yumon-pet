@@ -7,7 +7,7 @@ use crate::brain::loading::map_ordered;
 
 use crate::brain::bpe::TokenizerKind;
 
-use crate::brain::chats::load_distilled_chats;
+use crate::brain::chats::{load_distilled_chats, load_ultrachat_chats};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::brain::am_distill::load_am_distill_chats;
 use crate::brain::mdx::{load_chats_from_csv, load_chats_from_friends_csv};
@@ -63,6 +63,9 @@ pub enum FileKind {
     /// text with loss on every token, each story packed into whole-sentence
     /// chunks. Tokenizer corpus: whole stories.
     Stories,
+    /// UltraChat conversations CSV (`data/ultrachat/*.csv` or a directory).
+    /// Training: multi-turn user/assistant conversations mapped to Human/Yumon chat pairs.
+    UltrachatCsv,
     // extend with WikiXml, Txt, Pdf, … as needed
 }
 
@@ -272,6 +275,25 @@ impl DataLoader {
 
                         sents
                     }
+                    FileKind::UltrachatCsv => {
+                        let mut chats = load_ultrachat_chats(&entry.path, entry.limit)?;
+
+                        // Per-file limit before sample prep to reduce load
+                        if let Some(n) = entry.limit {
+                            chats.blocks.shuffle(&mut rng);
+                            chats.blocks.truncate(n);
+                        }
+
+                        let mut sents = Vec::new();
+                        for chat in chats.blocks {
+                            for mem in chat.memories {
+                                sents.push(mem.bot);
+                                sents.push(mem.human);
+                            }
+                        }
+
+                        sents
+                    }
                     _ => {
                         let mut pairs = load_sentences(&entry.path, &entry.kind)?;
 
@@ -422,7 +444,7 @@ impl DataLoader {
         // 1. Raw sentences from disk
         // Chat-built sources read their own files below.
         let mut sentences = match entry.kind {
-            FileKind::Paragraphs | FileKind::QuotesCsv | FileKind::Stories | FileKind::AmDistill => Vec::new(),
+            FileKind::Paragraphs | FileKind::QuotesCsv | FileKind::Stories | FileKind::AmDistill | FileKind::UltrachatCsv => Vec::new(),
             _ => load_sentences(&entry.path, &entry.kind)?,
         };
         println!(
@@ -555,6 +577,19 @@ impl DataLoader {
                     chats, tokenizer, keyword_index, rng, self.stage, max_seq_len,
                 )
             },
+            FileKind::UltrachatCsv => {
+                let mut chats = load_ultrachat_chats(&entry.path, entry.limit)?;
+
+                // Per-file limit before sample prep to reduce load
+                if let Some(n) = entry.limit {
+                    chats.blocks.shuffle(rng);
+                    chats.blocks.truncate(n);
+                }
+
+                prepare_paired_samples_chats(
+                    chats, tokenizer, keyword_index, rng, self.stage, max_seq_len,
+                )
+            },
             FileKind::Paragraphs | FileKind::QuotesCsv => {
                 let mut chats = match entry.kind {
                     FileKind::Paragraphs => load_wiki_chats(&entry.path)?,
@@ -634,6 +669,7 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
         FileKind::AmDistill     => Ok(Vec::new()),
         FileKind::DialogueCsv   => Ok(Vec::new()),
         FileKind::FriendsCsv    => Ok(Vec::new()),
+        FileKind::UltrachatCsv  => Ok(Vec::new()),
     }
 }
 
@@ -649,7 +685,8 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
         FileKind::QaPairs     => Ok(Vec::new()),
         FileKind::Chats       => Ok(Vec::new()),
         FileKind::JsonChats       => Ok(Vec::new()),
-        FileKind::DistillChat   => Ok(Vec::new())
+        FileKind::DistillChat   => Ok(Vec::new()),
+        FileKind::UltrachatCsv  => Ok(Vec::new())
     }
 }
 
