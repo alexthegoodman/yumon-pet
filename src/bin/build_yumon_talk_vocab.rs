@@ -30,9 +30,9 @@ struct Args {
     #[arg(long, default_value = "training-cache/yumon_talk_vocab.json")]
     output_vocab: PathBuf,
 
-    /// Number of canonical words to choose (default: 4000, matching 4096 total tokens with 96 non-word tokens)
-    #[arg(long, default_value_t = 4000)]
-    target_words: usize,
+    /// Number of canonical words to choose (default: calculated to meet vocab_size)
+    #[arg(long)]
+    target_words: Option<usize>,
 
     /// Total target vocabulary size including special, punctuation and placeholders (default: 4096)
     #[arg(long, default_value_t = 4096)]
@@ -99,9 +99,12 @@ fn main() -> Result<()> {
 
     println!("=== Building Dynamic Yumon Talk Vocabulary ===");
 
+    let non_word_count = 4 + 24 + (48 + 20 + 16); // 4 special + 24 punct + 84 placeholders = 112
+    let target_words = args.target_words.unwrap_or(args.vocab_size.saturating_sub(non_word_count));
+
     println!("Input cache:        {}", args.input_cache.display());
     println!("Output vocab:       {}", args.output_vocab.display());
-    println!("Target words:       {}", args.target_words);
+    println!("Target words:       {}", target_words);
     println!("Target vocab size:  {}", args.vocab_size);
     println!("Min word frequency: {}", args.min_word_freq);
 
@@ -157,10 +160,10 @@ fn main() -> Result<()> {
     }
 
     // 3. Deduplicate using curated synonyms and morphological variants to select canonical words
-    println!("\n[3/4] Selecting {} canonical words using curated synonyms & morphological variants...", args.target_words);
+    println!("\n[3/4] Selecting {} canonical words using curated synonyms & morphological variants...", target_words);
 
-    let mut canonical_words: Vec<String> = Vec::with_capacity(args.target_words);
-    let mut canonical_set: HashSet<String> = HashSet::with_capacity(args.target_words);
+    let mut canonical_words: Vec<String> = Vec::with_capacity(target_words);
+    let mut canonical_set: HashSet<String> = HashSet::with_capacity(target_words);
     let mut word_to_canonical: HashMap<String, String> = HashMap::new();
     let mut canonical_synonyms: HashMap<String, HashSet<String>> = HashMap::new();
 
@@ -168,7 +171,7 @@ fn main() -> Result<()> {
     let mut sealed_set: HashSet<String> = HashSet::new();
 
     for &(canon, syns) in yumon_pet::brain::yumon_talk::SEALED_WORDS.iter() {
-        if canonical_words.len() < args.target_words {
+        if canonical_words.len() < target_words {
             canonical_words.push(canon.to_string());
             canonical_set.insert(canon.to_string());
             sealed_set.insert(canon.to_string());
@@ -195,7 +198,7 @@ fn main() -> Result<()> {
 
     // Seed curated canonical words and their vetted synonyms
     for (canon, syns) in curated_map.iter() {
-        if canonical_words.len() >= args.target_words {
+        if canonical_words.len() >= target_words {
             break;
         }
         if sealed_set.contains(canon) || canonical_set.contains(canon) {
@@ -224,7 +227,7 @@ fn main() -> Result<()> {
 
     // Fill remaining canonical budget with highest-frequency open-class corpus words
     for (word, _freq) in sorted_words.iter() {
-        if canonical_words.len() >= args.target_words {
+        if canonical_words.len() >= target_words {
             break;
         }
 
@@ -371,12 +374,15 @@ fn main() -> Result<()> {
         "#".to_string(),
         "@".to_string(),
     ];
-    let mut placeholders = Vec::with_capacity(68);
+    let mut placeholders = Vec::with_capacity(84);
     for i in 0..48 {
         placeholders.push(format!("<NAME_{i}>"));
     }
     for i in 0..20 {
         placeholders.push(format!("<NUM_{i}>"));
+    }
+    for i in 0..16 {
+        placeholders.push(format!("<SLOT_{i}>"));
     }
 
     let vocab = YumonTalkVocab::new(

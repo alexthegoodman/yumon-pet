@@ -22,11 +22,65 @@ pub const BOS_ID: usize = 1;
 pub const EOS_ID: usize = 2;
 pub const UNK_ID: usize = 3;
 
-/// Translation context preserving entities and brand names.
+/// Translation context preserving entities, brand names, numbers, and template slots.
 #[derive(Debug, Clone, Default)]
 pub struct TranslationContext {
     pub entities: Vec<String>,
     pub numbers: Vec<String>,
+    pub slots: Vec<String>,
+}
+
+/// Normalize English contractions into their canonical constituent words.
+///
+/// Handles both standard ASCII apostrophe (`'`) and right single quotation mark (`\u{2019}`).
+pub fn normalize_contractions(text: &str) -> String {
+    let s = text.replace('\u{2019}', "'");
+
+    s.replace("can't", "can not")
+        .replace("Can't", "Can not")
+        .replace("CAN'T", "CAN NOT")
+        .replace("won't", "will not")
+        .replace("Won't", "Will not")
+        .replace("WON'T", "WILL NOT")
+        .replace("let's", "let us")
+        .replace("Let's", "Let us")
+        .replace("LET'S", "LET US")
+        .replace("it's", "it is")
+        .replace("It's", "It is")
+        .replace("IT'S", "IT IS")
+        .replace("that's", "that is")
+        .replace("That's", "That is")
+        .replace("THAT'S", "THAT IS")
+        .replace("there's", "there is")
+        .replace("There's", "There is")
+        .replace("THERE'S", "THERE IS")
+        .replace("what's", "what is")
+        .replace("What's", "What is")
+        .replace("WHAT'S", "WHAT IS")
+        .replace("who's", "who is")
+        .replace("Who's", "Who is")
+        .replace("WHO'S", "WHO IS")
+        .replace("where's", "where is")
+        .replace("Where's", "Where is")
+        .replace("WHERE'S", "WHERE IS")
+        .replace("how's", "how is")
+        .replace("How's", "How is")
+        .replace("HOW'S", "HOW IS")
+        .replace("here's", "here is")
+        .replace("Here's", "Here is")
+        .replace("HERE'S", "HERE IS")
+        .replace("n't", " not")
+        .replace("N'T", " NOT")
+        .replace("'re", " are")
+        .replace("'RE", " ARE")
+        .replace("'ve", " have")
+        .replace("'VE", " HAVE")
+        .replace("'ll", " will")
+        .replace("'LL", " WILL")
+        .replace("'d", " would")
+        .replace("'D", " WOULD")
+        .replace("'m", " am")
+        .replace("'M", " AM")
 }
 
 /// Fixed closed-class words (pronouns, basic prepositions, conjunctions, determiners, auxiliary verbs).
@@ -466,6 +520,14 @@ impl YumonTalkVocab {
         self.id_to_token.get(id).map_or(false, |tok| tok.starts_with("<NAME_") && tok.ends_with('>'))
     }
 
+    pub fn is_slot_token(&self, id: usize) -> bool {
+        self.id_to_token.get(id).map_or(false, |tok| tok.starts_with("<SLOT_") && tok.ends_with('>'))
+    }
+
+    pub fn is_num_token(&self, id: usize) -> bool {
+        self.id_to_token.get(id).map_or(false, |tok| tok.starts_with("<NUM_") && tok.ends_with('>'))
+    }
+
     pub fn resolve_english_word(&self, word: &str) -> Option<usize> {
         let lower = word.to_lowercase();
 
@@ -572,12 +634,14 @@ impl YumonTalkVocab {
 
     pub fn english_to_yumon_tokens(&self, english_text: &str, ctx: &mut TranslationContext) -> Result<Vec<usize>> {
         let mut tokens = Vec::new();
-        let chars: Vec<char> = english_text.chars().collect();
+        let normalized = normalize_contractions(english_text);
+        let chars: Vec<char> = normalized.chars().collect();
         let len = chars.len();
         let mut i = 0;
 
         let mut entity_map: HashMap<String, usize> = HashMap::new();
         let mut num_map: HashMap<String, usize> = HashMap::new();
+        let mut slot_map: HashMap<String, usize> = HashMap::new();
 
         while i < len {
             // Skip whitespace
@@ -618,7 +682,14 @@ impl YumonTalkVocab {
                     let slot = format!("<NAME_{ent_idx}>");
                     tokens.push(self.token_to_id(&slot).unwrap_or(UNK_ID));
                 } else {
-                    tokens.push(UNK_ID);
+                    // Out-of-vocabulary word: assign to dynamic template slot <SLOT_x>
+                    let slot_idx = slot_map.entry(word.clone()).or_insert_with(|| {
+                        let curr = ctx.slots.len();
+                        ctx.slots.push(word);
+                        curr % 16
+                    });
+                    let slot = format!("<SLOT_{slot_idx}>");
+                    tokens.push(self.token_to_id(&slot).unwrap_or(UNK_ID));
                 }
                 continue;
             }
@@ -836,6 +907,17 @@ impl YumonTalkVocab {
                 } else {
                     tok.to_string()
                 }
+            } else if tok.starts_with("<SLOT_") && tok.ends_with('>') {
+                let num_part = &tok[6..tok.len() - 1];
+                if let Ok(idx) = num_part.parse::<usize>() {
+                    if let Some(orig) = ctx.slots.get(idx) {
+                        orig.clone()
+                    } else {
+                        format!("slot_{idx}")
+                    }
+                } else {
+                    tok.to_string()
+                }
             } else {
                 // Canonical Yumon Talk word: randomly sample among synonym cluster
                 if let Some(syn_list) = self.synonym_clusters.get(tok) {
@@ -1032,14 +1114,16 @@ mod tests {
         .map(String::from)
         .collect();
         let placeholders = (0..48).map(|i| format!("<NAME_{i}>"))
-            .chain((0..20).map(|i| format!("<NUM_{i}>"))).collect();
+            .chain((0..20).map(|i| format!("<NUM_{i}>")))
+            .chain((0..16).map(|i| format!("<SLOT_{i}>")))
+            .collect();
         let canonical = vec![
             "hello".into(), "i".into(), "am".into(), "happy".into(), "to".into(), "see".into(),
             "my".into(), "good".into(), "friend".into(), "today".into(), "the".into(), "sun".into(),
             "shines".into(), "bright".into(), "in".into(), "blue".into(), "sky".into(), "please".into(),
             "give".into(), "me".into(), "some".into(), "water".into(), "because".into(), "thirsty".into(),
             "device".into(), "announced".into(), "new".into(), "and".into(), "pet".into(),
-            "very".into(), "a".into(), "yumon".into(),
+            "very".into(), "a".into(), "yumon".into(), "it".into(), "be".into(),
         ];
         let mut clusters = HashMap::new();
         clusters.insert("happy".into(), vec!["happy".into(), "delighted".into(), "glad".into(), "joyful".into()]);
@@ -1054,8 +1138,8 @@ mod tests {
         let vocab = sample_test_vocab();
         assert_eq!(vocab.token_to_id("<PAD>"), Some(0));
         assert_eq!(vocab.token_to_id("<BOS>"), Some(1));
-        assert_eq!(vocab.token_to_id("hello"), Some(96));
-        assert_eq!(vocab.id_to_token(96), Some("hello"));
+        assert_eq!(vocab.token_to_id("hello"), Some(112));
+        assert_eq!(vocab.id_to_token(112), Some("hello"));
         assert!(vocab.resolve_english_word("delighted").is_some());
     }
 
@@ -1131,11 +1215,39 @@ mod tests {
         assert_eq!(vocab.id_to_token(tokens_cap[0]), Some("<NAME_0>"));
         assert_eq!(ctx.entities, vec!["Diego"]);
 
-        // Lowercase unknown word becomes UNK:
+        // Lowercase unknown word becomes UNK if no SLOT placeholders in vocab:
         let mut ctx2 = TranslationContext::new();
         let tokens_lower = vocab.english_to_yumon_tokens("tadpoles", &mut ctx2).unwrap();
         assert_eq!(tokens_lower.len(), 1);
         assert_eq!(tokens_lower[0], UNK_ID);
         assert!(ctx2.entities.is_empty(), "Lowercase word must not be added to entities");
+    }
+
+    #[test]
+    fn test_slot_tokens_and_contractions() {
+        let vocab = sample_test_vocab();
+
+        // 1. Contraction expansion: "it's" -> "it is"
+        let mut ctx1 = TranslationContext::new();
+        let tokens = vocab.english_to_yumon_tokens("It's a good friend.", &mut ctx1).unwrap();
+        // None of these should be UNK or SLOT
+        for &tok in &tokens {
+            assert_ne!(tok, UNK_ID);
+            assert!(!vocab.is_slot_token(tok));
+        }
+
+        // 2. Out-of-vocabulary word mapping to <SLOT_0>
+        let mut ctx2 = TranslationContext::new();
+        let tokens_slot = vocab.english_to_yumon_tokens("tadpoles", &mut ctx2).unwrap();
+        assert_eq!(tokens_slot.len(), 1);
+        assert_eq!(vocab.id_to_token(tokens_slot[0]), Some("<SLOT_0>"));
+        assert_eq!(ctx2.slots, vec!["tadpoles"]);
+
+        // 3. Detokenization reconstruction with slot
+        let yumon = vocab.detokenize_yumon(&tokens_slot);
+        assert_eq!(yumon, "<SLOT_0>");
+        let mut rng = rand::thread_rng();
+        let reconstructed = vocab.yumon_to_english_with_context(&yumon, &ctx2, &mut rng).unwrap();
+        assert_eq!(reconstructed, "Tadpoles");
     }
 }

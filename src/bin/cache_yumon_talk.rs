@@ -57,6 +57,12 @@ struct Args {
     /// Maximum allowed NAME placeholder tokens in a target reply (default: 2).
     #[arg(long, default_value_t = 2)]
     max_name_tokens: usize,
+    /// Maximum allowed SLOT placeholder tokens in a target reply (default: 2).
+    #[arg(long, default_value_t = 2)]
+    max_slot_tokens: usize,
+    /// Maximum allowed SLOT placeholder tokens in a user prompt (default: 6).
+    #[arg(long, default_value_t = 6)]
+    max_prompt_slots: usize,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -70,6 +76,7 @@ enum ConversionResult {
     },
     SkippedUnk,
     SkippedTooManyNames,
+    SkippedTooManySlots,
     SkippedRoundtripFailed,
     SkippedOversized,
     SkippedEmpty,
@@ -83,6 +90,8 @@ fn convert_single_sample(
     target_tokenizer: &TokenizerKind,
     max_seq_len: usize,
     max_name_tokens: usize,
+    max_slot_tokens: usize,
+    max_prompt_slots: usize,
     seed: u64,
     capture_preview: bool,
 ) -> ConversionResult {
@@ -166,6 +175,16 @@ fn convert_single_sample(
     let name_token_count = reply_tokens.iter().filter(|&&id| vocab.is_name_token(id)).count();
     if name_token_count > max_name_tokens {
         return ConversionResult::SkippedTooManyNames;
+    }
+
+    let reply_slot_count = reply_tokens.iter().filter(|&&id| vocab.is_slot_token(id)).count();
+    if reply_slot_count > max_slot_tokens {
+        return ConversionResult::SkippedTooManySlots;
+    }
+
+    let prompt_slot_count = prompt_tokens.iter().filter(|&&id| vocab.is_slot_token(id)).count();
+    if prompt_slot_count > max_prompt_slots {
+        return ConversionResult::SkippedTooManySlots;
     }
 
     // Budget check: BOS (1) + prompt + sep (1) + reply + EOS (1) <= max_seq_len
@@ -302,6 +321,8 @@ fn main() -> Result<()> {
                 &target_tokenizer,
                 args.max_seq_len,
                 args.max_name_tokens,
+                args.max_slot_tokens,
+                args.max_prompt_slots,
                 args.seed,
                 capture_preview,
             );
@@ -331,6 +352,7 @@ fn main() -> Result<()> {
 
     let mut unk_token_count = 0;
     let mut too_many_names_count = 0;
+    let mut too_many_slots_count = 0;
     let mut oversized_count = 0;
     let mut empty_count = 0;
     let mut roundtrip_failed_count = 0;
@@ -347,6 +369,7 @@ fn main() -> Result<()> {
             }
             ConversionResult::SkippedUnk => unk_token_count += 1,
             ConversionResult::SkippedTooManyNames => too_many_names_count += 1,
+            ConversionResult::SkippedTooManySlots => too_many_slots_count += 1,
             ConversionResult::SkippedRoundtripFailed => roundtrip_failed_count += 1,
             ConversionResult::SkippedOversized => oversized_count += 1,
             ConversionResult::SkippedEmpty => empty_count += 1,
@@ -361,6 +384,7 @@ fn main() -> Result<()> {
     println!("Successfully converted to Yumon Talk: {} ({:.2}% coverage)", yumon_samples.len(), coverage_pct);
     println!("Skipped due to UNK tokens: {}", unk_token_count);
     println!("Skipped due to > {} NAME tokens in reply: {}", args.max_name_tokens, too_many_names_count);
+    println!("Skipped due to > {} SLOT tokens in reply or > {} in prompt: {}", args.max_slot_tokens, args.max_prompt_slots, too_many_slots_count);
     println!("Skipped due to roundtrip failure: {}", roundtrip_failed_count);
     println!("Skipped due to sequence length > {}: {}", args.max_seq_len, oversized_count);
     println!("Skipped due to empty text: {}", empty_count);
