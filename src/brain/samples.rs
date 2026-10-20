@@ -1277,6 +1277,35 @@ pub fn prepare_plain_text_samples(
 }
 
 /// Render prior turns as plain dialogue, newest complete turns first for budgeting,
+/// Render prior turns as plain dialogue, newest complete turns first for budgeting,
+/// then chronological in the prompt.
+/// `min_turns` specifies the minimum number of prior complete turns required (e.g. 1 for training chat samples).
+/// `max_input_tokens` excludes BOS, separator, and the reply (including EOS).
+pub fn language_prompt_min_turns<'a>(
+    message: &str,
+    memories: impl DoubleEndedIterator<Item = (&'a str, &'a str)>,
+    tokenizer: &TokenizerKind,
+    max_input_tokens: usize,
+    min_turns: usize,
+) -> Option<String> {
+    let mut prompt = message.to_string();
+    if tokenizer.encode(&prompt).len() > max_input_tokens { return None; }
+    let mut turns = Vec::new();
+    for (human, yumon) in memories.rev() {
+        let mut candidate_turns = turns.clone();
+        candidate_turns.insert(0, format!("Human: {human}\nYumon: {yumon}\n"));
+        let candidate = format!("{}Human: {message}", candidate_turns.concat());
+        if tokenizer.encode(&candidate).len() > max_input_tokens { break; }
+        turns = candidate_turns;
+        prompt = candidate;
+    }
+    if turns.len() < min_turns {
+        return None;
+    }
+    Some(prompt)
+}
+
+/// Render prior turns as plain dialogue, newest complete turns first for budgeting,
 /// then chronological in the prompt. An empty history keeps the original input.
 /// `max_input_tokens` excludes BOS, separator, and the reply (including EOS).
 pub fn language_prompt<'a>(
@@ -1285,16 +1314,7 @@ pub fn language_prompt<'a>(
     tokenizer: &TokenizerKind,
     max_input_tokens: usize,
 ) -> Option<String> {
-    let mut prompt = message.to_string();
-    if tokenizer.encode(&prompt).len() > max_input_tokens { return None; }
-    let mut turns = Vec::new();
-    for (human, yumon) in memories.rev() {
-        turns.insert(0, format!("Human: {human}\nYumon: {yumon}\n"));
-        let candidate = format!("{}Human: {message}", turns.concat());
-        if tokenizer.encode(&candidate).len() > max_input_tokens { break; }
-        prompt = candidate;
-    }
-    Some(prompt)
+    language_prompt_min_turns(message, memories, tokenizer, max_input_tokens, 0)
 }
 
 pub fn prepare_paired_samples_chats(
@@ -1366,11 +1386,12 @@ pub fn prepare_paired_samples_chats(
                     let reply_len = tokenizer.encode(&memory.bot).len();
                     let overhead = 2 + language_separator_len; // BOS + EOS
                     let Some(budget) = max_seq_len.checked_sub(reply_len + overhead) else { continue; };
-                    let Some(prompt) = language_prompt(
+                    let Some(prompt) = language_prompt_min_turns(
                         sent,
                         block.memories[..i].iter().map(|m| (m.human.as_str(), m.bot.as_str())),
                         tokenizer,
                         budget,
+                        1,
                     ) else { continue; };
                     (tokenizer.encode(&prompt), prompt)
                 }
@@ -1394,6 +1415,7 @@ pub fn prepare_paired_samples_chats(
                 //     (encoded, json)
                 // }
                 TrainingStage::Structured => {
+                    if i < 1 { continue; }
                     // Build the memories array: all pairs in this block before the current one
                     let prior_memories: Vec<serde_json::Value> = block.memories[..i]
                         .iter()
@@ -1517,13 +1539,12 @@ mod language_memory_tests {
         let isolated = turn("This is another conversation.", "Hello again.");
         let result = samples(vec![ChatBlock { memories: vec![first.clone(), second.clone(), third.clone()] },
             ChatBlock { memories: vec![isolated.clone()] }], 256);
-        assert_eq!(result.len(), 4); // Short replies remain eligible at 256.
-        assert_eq!(result[0].pair.0, first.human);
-        assert_eq!(result[1].pair.0, format!("Human: {}\nYumon: {}\nHuman: {}", first.human, first.bot, second.human));
-        assert_eq!(result[2].pair.0, format!("Human: {}\nYumon: {}\nHuman: {}\nYumon: {}\nHuman: {}", first.human, first.bot, second.human, second.bot, third.human));
-        assert_eq!(result[3].pair.0, isolated.human);
+        // Only turns with at least one complete prior turn are included (second and third).
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].pair.0, format!("Human: {}\nYumon: {}\nHuman: {}", first.human, first.bot, second.human));
+        assert_eq!(result[1].pair.0, format!("Human: {}\nYumon: {}\nHuman: {}\nYumon: {}\nHuman: {}", first.human, first.bot, second.human, second.bot, third.human));
         let tok = tokenizer();
-        for (sample, reply) in result.iter().zip([first.bot, second.bot, third.bot, isolated.bot]) {
+        for (sample, reply) in result.iter().zip([second.bot, third.bot]) {
             assert_eq!(sample.target_json, reply);
             assert_eq!(sample.pair.1, reply);
             let expected: Vec<_> = tok.encode(&reply).into_iter().chain([EOS_TOKEN]).collect();
@@ -1535,7 +1556,7 @@ mod language_memory_tests {
             assert_eq!(sample.input_ids.len(), 256);
             assert_eq!(sample.target_labels.len(), 256);
         }
-        println!("Sample input:\n{}\nSample output: {}", result[2].pair.0, result[2].target_json);
+        println!("Sample input:\n{}\nSample output: {}", result[1].pair.0, result[1].target_json);
     }
 
     #[test]
@@ -1544,10 +1565,11 @@ mod language_memory_tests {
             turn("My favorite color is blue.", "I like blue too."),
             turn("What color?", "Blue."),
         ] }], 256);
-        assert_eq!(result.len(), 2);
-        assert!(result[1].pair.0.contains("Yumon: I like blue too."));
-        assert!(result[1].pair.0.ends_with("Human: What color?"));
-        assert_eq!(result[1].target_json, "Blue.");
+        // Only the followup turn has >= 1 prior complete turn.
+        assert_eq!(result.len(), 1);
+        assert!(result[0].pair.0.contains("Yumon: I like blue too."));
+        assert!(result[0].pair.0.ends_with("Human: What color?"));
+        assert_eq!(result[0].target_json, "Blue.");
     }
 
     #[test]
@@ -1562,15 +1584,17 @@ mod language_memory_tests {
         assert_eq!(prompt, expected);
         assert_eq!(language_prompt(message, [recent].into_iter(), &tok, tok.encode(message).len()).unwrap(), message);
         assert!(language_prompt(message, std::iter::empty(), &tok, 0).is_none());
+        // Enforcing min_turns = 1 fails when history doesn't fit in budget:
+        assert!(language_prompt_min_turns(message, [recent].into_iter(), &tok, tok.encode(message).len(), 1).is_none());
     }
 
     #[test]
-    fn oversized_history_does_not_drop_the_current_training_turn() {
+    fn oversized_history_drops_turn_when_min_turns_cannot_be_satisfied() {
         let history = turn(&"An old memory with many words. ".repeat(100), "An old answer.");
         let current = turn("What should we do today?", "Go for a walk.");
         let result = samples(vec![ChatBlock { memories: vec![history, current.clone()] }], 256);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].pair, (current.human, current.bot));
+        // Turn 0 is dropped (no prior turn), turn 1 is dropped because history overflows budget.
+        assert_eq!(result.len(), 0);
     }
 
     #[test]
@@ -1714,16 +1738,14 @@ mod parallel_sample_tests {
             TrainingStage::Language,
             256,
         );
-        assert_eq!(samples.len(), 3);
-        assert_eq!(samples[0].pair.0, "Tell me about the moon");
+        assert_eq!(samples.len(), 1);
         assert_eq!(
-            samples[1].pair.0,
+            samples[0].pair.0,
             "Human: Tell me about the moon\nYumon: The moon orbits the Earth.\nHuman: Why?"
         );
-        assert_eq!(samples[2].pair.0, "Hello");
         let reply = tokenizer.encode("Gravity holds it in orbit.");
-        assert_eq!(samples[1].target_labels[..reply.len()], reply);
-        assert_eq!(samples[1].target_labels[reply.len()], EOS_TOKEN);
+        assert_eq!(samples[0].target_labels[..reply.len()], reply);
+        assert_eq!(samples[0].target_labels[reply.len()], EOS_TOKEN);
     }
 
     #[test]
