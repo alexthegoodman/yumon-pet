@@ -802,8 +802,8 @@ mod desktop {
         let event_loop = EventLoopBuilder::<RssEvent>::with_user_event().build();
         let proxy = event_loop.create_proxy();
         let mut builder = WindowBuilder::new()
-            .with_title("Yumon RSS")
-            .with_inner_size(LogicalSize::new(360, 520))
+            .with_title("Yumon Portal")
+            .with_inner_size(LogicalSize::new(880, 520))
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top(true)
@@ -827,9 +827,13 @@ mod desktop {
         }
         let window = builder.build(&event_loop)?;
         let ipc_proxy = proxy.clone();
+        let ui_html = include_str!("rss_ui.html")
+            .replace("/* __VENDOR_THREE__ */", include_str!("vendor/three.min.js"))
+            .replace("/* __VENDOR_ORBIT_CONTROLS__ */", include_str!("vendor/OrbitControls.js"))
+            .replace("/* __UNIVERSE_VIEW__ */", include_str!("universe_view.js"));
         let wv_builder = WebViewBuilder::new()
             .with_transparent(true)
-            .with_html(include_str!("rss_ui.html"))
+            .with_html(&ui_html)
             .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
             .with_ipc_handler(move |request| {
                 if let Ok(ipc) = serde_json::from_str::<Ipc>(request.body()) {
