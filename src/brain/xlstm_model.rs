@@ -297,7 +297,7 @@ impl<B: Backend> YumonXLstmBrain<B> {
             dec_ids.extend(tokenizer.encode(seed_text).iter().map(|&t| t as usize));
         }
 
-        let sep_text = if self.config.training_stage == TrainingStage::Structured { "\n---\n" } else { " " };
+        let sep_text = if self.config.training_stage == TrainingStage::Structured { "\n---\n" } else { crate::brain::samples::language_separator_for(tokenizer) };
         let sep_tokens = tokenizer.encode(sep_text);
         dec_ids.extend(sep_tokens.iter().map(|&t| t as usize));
 

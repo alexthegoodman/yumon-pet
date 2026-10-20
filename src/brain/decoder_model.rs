@@ -420,7 +420,7 @@ fn generate_with<B: Backend>(
     let sep_text = if training_stage == TrainingStage::Structured {
         "\n---\n"
     } else {
-        " "
+        crate::brain::samples::language_separator_for(tokenizer)
     };
     let sep_tokens = tokenizer.encode(sep_text);
     dec_ids.extend(sep_tokens.iter().map(|&t| t as usize));

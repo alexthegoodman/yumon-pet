@@ -272,11 +272,16 @@ impl TokenizerKind {
     pub fn encode(&self, text: &str) -> Vec<usize> {
         match self {
             Self::Char(t) => t.encode(text),
-            Self::Bpe(t)  => t.encode_raw(text)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|x| x as usize)
-                .collect(),
+            Self::Bpe(t)  => {
+                if t.vocab_size == crate::brain::yumon_talk::VOCAB_SIZE {
+                    return crate::brain::yumon_talk::tokenize_yumon(text);
+                }
+                t.encode_raw(text)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|x| x as usize)
+                    .collect()
+            }
         }
     }
 

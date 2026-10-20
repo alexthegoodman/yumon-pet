@@ -3,6 +3,27 @@
 Yumon Pet is a conversational desktop companion. Yumon Code trains on Rust code
 with and without doc comments.
 
+### Quick Recommended Step Order
+
+If you are retraining Yumon Talk MoE:
+
+First, may need to update your data sources in train.rs.
+
+#### 1. Regenerate base samples with turn 0 and "Human: " prefix
+cargo run --release --bin cache_samples -- [your-cache-args]
+
+#### 2. (Optional) Refresh the 4k vocab frequencies
+cargo run --release --bin build_yumon_talk_vocab
+
+#### 3. Regenerate the Yumon Talk sample cache
+cargo run --release --bin cache_yumon_talk -- --force
+
+#### 4. (Optional) Refresh the n-gram decompressor
+cargo run --release --bin build_decompressor
+
+#### 5. Start training
+cargo run --release --bin train_code -- --config configs/yumon-talk-moe.json
+
 ## Train and deploy Yumon Code
 
 Run these from the repository root with the original buckets, tokenizer and
@@ -190,3 +211,5 @@ vocab_size                                                             │ 4096 
 batch_size                                                             │ 2                                                                      │ Batch size
 
 epochs                                                                 │ 10                                                                     │ Total training epochs
+
+

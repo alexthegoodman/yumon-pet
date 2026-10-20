@@ -140,11 +140,16 @@ mod desktop {
     /// Trim at UTF-8 boundaries and re-encode, since BPE merges can change at a cut.
     fn comment_prompt(title: &str, context: usize, tokenizer: &TokenizerKind) -> Result<String> {
         let reply_tokens = (context / 4).clamp(8, 256);
-        let overhead = 1 + tokenizer.encode(" ").len() + reply_tokens;
+        let sep_len = tokenizer.encode(yumon_pet::brain::samples::language_separator_for(tokenizer)).len();
+        let overhead = 1 + sep_len + reply_tokens;
         let budget = context
             .checked_sub(overhead)
             .context("Checkpoint context is too short")?;
-        fit_prompt(title, budget, |text| tokenizer.encode(text).len())
+        let human_prefix = yumon_pet::brain::samples::human_prefix_for(tokenizer);
+        let human_prefix_len = tokenizer.encode(human_prefix).len();
+        let title_budget = budget.checked_sub(human_prefix_len).context("Checkpoint context is too short")?;
+        let prompt = fit_prompt(title, title_budget, |text| tokenizer.encode(text).len())?;
+        Ok(format!("{human_prefix}{prompt}"))
     }
 
     fn fit_prompt(
@@ -210,19 +215,40 @@ mod desktop {
         history: &[ChatMessage],
         context: usize,
         tokenizer: &TokenizerKind,
+        use_yumon_talk: bool,
     ) -> Result<String> {
         // Reserve up to 256 reply tokens (including EOS), with room for older checkpoints.
         let reply_tokens = (context / 4).clamp(8, 256);
+        let sep_tokens = tokenizer.encode(yumon_pet::brain::samples::language_separator_for(tokenizer)).len();
         let budget = context
-            .checked_sub(1 + tokenizer.encode(" ").len() + reply_tokens)
+            .checked_sub(1 + sep_tokens + reply_tokens)
             .context("Checkpoint context is too short")?;
-        let message = fit_chat_prompt(message, budget, |s| tokenizer.encode(s).len())?;
-        // Only adjacent, successful exchanges form memories. The pending current
-        // user message and failed replies never form a pair.
-        let memories = history.windows(2).filter_map(|pair| {
-            (pair[0].role == "user" && pair[1].role == "yumon")
-                .then_some((pair[0].text.as_str(), pair[1].text.as_str()))
-        });
+        let human_prefix = yumon_pet::brain::samples::human_prefix_for(tokenizer);
+        let human_prefix_len = tokenizer.encode(human_prefix).len();
+        let message_budget = budget.checked_sub(human_prefix_len).context("Checkpoint context is too short")?;
+        let message = fit_chat_prompt(message, message_budget, |s| tokenizer.encode(s).len())?;
+
+        let translated_memories: Vec<(String, String)> = if use_yumon_talk {
+            history.windows(2).filter_map(|pair| {
+                if pair[0].role == "user" && pair[1].role == "yumon" {
+                    let u = yumon_pet::brain::yumon_talk::english_to_yumon(&pair[0].text).unwrap_or_else(|_| pair[0].text.clone());
+                    let b = yumon_pet::brain::yumon_talk::english_to_yumon(&pair[1].text).unwrap_or_else(|_| pair[1].text.clone());
+                    Some((u, b))
+                } else {
+                    None
+                }
+            }).collect()
+        } else {
+            history.windows(2).filter_map(|pair| {
+                if pair[0].role == "user" && pair[1].role == "yumon" {
+                    Some((pair[0].text.clone(), pair[1].text.clone()))
+                } else {
+                    None
+                }
+            }).collect()
+        };
+
+        let memories = translated_memories.iter().map(|(u, b)| (u.as_str(), b.as_str()));
         language_prompt(&message, memories, tokenizer, budget)
             .context("Checkpoint context cannot fit your message")
     }
@@ -254,20 +280,20 @@ mod desktop {
                 chat("yumon", "Yes, blue."),
                 chat("user", "What color?"),
             ];
-            let prompt = chat_prompt("What color?", &history, 256, &tokenizer).unwrap();
+            let prompt = chat_prompt("What color?", &history, 256, &tokenizer, false).unwrap();
             assert_eq!(
                 prompt,
                 "Human: My favorite color is blue.\nYumon: I like blue too.\nHuman: Remember it?\nYumon: Yes, blue.\nHuman: What color?"
             );
             assert_eq!(
-                chat_prompt("What color?", &[], 256, &tokenizer).unwrap(),
-                "What color?"
+                chat_prompt("What color?", &[], 256, &tokenizer, false).unwrap(),
+                "Human: What color?"
             );
             assert_eq!(
-                chat_prompt("What color?", &history[2..4], 256, &tokenizer).unwrap(),
-                "What color?"
+                chat_prompt("What color?", &history[2..4], 256, &tokenizer, false).unwrap(),
+                "Human: What color?"
             );
-            assert!(1 + tokenizer.encode(&prompt).len() + tokenizer.encode(" ").len() + 64 <= 256);
+            assert!(1 + tokenizer.encode(&prompt).len() + tokenizer.encode(yumon_pet::brain::samples::language_separator_for(&tokenizer)).len() + 64 <= 256);
         }
 
         #[test]
@@ -279,23 +305,23 @@ mod desktop {
                 chat("user", "My favorite color is blue."),
                 chat("yumon", "I like blue too."),
             ];
-            let prompt = chat_prompt("What color?", &history, 256, &tokenizer).unwrap();
+            let prompt = chat_prompt("What color?", &history, 256, &tokenizer, false).unwrap();
             assert_eq!(
                 prompt,
                 "Human: My favorite color is blue.\nYumon: I like blue too.\nHuman: What color?"
             );
             let long = "Hello 🐾 friend! ".repeat(200);
             for context in [32, 256] {
-                let prompt = chat_prompt(&long, &history, context, &tokenizer).unwrap();
-                assert!(long.starts_with(&prompt));
+                let prompt = chat_prompt(&long, &history, context, &tokenizer, false).unwrap();
+                assert!(long.starts_with(prompt.strip_prefix("Human: ").unwrap_or(&prompt)));
                 assert!(
                     1 + tokenizer.encode(&prompt).len()
-                        + tokenizer.encode(" ").len()
+                        + tokenizer.encode(yumon_pet::brain::samples::language_separator_for(&tokenizer)).len()
                         + (context / 4).clamp(8, 64)
                         <= context
                 );
             }
-            assert!(chat_prompt("Hello", &history, 8, &tokenizer).is_err());
+            assert!(chat_prompt("Hello", &history, 8, &tokenizer, false).is_err());
         }
 
         #[test]
@@ -366,11 +392,11 @@ mod desktop {
             let prompt = comment_prompt("Product Hunt launch today", 1024, &tokenizer).unwrap();
             let prompt_len = tokenizer.encode(&prompt).len();
             // On a 1024 context, at least 256 reply tokens are reserved (instead of just 8).
-            assert!(1 + prompt_len + tokenizer.encode(" ").len() + 256 <= 1024);
+            assert!(1 + prompt_len + tokenizer.encode(yumon_pet::brain::samples::language_separator_for(&tokenizer)).len() + 256 <= 1024);
 
             let prompt_256 = comment_prompt("Product Hunt launch today", 256, &tokenizer).unwrap();
             let prompt_256_len = tokenizer.encode(&prompt_256).len();
-            assert!(1 + prompt_256_len + tokenizer.encode(" ").len() + 64 <= 256);
+            assert!(1 + prompt_256_len + tokenizer.encode(yumon_pet::brain::samples::language_separator_for(&tokenizer)).len() + 64 <= 256);
         }
 
         #[test]
@@ -380,10 +406,10 @@ mod desktop {
                 chat("user", "Hello Yumon!"),
                 chat("yumon", "Hello! How can I help you?"),
             ];
-            let prompt = chat_prompt("Tell me a story", &history, 1024, &tokenizer).unwrap();
+            let prompt = chat_prompt("Tell me a story", &history, 1024, &tokenizer, false).unwrap();
             let prompt_len = tokenizer.encode(&prompt).len();
             // 256 tokens reserved on 1024 context rather than clamped to 64.
-            assert!(1 + prompt_len + tokenizer.encode(" ").len() + 256 <= 1024);
+            assert!(1 + prompt_len + tokenizer.encode(yumon_pet::brain::samples::language_separator_for(&tokenizer)).len() + 256 <= 1024);
         }
     }
 
@@ -465,7 +491,7 @@ mod desktop {
                                 comment_prompt(&prompt_text, config.max_seq_len, &tokenizer)?
                             }
                             PromptKind::Chat => {
-                                chat_prompt(&prompt_text, history, config.max_seq_len, &tokenizer)?
+                                chat_prompt(&prompt_text, history, config.max_seq_len, &tokenizer, use_yumon_talk)?
                             }
                         };
                         let generate: fn(&$model, &TokenizerKind, &str, usize, &_) -> String =
@@ -477,7 +503,10 @@ mod desktop {
                             config.max_seq_len.min(256),
                             &device,
                         );
-                        let reply = match reply.split_once("\nHuman:") {
+                        let reply = match reply.split_once("\nHuman:")
+                            .or_else(|| reply.split_once("\nperson:"))
+                            .or_else(|| reply.split_once("\n person:"))
+                        {
                             Some((clean, _)) => clean.trim().to_owned(),
                             None => reply.trim().to_owned(),
                         };

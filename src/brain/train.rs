@@ -540,9 +540,17 @@ where
                 (p.to_string(), None, None)
             }
         };
-        let inference_prompt = build_inference_prompt(stage, &prompt_to_model);
+        let framed_prompt = if stage == TrainingStage::Language {
+            format!("person: {prompt_to_model}")
+        } else {
+            prompt_to_model.clone()
+        };
+        let inference_prompt = build_inference_prompt(stage, &framed_prompt);
         let raw_reply = generate_fn(&inference_prompt);
-        let raw_reply_trimmed = raw_reply.trim().to_string();
+        let raw_reply_trimmed = match raw_reply.split_once("\nperson:").or_else(|| raw_reply.split_once("\nHuman:")) {
+            Some((clean, _)) => clean.trim().to_string(),
+            None => raw_reply.trim().to_string(),
+        };
 
         let english_reply = if let Some(dec) = crate::brain::decompressor::get_global_decompressor() {
             let vocab = crate::brain::yumon_talk::get_global_vocab();
@@ -577,8 +585,17 @@ where
             yumon_reply: Some(raw_reply_trimmed),
         }
     } else {
-        let prompt = build_inference_prompt(stage, p);
-        let reply = generate_fn(&prompt);
+        let framed_prompt = if stage == TrainingStage::Language {
+            format!("Human: {p}")
+        } else {
+            p.to_string()
+        };
+        let prompt = build_inference_prompt(stage, &framed_prompt);
+        let raw_reply = generate_fn(&prompt);
+        let reply = match raw_reply.split_once("\nHuman:") {
+            Some((clean, _)) => clean.trim().to_string(),
+            None => raw_reply.trim().to_string(),
+        };
         EvalLogEntry {
             prompt: p.to_string(),
             reply,
@@ -1362,7 +1379,7 @@ where
         let mut depth_window: (Vec<f64>, usize) = (Vec::new(), 0);
 
         // Decoder-only style: [prompt][separator][reply] packed into one causal sequence
-        let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { " " };
+        let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { crate::brain::samples::language_separator_for(&tokenizer) };
         let sep_tokens = if raw_code { Vec::new() } else { tokenizer.encode(sep_text) };
         anyhow::ensure!(sep_tokens.len() + 2 <= run_cfg.max_seq_len, "Sequence too short for separator and reply");
         // Held-out loss; with adaptive loss also unweighted CE by training frequency
@@ -2532,7 +2549,7 @@ pub fn run_with_architecture(
                 let mut epoch_loss = 0.0f32;
 
                 // Decoder-only style: [prompt][separator][reply] packed into one causal sequence
-                let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { " " };
+                let sep_text = if stage_cfg.stage == TrainingStage::Structured { "\n---\n" } else { crate::brain::samples::language_separator_for(&tokenizer) };
                 let sep_tokens = tokenizer.encode(sep_text);
 
                 for batch_num in 0..num_batches {

@@ -808,7 +808,7 @@ pub fn prepare_paired_samples_split(
         .collect();
 
     let analyzer = EmotionAnalyzer::new();
-    let language_separator_len = tokenizer.encode(" ").len();
+    let language_separator_len = tokenizer.encode(language_separator_for(tokenizer)).len();
 
     map_ordered(inputs, |(sent, seed)| {
         let mut rng_local = StdRng::seed_from_u64(seed);
@@ -1021,7 +1021,7 @@ pub fn prepare_paired_samples_split_sep(
         .collect();
 
     let analyzer = EmotionAnalyzer::new();
-    let language_separator_len = tokenizer.encode(" ").len();
+    let language_separator_len = tokenizer.encode(language_separator_for(tokenizer)).len();
 
     map_ordered(inputs, |(sents, seed)| {
         let mut rng_local = StdRng::seed_from_u64(seed);
@@ -1276,7 +1276,25 @@ pub fn prepare_plain_text_samples(
     .collect()
 }
 
-/// Render prior turns as plain dialogue, newest complete turns first for budgeting,
+pub const LANGUAGE_SEPARATOR: &str = "\nYumon: ";
+pub const YUMON_TALK_LANGUAGE_SEPARATOR: &str = "\nyumon: ";
+
+pub fn language_separator_for(tokenizer: &TokenizerKind) -> &'static str {
+    if tokenizer.vocab_size() == crate::brain::yumon_talk::VOCAB_SIZE {
+        YUMON_TALK_LANGUAGE_SEPARATOR
+    } else {
+        LANGUAGE_SEPARATOR
+    }
+}
+
+pub fn human_prefix_for(tokenizer: &TokenizerKind) -> &'static str {
+    if tokenizer.vocab_size() == crate::brain::yumon_talk::VOCAB_SIZE {
+        "person: "
+    } else {
+        "Human: "
+    }
+}
+
 /// Render prior turns as plain dialogue, newest complete turns first for budgeting,
 /// then chronological in the prompt.
 /// `min_turns` specifies the minimum number of prior complete turns required (e.g. 1 for training chat samples).
@@ -1288,13 +1306,29 @@ pub fn language_prompt_min_turns<'a>(
     max_input_tokens: usize,
     min_turns: usize,
 ) -> Option<String> {
-    let mut prompt = message.to_string();
-    if tokenizer.encode(&prompt).len() > max_input_tokens { return None; }
+    let human_prefix = human_prefix_for(tokenizer);
+    let current_turn = if message.starts_with(human_prefix) {
+        message.to_string()
+    } else if let Some(stripped) = message.strip_prefix("Human: ") {
+        format!("{human_prefix}{stripped}")
+    } else if let Some(stripped) = message.strip_prefix("person: ") {
+        format!("{human_prefix}{stripped}")
+    } else {
+        format!("{human_prefix}{message}")
+    };
+    if tokenizer.encode(&current_turn).len() > max_input_tokens { return None; }
+    let mut prompt = current_turn.clone();
     let mut turns = Vec::new();
+    let is_talk = tokenizer.vocab_size() == crate::brain::yumon_talk::VOCAB_SIZE;
     for (human, yumon) in memories.rev() {
         let mut candidate_turns = turns.clone();
-        candidate_turns.insert(0, format!("Human: {human}\nYumon: {yumon}\n"));
-        let candidate = format!("{}Human: {message}", candidate_turns.concat());
+        let formatted_turn = if is_talk {
+            format!("person: {human}\nyumon: {yumon}\n")
+        } else {
+            format!("Human: {human}\nYumon: {yumon}\n")
+        };
+        candidate_turns.insert(0, formatted_turn);
+        let candidate = format!("{}{current_turn}", candidate_turns.concat());
         if tokenizer.encode(&candidate).len() > max_input_tokens { break; }
         turns = candidate_turns;
         prompt = candidate;
@@ -1335,7 +1369,7 @@ pub fn prepare_paired_samples_chats(
         .collect();
 
     let analyzer = EmotionAnalyzer::new();
-    let language_separator_len = tokenizer.encode(" ").len();
+    let language_separator_len = tokenizer.encode(language_separator_for(tokenizer)).len();
 
     map_ordered(blocks, |(block, seed)| {
         let mut rng_local = StdRng::seed_from_u64(seed);
@@ -1391,7 +1425,7 @@ pub fn prepare_paired_samples_chats(
                         block.memories[..i].iter().map(|m| (m.human.as_str(), m.bot.as_str())),
                         tokenizer,
                         budget,
-                        1,
+                        0,
                     ) else { continue; };
                     (tokenizer.encode(&prompt), prompt)
                 }
@@ -1539,12 +1573,14 @@ mod language_memory_tests {
         let isolated = turn("This is another conversation.", "Hello again.");
         let result = samples(vec![ChatBlock { memories: vec![first.clone(), second.clone(), third.clone()] },
             ChatBlock { memories: vec![isolated.clone()] }], 256);
-        // Only turns with at least one complete prior turn are included (second and third).
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].pair.0, format!("Human: {}\nYumon: {}\nHuman: {}", first.human, first.bot, second.human));
-        assert_eq!(result[1].pair.0, format!("Human: {}\nYumon: {}\nHuman: {}\nYumon: {}\nHuman: {}", first.human, first.bot, second.human, second.bot, third.human));
+        // All turns starting from turn 0 are included.
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].pair.0, format!("Human: {}", first.human));
+        assert_eq!(result[1].pair.0, format!("Human: {}\nYumon: {}\nHuman: {}", first.human, first.bot, second.human));
+        assert_eq!(result[2].pair.0, format!("Human: {}\nYumon: {}\nHuman: {}\nYumon: {}\nHuman: {}", first.human, first.bot, second.human, second.bot, third.human));
+        assert_eq!(result[3].pair.0, format!("Human: {}", isolated.human));
         let tok = tokenizer();
-        for (sample, reply) in result.iter().zip([second.bot, third.bot]) {
+        for (sample, reply) in result.iter().zip([first.bot, second.bot, third.bot, isolated.bot]) {
             assert_eq!(sample.target_json, reply);
             assert_eq!(sample.pair.1, reply);
             let expected: Vec<_> = tok.encode(&reply).into_iter().chain([EOS_TOKEN]).collect();
@@ -1552,11 +1588,11 @@ mod language_memory_tests {
             assert_eq!(actual, expected);
             let input: Vec<_> = sample.input_ids.iter().copied().take_while(|&id| id != PAD_TOKEN).collect();
             assert_eq!(input, std::iter::once(BOS_TOKEN).chain(tok.encode(&sample.pair.0)).collect::<Vec<_>>());
-            assert!(input.len() + tok.encode(" ").len() + actual.len() <= 256);
+            assert!(input.len() + tok.encode(LANGUAGE_SEPARATOR).len() + actual.len() <= 256);
             assert_eq!(sample.input_ids.len(), 256);
             assert_eq!(sample.target_labels.len(), 256);
         }
-        println!("Sample input:\n{}\nSample output: {}", result[1].pair.0, result[1].target_json);
+        println!("Sample input:\n{}\nSample output: {}", result[2].pair.0, result[2].target_json);
     }
 
     #[test]
@@ -1565,11 +1601,12 @@ mod language_memory_tests {
             turn("My favorite color is blue.", "I like blue too."),
             turn("What color?", "Blue."),
         ] }], 256);
-        // Only the followup turn has >= 1 prior complete turn.
-        assert_eq!(result.len(), 1);
-        assert!(result[0].pair.0.contains("Yumon: I like blue too."));
-        assert!(result[0].pair.0.ends_with("Human: What color?"));
-        assert_eq!(result[0].target_json, "Blue.");
+        // Both the initial turn and the followup turn are included.
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].pair.0, "Human: My favorite color is blue.");
+        assert!(result[1].pair.0.contains("Yumon: I like blue too."));
+        assert!(result[1].pair.0.ends_with("Human: What color?"));
+        assert_eq!(result[1].target_json, "Blue.");
     }
 
     #[test]
@@ -1582,10 +1619,11 @@ mod language_memory_tests {
         let old = "An old memory with many words. ".repeat(100);
         let prompt = language_prompt(message, [(old.as_str(), old.as_str()), recent].into_iter(), &tok, budget).unwrap();
         assert_eq!(prompt, expected);
-        assert_eq!(language_prompt(message, [recent].into_iter(), &tok, tok.encode(message).len()).unwrap(), message);
+        let framed = format!("Human: {message}");
+        assert_eq!(language_prompt(message, [recent].into_iter(), &tok, tok.encode(&framed).len()).unwrap(), framed);
         assert!(language_prompt(message, std::iter::empty(), &tok, 0).is_none());
         // Enforcing min_turns = 1 fails when history doesn't fit in budget:
-        assert!(language_prompt_min_turns(message, [recent].into_iter(), &tok, tok.encode(message).len(), 1).is_none());
+        assert!(language_prompt_min_turns(message, [recent].into_iter(), &tok, tok.encode(&framed).len(), 1).is_none());
     }
 
     #[test]
@@ -1593,8 +1631,9 @@ mod language_memory_tests {
         let history = turn(&"An old memory with many words. ".repeat(100), "An old answer.");
         let current = turn("What should we do today?", "Go for a walk.");
         let result = samples(vec![ChatBlock { memories: vec![history, current.clone()] }], 256);
-        // Turn 0 is dropped (no prior turn), turn 1 is dropped because history overflows budget.
-        assert_eq!(result.len(), 0);
+        // History overflows context, so turn 0 is dropped; turn 1 retains 0 turns and is kept.
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].pair.0, "Human: What should we do today?");
     }
 
     #[test]
@@ -1618,7 +1657,7 @@ mod language_memory_tests {
         for sample in &result {
             let input_len = sample.input_ids.iter().take_while(|&&id| id != PAD_TOKEN).count();
             let reply_len = sample.target_labels.iter().take_while(|&&id| id != PAD_TOKEN).count();
-            assert!(input_len + tok.encode(" ").len() + reply_len <= 256);
+            assert!(input_len + tok.encode(LANGUAGE_SEPARATOR).len() + reply_len <= 256);
         }
         println!("Verified {} real corpus samples", result.len());
     }
@@ -1738,14 +1777,16 @@ mod parallel_sample_tests {
             TrainingStage::Language,
             256,
         );
-        assert_eq!(samples.len(), 1);
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples[0].pair.0, "Human: Tell me about the moon");
         assert_eq!(
-            samples[0].pair.0,
+            samples[1].pair.0,
             "Human: Tell me about the moon\nYumon: The moon orbits the Earth.\nHuman: Why?"
         );
+        assert_eq!(samples[2].pair.0, "Human: Hello");
         let reply = tokenizer.encode("Gravity holds it in orbit.");
-        assert_eq!(samples[0].target_labels[..reply.len()], reply);
-        assert_eq!(samples[0].target_labels[reply.len()], EOS_TOKEN);
+        assert_eq!(samples[1].target_labels[..reply.len()], reply);
+        assert_eq!(samples[1].target_labels[reply.len()], EOS_TOKEN);
     }
 
     #[test]
