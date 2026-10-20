@@ -17,8 +17,8 @@ path = "src/bin/train_ui.rs"
 required-features = ["desktop"]
 
 [[bin]]
-name = "yumon_rss"
-path = "src/bin/yumon_rss.rs"
+name = "yumon_portal"
+path = "src/bin/yumon_portal.rs"
 required-features = ["desktop"]
 
 [[bin]]

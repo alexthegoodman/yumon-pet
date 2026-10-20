@@ -364,7 +364,7 @@
       ? `Next turn in ${Math.max(0, Math.ceil((nextCheck - Date.now()) / 60000))} min · Every 5 min`
       : 'Product Hunt · Daily products';
   };
-  window.__yumon_rss = state => {
+  window.__yumon_portal = state => {
     document.getElementById('status').textContent = state.status;
     refresh.disabled = state.busy || state.chat_busy;
     canChat = !state.busy && !state.chat_busy;

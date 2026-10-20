@@ -182,8 +182,8 @@ cargo run --release --bin yumon-pet -- train-brain --architecture moe --batch-si
 cargo run --release --bin chat_ui
 cargo run --release --bin yumon_world
 cargo run --release --bin yumon_universe -- --checkpoint <language-checkpoint> --seed 42 --theme suburban
-cargo run --release --bin yumon_rss -- --checkpoint <language-checkpoint> --architecture moe
-cargo run --release --bin yumon_rss -- --check-feeds
+cargo run --release --bin yumon_portal -- --checkpoint <language-checkpoint> --architecture moe
+cargo run --release --bin yumon_portal -- --check-feeds
 cargo run --release --bin endless_data
 
 # Web app (clang may be needed).
@@ -212,7 +212,7 @@ cargo run --release --no-default-features --bin gen_synthetic_data -- --topics p
 cargo test --no-default-features --lib brain::code_
 cargo test --no-default-features --lib sample_cache
 cargo test --no-default-features --bin gen_synthetic_captions
-cargo test --bin yumon_rss
+cargo test --bin yumon_portal
 
 # Tiny local Code model (first command is preparation only, run once).
 cargo run --no-default-features --bin cache_samples -- --code-config configs/yumon-code-smoke.json --train-code-tokenizer --preview-samples 0

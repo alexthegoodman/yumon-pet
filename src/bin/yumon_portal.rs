@@ -914,7 +914,7 @@ mod desktop {
             }
             if ready {
                 if let Ok(json) = serde_json::to_string(&state) {
-                    let _ = webview.evaluate_script(&format!("window.__yumon_rss({json})"));
+                    let _ = webview.evaluate_script(&format!("window.__yumon_portal({json})"));
                 }
             }
         });

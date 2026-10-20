@@ -73,7 +73,7 @@ def fit_chat_prompt(
 ) -> str:
     """
     Trim unicode characters from the end of message until it fits within budget.
-    Matches Rust fit_chat_prompt in yumon_rss.rs.
+    Matches Rust fit_chat_prompt in yumon_portal.rs.
     """
     prompt = message.strip()
     while token_count(prompt) > budget:
@@ -114,7 +114,7 @@ def extract_memories(history: Sequence[Any]) -> List[Tuple[str, str]]:
     """
     Extract memories from adjacent successful exchanges (user followed by yumon).
     Error messages or pending messages never form a pair.
-    Matches history.windows(2) filtering in yumon_rss.rs.
+    Matches history.windows(2) filtering in yumon_portal.rs.
     """
     memories: List[Tuple[str, str]] = []
     for i in range(len(history) - 1):
@@ -135,7 +135,7 @@ def chat_prompt(
     tokenizer: Tokenizer,
 ) -> str:
     """
-    Build a chat prompt with memory context matching yumon_rss.rs:
+    Build a chat prompt with memory context matching yumon_portal.rs:
     - Reserve reply tokens (clamp(context // 4, 8, 64))
     - Calculate budget taking BOS and separator token into account
     - Trim message to budget
