@@ -5,7 +5,7 @@
   "source": "../rust-code",
   "cache": "training-cache/yumon_talk_samples.bin",
   "tokenizer": "training-cache/yumon_talk_tokenizer",
-  "max_seq_len": 1024,
+  "max_seq_len": 256,
   "exclude_dirs": [".git", "target", "node_modules"],
   "seed": 4815162342,
   "vocab_size": 4096,
@@ -18,5 +18,5 @@
   "first_lr": 0.0003,
   "last_lr": 0.00003,
   "validation_fraction": 0.01,
-  "out_dir": "checkpoints/yumon-talk-moe-glide-4k-deep-5"
+  "out_dir": "checkpoints/yumon-talk-moe-glide-4k-256"
 }

@@ -59,7 +59,8 @@ mod desktop {
             // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-small-1/code_128h_8l_4a_512ff_256len_b4_Moe_e4_k1_f32_yumon_talk_v1" // also quite bad
             // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-deep-1/code_256h_12l_8a_1024ff_1024len_b4_Moe_e4_k1_f32_yumon_talk_v1"
             // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-deep-2/code_64h_6l_4a_256ff_1024len_b4_Moe_e4_k1_f32_yumon_talk_v1"
-            default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-deep-4/code_256h_16l_8a_1024ff_1024len_b2_Moe_e8_k2_f32_yumon_talk_v1"
+            // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-deep-4/code_256h_16l_8a_1024ff_1024len_b2_Moe_e8_k2_f32_yumon_talk_v1"
+            default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-deep-4/code_64h_4l_4a_256ff_1024len_b4_Moe_e4_k1_f32_yumon_talk_v1"
         )]
         checkpoint: String,
         #[arg(long, value_enum, default_value = "decoder-only")]
@@ -135,10 +136,11 @@ mod desktop {
 
     type Responder = Box<dyn Fn(&str, PromptKind, &[ChatMessage]) -> Result<String>>;
 
-    /// Keep room for BOS, the Language separator, and at least eight reply tokens.
+    /// Keep room for BOS, the Language separator, and reply tokens.
     /// Trim at UTF-8 boundaries and re-encode, since BPE merges can change at a cut.
     fn comment_prompt(title: &str, context: usize, tokenizer: &TokenizerKind) -> Result<String> {
-        let overhead = 1 + tokenizer.encode(" ").len() + 8;
+        let reply_tokens = (context / 4).clamp(8, 256);
+        let overhead = 1 + tokenizer.encode(" ").len() + reply_tokens;
         let budget = context
             .checked_sub(overhead)
             .context("Checkpoint context is too short")?;
@@ -209,8 +211,8 @@ mod desktop {
         context: usize,
         tokenizer: &TokenizerKind,
     ) -> Result<String> {
-        // Reserve up to 64 reply tokens (including EOS), with room for older checkpoints.
-        let reply_tokens = (context / 4).clamp(8, 64);
+        // Reserve up to 256 reply tokens (including EOS), with room for older checkpoints.
+        let reply_tokens = (context / 4).clamp(8, 256);
         let budget = context
             .checked_sub(1 + tokenizer.encode(" ").len() + reply_tokens)
             .context("Checkpoint context is too short")?;
@@ -357,6 +359,32 @@ mod desktop {
             assert_eq!(state.status, "Products waiting");
             assert!(state.entries.is_empty());
         }
+
+        #[test]
+        fn comment_prompt_reserves_reply_space_and_scales_with_context() {
+            let tokenizer = tokenizer();
+            let prompt = comment_prompt("Product Hunt launch today", 1024, &tokenizer).unwrap();
+            let prompt_len = tokenizer.encode(&prompt).len();
+            // On a 1024 context, at least 256 reply tokens are reserved (instead of just 8).
+            assert!(1 + prompt_len + tokenizer.encode(" ").len() + 256 <= 1024);
+
+            let prompt_256 = comment_prompt("Product Hunt launch today", 256, &tokenizer).unwrap();
+            let prompt_256_len = tokenizer.encode(&prompt_256).len();
+            assert!(1 + prompt_256_len + tokenizer.encode(" ").len() + 64 <= 256);
+        }
+
+        #[test]
+        fn chat_prompt_scales_reply_budget_for_large_context() {
+            let tokenizer = tokenizer();
+            let history = vec![
+                chat("user", "Hello Yumon!"),
+                chat("yumon", "Hello! How can I help you?"),
+            ];
+            let prompt = chat_prompt("Tell me a story", &history, 1024, &tokenizer).unwrap();
+            let prompt_len = tokenizer.encode(&prompt).len();
+            // 256 tokens reserved on 1024 context rather than clamped to 64.
+            assert!(1 + prompt_len + tokenizer.encode(" ").len() + 256 <= 1024);
+        }
     }
 
     fn load_responder(args: &Args) -> Result<Responder> {
@@ -446,10 +474,13 @@ mod desktop {
                             &brain,
                             &tokenizer,
                             &prompt,
-                            config.max_seq_len.min(64),
+                            config.max_seq_len.min(256),
                             &device,
                         );
-                        let reply = reply.trim().to_owned();
+                        let reply = match reply.split_once("\nHuman:") {
+                            Some((clean, _)) => clean.trim().to_owned(),
+                            None => reply.trim().to_owned(),
+                        };
                         anyhow::ensure!(!reply.is_empty(), "Yumon returned an empty reply");
 
                         let final_reply = if use_yumon_talk {
@@ -526,6 +557,18 @@ mod desktop {
         };
         state.can_refresh = true;
         state.chat_status = "Say hello or share an idea.".into();
+        let drain_pending = |state: &mut ViewState, refresh: &mut bool| {
+            while let Ok(req) = rx.try_recv() {
+                match req {
+                    WorkerRequest::ClearChat => {
+                        state.chat.clear();
+                        state.chat_status = "Say hello or share an idea.".into();
+                    }
+                    WorkerRequest::Refresh => *refresh = true,
+                    WorkerRequest::Chat(_) => {}
+                }
+            }
+        };
         let agent = agent();
         let mut deadline = Instant::now();
         let mut refresh = false;
@@ -539,6 +582,7 @@ mod desktop {
             }
             if refresh || cache.is_none() {
                 state.status = "Loading today's Product Hunt products...".into();
+                drain_pending(&mut state, &mut refresh);
                 if !publish(&state) {
                     return;
                 }
@@ -564,6 +608,7 @@ mod desktop {
                 if let Some(daily) = &mut cache {
                     if let Some(product) = daily.next_product().cloned() {
                         state.status = format!("Yumon is reading {}...", product.article.title);
+                        drain_pending(&mut state, &mut refresh);
                         if !publish(&state) {
                             return;
                         }
@@ -615,6 +660,7 @@ mod desktop {
             } else {
                 format!("{} Will retry on the next check.", errors.join(" · "))
             };
+            drain_pending(&mut state, &mut refresh);
             if !publish(&state) {
                 return;
             }
@@ -635,6 +681,7 @@ mod desktop {
                             return;
                         }
                         answer_chat(&mut state, message, &responder);
+                        drain_pending(&mut state, &mut refresh);
                         if !publish(&state) {
                             return;
                         }
@@ -768,7 +815,7 @@ mod desktop {
             use wry::WebViewBuilderExtUnix;
             wv_builder.build_gtk(window.default_vbox().context("No GTK window container")?)?
         };
-        let (tx, rx) = mpsc::sync_channel(1);
+        let (tx, rx) = mpsc::channel();
         let worker_state = state.clone();
         thread::spawn(move || {
             worker(
@@ -798,7 +845,7 @@ mod desktop {
                 Event::UserEvent(RssEvent::Ui(Ipc::Refresh))
                     if state.can_refresh && !state.busy && !state.chat_busy =>
                 {
-                    if tx.try_send(WorkerRequest::Refresh).is_ok() {
+                    if tx.send(WorkerRequest::Refresh).is_ok() {
                         state.busy = true;
                         state.status = "Refreshing Product Hunt...".into();
                     }
@@ -808,16 +855,16 @@ mod desktop {
                 {
                     let message = message.trim();
                     if !message.is_empty() && message.chars().count() <= 4096 {
-                        if tx.try_send(WorkerRequest::Chat(message.to_owned())).is_ok() {
+                        if tx.send(WorkerRequest::Chat(message.to_owned())).is_ok() {
                             state.chat_busy = true;
                             state.chat_status = "Yumon is thinking...".into();
                         }
                     }
                 }
-                Event::UserEvent(RssEvent::Ui(Ipc::ClearChat))
-                    if !state.busy && !state.chat_busy =>
-                {
-                    let _ = tx.try_send(WorkerRequest::ClearChat);
+                Event::UserEvent(RssEvent::Ui(Ipc::ClearChat)) => {
+                    state.chat.clear();
+                    state.chat_status = "Say hello or share an idea.".into();
+                    let _ = tx.send(WorkerRequest::ClearChat);
                 }
                 Event::UserEvent(RssEvent::Ui(Ipc::Drag)) => {
                     let _ = window.drag_window();

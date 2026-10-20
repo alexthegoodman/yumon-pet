@@ -127,11 +127,11 @@
   const updateSend = () => { chatSend.disabled = !canChat || submitting || !chatInput.value.trim(); };
   chatInput.addEventListener('input', updateSend);
   chatClear.addEventListener('click', () => {
-    if (chatClear.disabled) return;
-    chatClear.disabled = true;
     send('clear_chat');
     chatMessages.replaceChildren(element('p', 'chat-empty', 'Say hello, ask a question, or share a business idea with Yumon.'));
     chatInput.focus();
+    submitting = false;
+    submittedMessage = null;
   });
   document.getElementById('chat-form').addEventListener('submit', event => {
     event.preventDefault();
@@ -172,7 +172,6 @@
     document.getElementById('chat-status').textContent = state.busy && state.can_refresh
       ? 'Yumon is reading products. You can send your message shortly.' : state.chat_status;
     const messages = state.chat || [];
-    chatClear.disabled = !canChat || submitting || !messages.length;
     const chatFingerprint = JSON.stringify(messages);
     if (submittedMessage && chatFingerprint !== submittedChatFingerprint && messages.findLast(message => message.role === 'user')?.text === submittedMessage) {
       if (chatInput.value.trim() === submittedMessage) chatInput.value = '';

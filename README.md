@@ -172,3 +172,21 @@ without it still load. At these model sizes it made no measurable speed differen
 ```
 cargo run --release --no-default-features --bin yumon_nano -- tmp/example2.rs --checkpoint "D:/models/moe-mini-2/code_256h_24l_32a_1024ff_512len_b2_Moe_e8_k2_f32_curriculum_documented_balanced_v2" --architecture moe
 ```
+
+## XLSTM Hyperparameter Mapping Breakdown
+
+architecture                                                           │ "xlstm"                                                                │ Instantiates YumonXLstmBrain
+
+embed_dim                                                              │ 256                                                                    │ Model dimension d_{model}
+
+attn_heads                                                             │ 8                                                                      │ Number of independent mLSTM matrix-memory heads (256/8 = 32 head dim)
+
+ff_dim                                                                 │ 1024                                                                   │ Hidden dimension of the post-mLSTM MLP block
+
+n_layers                                                               │ 16                                                                     │ Number of stacked XLstmBlock units
+
+vocab_size                                                             │ 4096                                                                   │ Matches Talk BPE tokenizer
+
+batch_size                                                             │ 2                                                                      │ Batch size
+
+epochs                                                                 │ 10                                                                     │ Total training epochs
