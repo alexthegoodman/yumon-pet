@@ -8,12 +8,12 @@
 use {
     anyhow::{Result, ensure},
     clap::Parser,
-    std::collections::HashMap,
+    std::collections::{HashMap, HashSet},
     std::path::PathBuf,
     yumon_pet::brain::{
         kilo_vocab::{self, KiloVocab, WordContextProfile},
         sample_cache,
-        yumon_talk::TranslationContext,
+        yumon_talk::{SEALED_WORDS, TranslationContext},
     },
 };
 
@@ -129,33 +129,61 @@ fn main() -> Result<()> {
     let mut sample_count = 0usize;
     let started = std::time::Instant::now();
 
+    // Precompute sealed closed-class stopwords for fast content-word filtering
+    let mut sealed_set: HashSet<&'static str> = HashSet::with_capacity(256);
+    for &(canon, syns) in SEALED_WORDS {
+        sealed_set.insert(canon);
+        for &s in syns {
+            sealed_set.insert(s);
+        }
+    }
+
     sample_cache::stream_pairs_lenient(&args.input_cache, args.sample_limit, |pair| {
         sample_count += 1;
         let combined = format!("{} {}", pair.0, pair.1);
         let words = extract_words(&combined);
         let len = words.len();
 
-        // Count unigrams and collect bi-directional context profiles
+        // Count unigrams and collect bi-directional content-word context profiles
         for i in 0..len {
             total_tokens += 1;
             let w = &words[i];
             *word_counts.entry(w.clone()).or_insert(0) += 1;
 
+            // Multi-gram 4-gram context frames (left & right)
             let w_minus2 = if i >= 2 { &words[i - 2] } else { "<s>" };
             let w_minus1 = if i >= 1 { &words[i - 1] } else { "<s>" };
             let w_plus1 = if i + 1 < len { &words[i + 1] } else { "</s>" };
             let w_plus2 = if i + 2 < len { &words[i + 2] } else { "</s>" };
 
-            let h_l = kilo_vocab::fast_word_hash(w_minus1);
-            let h_r = kilo_vocab::fast_word_hash(w_plus1);
             let h_left = kilo_vocab::hash_multigram_left(w_minus2, w_minus1, w_plus1);
             let h_right = kilo_vocab::hash_multigram_right(w_minus1, w_plus1, w_plus2);
 
             let prof = word_contexts.entry(w.clone()).or_default();
-            prof.add_left(h_l);
-            prof.add_right(h_r);
             prof.add_multigram(h_left);
             prof.add_multigram(h_right);
+
+            // Filter closed-class stopwords: look back up to 3 words for nearest content word
+            for offset in 1..=3 {
+                if i >= offset {
+                    let prev = &words[i - offset];
+                    if !sealed_set.contains(prev.as_str()) {
+                        prof.add_left(kilo_vocab::fast_word_hash(prev));
+                        break;
+                    }
+                }
+            }
+
+            // Filter closed-class stopwords: look forward up to 3 words for nearest content word
+            for offset in 1..=3 {
+                if i + offset < len {
+                    let next = &words[i + offset];
+                    if !sealed_set.contains(next.as_str()) {
+                        prof.add_right(kilo_vocab::fast_word_hash(next));
+                        break;
+                    }
+                }
+            }
         }
 
         // Count 2-word and 3-word n-gram phrases
