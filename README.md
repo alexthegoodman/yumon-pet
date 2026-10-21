@@ -39,6 +39,10 @@ cargo run --release --bin build_decompressor
 cargo run --release --bin train_code -- --config configs/yumon-talk-moe.json
 ```
 
+### For Distribution
+
+Windows: Run the `scripts/package_release.ps1` script in PowerShell.
+
 ## Train and deploy Yumon Code
 
 Run these from the repository root with the original buckets, tokenizer and

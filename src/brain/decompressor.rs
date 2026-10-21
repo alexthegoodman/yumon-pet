@@ -248,6 +248,16 @@ impl NGramDecompressor {
         Ok(model)
     }
 
+    /// Load the model from in-memory binary zstd-compressed bytes.
+    pub fn load_from_bytes(bytes: &[u8]) -> Result<Self> {
+        let decoder = zstd::stream::read::Decoder::new(std::io::Cursor::new(bytes))
+            .context("initializing zstd decoder for NGramDecompressor")?;
+        let mut reader = BufReader::new(decoder);
+        let model: Self = bincode::deserialize_from(&mut reader)
+            .context("deserializing NGramDecompressor from bytes")?;
+        Ok(model)
+    }
+
     /// Load from `model_path` if present; otherwise train on `cache_path` and save.
     pub fn load_or_train(model_path: &Path, cache_path: &Path, order: usize) -> Result<Self> {
         if model_path.exists() {

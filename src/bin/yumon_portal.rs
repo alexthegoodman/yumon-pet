@@ -414,7 +414,7 @@ mod desktop {
                 check_feeds: false,
                 yumon_talk: true,
                 yumon_talk_vocab: None,
-                decompressor: None,
+                decompressor: Some(PathBuf::from("training-cache/ngram_decompressor.bin")),
                 no_decompressor: false,
             };
             let responder = load_responder(&args).expect("load_responder with embedded model should succeed");
@@ -466,27 +466,39 @@ mod desktop {
         }
         let decompressor: Option<std::sync::Arc<NGramDecompressor>> = if use_yumon_talk && !args.no_decompressor {
             let candidate_path = args.decompressor.clone().or_else(|| {
+                // 1. Next to the executable (standard release package layout)
                 if let Ok(exe_path) = std::env::current_exe() {
                     let beside = exe_path.with_file_name("ngram_decompressor.bin");
                     if beside.exists() {
                         return Some(beside);
                     }
                 }
+                // 2. Local workspace cache (for development)
+                let local = PathBuf::from("training-cache/ngram_decompressor.bin");
+                if local.exists() {
+                    return Some(local);
+                }
+                // 3. Local app data directory
+                if let Some(dirs) = directories::ProjectDirs::from("", "Yumon", "YumonRSS") {
+                    let app_data = dirs.data_local_dir().join("ngram_decompressor.bin");
+                    if app_data.exists() {
+                        return Some(app_data);
+                    }
+                }
                 None
             });
 
             if let Some(path) = candidate_path {
-                println!("[Yumon Portal] Loading N-gram decompressor from {} ...", path.display());
-                match NGramDecompressor::load_from_file(&path) {
-                    Ok(d) => Some(std::sync::Arc::new(d)),
-                    Err(e) => {
-                        eprintln!("[Yumon Portal] Warning: Failed to load decompressor: {e}");
-                        None
-                    }
-                }
+                println!("[Yumon Portal] Loading N-gram statistical decompressor from {} ...", path.display());
+                let d = NGramDecompressor::load_from_file(&path)
+                    .with_context(|| format!("loading decompressor from {}", path.display()))?;
+                Some(std::sync::Arc::new(d))
             } else {
-                println!("[Yumon Portal] External decompressor model file not present; using embedded vocabulary reconstruction.");
-                None
+                anyhow::bail!(
+                    "Decompressor model 'ngram_decompressor.bin' not found.
+                     Please ensure 'ngram_decompressor.bin' is placed in the same folder as yumon_portal.exe,
+                     or specify its path via --decompressor <path>."
+                );
             }
         } else {
             None
@@ -551,15 +563,12 @@ mod desktop {
                                 match dec.decompress_with_context(&reply, &vocab, &ctx) {
                                     Ok(decompressed) => decompressed,
                                     Err(e) => {
-                                        eprintln!("[Yumon Portal] Decompressor fallback: {e}");
-                                        let mut rng = rand::thread_rng();
-                                        vocab.yumon_to_english_with_context(&reply, &ctx, &mut rng).unwrap_or(reply)
+                                        eprintln!("[Yumon Portal] Decompressor error: {e}");
+                                        reply
                                     }
                                 }
                             } else {
-                                let vocab = yumon_talk::get_global_vocab();
-                                let mut rng = rand::thread_rng();
-                                vocab.yumon_to_english_with_context(&reply, &ctx, &mut rng).unwrap_or(reply)
+                                reply
                             }
                         } else {
                             reply
