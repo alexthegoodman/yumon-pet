@@ -169,17 +169,17 @@ impl WordContextProfile {
         }
     }
 
-    /// Compute composite distributional similarity (bi-directional cosine + multi-gram overlap).
+    /// Compute bi-directional content-neighbor similarity (with optional multi-gram frame boost).
     pub fn similarity(&self, other: &WordContextProfile) -> f64 {
         let left_sim = cosine_similarity_sparse(&self.left_neighbors, &other.left_neighbors);
         let right_sim = cosine_similarity_sparse(&self.right_neighbors, &other.right_neighbors);
         let bidir = (left_sim + right_sim) * 0.5;
 
-        // If multi-gram frames also match, incorporate multi-gram frame overlap
+        // If multi-gram frames also match, use it as an optional boost (never a penalty)
         if !self.multigram_frames.is_empty() && !other.multigram_frames.is_empty() {
             let matches = self.multigram_frames.iter().filter(|f| other.multigram_frames.contains(f)).count();
             let mg_sim = matches as f64 / ((self.multigram_frames.len() * other.multigram_frames.len()) as f64).sqrt();
-            bidir * 0.70 + mg_sim * 0.30
+            bidir.max(mg_sim)
         } else {
             bidir
         }
