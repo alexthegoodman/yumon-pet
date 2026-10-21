@@ -13,7 +13,33 @@
   const TANK_HEIGHT = 20.5;  // Y: 0 to 20.5
   const WATER_LEVEL = 19.4;  // Top surface of water
 
-  // PRNG matching universe.rs
+  // Recursive WebGL disposal helper to prevent resource leaks
+  function disposeHierarchy(obj) {
+    if (!obj) return;
+    const disposedGeos = new Set();
+    const disposedMats = new Set();
+
+    obj.traverse((child) => {
+      if (child.geometry && !child.geometry.userData?.isShared) {
+        if (!disposedGeos.has(child.geometry)) {
+          disposedGeos.add(child.geometry);
+          child.geometry.dispose();
+        }
+      }
+      if (child.material) {
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        for (let i = 0; i < mats.length; i++) {
+          const m = mats[i];
+          if (m && !m.userData?.isShared) {
+            if (!disposedMats.has(m)) {
+              disposedMats.add(m);
+              m.dispose();
+            }
+          }
+        }
+      }
+    });
+  }
   function createRandom(seed) {
     let state = BigInt(seed);
     return function () {
@@ -291,10 +317,12 @@
       this.sceneryGroup = null;
       this.territoryGroup = null;
       this.sparklesGroup = null;
+      this.flakesGroup = null;
       this.ambientBubbles = [];
       this.swayingPlants = [];
       this.foodFlakes = [];
       this.flakesEatenTotal = 0;
+      this.animId = null;
 
       this.citizens = [
         {
@@ -392,12 +420,73 @@
       this.updateSkyAndFog();
       this.setCameraForTheme(this.theme);
 
-      // Sparkles effect group
+      // Sparkles effect group & pool (fixed size to eliminate WebGL buffer churn)
+      this.sparkleGeoAquarium = new THREE.SphereGeometry(0.11, 6, 6);
+      this.sparkleGeoAquarium.userData = { isShared: true };
+      this.sparkleGeoSuburban = new THREE.SphereGeometry(0.08, 6, 6);
+      this.sparkleGeoSuburban.userData = { isShared: true };
+      this.sparkleMaterialCache = new Map();
+
+      this.sparklePoolSize = 128;
+      this.sparklePoolIndex = 0;
+      this.sparklePool = [];
       this.sparklesGroup = new THREE.Group();
       this.scene.add(this.sparklesGroup);
 
+      const defaultSparkleMat = this.getSparkleMaterial(0xffd166, false);
+      for (let i = 0; i < this.sparklePoolSize; i++) {
+        const p = new THREE.Mesh(this.sparkleGeoSuburban, defaultSparkleMat);
+        p.visible = false;
+        p.userData = {
+          active: false,
+          vx: 0,
+          vy: 0,
+          vz: 0,
+          life: 0,
+        };
+        this.sparklesGroup.add(p);
+        this.sparklePool.push(p);
+      }
+
+      // Food Flakes pool (fixed size to eliminate WebGL buffer churn)
+      this.flakeGeo = new THREE.CylinderGeometry(0.18, 0.22, 0.04, 6);
+      this.flakeGeo.userData = { isShared: true };
+      const flakeColors = [0xf59e0b, 0xef4444, 0x10b981, 0xf97316, 0xeab308, 0xec4899];
+      this.flakeMaterials = flakeColors.map((color) => {
+        const mat = new THREE.MeshStandardMaterial({
+          color,
+          roughness: 0.5,
+          side: THREE.DoubleSide,
+        });
+        mat.userData = { isShared: true };
+        return mat;
+      });
+
+      this.flakePoolSize = 64;
+      this.flakePoolIndex = 0;
+      this.foodFlakes = [];
+      this.flakesGroup = new THREE.Group();
+      this.scene.add(this.flakesGroup);
+
+      for (let i = 0; i < this.flakePoolSize; i++) {
+        const mat = this.flakeMaterials[i % this.flakeMaterials.length];
+        const flakeMesh = new THREE.Mesh(this.flakeGeo, mat);
+        flakeMesh.visible = false;
+        flakeMesh.userData = {
+          active: false,
+          pos: { x: 0, y: 0, z: 0 },
+          vy: 1.0,
+          phase: 0,
+          rotSpeed: 0,
+          eaten: false,
+          settledTime: 0,
+        };
+        this.flakesGroup.add(flakeMesh);
+        this.foodFlakes.push(flakeMesh);
+      }
+
       // Resize observer
-      const resizeObserver = new ResizeObserver(() => {
+      this.resizeObserver = new ResizeObserver(() => {
         const w = this.container.clientWidth;
         const h = this.container.clientHeight;
         if (w && h) {
@@ -406,11 +495,13 @@
           this.renderer.setSize(w, h);
         }
       });
-      resizeObserver.observe(this.container);
+      this.resizeObserver.observe(this.container);
 
       // Raycaster for selecting Yumons or dropping food
       this.raycaster = new THREE.Raycaster();
       this.mouse = new THREE.Vector2();
+      this.planeZ0 = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+      this.intersectPoint = new THREE.Vector3();
       this.renderer.domElement.addEventListener('pointerdown', (e) => {
         this.pointerDownTime = performance.now();
         this.pointerDownPos = { x: e.clientX, y: e.clientY };
@@ -425,6 +516,22 @@
           this.onClick(e);
         }
       });
+    }
+
+    getSparkleMaterial(colorHex, isAquarium) {
+      const color = colorHex || (isAquarium ? 0x7ce8ff : 0xffd166);
+      const key = color * 2 + (isAquarium ? 1 : 0);
+      let mat = this.sparkleMaterialCache.get(key);
+      if (!mat) {
+        mat = new THREE.MeshBasicMaterial({
+          color,
+          transparent: isAquarium,
+          opacity: isAquarium ? 0.75 : 1.0,
+        });
+        mat.userData = { isShared: true };
+        this.sparkleMaterialCache.set(key, mat);
+      }
+      return mat;
     }
 
     setCameraForTheme(theme) {
@@ -444,9 +551,17 @@
 
     updateSkyAndFog() {
       if (this.theme === 'Suburban') {
-        const skyColor = new THREE.Color(0xa3c9e0);
-        this.scene.background = skyColor;
-        this.scene.fog = new THREE.FogExp2(0xa3c9e0, 0.007);
+        if (!this.scene.background) {
+          this.scene.background = new THREE.Color(0xa3c9e0);
+        } else {
+          this.scene.background.setHex(0xa3c9e0);
+        }
+        if (!this.scene.fog) {
+          this.scene.fog = new THREE.FogExp2(0xa3c9e0, 0.007);
+        } else {
+          this.scene.fog.color.setHex(0xa3c9e0);
+          this.scene.fog.density = 0.007;
+        }
         if (this.hemiLight) {
           this.hemiLight.color.setHex(0xffffff);
           this.hemiLight.groundColor.setHex(0x4a6350);
@@ -459,9 +574,17 @@
         }
       } else {
         // Real Fish Tank: Deep crystal-clear tropical aquarium water with top LED illumination
-        const waterColor = new THREE.Color(0x0a263d);
-        this.scene.background = waterColor;
-        this.scene.fog = new THREE.FogExp2(0x0c314f, 0.01);
+        if (!this.scene.background) {
+          this.scene.background = new THREE.Color(0x0a263d);
+        } else {
+          this.scene.background.setHex(0x0a263d);
+        }
+        if (!this.scene.fog) {
+          this.scene.fog = new THREE.FogExp2(0x0c314f, 0.01);
+        } else {
+          this.scene.fog.color.setHex(0x0c314f);
+          this.scene.fog.density = 0.01;
+        }
         if (this.hemiLight) {
           this.hemiLight.color.setHex(0x6ee7b7);
           this.hemiLight.groundColor.setHex(0x071e2e);
@@ -477,15 +600,31 @@
     }
 
     buildWorld() {
-      if (this.sceneryGroup) this.scene.remove(this.sceneryGroup);
-      if (this.territoryGroup) this.scene.remove(this.territoryGroup);
+      if (this.sceneryGroup) {
+        disposeHierarchy(this.sceneryGroup);
+        this.scene.remove(this.sceneryGroup);
+      }
+      if (this.territoryGroup) {
+        disposeHierarchy(this.territoryGroup);
+        this.scene.remove(this.territoryGroup);
+      }
 
       this.sceneryGroup = new THREE.Group();
       this.territoryGroup = new THREE.Group();
       this.landmarks = [];
       this.ambientBubbles = [];
       this.swayingPlants = [];
-      this.foodFlakes = [];
+
+      // Deactivate any active food flakes
+      if (this.foodFlakes) {
+        for (let f = 0; f < this.foodFlakes.length; f++) {
+          this.foodFlakes[f].userData.active = false;
+          this.foodFlakes[f].visible = false;
+        }
+      }
+      if (this.flakesGroup) {
+        this.flakesGroup.visible = this.theme === 'FishTank';
+      }
 
       if (this.theme === 'Suburban') {
         // ── Suburban Environment ──
@@ -1053,7 +1192,10 @@
 
     initCitizens() {
       for (const y of this.yumons) {
-        if (y.mesh) this.scene.remove(y.mesh);
+        if (y.mesh) {
+          disposeHierarchy(y.mesh);
+          this.scene.remove(y.mesh);
+        }
       }
       this.yumons = [];
 
@@ -1322,22 +1464,18 @@
       this.updateHUDCard();
     }
 
-    // Interactive Feeding: drops 6-8 multi-colored fish food flakes
+    // Interactive Feeding: drops 6-8 multi-colored fish food flakes from fixed pool
     dropFood(centerX, centerZ) {
       if (this.theme !== 'FishTank') return;
 
-      const flakeColors = [0xf59e0b, 0xef4444, 0x10b981, 0xf97316, 0xeab308, 0xec4899];
       const count = 6 + Math.floor(Math.random() * 3);
 
       for (let f = 0; f < count; f++) {
-        const col = flakeColors[Math.floor(Math.random() * flakeColors.length)];
-        const flakeMat = new THREE.MeshStandardMaterial({
-          color: col,
-          roughness: 0.5,
-          side: THREE.DoubleSide,
-        });
-        const flakeGeo = new THREE.CylinderGeometry(0.18, 0.22, 0.04, 6);
-        const flakeMesh = new THREE.Mesh(flakeGeo, flakeMat);
+        const flakeMesh = this.foodFlakes[this.flakePoolIndex];
+        this.flakePoolIndex = (this.flakePoolIndex + 1) % this.flakePoolSize;
+
+        const mat = this.flakeMaterials[Math.floor(Math.random() * this.flakeMaterials.length)];
+        flakeMesh.material = mat;
 
         const fx = Math.max(-24.0, Math.min(24.0, centerX + (Math.random() - 0.5) * 6.0));
         const fz = Math.max(-7.0, Math.min(7.0, centerZ + (Math.random() - 0.5) * 4.0));
@@ -1345,17 +1483,18 @@
 
         flakeMesh.position.set(fx, fy, fz);
         flakeMesh.rotation.set(Math.random(), Math.random(), Math.random());
-        this.sceneryGroup.add(flakeMesh);
 
-        this.foodFlakes.push({
-          mesh: flakeMesh,
-          pos: { x: fx, y: fy, z: fz },
-          vy: 0.9 + Math.random() * 0.9, // Gentle slow flutter down
-          phase: Math.random() * Math.PI * 2.0,
-          rotSpeed: (Math.random() - 0.5) * 4.0,
-          eaten: false,
-          settledTime: 0,
-        });
+        const u = flakeMesh.userData;
+        u.active = true;
+        u.eaten = false;
+        u.pos.x = fx;
+        u.pos.y = fy;
+        u.pos.z = fz;
+        u.vy = 0.9 + Math.random() * 0.9;
+        u.phase = Math.random() * Math.PI * 2.0;
+        u.rotSpeed = (Math.random() - 0.5) * 4.0;
+        u.settledTime = 0;
+        flakeMesh.visible = true;
 
         // Little feeding splash ripples on the water surface
         this.spawnSparkles(fx, WATER_LEVEL, fz, 0xbae6fd);
@@ -1376,16 +1515,17 @@
     }
 
     findNearestFoodFlake(y) {
-      if (this.foodFlakes.length === 0) return null;
+      if (!this.foodFlakes || this.foodFlakes.length === 0) return null;
       let nearest = null;
       let minDist = Infinity;
       for (let i = 0; i < this.foodFlakes.length; i++) {
         const f = this.foodFlakes[i];
-        if (f.eaten) continue;
-        const dist = Math.hypot(y.pos.x - f.pos.x, y.pos.y - f.pos.y, y.pos.z - f.pos.z);
+        const u = f.userData;
+        if (!u.active || u.eaten) continue;
+        const dist = Math.hypot(y.pos.x - u.pos.x, y.pos.y - u.pos.y, y.pos.z - u.pos.z);
         if (dist < minDist) {
           minDist = dist;
-          nearest = f;
+          nearest = u;
         }
       }
       if (nearest) {
@@ -1462,10 +1602,8 @@
 
       if (this.theme === 'FishTank') {
         // In Fish Tank: Clicking inside the tank drops fish food flakes right there!
-        const planeZ0 = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
-        const intersectPoint = new THREE.Vector3();
-        if (this.raycaster.ray.intersectPlane(planeZ0, intersectPoint)) {
-          const dropX = Math.max(-24.0, Math.min(24.0, intersectPoint.x));
+        if (this.raycaster.ray.intersectPlane(this.planeZ0, this.intersectPoint)) {
+          const dropX = Math.max(-24.0, Math.min(24.0, this.intersectPoint.x));
           const dropZ = (Math.random() - 0.5) * 6.0;
           this.dropFood(dropX, dropZ);
         } else {
@@ -1493,26 +1631,27 @@
 
     spawnSparkles(x, y, z, colorHex) {
       const isAquarium = this.theme === 'FishTank';
+      const geo = isAquarium ? this.sparkleGeoAquarium : this.sparkleGeoSuburban;
+      const mat = this.getSparkleMaterial(colorHex, isAquarium);
+
       for (let i = 0; i < 8; i++) {
-        const pGeo = new THREE.SphereGeometry(isAquarium ? 0.11 : 0.08, 6, 6);
-        const pMat = new THREE.MeshBasicMaterial({
-          color: colorHex || (isAquarium ? 0x7ce8ff : 0xffd166),
-          transparent: isAquarium,
-          opacity: isAquarium ? 0.75 : 1.0,
-        });
-        const p = new THREE.Mesh(pGeo, pMat);
+        const p = this.sparklePool[this.sparklePoolIndex];
+        this.sparklePoolIndex = (this.sparklePoolIndex + 1) % this.sparklePoolSize;
+
+        p.geometry = geo;
+        p.material = mat;
         p.position.set(
           x + (Math.random() - 0.5) * 0.8,
           y + (Math.random() - 0.5) * 0.8,
           z + (Math.random() - 0.5) * 0.8
         );
-        p.userData = {
-          vy: 0.8 + Math.random() * 1.5,
-          vx: (Math.random() - 0.5) * 1.2,
-          vz: (Math.random() - 0.5) * 1.2,
-          life: 1.0,
-        };
-        this.sparklesGroup.add(p);
+        p.scale.set(1, 1, 1);
+        p.userData.vx = (Math.random() - 0.5) * 1.2;
+        p.userData.vy = 0.8 + Math.random() * 1.5;
+        p.userData.vz = (Math.random() - 0.5) * 1.2;
+        p.userData.life = 1.0;
+        p.userData.active = true;
+        p.visible = true;
       }
     }
 
@@ -1521,16 +1660,18 @@
 
       const isAquarium = this.theme === 'FishTank';
 
-      // Update sparkles
-      for (let i = this.sparklesGroup.children.length - 1; i >= 0; i--) {
-        const p = this.sparklesGroup.children[i];
+      // Update sparkles from fixed pool
+      for (let i = 0; i < this.sparklePoolSize; i++) {
+        const p = this.sparklePool[i];
+        if (!p.userData.active) continue;
         p.userData.life -= dt * 1.5;
         p.position.x += p.userData.vx * dt;
         p.position.y += p.userData.vy * dt;
         p.position.z += p.userData.vz * dt;
         p.scale.multiplyScalar(0.96);
         if (p.userData.life <= 0) {
-          this.sparklesGroup.remove(p);
+          p.userData.active = false;
+          p.visible = false;
         }
       }
 
@@ -1563,29 +1704,32 @@
         }
       }
 
-      // Update Falling Food Flakes
+      // Update Falling Food Flakes from fixed pool
       if (isAquarium && this.foodFlakes.length > 0) {
-        for (let f = this.foodFlakes.length - 1; f >= 0; f--) {
+        for (let f = 0; f < this.foodFlakes.length; f++) {
           const flake = this.foodFlakes[f];
-          if (flake.eaten) {
-            this.sceneryGroup.remove(flake.mesh);
-            this.foodFlakes.splice(f, 1);
+          const u = flake.userData;
+          if (!u.active) continue;
+
+          if (u.eaten) {
+            u.active = false;
+            flake.visible = false;
             continue;
           }
 
-          if (flake.pos.y > 0.4) {
-            flake.pos.y -= flake.vy * dt;
-            flake.pos.x += Math.sin(now * 0.004 + flake.phase) * dt * 0.5;
-            flake.pos.z += Math.cos(now * 0.003 + flake.phase) * dt * 0.35;
-            flake.mesh.rotation.x += flake.rotSpeed * dt;
-            flake.mesh.rotation.y += flake.rotSpeed * 0.5 * dt;
-            flake.mesh.position.set(flake.pos.x, flake.pos.y, flake.pos.z);
+          if (u.pos.y > 0.4) {
+            u.pos.y -= u.vy * dt;
+            u.pos.x += Math.sin(now * 0.004 + u.phase) * dt * 0.5;
+            u.pos.z += Math.cos(now * 0.003 + u.phase) * dt * 0.35;
+            flake.rotation.x += u.rotSpeed * dt;
+            flake.rotation.y += u.rotSpeed * 0.5 * dt;
+            flake.position.set(u.pos.x, u.pos.y, u.pos.z);
           } else {
             // Flake has settled on the sand
-            flake.settledTime += dt;
-            if (flake.settledTime > 12.0) {
-              this.sceneryGroup.remove(flake.mesh);
-              this.foodFlakes.splice(f, 1);
+            u.settledTime += dt;
+            if (u.settledTime > 12.0) {
+              u.active = false;
+              flake.visible = false;
             }
           }
         }
@@ -1602,7 +1746,7 @@
 
         // If eating, update target to track falling flake
         if (isAquarium && y.behavior === Behaviors.Eat && y.targetFlake) {
-          if (!y.targetFlake.eaten) {
+          if (!y.targetFlake.eaten && y.targetFlake.active) {
             y.target.x = y.targetFlake.pos.x;
             y.target.y = y.targetFlake.pos.y;
             y.target.z = y.targetFlake.pos.z;
@@ -1666,7 +1810,7 @@
             }
 
             // Check if Yumon caught the food flake!
-            if (y.behavior === Behaviors.Eat && y.targetFlake && !y.targetFlake.eaten) {
+            if (y.behavior === Behaviors.Eat && y.targetFlake && !y.targetFlake.eaten && y.targetFlake.active) {
               const flakeDist = Math.hypot(
                 y.pos.x - y.targetFlake.pos.x,
                 y.pos.y - y.targetFlake.pos.y,
@@ -1813,7 +1957,7 @@
       if (this.theme === 'FishTank') {
         // Natural Fish Tank Decisions across 3D water volume
         // If food flakes exist, prioritize food!
-        if (this.foodFlakes.length > 0 && Math.random() < 0.8) {
+        if (this.foodFlakes.some((f) => f.userData.active && !f.userData.eaten) && Math.random() < 0.8) {
           const flake = this.findNearestFoodFlake(y);
           if (flake) {
             y.behavior = Behaviors.Eat;
@@ -1911,7 +2055,7 @@
     }
 
     animate() {
-      requestAnimationFrame(this.animate);
+      this.animId = requestAnimationFrame(this.animate);
       const now = performance.now();
       const dt = Math.min(0.1, (now - (this.lastTime || now)) / 1000.0);
       this.lastTime = now;
@@ -1919,6 +2063,49 @@
       this.tickSimulation(dt, now);
       this.controls.update();
       this.renderer.render(this.scene, this.camera);
+    }
+
+    dispose() {
+      if (this.animId) {
+        cancelAnimationFrame(this.animId);
+        this.animId = null;
+      }
+      if (this.resizeObserver) {
+        this.resizeObserver.disconnect();
+      }
+      if (this.sceneryGroup) {
+        disposeHierarchy(this.sceneryGroup);
+        this.scene.remove(this.sceneryGroup);
+      }
+      if (this.territoryGroup) {
+        disposeHierarchy(this.territoryGroup);
+        this.scene.remove(this.territoryGroup);
+      }
+      if (this.sparklesGroup) {
+        disposeHierarchy(this.sparklesGroup);
+        this.scene.remove(this.sparklesGroup);
+      }
+      if (this.flakesGroup) {
+        disposeHierarchy(this.flakesGroup);
+        this.scene.remove(this.flakesGroup);
+      }
+      for (const y of this.yumons) {
+        if (y.mesh) {
+          disposeHierarchy(y.mesh);
+          this.scene.remove(y.mesh);
+        }
+      }
+      if (this.sparkleMaterialCache) {
+        this.sparkleMaterialCache.forEach((mat) => mat.dispose());
+        this.sparkleMaterialCache.clear();
+      }
+      this.sparkleGeoAquarium?.dispose();
+      this.sparkleGeoSuburban?.dispose();
+      this.flakeGeo?.dispose();
+      if (this.flakeMaterials) {
+        this.flakeMaterials.forEach((mat) => mat.dispose());
+      }
+      this.renderer?.dispose();
     }
   }
 
@@ -1936,6 +2123,13 @@
   } else {
     startUniverseApp();
   }
+
+  window.addEventListener('beforeunload', () => {
+    if (window.__yumon_universe_app) {
+      window.__yumon_universe_app.dispose();
+      window.__yumon_universe_app = null;
+    }
+  });
 
   // Global callback for state sync
   window.__onUniverseRssSync = function (state) {
