@@ -29,7 +29,7 @@ use burn::{
     module::Ignored,
     nn::{Dropout, DropoutConfig, Embedding, EmbeddingConfig, Linear, LinearConfig},
     prelude::*,
-    record::{BinFileRecorder, FullPrecisionSettings, Recorder},
+    record::{BinBytesRecorder, BinFileRecorder, FullPrecisionSettings, Recorder},
     tensor::{FloatDType, activation::softmax},
 };
 use serde::{Deserialize, Serialize};
@@ -329,6 +329,33 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         let record = recorder
             .load(dir.join("model").into(), device)
             .map_err(|e| anyhow::anyhow!("load: {e:?}"))?;
+        let config = YumonDecBrainConfig {
+            vocab_size: metadata.vocab_size,
+            training_stage: metadata.training_stage,
+            dropout_rate: metadata.dropout_rate,
+            embed_dim: metadata.embed_dim,
+            hidden_units: metadata.hidden_units,
+            n_layers: metadata.n_layers,
+            attn_heads: metadata.attn_heads,
+            ff_dim: metadata.ff_dim,
+            max_seq_len: metadata.max_seq_len,
+        };
+        let model = config.init::<B>(device).load_record(record);
+        Ok((model, tokenizer, config))
+    }
+
+    pub fn load_from_bytes(
+        model_bytes: &[u8],
+        tokenizer_bytes: &[u8],
+        metadata_json: &str,
+        device: &B::Device,
+    ) -> Result<(Self, TokenizerKind, YumonDecBrainConfig)> {
+        let metadata: DecMetadata = serde_json::from_str(metadata_json)?;
+        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load_from_bytes(tokenizer_bytes)?);
+        let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+        let record = recorder
+            .load(model_bytes.to_vec(), device)
+            .map_err(|e| anyhow::anyhow!("load from bytes: {e:?}"))?;
         let config = YumonDecBrainConfig {
             vocab_size: metadata.vocab_size,
             training_stage: metadata.training_stage,

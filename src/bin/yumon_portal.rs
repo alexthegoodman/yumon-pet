@@ -45,25 +45,17 @@ mod desktop {
         EncoderDecoder,
     }
 
+    const EMBEDDED_MODEL_BYTES: &[u8] = include_bytes!("../../assets/portal_model/model.bin");
+    const EMBEDDED_TOKENIZER_BYTES: &[u8] = include_bytes!("../../assets/portal_model/tokenizer.json");
+    const EMBEDDED_METADATA_STR: &str = include_str!("../../assets/portal_model/metadata.json");
+    const EMBEDDED_VOCAB_STR: &str = include_str!("../../assets/portal_model/kilo_talk_vocab.json");
+
     #[derive(Parser)]
-    #[command(about = "Yumon RSS: daily Product Hunt ideas with local commentary")]
+    #[command(about = "Yumon Portal: daily Product Hunt ideas with local commentary")]
     struct Args {
-        #[arg(
-            long,
-            // default_value = "D:/models/runpod/large1/512h_16l_8a_256len_b32_Moe_e4_k1_Language_1m"
-            // default_value = "D:/models/runpod/run1024h/1024h_24l_32a_256len_b16_DecoderOnly_Language_200k"
-            // default_value = "D:/models/runpod/bf16-1/1024h_24l_32a_256len_b16_DecoderOnly_Language_bf16_150k" // good
-            // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide/code_256h_12l_8a_1024ff_256len_b4_Moe_e4_k1_f32_yumon_talk_v1"
-            // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-2/code_256h_12l_8a_1024ff_256len_b4_Moe_e4_k1_f32_yumon_talk_v1" // quite good
-            // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-large-1/code_512h_16l_8a_2048ff_256len_b2_Moe_e4_k1_f32_yumon_talk_v1" // bad
-            // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-small-1/code_128h_8l_4a_512ff_256len_b4_Moe_e4_k1_f32_yumon_talk_v1" // also quite bad
-            // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-deep-1/code_256h_12l_8a_1024ff_1024len_b4_Moe_e4_k1_f32_yumon_talk_v1"
-            // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-deep-2/code_64h_6l_4a_256ff_1024len_b4_Moe_e4_k1_f32_yumon_talk_v1"
-            // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-deep-4/code_256h_16l_8a_1024ff_1024len_b2_Moe_e8_k2_f32_yumon_talk_v1"
-            // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-deep-4/code_64h_4l_4a_256ff_1024len_b4_Moe_e4_k1_f32_yumon_talk_v1" // good
-            default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-moe-kilo-glide-4k-1024/code_64h_4l_4a_256ff_1024len_b4_Moe_e4_k1_f32_yumon_talk_v1"
-        )]
-        checkpoint: String,
+        /// Optional path to custom checkpoint directory (defaults to embedded model if omitted).
+        #[arg(long)]
+        checkpoint: Option<String>,
         #[arg(long, value_enum, default_value = "decoder-only")]
         architecture: Architecture,
         /// JSON history location (defaults to YumonRSS's local application data).
@@ -78,12 +70,12 @@ mod desktop {
         /// Enable Yumon Talk bidirectional translation (English -> Yumon Talk prompt, Yumon Talk -> English reply).
         #[arg(long)]
         yumon_talk: bool,
-        /// Path to Yumon Talk vocabulary JSON (defaults to training-cache/kilo_talk_vocab.json).
-        #[arg(long, default_value = "training-cache/kilo_talk_vocab.json")]
-        yumon_talk_vocab: PathBuf,
-        /// Path to N-gram statistical decompressor model (defaults to training-cache/ngram_decompressor.bin).
-        #[arg(long, default_value = "training-cache/ngram_decompressor.bin")]
-        decompressor: PathBuf,
+        /// Optional path to Yumon Talk vocabulary JSON (defaults to embedded vocabulary if omitted).
+        #[arg(long)]
+        yumon_talk_vocab: Option<PathBuf>,
+        /// Optional path to N-gram statistical decompressor model (falls back to embedded vocabulary).
+        #[arg(long)]
+        decompressor: Option<PathBuf>,
         /// Disable decompressor and output raw Yumon Talk tokens.
         #[arg(long)]
         no_decompressor: bool,
@@ -401,6 +393,36 @@ mod desktop {
         }
 
         #[test]
+        fn embedded_assets_are_valid() {
+            let meta: serde_json::Value = serde_json::from_str(EMBEDDED_METADATA_STR).unwrap();
+            assert_eq!(meta["training_stage"], "Language");
+            assert_eq!(meta["vocab_size"], 4096);
+            assert!(EMBEDDED_MODEL_BYTES.len() > 1_000_000);
+            assert!(EMBEDDED_TOKENIZER_BYTES.len() > 1_000);
+            let parsed_vocab = yumon_pet::brain::yumon_talk::YumonTalkVocab::load_from_str(EMBEDDED_VOCAB_STR);
+            assert!(parsed_vocab.is_ok());
+            assert_eq!(parsed_vocab.unwrap().vocab_size, 4096);
+        }
+
+        #[test]
+        fn test_embedded_model_inference_smoke() {
+            let args = Args {
+                checkpoint: None,
+                architecture: Architecture::DecoderOnly,
+                history: None,
+                cache: None,
+                check_feeds: false,
+                yumon_talk: true,
+                yumon_talk_vocab: None,
+                decompressor: None,
+                no_decompressor: false,
+            };
+            let responder = load_responder(&args).expect("load_responder with embedded model should succeed");
+            let reply = responder("Hello", PromptKind::Chat, &[]).expect("inference with embedded model should succeed");
+            assert!(!reply.trim().is_empty());
+        }
+
+        #[test]
         fn chat_prompt_scales_reply_budget_for_large_context() {
             let tokenizer = tokenizer();
             let history = vec![
@@ -415,57 +437,67 @@ mod desktop {
     }
 
     fn load_responder(args: &Args) -> Result<Responder> {
-        let metadata: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
-            PathBuf::from(&args.checkpoint).join("metadata.json"),
-        )?)?;
+        let metadata: serde_json::Value = if let Some(ckpt) = &args.checkpoint {
+            serde_json::from_str(&std::fs::read_to_string(
+                PathBuf::from(ckpt).join("metadata.json"),
+            )?)?
+        } else {
+            serde_json::from_str(EMBEDDED_METADATA_STR)?
+        };
         anyhow::ensure!(
             metadata["training_stage"] == "Language",
-            "RSS requires a Language-stage checkpoint"
+            "Portal requires a Language-stage checkpoint"
         );
         let vocab_size_is_4k = metadata["vocab_size"].as_u64() == Some(4096);
         let use_yumon_talk = args.yumon_talk || vocab_size_is_4k;
         if use_yumon_talk {
-            if args.yumon_talk_vocab.exists() {
-                println!("[Yumon RSS] Loading Yumon Talk vocabulary from {} ...", args.yumon_talk_vocab.display());
-                yumon_talk::load_global_vocab_file(&args.yumon_talk_vocab)?;
+            if let Some(vocab_path) = &args.yumon_talk_vocab {
+                if vocab_path.exists() {
+                    println!("[Yumon Portal] Loading Yumon Talk vocabulary from {} ...", vocab_path.display());
+                    yumon_talk::load_global_vocab_file(vocab_path)?;
+                } else {
+                    println!("[Yumon Portal] Specified vocab file {} not found; using embedded vocabulary.", vocab_path.display());
+                    yumon_talk::load_global_vocab_str(EMBEDDED_VOCAB_STR)?;
+                }
             } else {
-                eprintln!("[Yumon RSS] Warning: Yumon Talk vocab file {} not found; using default vocab.", args.yumon_talk_vocab.display());
+                println!("[Yumon Portal] Using embedded Yumon Talk vocabulary.");
+                yumon_talk::load_global_vocab_str(EMBEDDED_VOCAB_STR)?;
             }
         }
         let decompressor: Option<std::sync::Arc<NGramDecompressor>> = if use_yumon_talk && !args.no_decompressor {
-            if args.decompressor.exists() {
-                println!("[Yumon RSS] Loading N-gram decompressor from {} ...", args.decompressor.display());
-                match NGramDecompressor::load_from_file(&args.decompressor) {
+            let candidate_path = args.decompressor.clone().or_else(|| {
+                if let Ok(exe_path) = std::env::current_exe() {
+                    let beside = exe_path.with_file_name("ngram_decompressor.bin");
+                    if beside.exists() {
+                        return Some(beside);
+                    }
+                }
+                None
+            });
+
+            if let Some(path) = candidate_path {
+                println!("[Yumon Portal] Loading N-gram decompressor from {} ...", path.display());
+                match NGramDecompressor::load_from_file(&path) {
                     Ok(d) => Some(std::sync::Arc::new(d)),
                     Err(e) => {
-                        eprintln!("[Yumon RSS] Warning: Failed to load decompressor: {e}");
+                        eprintln!("[Yumon Portal] Warning: Failed to load decompressor: {e}");
                         None
                     }
                 }
             } else {
-                let default_samples = std::path::Path::new("training-cache/samples.bin");
-                if default_samples.exists() {
-                    println!("[Yumon RSS] Decompressor not found at {}; training from {} ...", args.decompressor.display(), default_samples.display());
-                    let mut d = NGramDecompressor::new(3);
-                    if let Ok(count) = d.train_on_cache(default_samples, None) {
-                        println!("[Yumon RSS] Trained decompressor on {count} samples; saving to {} ...", args.decompressor.display());
-                        let _ = d.save_to_file(&args.decompressor);
-                        Some(std::sync::Arc::new(d))
-                    } else {
-                        None
-                    }
-                } else {
-                    eprintln!("[Yumon RSS] Notice: Decompressor model not found; raw tokens will be shown.");
-                    None
-                }
+                println!("[Yumon Portal] External decompressor model file not present; using embedded vocabulary reconstruction.");
+                None
             }
         } else {
             None
         };
         let device = Default::default();
-        macro_rules! load {
-            ($model:ty, $generate:expr) => {{
-                let (brain, tokenizer, config) = <$model>::load(&args.checkpoint, &device)?;
+
+        macro_rules! build_responder {
+            ($brain:expr, $tokenizer:expr, $config:expr, $model_ty:ty, $generate:expr) => {{
+                let brain = $brain;
+                let tokenizer = $tokenizer;
+                let config = $config;
                 anyhow::ensure!(
                     config.training_stage == TrainingStage::Language,
                     "Expected Language stage"
@@ -479,7 +511,7 @@ mod desktop {
                             match yumon_talk::english_to_yumon_with_map(text) {
                                 Ok((talk, context)) => (talk, context),
                                 Err(e) => {
-                                    eprintln!("[Yumon RSS] English -> Yumon Talk translation fallback: {e}");
+                                    eprintln!("[Yumon Portal] English -> Yumon Talk translation fallback: {e}");
                                     (text.to_string(), yumon_talk::TranslationContext::new())
                                 }
                             }
@@ -495,7 +527,7 @@ mod desktop {
                                 chat_prompt(&prompt_text, history, config.max_seq_len, &tokenizer, use_yumon_talk)?
                             }
                         };
-                        let generate: fn(&$model, &TokenizerKind, &str, usize, &_) -> String =
+                        let generate: fn(&$model_ty, &TokenizerKind, &str, usize, &_) -> String =
                             $generate;
                         let reply = generate(
                             &brain,
@@ -519,12 +551,15 @@ mod desktop {
                                 match dec.decompress_with_context(&reply, &vocab, &ctx) {
                                     Ok(decompressed) => decompressed,
                                     Err(e) => {
-                                        eprintln!("[Yumon RSS] Decompressor fallback: {e}");
-                                        reply
+                                        eprintln!("[Yumon Portal] Decompressor fallback: {e}");
+                                        let mut rng = rand::thread_rng();
+                                        vocab.yumon_to_english_with_context(&reply, &ctx, &mut rng).unwrap_or(reply)
                                     }
                                 }
                             } else {
-                                reply
+                                let vocab = yumon_talk::get_global_vocab();
+                                let mut rng = rand::thread_rng();
+                                vocab.yumon_to_english_with_context(&reply, &ctx, &mut rng).unwrap_or(reply)
                             }
                         } else {
                             reply
@@ -535,27 +570,42 @@ mod desktop {
                 ) as Responder)
             }};
         }
-        let arch = if metadata.get("num_experts").is_some() && matches!(args.architecture, Architecture::DecoderOnly) {
-            println!("[Yumon RSS] Auto-detected MoE checkpoint metadata; using MoE architecture.");
-            Architecture::Moe
+
+        if let Some(ckpt) = &args.checkpoint {
+            let arch = if metadata.get("num_experts").is_some() && matches!(args.architecture, Architecture::DecoderOnly) {
+                println!("[Yumon Portal] Auto-detected MoE checkpoint metadata; using MoE architecture.");
+                Architecture::Moe
+            } else {
+                args.architecture
+            };
+            println!("[Yumon Portal] Loading checkpoint from directory: {ckpt}");
+            match arch {
+                Architecture::DecoderOnly => {
+                    let (brain, tokenizer, config) = YumonDecBrain::<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>::load(ckpt, &device)?;
+                    build_responder!(brain, tokenizer, config, YumonDecBrain<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>, |b, t, p, n, d| b.generate_unmasked_parsed(t, p, n, d).raw_output)
+                }
+                Architecture::Moe => {
+                    let (brain, tokenizer, config) = YumonMoeBrain::<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>::load(ckpt, &device)?;
+                    build_responder!(brain, tokenizer, config, YumonMoeBrain<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>, |b, t, p, n, d| b.generate_unmasked_parsed(t, p, n, d).raw_output)
+                }
+                Architecture::Xlstm => {
+                    let (brain, tokenizer, config) = YumonXLstmBrain::<Wgpu>::load(ckpt, &device)?;
+                    build_responder!(brain, tokenizer, config, YumonXLstmBrain<Wgpu>, |b, t, p, n, d| b.generate_unmasked_parsed(t, p, n, d).raw_output)
+                }
+                Architecture::EncoderDecoder => {
+                    let (brain, tokenizer, config) = YumonBrain::<Wgpu>::load(ckpt, &device)?;
+                    build_responder!(brain, tokenizer, config, YumonBrain<Wgpu>, |b, t, p, n, d| b.generate_unmasked_parsed::<cubecl::wgpu::WgpuRuntime>(t, p, n, d).raw_output)
+                }
+            }
         } else {
-            args.architecture
-        };
-        match arch {
-            // The decoder's custom FlashAttention ops require an unfused backend.
-            Architecture::DecoderOnly => load!(
-                YumonDecBrain<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>,
-                |b, t, p, n, d| b.generate_unmasked_parsed(t, p, n, d).raw_output
-            ),
-            Architecture::Moe => load!(YumonMoeBrain<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>, |b, t, p, n, d| b
-                .generate_unmasked_parsed(t, p, n, d)
-                .raw_output),
-            Architecture::Xlstm => load!(YumonXLstmBrain<Wgpu>, |b, t, p, n, d| b
-                .generate_unmasked_parsed(t, p, n, d)
-                .raw_output),
-            Architecture::EncoderDecoder => load!(YumonBrain<Wgpu>, |b, t, p, n, d| b
-                .generate_unmasked_parsed::<cubecl::wgpu::WgpuRuntime>(t, p, n, d)
-                .raw_output),
+            println!("[Yumon Portal] Loading self-contained embedded MoE checkpoint...");
+            let (brain, tokenizer, config) = YumonMoeBrain::<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>::load_from_bytes(
+                EMBEDDED_MODEL_BYTES,
+                EMBEDDED_TOKENIZER_BYTES,
+                EMBEDDED_METADATA_STR,
+                &device,
+            )?;
+            build_responder!(brain, tokenizer, config, YumonMoeBrain<burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>>, |b, t, p, n, d| b.generate_unmasked_parsed(t, p, n, d).raw_output)
         }
     }
 

@@ -13,3 +13,5 @@ example.rs
 training-cache
 __pycache__
 checkpoints
+
+assets/*

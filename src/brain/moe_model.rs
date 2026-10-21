@@ -17,7 +17,7 @@ use burn::{
         RotaryEncodingConfig,
     },
     prelude::*,
-    record::{BinFileRecorder, FullPrecisionSettings, Recorder},
+    record::{BinBytesRecorder, BinFileRecorder, FullPrecisionSettings, Recorder},
     tensor::{
         IndexingUpdateOp, FloatDType,
         activation::{log_softmax, sigmoid, softmax},
@@ -613,6 +613,55 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                 }
             }
             Err(error) => anyhow::bail!("load: {error:?}"),
+        };
+
+        let config = YumonMoeBrainConfig {
+            vocab_size: metadata.vocab_size,
+            embed_dim: metadata.embed_dim,
+            hidden_units: metadata.hidden_units,
+            n_layers: metadata.n_layers,
+            attn_heads: metadata.attn_heads,
+            ff_dim: metadata.ff_dim,
+            max_seq_len: metadata.max_seq_len,
+            training_stage: metadata.training_stage,
+            dropout_rate: metadata.dropout_rate,
+            num_experts: metadata.num_experts,
+            top_k: metadata.top_k,
+            aux_loss_weight: metadata.aux_loss_weight,
+            z_loss_weight: metadata.z_loss_weight,
+            adaptive_depth: metadata.adaptive_depth,
+            kv_heads: metadata.kv_heads,
+        };
+
+        let model = config.init::<B>(device).load_record(record);
+
+        Ok((model, tokenizer, config))
+    }
+
+    pub fn load_from_bytes(
+        model_bytes: &[u8],
+        tokenizer_bytes: &[u8],
+        metadata_json: &str,
+        device: &B::Device,
+    ) -> Result<(Self, TokenizerKind, YumonMoeBrainConfig)> {
+        let metadata: MoeMetadata = serde_json::from_str(metadata_json)?;
+
+        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load_from_bytes(tokenizer_bytes)?);
+
+        let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+        let record = match recorder.load(model_bytes.to_vec(), device) {
+            Ok(record) => record,
+            // Checkpoints from before adaptive depth have no exit gate field.
+            Err(error) if metadata.adaptive_depth.is_none() => {
+                let legacy: LegacyMoeBrainRecord<B> = recorder.load(model_bytes.to_vec(), device)
+                    .map_err(|e| anyhow::anyhow!("load: {error:?}; legacy layout: {e:?}"))?;
+                YumonMoeBrainRecord {
+                    config: legacy.config, embedding: legacy.embedding, rope: legacy.rope,
+                    blocks: legacy.blocks, norm: legacy.norm, dropout: legacy.dropout,
+                    token_head: legacy.token_head, exit_gates: Vec::new(),
+                }
+            }
+            Err(error) => anyhow::bail!("load from bytes: {error:?}"),
         };
 
         let config = YumonMoeBrainConfig {

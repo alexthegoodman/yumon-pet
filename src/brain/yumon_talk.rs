@@ -448,21 +448,25 @@ impl YumonTalkVocab {
         self.dynamic_cache = Arc::new(RwLock::new(HashMap::new()));
     }
 
-    pub fn load_from_file(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading vocab file {}", path.display()))?;
-        if let Ok(mut kilo) = serde_json::from_str::<super::kilo_vocab::KiloVocab>(&text) {
+    pub fn load_from_str(text: &str) -> Result<Self> {
+        if let Ok(mut kilo) = serde_json::from_str::<super::kilo_vocab::KiloVocab>(text) {
             kilo.rebuild_indices();
             return Ok(kilo.to_yumon_talk_vocab());
         }
-        if let Ok(mut vocab) = serde_json::from_str::<Self>(&text) {
+        if let Ok(mut vocab) = serde_json::from_str::<Self>(text) {
             vocab.rebuild_indices();
             return Ok(vocab);
         }
-        let mut vocab: Self = serde_json::from_str(&text)
-            .with_context(|| format!("parsing vocab file {}", path.display()))?;
+        let mut vocab: Self = serde_json::from_str(text)
+            .context("parsing vocab JSON")?;
         vocab.rebuild_indices();
         Ok(vocab)
+    }
+
+    pub fn load_from_file(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading vocab file {}", path.display()))?;
+        Self::load_from_str(&text)
     }
 
     pub fn save_to_file(&self, path: &Path) -> Result<()> {
@@ -1063,6 +1067,12 @@ pub fn set_global_vocab(vocab: YumonTalkVocab) {
     let rw = GLOBAL_VOCAB.get_or_init(|| RwLock::new(YumonTalkVocab::empty()));
     let mut guard = rw.write().expect("global vocab lock poisoned");
     *guard = vocab;
+}
+
+pub fn load_global_vocab_str(json_text: &str) -> Result<()> {
+    let vocab = YumonTalkVocab::load_from_str(json_text)?;
+    set_global_vocab(vocab);
+    Ok(())
 }
 
 pub fn load_global_vocab_file(path: &Path) -> Result<()> {
