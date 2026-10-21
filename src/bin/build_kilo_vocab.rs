@@ -191,6 +191,9 @@ fn main() -> Result<()> {
     model.save_tokenizer_json(&tokenizer_dir)?;
     println!("Successfully saved HuggingFace tokenizer.json at {}!", tokenizer_dir.display());
 
+    let legacy_tok_dir = args.output_vocab.parent().unwrap_or(std::path::Path::new(".")).join("yumon_talk_tokenizer");
+    let _ = model.save_tokenizer_json(&legacy_tok_dir);
+
     // 4. Previews and Analytics
     println!("\n[4/4] Running encoding previews and quality analytics...");
     let mut preview_count = 0usize;

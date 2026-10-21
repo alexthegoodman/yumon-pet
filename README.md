@@ -7,27 +7,33 @@ with and without doc comments.
 
 If you are retraining Yumon Talk MoE:
 
-First, may need to update your data sources in train.rs.
+> [!NOTE]
+> Update your data sources in `src/brain/train.rs` first if needed.
 
 #### 1. Regenerate base samples with turn 0 and "Human: " prefix
-cargo run --release --bin cache_samples -- [your-cache-args]
+```sh
+cargo run --release --bin cache_samples -- --max-seq-len 1024
+```
 
-I use `-- --max-seq-len 1024`
-
-#### Then
+#### 2. Build the data-driven 4k vocabulary & tokenizer
+```sh
 cargo run --release --bin build_kilo_vocab
+```
 
-#### 2. (Optional) Refresh the 4k vocab frequencies
-cargo run --release --bin build_yumon_talk_vocab
+#### 3. Regenerate the compressed sample cache
+```sh
+cargo run --release --bin cache_yumon_talk -- --vocab training-cache/kilo_talk_vocab.json --output training-cache/kilo_talk_samples.bin --max-seq-len 1024 --force
+```
 
-#### 3. Regenerate the Yumon Talk sample cache
-cargo run --release --bin cache_yumon_talk -- --force
-
-#### 4. (Optional) Refresh the n-gram decompressor
+#### 4. Refresh the n-gram decompressor
+```sh
 cargo run --release --bin build_decompressor
+```
 
 #### 5. Start training
+```sh
 cargo run --release --bin train_code -- --config configs/yumon-talk-moe.json
+```
 
 ## Train and deploy Yumon Code
 
@@ -216,5 +222,3 @@ vocab_size                                                             │ 4096 
 batch_size                                                             │ 2                                                                      │ Batch size
 
 epochs                                                                 │ 10                                                                     │ Total training epochs
-
-
