@@ -11,6 +11,7 @@ use {
     std::time::Instant,
     yumon_pet::brain::{
         decompressor::NGramDecompressor,
+        kilo_vocab::KiloVocab,
         yumon_talk::{TranslationContext, YumonTalkVocab},
     },
 };
@@ -35,8 +36,8 @@ struct Args {
     #[arg(long)]
     limit: Option<usize>,
 
-    /// Path to Yumon Talk vocabulary JSON (default: training-cache/yumon_talk_vocab.json)
-    #[arg(long, default_value = "training-cache/yumon_talk_vocab.json")]
+    /// Path to vocabulary JSON (default: training-cache/kilo_talk_vocab.json)
+    #[arg(long, default_value = "training-cache/kilo_talk_vocab.json")]
     vocab: PathBuf,
 
     /// Number of preview comparisons to print
@@ -84,9 +85,16 @@ fn main() -> Result<()> {
     println!("Saved decompressor model ({:.1} KB)", file_size_kb);
 
     // [3/3] Preview decompression comparison
-    if args.vocab.exists() && args.previews > 0 {
+    let vocab_path = if args.vocab.exists() {
+        args.vocab
+    } else if std::path::Path::new("training-cache/yumon_talk_vocab.json").exists() {
+        PathBuf::from("training-cache/yumon_talk_vocab.json")
+    } else {
+        args.vocab
+    };
+
+    if vocab_path.exists() && args.previews > 0 {
         println!("\n[3/3] Decompression Preview & Comparison (Top {} samples):", args.previews);
-        let vocab = YumonTalkVocab::load_from_file(&args.vocab)?;
 
         let test_sentences = [
             "This release made a significant impact on performance.",
@@ -96,29 +104,47 @@ fn main() -> Result<()> {
             "Nintendo announced an exciting handheld console.",
         ];
 
-        let mut rng = rand::thread_rng();
+        if let Ok(kilo) = KiloVocab::load_from_json(&vocab_path) {
+            println!("Loaded Kilo Tokenizer / Vocab Mapping Model from {} ({} tokens)", vocab_path.display(), kilo.vocab_size);
+            for (i, &sentence) in test_sentences.iter().take(args.previews).enumerate() {
+                let mut ctx = TranslationContext::new();
+                let tokens = match kilo.encode(sentence, &mut ctx) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                let compressed_text = kilo.decode_tokens(&tokens);
 
-        for (i, &sentence) in test_sentences.iter().take(args.previews).enumerate() {
-            let mut ctx = TranslationContext::new();
-            let tokens = match vocab.english_to_yumon_tokens(sentence, &mut ctx) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            let yumon_talk = vocab.detokenize_yumon(&tokens);
+                let t0 = Instant::now();
+                let ngram_decomp = decompressor.decompress_kilo(&tokens, &kilo, &ctx, 4)?;
+                let latency_us = t0.elapsed().as_micros();
 
-            // Random synonym sampling (old approach)
-            let random_decomp = vocab.yumon_to_english_with_context(&yumon_talk, &ctx, &mut rng).unwrap_or_default();
+                println!("\n--- Sample #{} ---", i + 1);
+                println!("  Original:       {}", sentence);
+                println!("  Compressed:     {}", compressed_text);
+                println!("  N-Gram Model:   {} ({:>4} µs)", ngram_decomp, latency_us);
+            }
+        } else if let Ok(vocab) = YumonTalkVocab::load_from_file(&vocab_path) {
+            println!("Loaded Yumon Talk vocabulary from {}", vocab_path.display());
+            let mut rng = rand::thread_rng();
+            for (i, &sentence) in test_sentences.iter().take(args.previews).enumerate() {
+                let mut ctx = TranslationContext::new();
+                let tokens = match vocab.english_to_yumon_tokens(sentence, &mut ctx) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                let yumon_talk = vocab.detokenize_yumon(&tokens);
+                let random_decomp = vocab.yumon_to_english_with_context(&yumon_talk, &ctx, &mut rng).unwrap_or_default();
 
-            // N-Gram Statistical Disambiguation (new approach)
-            let t0 = Instant::now();
-            let ngram_decomp = decompressor.decompress_with_context(&yumon_talk, &vocab, &ctx)?;
-            let latency_us = t0.elapsed().as_micros();
+                let t0 = Instant::now();
+                let ngram_decomp = decompressor.decompress_with_context(&yumon_talk, &vocab, &ctx)?;
+                let latency_us = t0.elapsed().as_micros();
 
-            println!("\n--- Sample #{} ---", i + 1);
-            println!("  Original:       {}", sentence);
-            println!("  Compressed:     {}", yumon_talk);
-            println!("  Random Synonym: {}", random_decomp);
-            println!("  N-Gram Model:   {} ({:>4} µs)", ngram_decomp, latency_us);
+                println!("\n--- Sample #{} ---", i + 1);
+                println!("  Original:       {}", sentence);
+                println!("  Compressed:     {}", yumon_talk);
+                println!("  Random Synonym: {}", random_decomp);
+                println!("  N-Gram Model:   {} ({:>4} µs)", ngram_decomp, latency_us);
+            }
         }
     }
 
