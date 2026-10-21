@@ -622,6 +622,48 @@ impl KiloVocab {
         model.rebuild_indices();
         Ok(model)
     }
+
+    /// Export as a standard HuggingFace WordLevel `tokenizer.json` for Burn / tokenizers runtime.
+    pub fn save_tokenizer_json(&self, dir: &Path) -> Result<()> {
+        let file_path = if dir.extension().map_or(false, |ext| ext == "json") {
+            dir.to_path_buf()
+        } else {
+            dir.join("tokenizer.json")
+        };
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let added_tokens = serde_json::json!([
+            { "id": 0, "content": "<pad>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
+            { "id": 1, "content": "<s>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
+            { "id": 2, "content": "</s>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
+            { "id": 3, "content": "<unk>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true }
+        ]);
+        let mut vocab_map = serde_json::Map::new();
+        for (i, tok) in self.id_to_token.iter().enumerate() {
+            vocab_map.insert(tok.clone(), serde_json::Value::Number(serde_json::Number::from(i)));
+        }
+        let root = serde_json::json!({
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": added_tokens,
+            "normalizer": null,
+            "pre_tokenizer": {
+                "type": "WhitespaceSplit"
+            },
+            "post_processor": null,
+            "decoder": null,
+            "model": {
+                "type": "WordLevel",
+                "vocab": vocab_map,
+                "unk_token": "<unk>"
+            }
+        });
+        let json = serde_json::to_string_pretty(&root)?;
+        std::fs::write(&file_path, json)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

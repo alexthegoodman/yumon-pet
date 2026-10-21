@@ -186,6 +186,11 @@ fn main() -> Result<()> {
     model.save_to_json(&args.output_vocab)?;
     println!("Successfully saved {} (version {})!", args.output_vocab.display(), model.version);
 
+    let tokenizer_dir = args.output_vocab.parent().unwrap_or(std::path::Path::new(".")).join("kilo_talk_tokenizer");
+    println!("Saving HuggingFace WordLevel tokenizer to {} ...", tokenizer_dir.display());
+    model.save_tokenizer_json(&tokenizer_dir)?;
+    println!("Successfully saved HuggingFace tokenizer.json at {}!", tokenizer_dir.display());
+
     // 4. Previews and Analytics
     println!("\n[4/4] Running encoding previews and quality analytics...");
     let mut preview_count = 0usize;
