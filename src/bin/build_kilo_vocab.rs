@@ -46,6 +46,10 @@ struct Args {
     #[arg(long, default_value_t = 25)]
     max_cluster_size: usize,
 
+    /// Minimum word occurrences required to perform multi-gram distributional matching (default: 10)
+    #[arg(long, default_value_t = 10)]
+    min_context_freq: usize,
+
     /// Minimum word frequency in corpus to be considered (default: 2)
     #[arg(long, default_value_t = 2)]
     min_word_freq: usize,
@@ -106,6 +110,7 @@ fn main() -> Result<()> {
     println!("Max phrase tokens:    {}", args.max_phrases);
     println!("Min mapping score:    {:.2} (words below this are dropped)", args.min_mapping_score);
     println!("Max cluster size:     {}", args.max_cluster_size);
+    println!("Min context freq:     {} (minimum occurrences for distributional matching)", args.min_context_freq);
     println!("Min word frequency:   {}", args.min_word_freq);
     println!("Min phrase frequency: {}", args.min_phrase_freq);
 
@@ -130,20 +135,27 @@ fn main() -> Result<()> {
         let words = extract_words(&combined);
         let len = words.len();
 
-        // Count unigrams and collect N-gram sandwich context frames (L, R)
+        // Count unigrams and collect multi-gram context frames (left 4-gram & right 4-gram)
         for i in 0..len {
             total_tokens += 1;
             let w = &words[i];
             *word_counts.entry(w.clone()).or_insert(0) += 1;
 
-            let l = if i > 0 { &words[i - 1] } else { "<s>" };
-            let r = if i + 1 < len { &words[i + 1] } else { "</s>" };
-            let h = kilo_vocab::hash_context(l, r);
+            let w_minus2 = if i >= 2 { &words[i - 2] } else { "<s>" };
+            let w_minus1 = if i >= 1 { &words[i - 1] } else { "<s>" };
+            let w_plus1 = if i + 1 < len { &words[i + 1] } else { "</s>" };
+            let w_plus2 = if i + 2 < len { &words[i + 2] } else { "</s>" };
+
+            let h_left = kilo_vocab::hash_multigram_left(w_minus2, w_minus1, w_plus1);
+            let h_right = kilo_vocab::hash_multigram_right(w_minus1, w_plus1, w_plus2);
 
             let frames = word_contexts.entry(w.clone()).or_default();
-            // Cap at 100 context frames per word to maintain strict memory bounds
-            if frames.len() < 100 && !frames.contains(&h) {
-                frames.push(h);
+            // Cap at 150 context frames per word to maintain strict memory bounds
+            if frames.len() < 150 && !frames.contains(&h_left) {
+                frames.push(h_left);
+            }
+            if frames.len() < 150 && !frames.contains(&h_right) {
+                frames.push(h_right);
             }
         }
 
@@ -184,7 +196,7 @@ fn main() -> Result<()> {
     );
 
     // 2. Build KiloVocab mapping model using empirical N-gram context distributions
-    println!("\n[2/4] Inducing 4,096-token vocabulary using N-gram context distributions (Zero WordNet)...");
+    println!("\n[2/4] Inducing 4,096-token vocabulary using multi-gram context distributions (Zero WordNet)...");
     let model = KiloVocab::learn_from_corpus(
         &word_counts,
         &phrase_counts,
@@ -192,6 +204,7 @@ fn main() -> Result<()> {
         args.max_phrases,
         args.min_mapping_score,
         args.max_cluster_size,
+        args.min_context_freq,
         Some(&word_contexts),
     );
 

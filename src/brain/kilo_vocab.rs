@@ -68,6 +68,30 @@ pub fn hash_context(left: &str, right: &str) -> ContextFrameHash {
     h
 }
 
+/// Hash a left-biased 4-gram context frame `(w_minus2, w_minus1, __, w_plus1)`.
+#[inline]
+pub fn hash_multigram_left(w_minus2: &str, w_minus1: &str, w_plus1: &str) -> ContextFrameHash {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in w_minus2.as_bytes() { h ^= *b as u64; h = h.wrapping_mul(0x100000001b3); }
+    h ^= 0x20; h = h.wrapping_mul(0x100000001b3);
+    for b in w_minus1.as_bytes() { h ^= *b as u64; h = h.wrapping_mul(0x100000001b3); }
+    h ^= 0x20; h = h.wrapping_mul(0x100000001b3);
+    for b in w_plus1.as_bytes() { h ^= *b as u64; h = h.wrapping_mul(0x100000001b3); }
+    h
+}
+
+/// Hash a right-biased 4-gram context frame `(w_minus1, __, w_plus1, w_plus2)`.
+#[inline]
+pub fn hash_multigram_right(w_minus1: &str, w_plus1: &str, w_plus2: &str) -> ContextFrameHash {
+    let mut h: u64 = 0x84222325cbf29ce4; // distinct salt
+    for b in w_minus1.as_bytes() { h ^= *b as u64; h = h.wrapping_mul(0x100000001b3); }
+    h ^= 0x20; h = h.wrapping_mul(0x100000001b3);
+    for b in w_plus1.as_bytes() { h ^= *b as u64; h = h.wrapping_mul(0x100000001b3); }
+    h ^= 0x20; h = h.wrapping_mul(0x100000001b3);
+    for b in w_plus2.as_bytes() { h ^= *b as u64; h = h.wrapping_mul(0x100000001b3); }
+    h
+}
+
 /// Prefix trie node for greedy longest-match multi-word phrase matching.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PhraseTrieNode {
@@ -319,7 +343,7 @@ impl KiloVocab {
     /// Distinct words (e.g. `world` and `universe`) retain separate canonical tokens.
     /// Frequent multi-word phrases (e.g. `as well as`) are assigned single token IDs.
     /// Remaining corpus words are scored against candidate canonical anchors using empirical
-    /// N-gram sandwich context distribution overlap and morphological derivations; words scoring
+    /// multi-gram sandwich context distribution overlap and morphological derivations; words scoring
     /// below `min_mapping_score` are strictly dropped to preserve semantic fidelity without WordNet.
     pub fn learn_from_corpus(
         word_counts: &HashMap<String, usize>,
@@ -328,6 +352,7 @@ impl KiloVocab {
         max_phrases: usize,
         min_mapping_score: f64,
         max_cluster_size: usize,
+        min_context_freq: usize,
         word_contexts: Option<&HashMap<String, Vec<ContextFrameHash>>>,
     ) -> Self {
         let mut model = Self::empty();
@@ -414,7 +439,7 @@ impl KiloVocab {
             }
         }
 
-        // 4. Score and map remaining corpus words to canonical anchors using N-gram context distributions
+        // 4. Score and map remaining corpus words to canonical anchors using multi-gram context distributions
         // Words with max score < min_mapping_score are strictly DROPPED.
         let curated_synonyms = get_curated_synonyms();
         let mut temp_clusters: HashMap<String, Vec<(String, usize)>> = HashMap::new();
@@ -438,12 +463,12 @@ impl KiloVocab {
                     let canon_anchor = canonical_set.get(&variant).unwrap().as_str();
                     let mut score = 0.75; // Verified morphological root baseline
 
-                    // If context frames are available, verify contextual agreement
+                    // If context frames are available, compute symmetric cosine similarity
                     if let (Some(w_f), Some(a_f)) = (word_frames, anchor_frame_sets.get(canon_anchor)) {
-                        if !w_f.is_empty() {
+                        if !w_f.is_empty() && !a_f.is_empty() {
                             let matches = w_f.iter().filter(|f| a_f.contains(f)).count();
-                            let overlap = matches as f64 / w_f.len() as f64;
-                            score += 0.25 * overlap;
+                            let cosine = matches as f64 / ((w_f.len() * a_f.len()) as f64).sqrt();
+                            score += 0.25 * cosine;
                         }
                     }
                     candidates.push((canon_anchor, score));
@@ -455,13 +480,13 @@ impl KiloVocab {
                 if canonical_set.contains(canon) && !sealed_set.contains(canon) {
                     if syns.iter().any(|s| s.trim().to_lowercase() == clean) {
                         let canon_anchor = canonical_set.get(canon).unwrap().as_str();
-                        let mut score = 0.70;
+                        let mut score = 0.65;
 
                         if let (Some(w_f), Some(a_f)) = (word_frames, anchor_frame_sets.get(canon_anchor)) {
-                            if !w_f.is_empty() {
+                            if !w_f.is_empty() && !a_f.is_empty() {
                                 let matches = w_f.iter().filter(|f| a_f.contains(f)).count();
-                                let overlap = matches as f64 / w_f.len() as f64;
-                                score += 0.30 * overlap;
+                                let cosine = matches as f64 / ((w_f.len() * a_f.len()) as f64).sqrt();
+                                score += 0.35 * cosine;
                             }
                         }
                         candidates.push((canon_anchor, score));
@@ -469,24 +494,31 @@ impl KiloVocab {
                 }
             }
 
-            // C. Empirical N-Gram Context Distributional Overlap (Zero WordNet)
-            if let Some(w_f) = word_frames {
-                if !w_f.is_empty() {
-                    let mut anchor_matches: HashMap<&str, usize> = HashMap::new();
-                    for &f in w_f {
-                        if let Some(anchors) = frame_to_anchors.get(&f) {
-                            for &a in anchors {
-                                *anchor_matches.entry(a).or_insert(0) += 1;
+            // C. Empirical Multi-Gram Distributional Overlap
+            // Guardrail 1: candidate word must have sufficient corpus occurrences
+            if *freq >= min_context_freq {
+                if let Some(w_f) = word_frames {
+                    if !w_f.is_empty() {
+                        let mut anchor_matches: HashMap<&str, usize> = HashMap::new();
+                        for &f in w_f {
+                            if let Some(anchors) = frame_to_anchors.get(&f) {
+                                for &a in anchors {
+                                    *anchor_matches.entry(a).or_insert(0) += 1;
+                                }
                             }
                         }
-                    }
 
-                    for (a, match_count) in anchor_matches {
-                        let overlap = match_count as f64 / w_f.len() as f64;
-                        // Minimum evidence requirement: at least 2 distinct matching context frames
-                        // unless the word was extremely rare (< 3 frames)
-                        if match_count >= 2 || w_f.len() < 3 {
-                            candidates.push((a, overlap));
+                        for (a, match_count) in anchor_matches {
+                            // Guardrail 2: must match at least 3 distinct multi-gram contexts
+                            if match_count >= 3 {
+                                if let Some(a_f) = anchor_frame_sets.get(a) {
+                                    if !a_f.is_empty() {
+                                        // Symmetric cosine similarity: |w_f ∩ a_f| / sqrt(|w_f| * |a_f|)
+                                        let cosine = match_count as f64 / ((w_f.len() * a_f.len()) as f64).sqrt();
+                                        candidates.push((a, cosine));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -929,7 +961,7 @@ mod tests {
         word_counts.insert("planet".to_string(), 700);
 
         let phrase_counts = HashMap::new();
-        let model = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, 4096, 50, 0.60, 25, None);
+        let model = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, 4096, 50, 0.60, 25, 5, None);
 
         let id_world = model.token_to_id("world").expect("world must exist");
         let id_universe = model.token_to_id("universe").expect("universe must exist");
@@ -951,7 +983,7 @@ mod tests {
         let mut phrase_counts = HashMap::new();
         phrase_counts.insert("as well as".to_string(), 300);
 
-        let model = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, 4096, 50, 0.60, 25, None);
+        let model = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, 4096, 50, 0.60, 25, 5, None);
         assert!(model.token_to_id("as well as").is_some());
 
         let mut ctx = TranslationContext::new();
@@ -968,7 +1000,7 @@ mod tests {
         word_counts.insert("apples".to_string(), 100);
 
         let phrase_counts = HashMap::new();
-        let model = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, 4096, 50, 0.60, 25, None);
+        let model = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, 4096, 50, 0.60, 25, 5, None);
 
         let mut ctx = TranslationContext::new();
         let tokens = model.encode("Alice bought 42 exotic mangosteens.", &mut ctx).unwrap();
@@ -999,7 +1031,7 @@ mod tests {
         word_counts.insert("world".to_string(), 10);
         let phrase_counts = HashMap::new();
 
-        let model = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, 4096, 20, 0.60, 25, None);
+        let model = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, 4096, 20, 0.60, 25, 5, None);
         let temp_dir = std::env::temp_dir();
         let path = temp_dir.join("test_kilo_vocab.json");
 
@@ -1028,7 +1060,7 @@ mod tests {
         // Set target vocab size so canonical anchors stop right after "run" and "happy"
         let sealed_count = SEALED_WORDS.iter().map(|(c, _)| c.to_lowercase()).collect::<HashSet<_>>().len();
         let target_vocab_size = FIXED_NON_VOCAB_COUNT + sealed_count + 2;
-        let model = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, target_vocab_size, 0, 0.60, 25, None);
+        let model = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, target_vocab_size, 0, 0.60, 25, 5, None);
 
         let run_id = model.token_to_id("run").expect("run must be a canonical anchor");
         let happy_id = model.token_to_id("happy").expect("happy must be a canonical anchor");
@@ -1086,6 +1118,7 @@ mod tests {
             0,
             0.60,
             25,
+            5,
             Some(&word_contexts),
         );
 

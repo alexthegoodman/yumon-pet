@@ -700,7 +700,7 @@ mod tests {
         word_counts.insert("day".to_string(), 100);
 
         let phrase_counts = std::collections::HashMap::new();
-        let vocab = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, 4096, 20, 0.60, 25, None);
+        let vocab = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, 4096, 20, 0.60, 25, 5, None);
 
         let mut ctx = TranslationContext::new();
         let tokens = vocab.encode("Alice loves exploring the universe every day.", &mut ctx).unwrap();
