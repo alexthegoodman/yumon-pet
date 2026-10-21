@@ -469,6 +469,23 @@ impl KiloVocab {
             }
         }
 
+        // 1b. Seed curated canonical synonym anchors (e.g. `sad`, `happy`, `cat`, `dog`, `run`, `speak`)
+        // provided they appear in the corpus
+        let curated_synonyms = get_curated_synonyms();
+        let mut sorted_curated: Vec<&String> = curated_synonyms.keys().collect();
+        sorted_curated.sort_by(|a, b| {
+            let fa = word_counts.get(*a).copied().unwrap_or(0);
+            let fb = word_counts.get(*b).copied().unwrap_or(0);
+            fb.cmp(&fa).then_with(|| a.cmp(b))
+        });
+        for canon in sorted_curated {
+            let clean = canon.trim().to_lowercase();
+            if word_counts.contains_key(&clean) && !seen.contains(&clean) && learned.len() < target_learned {
+                seen.insert(clean.clone());
+                learned.push(clean);
+            }
+        }
+
         // 2. Select top multi-word phrases (collocations with >= 2 words)
         let mut sorted_phrases: Vec<(String, usize)> = phrase_counts
             .iter()
@@ -486,7 +503,7 @@ impl KiloVocab {
             }
         }
 
-        // 3. Select top empirical unigrams by frequency (preserving distinct words)
+        // 3. Select top empirical unigrams by frequency with morphological deduplication
         let mut sorted_words: Vec<(String, usize)> = word_counts
             .iter()
             .map(|(k, v)| (k.clone(), *v))
@@ -498,11 +515,37 @@ impl KiloVocab {
                 break;
             }
             let clean = word.trim().to_lowercase();
-            if clean.len() >= 2 || clean == "a" || clean == "i" {
-                if !seen.contains(&clean) {
-                    seen.insert(clean.clone());
-                    learned.push(clean);
+            if clean.len() < 2 && clean != "a" && clean != "i" {
+                continue;
+            }
+            if seen.contains(&clean) {
+                continue;
+            }
+
+            // Check if clean is a morphological variant of an anchor already selected
+            let variants = morphological_variants(&clean);
+            if variants.iter().any(|v| seen.contains(v)) {
+                // An anchor for this morphological family already exists (e.g. `learn` is in seen for `learning`),
+                // so do not duplicate it as a canonical anchor.
+                continue;
+            }
+
+            // Prefer base lemma (e.g. `learn` instead of `learning`, `user` instead of `users`)
+            // if a shorter root exists in the corpus
+            let mut chosen = clean.clone();
+            for v in &variants {
+                if v.len() < clean.len() && word_counts.contains_key(v) && !seen.contains(v) {
+                    let root_freq = word_counts.get(v).copied().unwrap_or(0);
+                    if root_freq >= 5 {
+                        chosen = v.clone();
+                        break;
+                    }
                 }
+            }
+
+            if !seen.contains(&chosen) && learned.len() < target_learned {
+                seen.insert(chosen.clone());
+                learned.push(chosen);
             }
         }
 
@@ -1235,5 +1278,31 @@ mod tests {
 
         // "rocket" has 0% context overlap with "car" -> DROPPED!
         assert_eq!(model.resolve_word("rocket"), None);
+    }
+
+    #[test]
+    fn test_morphological_deduplication_frees_slots() {
+        let mut word_counts = HashMap::new();
+        word_counts.insert("learning".to_string(), 1000); // inflected form higher frequency
+        word_counts.insert("learn".to_string(), 800);     // base lemma
+        word_counts.insert("sad".to_string(), 600);       // distinct concept that needs a slot
+
+        let phrase_counts = HashMap::new();
+        let sealed_count = SEALED_WORDS.iter().map(|(c, _)| c.to_lowercase()).collect::<HashSet<_>>().len();
+        // Allow room for only 2 open vocabulary anchors
+        let target_vocab_size = FIXED_NON_VOCAB_COUNT + sealed_count + 2;
+        let model = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, target_vocab_size, 0, 0.60, 25, 5, None);
+
+        // "learn" must be chosen as anchor over "learning"
+        assert!(model.token_to_id("learn").is_some(), "base lemma 'learn' should be canonical anchor");
+        assert!(model.token_to_id("learning").is_none(), "'learning' should NOT waste an anchor slot");
+
+        // "sad" now gets the second anchor slot instead of being pushed out!
+        assert!(model.token_to_id("sad").is_some(), "'sad' should get an anchor slot thanks to deduping");
+
+        // "learning" maps dynamically to "learn"
+        let learn_id = model.token_to_id("learn").unwrap();
+        assert_eq!(model.resolve_word("learning"), Some(learn_id));
+        assert!(model.allowable_words("learn").contains(&"learning".to_string()));
     }
 }

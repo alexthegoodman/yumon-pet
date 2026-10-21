@@ -18,5 +18,5 @@
   "first_lr": 0.0003,
   "last_lr": 0.00003,
   "validation_fraction": 0.01,
-  "out_dir": "checkpoints/yumon-talk-moe-glide-4k-256"
+  "out_dir": "checkpoints/yumon-moe-kilo-glide-4k-1024"
 }

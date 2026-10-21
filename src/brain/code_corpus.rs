@@ -196,8 +196,15 @@ pub fn load_tokenizer(path: &str) -> Result<TokenizerKind> {
     ensure!(tok.inner.get_normalizer().is_none(), "Code tokenizer must have no normalizer; create one with --train-code-tokenizer");
     ensure!(tok.inner.get_truncation().is_none() && tok.inner.get_padding().is_none(),
         "Code tokenizer must not truncate or pad during encoding");
-    for (id, name) in ["<PAD>", "<BOS>", "<EOS>", "<UNK>"].iter().enumerate() {
-        ensure!(tok.inner.token_to_id(name) == Some(id as u32), "invalid special token ID for {name}");
+    let special_variants: [&[&str]; 4] = [
+        &["<PAD>", "<pad>"],
+        &["<BOS>", "<s>", "<bos>"],
+        &["<EOS>", "</s>", "<eos>"],
+        &["<UNK>", "<unk>"],
+    ];
+    for (id, variants) in special_variants.iter().enumerate() {
+        let found = variants.iter().any(|&name| tok.inner.token_to_id(name) == Some(id as u32));
+        ensure!(found, "invalid special token ID for {}", variants[0]);
     }
     // Source string literals like "<PAD>" must be ordinary code, not control IDs.
     tok.inner.set_encode_special_tokens(true);

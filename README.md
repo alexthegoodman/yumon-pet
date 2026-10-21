@@ -16,6 +16,10 @@ cargo run --release --bin cache_samples -- --max-seq-len 1024
 ```
 
 #### 2. Build the data-driven 4k vocabulary & tokenizer
+
+Note: still has some semantic redundancy and needs to be semantically deduped more effectively.
+Once fully deduped, more tokens will be available for rich encoding.
+
 ```sh
 cargo run --release --bin build_kilo_vocab
 ```
