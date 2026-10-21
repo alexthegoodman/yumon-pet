@@ -282,6 +282,14 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
     use crate::brain::{code_corpus, code_curriculum};
     config.validate()?;
     let tokenizer = code_corpus::load_tokenizer(&config.tokenizer)?;
+
+    // If training with a talk vocabulary (e.g. kilo_talk_vocab.json beside the tokenizer),
+    // load it into the global vocab so evaluation previews use the exact matching vocabulary!
+    let kilo_vocab_path = std::path::Path::new(&config.tokenizer).parent()
+        .unwrap_or(std::path::Path::new(".")).join("kilo_talk_vocab.json");
+    if kilo_vocab_path.exists() {
+        let _ = crate::brain::yumon_talk::load_global_vocab_file(&kilo_vocab_path);
+    }
     let mut prepared = code_curriculum::prepare(config, &tokenizer)?;
     let overfit = config.overfit_samples.is_some();
     if let Some(count) = config.overfit_samples {

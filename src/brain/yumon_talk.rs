@@ -451,12 +451,13 @@ impl YumonTalkVocab {
     pub fn load_from_file(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading vocab file {}", path.display()))?;
+        if let Ok(mut kilo) = serde_json::from_str::<super::kilo_vocab::KiloVocab>(&text) {
+            kilo.rebuild_indices();
+            return Ok(kilo.to_yumon_talk_vocab());
+        }
         if let Ok(mut vocab) = serde_json::from_str::<Self>(&text) {
             vocab.rebuild_indices();
             return Ok(vocab);
-        }
-        if let Ok(kilo) = serde_json::from_str::<super::kilo_vocab::KiloVocab>(&text) {
-            return Ok(kilo.to_yumon_talk_vocab());
         }
         let mut vocab: Self = serde_json::from_str(&text)
             .with_context(|| format!("parsing vocab file {}", path.display()))?;
@@ -776,7 +777,8 @@ impl YumonTalkVocab {
                     i += 1;
                 }
                 let word: String = chars[start..i].iter().collect();
-                if let Some(id) = self.token_to_id(&word.to_lowercase()) {
+                let lower = word.to_lowercase();
+                if let Some(id) = self.token_to_id(&lower).or_else(|| self.word_to_id.get(&lower).copied()) {
                     tokens.push(id);
                 } else {
                     tokens.push(UNK_ID);
@@ -1030,11 +1032,25 @@ static GLOBAL_VOCAB: OnceLock<RwLock<YumonTalkVocab>> = OnceLock::new();
 pub fn get_global_vocab() -> std::sync::RwLockReadGuard<'static, YumonTalkVocab> {
     let rw = GLOBAL_VOCAB.get_or_init(|| {
         thesaurus::init();
-        let env_path = std::env::var("YUMON_TALK_VOCAB").ok().map(std::path::PathBuf::from);
-        let default_path = Path::new("training-cache/yumon_talk_vocab.json");
-        let path = env_path.as_deref().unwrap_or(default_path);
-        if path.exists() {
-            if let Ok(v) = YumonTalkVocab::load_from_file(path) {
+        if let Ok(env_path) = std::env::var("YUMON_TALK_VOCAB").or_else(|_| std::env::var("KILO_TALK_VOCAB")) {
+            let path = Path::new(&env_path);
+            if path.exists() {
+                if let Ok(v) = YumonTalkVocab::load_from_file(path) {
+                    return RwLock::new(v);
+                }
+            }
+        }
+        // Prefer modern data-driven kilo_talk_vocab.json
+        let kilo_path = Path::new("training-cache/kilo_talk_vocab.json");
+        if kilo_path.exists() {
+            if let Ok(v) = YumonTalkVocab::load_from_file(kilo_path) {
+                return RwLock::new(v);
+            }
+        }
+        // Fallback to legacy yumon_talk_vocab.json
+        let legacy_path = Path::new("training-cache/yumon_talk_vocab.json");
+        if legacy_path.exists() {
+            if let Ok(v) = YumonTalkVocab::load_from_file(legacy_path) {
                 return RwLock::new(v);
             }
         }

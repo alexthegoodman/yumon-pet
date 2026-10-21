@@ -52,7 +52,7 @@ mod desktop {
             long,
             // default_value = "D:/models/runpod/large1/512h_16l_8a_256len_b32_Moe_e4_k1_Language_1m"
             // default_value = "D:/models/runpod/run1024h/1024h_24l_32a_256len_b16_DecoderOnly_Language_200k"
-            // default_value = "D:/models/runpod/bf16-1/1024h_24l_32a_256len_b16_DecoderOnly_Language_bf16_150k"
+            // default_value = "D:/models/runpod/bf16-1/1024h_24l_32a_256len_b16_DecoderOnly_Language_bf16_150k" // good
             // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide/code_256h_12l_8a_1024ff_256len_b4_Moe_e4_k1_f32_yumon_talk_v1"
             // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-2/code_256h_12l_8a_1024ff_256len_b4_Moe_e4_k1_f32_yumon_talk_v1" // quite good
             // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-large-1/code_512h_16l_8a_2048ff_256len_b2_Moe_e4_k1_f32_yumon_talk_v1" // bad
@@ -60,7 +60,8 @@ mod desktop {
             // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-deep-1/code_256h_12l_8a_1024ff_1024len_b4_Moe_e4_k1_f32_yumon_talk_v1"
             // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-deep-2/code_64h_6l_4a_256ff_1024len_b4_Moe_e4_k1_f32_yumon_talk_v1"
             // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-deep-4/code_256h_16l_8a_1024ff_1024len_b2_Moe_e8_k2_f32_yumon_talk_v1"
-            default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-deep-4/code_64h_4l_4a_256ff_1024len_b4_Moe_e4_k1_f32_yumon_talk_v1"
+            // default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-talk-moe-glide-4k-deep-4/code_64h_4l_4a_256ff_1024len_b4_Moe_e4_k1_f32_yumon_talk_v1" // good
+            default_value = "D:/projects/common/yumon-pet/checkpoints/yumon-moe-kilo-glide-4k-1024/code_64h_4l_4a_256ff_1024len_b4_Moe_e4_k1_f32_yumon_talk_v1"
         )]
         checkpoint: String,
         #[arg(long, value_enum, default_value = "decoder-only")]
@@ -77,8 +78,8 @@ mod desktop {
         /// Enable Yumon Talk bidirectional translation (English -> Yumon Talk prompt, Yumon Talk -> English reply).
         #[arg(long)]
         yumon_talk: bool,
-        /// Path to Yumon Talk vocabulary JSON (defaults to training-cache/yumon_talk_vocab.json).
-        #[arg(long, default_value = "training-cache/yumon_talk_vocab.json")]
+        /// Path to Yumon Talk vocabulary JSON (defaults to training-cache/kilo_talk_vocab.json).
+        #[arg(long, default_value = "training-cache/kilo_talk_vocab.json")]
         yumon_talk_vocab: PathBuf,
         /// Path to N-gram statistical decompressor model (defaults to training-cache/ngram_decompressor.bin).
         #[arg(long, default_value = "training-cache/ngram_decompressor.bin")]
