@@ -92,6 +92,100 @@ pub fn hash_multigram_right(w_minus1: &str, w_plus1: &str, w_plus2: &str) -> Con
     h
 }
 
+/// Fast 32-bit FNV-1a non-cryptographic hash for a word string with zero heap allocations.
+#[inline]
+pub fn fast_word_hash(word: &str) -> u32 {
+    let mut h: u32 = 0x811c9dc5;
+    for b in word.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x01000193);
+    }
+    h
+}
+
+/// Compute cosine similarity between two sparse neighbor count vectors.
+pub fn cosine_similarity_sparse(a: &[(u32, u32)], b: &[(u32, u32)]) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0;
+    let mut norm_a = 0.0;
+    for &(h_a, count_a) in a {
+        let ca = count_a as f64;
+        norm_a += ca * ca;
+        for &(h_b, count_b) in b {
+            if h_a == h_b {
+                dot += ca * (count_b as f64);
+                break;
+            }
+        }
+    }
+    let mut norm_b = 0.0;
+    for &(_, count_b) in b {
+        let cb = count_b as f64;
+        norm_b += cb * cb;
+    }
+    let denom = (norm_a * norm_b).sqrt();
+    if denom > 0.0 {
+        dot / denom
+    } else {
+        0.0
+    }
+}
+
+/// A comprehensive distributional context profile tracking immediate left/right neighbor
+/// distributions and multi-gram context frames for empirical synonym discovery.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WordContextProfile {
+    pub left_neighbors: Vec<(u32, u32)>,
+    pub right_neighbors: Vec<(u32, u32)>,
+    pub multigram_frames: Vec<ContextFrameHash>,
+}
+
+impl WordContextProfile {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add_left(&mut self, hash: u32) {
+        if let Some(pos) = self.left_neighbors.iter().position(|&(h, _)| h == hash) {
+            self.left_neighbors[pos].1 = self.left_neighbors[pos].1.saturating_add(1);
+        } else if self.left_neighbors.len() < 50 {
+            self.left_neighbors.push((hash, 1));
+        }
+    }
+
+    pub fn add_right(&mut self, hash: u32) {
+        if let Some(pos) = self.right_neighbors.iter().position(|&(h, _)| h == hash) {
+            self.right_neighbors[pos].1 = self.right_neighbors[pos].1.saturating_add(1);
+        } else if self.right_neighbors.len() < 50 {
+            self.right_neighbors.push((hash, 1));
+        }
+    }
+
+    pub fn add_multigram(&mut self, hash: ContextFrameHash) {
+        if self.multigram_frames.len() < 100 && !self.multigram_frames.contains(&hash) {
+            self.multigram_frames.push(hash);
+        }
+    }
+
+    /// Compute composite distributional similarity (bi-directional cosine + multi-gram overlap).
+    pub fn similarity(&self, other: &WordContextProfile) -> f64 {
+        let left_sim = cosine_similarity_sparse(&self.left_neighbors, &other.left_neighbors);
+        let right_sim = cosine_similarity_sparse(&self.right_neighbors, &other.right_neighbors);
+        let bidir = (left_sim + right_sim) * 0.5;
+
+        // If multi-gram frames also match, incorporate multi-gram frame overlap
+        if !self.multigram_frames.is_empty() && !other.multigram_frames.is_empty() {
+            let matches = self.multigram_frames.iter().filter(|f| other.multigram_frames.contains(f)).count();
+            let mg_sim = matches as f64 / ((self.multigram_frames.len() * other.multigram_frames.len()) as f64).sqrt();
+            bidir * 0.70 + mg_sim * 0.30
+        } else {
+            bidir
+        }
+    }
+}
+
 /// Prefix trie node for greedy longest-match multi-word phrase matching.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PhraseTrieNode {
@@ -338,13 +432,13 @@ impl KiloVocab {
         self.allowable_cache = allowable_cache;
     }
 
-    /// Learn a 4,096-token vocabulary from empirical corpus frequencies and N-gram context frames.
+    /// Learn a 4,096-token vocabulary from empirical corpus frequencies and bi-directional context profiles.
     ///
     /// Distinct words (e.g. `world` and `universe`) retain separate canonical tokens.
     /// Frequent multi-word phrases (e.g. `as well as`) are assigned single token IDs.
-    /// Remaining corpus words are scored against candidate canonical anchors using empirical
-    /// multi-gram sandwich context distribution overlap and morphological derivations; words scoring
-    /// below `min_mapping_score` are strictly dropped to preserve semantic fidelity without WordNet.
+    /// Remaining corpus words are scored against candidate canonical anchors using decoupled
+    /// bi-directional left/right context transition profiles, multi-gram overlap, curated synonyms,
+    /// and morphological derivations; words scoring below `min_mapping_score` are strictly dropped.
     pub fn learn_from_corpus(
         word_counts: &HashMap<String, usize>,
         phrase_counts: &HashMap<String, usize>,
@@ -353,7 +447,7 @@ impl KiloVocab {
         min_mapping_score: f64,
         max_cluster_size: usize,
         min_context_freq: usize,
-        word_contexts: Option<&HashMap<String, Vec<ContextFrameHash>>>,
+        word_contexts: Option<&HashMap<String, WordContextProfile>>,
     ) -> Self {
         let mut model = Self::empty();
         let target_learned = target_vocab_size.saturating_sub(FIXED_NON_VOCAB_COUNT);
@@ -419,28 +513,27 @@ impl KiloVocab {
             .cloned()
             .collect();
 
-        // Build inverted index of anchor context frames: frame_hash -> [anchor_1, anchor_2, ...]
-        let mut frame_to_anchors: HashMap<ContextFrameHash, Vec<&str>> = HashMap::new();
-        let mut anchor_frame_sets: HashMap<&str, HashSet<ContextFrameHash>> = HashMap::new();
+        // Build inverted indices of anchor left and right context neighbors
+        let mut left_to_anchors: HashMap<u32, Vec<&str>> = HashMap::new();
+        let mut right_to_anchors: HashMap<u32, Vec<&str>> = HashMap::new();
 
         if let Some(wc) = word_contexts {
             for canon in &canonical_set {
                 if sealed_set.contains(canon) {
                     continue;
                 }
-                if let Some(frames) = wc.get(canon) {
-                    let mut set = HashSet::with_capacity(frames.len());
-                    for &f in frames {
-                        set.insert(f);
-                        frame_to_anchors.entry(f).or_default().push(canon.as_str());
+                if let Some(prof) = wc.get(canon) {
+                    for &(h_l, _) in &prof.left_neighbors {
+                        left_to_anchors.entry(h_l).or_default().push(canon.as_str());
                     }
-                    anchor_frame_sets.insert(canon.as_str(), set);
+                    for &(h_r, _) in &prof.right_neighbors {
+                        right_to_anchors.entry(h_r).or_default().push(canon.as_str());
+                    }
                 }
             }
         }
 
-        // 4. Score and map remaining corpus words to canonical anchors using multi-gram context distributions
-        // Words with max score < min_mapping_score are strictly DROPPED.
+        // 4. Score and map remaining corpus words to canonical anchors
         let curated_synonyms = get_curated_synonyms();
         let mut temp_clusters: HashMap<String, Vec<(String, usize)>> = HashMap::new();
 
@@ -449,12 +542,11 @@ impl KiloVocab {
             if clean.len() < 2 && clean != "a" && clean != "i" {
                 continue;
             }
-            // Skip if this word is already a canonical anchor or sealed word
             if canonical_set.contains(&clean) || sealed_set.contains(&clean) {
                 continue;
             }
 
-            let word_frames = word_contexts.and_then(|wc| wc.get(&clean));
+            let word_prof = word_contexts.and_then(|wc| wc.get(&clean));
             let mut candidates: Vec<(&str, f64)> = Vec::new();
 
             // A. Morphological lemmatization & irregular verbs (high baseline + context confirmation)
@@ -463,13 +555,9 @@ impl KiloVocab {
                     let canon_anchor = canonical_set.get(&variant).unwrap().as_str();
                     let mut score = 0.75; // Verified morphological root baseline
 
-                    // If context frames are available, compute symmetric cosine similarity
-                    if let (Some(w_f), Some(a_f)) = (word_frames, anchor_frame_sets.get(canon_anchor)) {
-                        if !w_f.is_empty() && !a_f.is_empty() {
-                            let matches = w_f.iter().filter(|f| a_f.contains(f)).count();
-                            let cosine = matches as f64 / ((w_f.len() * a_f.len()) as f64).sqrt();
-                            score += 0.25 * cosine;
-                        }
+                    if let (Some(w_p), Some(a_p)) = (word_prof, word_contexts.and_then(|wc| wc.get(canon_anchor))) {
+                        let sim = w_p.similarity(a_p);
+                        score += 0.25 * sim;
                     }
                     candidates.push((canon_anchor, score));
                 }
@@ -482,42 +570,35 @@ impl KiloVocab {
                         let canon_anchor = canonical_set.get(canon).unwrap().as_str();
                         let mut score = 0.65;
 
-                        if let (Some(w_f), Some(a_f)) = (word_frames, anchor_frame_sets.get(canon_anchor)) {
-                            if !w_f.is_empty() && !a_f.is_empty() {
-                                let matches = w_f.iter().filter(|f| a_f.contains(f)).count();
-                                let cosine = matches as f64 / ((w_f.len() * a_f.len()) as f64).sqrt();
-                                score += 0.35 * cosine;
-                            }
+                        if let (Some(w_p), Some(a_p)) = (word_prof, word_contexts.and_then(|wc| wc.get(canon_anchor))) {
+                            let sim = w_p.similarity(a_p);
+                            score += 0.35 * sim;
                         }
                         candidates.push((canon_anchor, score));
                     }
                 }
             }
 
-            // C. Empirical Multi-Gram Distributional Overlap
-            // Guardrail 1: candidate word must have sufficient corpus occurrences
+            // C. Empirical Bi-Directional Distributional Context Matching
             if *freq >= min_context_freq {
-                if let Some(w_f) = word_frames {
-                    if !w_f.is_empty() {
-                        let mut anchor_matches: HashMap<&str, usize> = HashMap::new();
-                        for &f in w_f {
-                            if let Some(anchors) = frame_to_anchors.get(&f) {
-                                for &a in anchors {
-                                    *anchor_matches.entry(a).or_insert(0) += 1;
-                                }
-                            }
+                if let Some(w_p) = word_prof {
+                    let mut candidate_anchors: HashSet<&str> = HashSet::new();
+                    for &(h_l, _) in &w_p.left_neighbors {
+                        if let Some(anchors) = left_to_anchors.get(&h_l) {
+                            for &a in anchors { candidate_anchors.insert(a); }
                         }
+                    }
+                    for &(h_r, _) in &w_p.right_neighbors {
+                        if let Some(anchors) = right_to_anchors.get(&h_r) {
+                            for &a in anchors { candidate_anchors.insert(a); }
+                        }
+                    }
 
-                        for (a, match_count) in anchor_matches {
-                            // Guardrail 2: must match at least 3 distinct multi-gram contexts
-                            if match_count >= 3 {
-                                if let Some(a_f) = anchor_frame_sets.get(a) {
-                                    if !a_f.is_empty() {
-                                        // Symmetric cosine similarity: |w_f ∩ a_f| / sqrt(|w_f| * |a_f|)
-                                        let cosine = match_count as f64 / ((w_f.len() * a_f.len()) as f64).sqrt();
-                                        candidates.push((a, cosine));
-                                    }
-                                }
+                    for a in candidate_anchors {
+                        if let Some(a_p) = word_contexts.and_then(|wc| wc.get(a)) {
+                            let sim = w_p.similarity(a_p);
+                            if sim >= min_mapping_score {
+                                candidates.push((a, sim));
                             }
                         }
                     }
@@ -533,8 +614,6 @@ impl KiloVocab {
                         fa.cmp(&fb)
                     })
             }) {
-                // STRICT CUTOFF: Only map if score >= min_mapping_score!
-                // Low-scoring words are cleanly DROPPED.
                 if best_score >= min_mapping_score {
                     temp_clusters
                         .entry(best_anchor.to_string())
@@ -547,7 +626,6 @@ impl KiloVocab {
         // 5. Populate allowable_clusters, sorted by frequency and capped at max_cluster_size
         let mut allowable_clusters = HashMap::new();
         for (canon, mut cluster_words) in temp_clusters {
-            // Sort by corpus frequency descending, then alphabetically
             cluster_words.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
             cluster_words.truncate(max_cluster_size);
             allowable_clusters.insert(
@@ -1091,21 +1169,48 @@ mod tests {
         // Unrelated word: "rocket" (distinct frames)
         word_counts.insert("rocket".to_string(), 10);
 
-        // Construct N-gram sandwich context frames
+        // Construct bi-directional context profiles
         let mut word_contexts = HashMap::new();
         let frame_the_crashed = hash_context("the", "crashed");
         let frame_new_was = hash_context("new", "was");
         let frame_drove_home = hash_context("drove", "home");
         let frame_space_into = hash_context("space", "into");
 
-        // "car" context frames
-        word_contexts.insert("car".to_string(), vec![frame_the_crashed, frame_new_was, frame_drove_home]);
+        let h_the = fast_word_hash("the");
+        let h_crashed = fast_word_hash("crashed");
+        let h_new = fast_word_hash("new");
+        let h_was = fast_word_hash("was");
+        let h_space = fast_word_hash("space");
+        let h_into = fast_word_hash("into");
 
-        // "automobile" shares 100% of its frames with "car"
-        word_contexts.insert("automobile".to_string(), vec![frame_the_crashed, frame_new_was, frame_drove_home]);
+        // "car" context profile
+        let mut prof_car = WordContextProfile::new();
+        prof_car.add_left(h_the);
+        prof_car.add_right(h_crashed);
+        prof_car.add_left(h_new);
+        prof_car.add_right(h_was);
+        prof_car.add_multigram(frame_the_crashed);
+        prof_car.add_multigram(frame_new_was);
+        prof_car.add_multigram(frame_drove_home);
+        word_contexts.insert("car".to_string(), prof_car);
+
+        // "automobile" shares 100% of its frames and neighbors with "car"
+        let mut prof_auto = WordContextProfile::new();
+        prof_auto.add_left(h_the);
+        prof_auto.add_right(h_crashed);
+        prof_auto.add_left(h_new);
+        prof_auto.add_right(h_was);
+        prof_auto.add_multigram(frame_the_crashed);
+        prof_auto.add_multigram(frame_new_was);
+        prof_auto.add_multigram(frame_drove_home);
+        word_contexts.insert("automobile".to_string(), prof_auto);
 
         // "rocket" shares 0% with "car"
-        word_contexts.insert("rocket".to_string(), vec![frame_space_into]);
+        let mut prof_rocket = WordContextProfile::new();
+        prof_rocket.add_left(h_space);
+        prof_rocket.add_right(h_into);
+        prof_rocket.add_multigram(frame_space_into);
+        word_contexts.insert("rocket".to_string(), prof_rocket);
 
         let phrase_counts = HashMap::new();
         let sealed_count = SEALED_WORDS.iter().map(|(c, _)| c.to_lowercase()).collect::<HashSet<_>>().len();
@@ -1124,7 +1229,7 @@ mod tests {
 
         let car_id = model.token_to_id("car").expect("car must be anchor");
 
-        // "automobile" has 100% N-gram context overlap with "car" -> mapped!
+        // "automobile" has high context similarity with "car" -> mapped!
         assert_eq!(model.resolve_word("automobile"), Some(car_id));
         assert!(model.allowable_words("car").contains(&"automobile".to_string()));
 

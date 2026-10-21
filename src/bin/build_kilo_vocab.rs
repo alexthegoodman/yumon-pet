@@ -11,7 +11,7 @@ use {
     std::collections::HashMap,
     std::path::PathBuf,
     yumon_pet::brain::{
-        kilo_vocab::{self, ContextFrameHash, KiloVocab},
+        kilo_vocab::{self, KiloVocab, WordContextProfile},
         sample_cache,
         yumon_talk::TranslationContext,
     },
@@ -124,7 +124,7 @@ fn main() -> Result<()> {
     println!("\n[1/4] Scanning {} for unigrams, phrases, and N-gram context frames...", args.input_cache.display());
     let mut word_counts: HashMap<String, usize> = HashMap::new();
     let mut phrase_counts: HashMap<String, usize> = HashMap::new();
-    let mut word_contexts: HashMap<String, Vec<ContextFrameHash>> = HashMap::new();
+    let mut word_contexts: HashMap<String, WordContextProfile> = HashMap::new();
     let mut total_tokens = 0usize;
     let mut sample_count = 0usize;
     let started = std::time::Instant::now();
@@ -135,7 +135,7 @@ fn main() -> Result<()> {
         let words = extract_words(&combined);
         let len = words.len();
 
-        // Count unigrams and collect multi-gram context frames (left 4-gram & right 4-gram)
+        // Count unigrams and collect bi-directional context profiles
         for i in 0..len {
             total_tokens += 1;
             let w = &words[i];
@@ -146,17 +146,16 @@ fn main() -> Result<()> {
             let w_plus1 = if i + 1 < len { &words[i + 1] } else { "</s>" };
             let w_plus2 = if i + 2 < len { &words[i + 2] } else { "</s>" };
 
+            let h_l = kilo_vocab::fast_word_hash(w_minus1);
+            let h_r = kilo_vocab::fast_word_hash(w_plus1);
             let h_left = kilo_vocab::hash_multigram_left(w_minus2, w_minus1, w_plus1);
             let h_right = kilo_vocab::hash_multigram_right(w_minus1, w_plus1, w_plus2);
 
-            let frames = word_contexts.entry(w.clone()).or_default();
-            // Cap at 150 context frames per word to maintain strict memory bounds
-            if frames.len() < 150 && !frames.contains(&h_left) {
-                frames.push(h_left);
-            }
-            if frames.len() < 150 && !frames.contains(&h_right) {
-                frames.push(h_right);
-            }
+            let prof = word_contexts.entry(w.clone()).or_default();
+            prof.add_left(h_l);
+            prof.add_right(h_r);
+            prof.add_multigram(h_left);
+            prof.add_multigram(h_right);
         }
 
         // Count 2-word and 3-word n-gram phrases
