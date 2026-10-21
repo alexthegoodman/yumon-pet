@@ -451,6 +451,13 @@ impl YumonTalkVocab {
     pub fn load_from_file(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading vocab file {}", path.display()))?;
+        if let Ok(mut vocab) = serde_json::from_str::<Self>(&text) {
+            vocab.rebuild_indices();
+            return Ok(vocab);
+        }
+        if let Ok(kilo) = serde_json::from_str::<super::kilo_vocab::KiloVocab>(&text) {
+            return Ok(kilo.to_yumon_talk_vocab());
+        }
         let mut vocab: Self = serde_json::from_str(&text)
             .with_context(|| format!("parsing vocab file {}", path.display()))?;
         vocab.rebuild_indices();

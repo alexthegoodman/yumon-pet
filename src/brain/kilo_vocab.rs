@@ -623,6 +623,24 @@ impl KiloVocab {
         Ok(model)
     }
 
+    /// Convert to a YumonTalkVocab for full backwards-compatibility with legacy tools.
+    pub fn to_yumon_talk_vocab(&self) -> super::yumon_talk::YumonTalkVocab {
+        let mut synonym_clusters = HashMap::new();
+        for word in &self.learned_vocab {
+            let allow = self.allowable_words(word);
+            if !allow.is_empty() {
+                synonym_clusters.insert(word.clone(), allow);
+            }
+        }
+        super::yumon_talk::YumonTalkVocab::new(
+            self.special_tokens.clone(),
+            self.punctuation.clone(),
+            self.placeholders.clone(),
+            self.learned_vocab.clone(),
+            synonym_clusters,
+        )
+    }
+
     /// Export as a standard HuggingFace WordLevel `tokenizer.json` for Burn / tokenizers runtime.
     pub fn save_tokenizer_json(&self, dir: &Path) -> Result<()> {
         let file_path = if dir.extension().map_or(false, |ext| ext == "json") {

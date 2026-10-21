@@ -83,10 +83,68 @@ enum ConversionResult {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+enum ActiveVocab {
+    Kilo(yumon_pet::brain::kilo_vocab::KiloVocab),
+    Yumon(YumonTalkVocab),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ActiveVocab {
+    fn encode(&self, text: &str, ctx: &mut yumon_talk::TranslationContext) -> Result<Vec<usize>> {
+        match self {
+            ActiveVocab::Kilo(k) => k.encode(text, ctx),
+            ActiveVocab::Yumon(y) => y.english_to_yumon_tokens(text, ctx),
+        }
+    }
+
+    fn detokenize(&self, tokens: &[usize]) -> String {
+        match self {
+            ActiveVocab::Kilo(k) => k.decode_tokens(tokens),
+            ActiveVocab::Yumon(y) => y.detokenize_yumon(tokens),
+        }
+    }
+
+    fn reconstruct(
+        &self,
+        yumon_text: &str,
+        tokens: &[usize],
+        ctx: &yumon_talk::TranslationContext,
+        rng: &mut impl rand::Rng,
+    ) -> Result<String> {
+        match self {
+            ActiveVocab::Kilo(k) => Ok(k.decode_with_context(tokens, ctx)),
+            ActiveVocab::Yumon(y) => y.yumon_to_english_with_context(yumon_text, ctx, rng),
+        }
+    }
+
+    fn is_name_token(&self, id: usize) -> bool {
+        match self {
+            ActiveVocab::Kilo(k) => k.is_name_token(id),
+            ActiveVocab::Yumon(y) => y.is_name_token(id),
+        }
+    }
+
+    fn is_slot_token(&self, id: usize) -> bool {
+        match self {
+            ActiveVocab::Kilo(k) => k.is_slot_token(id),
+            ActiveVocab::Yumon(y) => y.is_slot_token(id),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn is_num_token(&self, id: usize) -> bool {
+        match self {
+            ActiveVocab::Kilo(k) => k.is_num_token(id),
+            ActiveVocab::Yumon(y) => y.is_num_token(id),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn convert_single_sample(
     idx: usize,
     sample: &Sample,
-    vocab: &YumonTalkVocab,
+    vocab: &ActiveVocab,
     target_tokenizer: &TokenizerKind,
     max_seq_len: usize,
     max_name_tokens: usize,
@@ -123,23 +181,23 @@ fn convert_single_sample(
 
     let (prompt_tokens, reply_tokens, prompt_yumon, reply_yumon, prompt_recon, reply_recon) =
         if !prompt_raw.trim().is_empty() && !reply_raw.trim().is_empty() {
-            let p_tokens = match vocab.english_to_yumon_tokens(&prompt_raw, &mut ctx) {
+            let p_tokens = match vocab.encode(&prompt_raw, &mut ctx) {
                 Ok(t) => t,
                 Err(_) => return ConversionResult::SkippedUnk,
             };
-            let r_tokens = match vocab.english_to_yumon_tokens(&reply_raw, &mut ctx) {
+            let r_tokens = match vocab.encode(&reply_raw, &mut ctx) {
                 Ok(t) => t,
                 Err(_) => return ConversionResult::SkippedUnk,
             };
 
-            let p_yumon = vocab.detokenize_yumon(&p_tokens);
-            let r_yumon = vocab.detokenize_yumon(&r_tokens);
+            let p_yumon = vocab.detokenize(&p_tokens);
+            let r_yumon = vocab.detokenize(&r_tokens);
 
-            let p_recon = match vocab.yumon_to_english_with_context(&p_yumon, &ctx, &mut rng) {
+            let p_recon = match vocab.reconstruct(&p_yumon, &p_tokens, &ctx, &mut rng) {
                 Ok(eng) => eng,
                 Err(_) => return ConversionResult::SkippedRoundtripFailed,
             };
-            let r_recon = match vocab.yumon_to_english_with_context(&r_recon_source(&r_yumon), &ctx, &mut rng) {
+            let r_recon = match vocab.reconstruct(&r_recon_source(&r_yumon), &r_tokens, &ctx, &mut rng) {
                 Ok(eng) => eng,
                 Err(_) => return ConversionResult::SkippedRoundtripFailed,
             };
@@ -154,12 +212,12 @@ fn convert_single_sample(
             if text.is_empty() {
                 return ConversionResult::SkippedEmpty;
             }
-            let r_tokens = match vocab.english_to_yumon_tokens(text, &mut ctx) {
+            let r_tokens = match vocab.encode(text, &mut ctx) {
                 Ok(t) => t,
                 Err(_) => return ConversionResult::SkippedUnk,
             };
-            let r_yumon = vocab.detokenize_yumon(&r_tokens);
-            let r_recon = match vocab.yumon_to_english_with_context(&r_yumon, &ctx, &mut rng) {
+            let r_yumon = vocab.detokenize(&r_tokens);
+            let r_recon = match vocab.reconstruct(&r_yumon, &r_tokens, &ctx, &mut rng) {
                 Ok(eng) => eng,
                 Err(_) => return ConversionResult::SkippedRoundtripFailed,
             };
@@ -262,16 +320,26 @@ fn main() -> Result<()> {
     ensure!(args.input_cache.exists(), "Input cache does not exist: {}", args.input_cache.display());
     ensure!(args.max_seq_len >= 2, "max_seq_len must be >= 2");
 
-    println!("Initializing thesaurus dictionary (static feature)...");
-    thesaurus::init();
-    yumon_talk::get_thesaurus_dict();
-
-    if args.vocab.exists() {
-        println!("Loading Yumon Talk dynamic vocabulary from {} ...", args.vocab.display());
-        yumon_talk::load_global_vocab_file(&args.vocab)?;
+    let (active_vocab, default_tokenizer_dir) = if args.vocab.exists() {
+        if let Ok(kilo) = yumon_pet::brain::kilo_vocab::KiloVocab::load_from_json(&args.vocab) {
+            println!("Loaded Kilo Tokenizer / Vocab Mapping Model from {} ({} tokens, {} multi-word phrases)",
+                args.vocab.display(), kilo.vocab_size, kilo.learned_vocab.iter().filter(|w| w.contains(' ')).count());
+            let tok_dir = args.vocab.parent().unwrap_or(std::path::Path::new(".")).join("kilo_talk_tokenizer");
+            (ActiveVocab::Kilo(kilo), tok_dir)
+        } else {
+            println!("Initializing thesaurus dictionary (legacy Yumon Talk)...");
+            thesaurus::init();
+            yumon_talk::get_thesaurus_dict();
+            println!("Loading Yumon Talk dynamic vocabulary from {} ...", args.vocab.display());
+            yumon_talk::load_global_vocab_file(&args.vocab)?;
+            let tok_dir = args.vocab.parent().unwrap_or(std::path::Path::new(".")).join("yumon_talk_tokenizer");
+            (ActiveVocab::Yumon(yumon_talk::get_global_vocab().clone()), tok_dir)
+        }
     } else {
         println!("Notice: Vocab file {} not found; using built-in default vocabulary.", args.vocab.display());
-    }
+        let tok_dir = PathBuf::from(&args.tokenizer);
+        (ActiveVocab::Yumon(yumon_talk::get_global_vocab().clone()), tok_dir)
+    };
 
     println!("Loading input samples from {} ...", args.input_cache.display());
     let (input_meta, input_samples) = sample_cache::load_cache_lenient_limit(
@@ -280,12 +348,11 @@ fn main() -> Result<()> {
         args.limit,
     )?;
 
-    let talk_tokenizer_dir = args.vocab.parent().unwrap_or(std::path::Path::new(".")).join("yumon_talk_tokenizer");
-    let target_tokenizer = if talk_tokenizer_dir.join("tokenizer.json").exists() {
-        println!("Using Yumon Talk tokenizer from {} ...", talk_tokenizer_dir.display());
+    let target_tokenizer = if default_tokenizer_dir.join("tokenizer.json").exists() {
+        println!("Using tokenizer from {} ...", default_tokenizer_dir.display());
         TokenizerKind::Bpe(
-            BpeTokenizer::load(talk_tokenizer_dir.to_str().unwrap())
-                .with_context(|| format!("loading tokenizer from {}", talk_tokenizer_dir.display()))?
+            BpeTokenizer::load(default_tokenizer_dir.to_str().unwrap())
+                .with_context(|| format!("loading tokenizer from {}", default_tokenizer_dir.display()))?
         )
     } else {
         println!("Using base tokenizer from {} ...", args.tokenizer);
@@ -304,9 +371,6 @@ fn main() -> Result<()> {
     let processed_counter = AtomicUsize::new(0);
     let converted_counter = AtomicUsize::new(0);
 
-    let vocab_guard = yumon_talk::get_global_vocab();
-    let vocab_ref = &*vocab_guard;
-
     let preview_capture_limit = args.preview_samples.max(10) * 5;
 
     let results: Vec<ConversionResult> = input_samples
@@ -317,7 +381,7 @@ fn main() -> Result<()> {
             let res = convert_single_sample(
                 idx,
                 sample,
-                vocab_ref,
+                &active_vocab,
                 &target_tokenizer,
                 args.max_seq_len,
                 args.max_name_tokens,
