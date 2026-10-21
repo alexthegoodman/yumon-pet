@@ -17,6 +17,31 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::yumon_talk::{TranslationContext, YumonTalkVocab, get_global_vocab};
+use super::kilo_vocab::KiloVocab;
+
+/// Trait abstraction for token-to-word mapping and allowable word candidate lookup.
+pub trait DecompressorVocab {
+    fn id_to_token(&self, id: usize) -> Option<&str>;
+    fn allowable_words(&self, tok: &str) -> Vec<String>;
+}
+
+impl DecompressorVocab for YumonTalkVocab {
+    fn id_to_token(&self, id: usize) -> Option<&str> {
+        self.id_to_token(id)
+    }
+    fn allowable_words(&self, tok: &str) -> Vec<String> {
+        self.allowable_words(tok)
+    }
+}
+
+impl DecompressorVocab for KiloVocab {
+    fn id_to_token(&self, id: usize) -> Option<&str> {
+        self.id_to_token(id)
+    }
+    fn allowable_words(&self, tok: &str) -> Vec<String> {
+        self.allowable_words(tok)
+    }
+}
 
 pub type WordId = u32;
 
@@ -304,10 +329,10 @@ impl NGramDecompressor {
     }
 
     /// Decompress a Yumon Talk / Kilo Talk token sequence into natural English using beam search.
-    pub fn decompress_tokens(
+    pub fn decompress_tokens<V: DecompressorVocab>(
         &self,
         tokens: &[usize],
-        vocab: &YumonTalkVocab,
+        vocab: &V,
         ctx: &TranslationContext,
         beam_width: usize,
     ) -> Result<String> {
@@ -493,6 +518,17 @@ impl NGramDecompressor {
         let tokens = vocab.tokenize_yumon(yumon_text);
         self.decompress_tokens(&tokens, vocab, ctx, 1)
     }
+
+    /// Decompress Kilo token IDs using KiloVocab.
+    pub fn decompress_kilo(
+        &self,
+        tokens: &[usize],
+        vocab: &KiloVocab,
+        ctx: &TranslationContext,
+        beam_width: usize,
+    ) -> Result<String> {
+        self.decompress_tokens(tokens, vocab, ctx, beam_width)
+    }
 }
 
 /// Helper to capitalize a word's first character.
@@ -648,5 +684,29 @@ mod tests {
         assert_eq!(dec.total_unigrams, loaded.total_unigrams);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_kilo_vocab_end_to_end_decompression() {
+        let mut dec = NGramDecompressor::new(3);
+        dec.train_on_text("Alice loves exploring the universe every day.");
+
+        let mut word_counts = std::collections::HashMap::new();
+        word_counts.insert("loves".to_string(), 100);
+        word_counts.insert("exploring".to_string(), 100);
+        word_counts.insert("the".to_string(), 200);
+        word_counts.insert("universe".to_string(), 100);
+        word_counts.insert("every".to_string(), 100);
+        word_counts.insert("day".to_string(), 100);
+
+        let phrase_counts = std::collections::HashMap::new();
+        let vocab = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, 4096, 20);
+
+        let mut ctx = TranslationContext::new();
+        let tokens = vocab.encode("Alice loves exploring the universe every day.", &mut ctx).unwrap();
+
+        let decompressed = dec.decompress_kilo(&tokens, &vocab, &ctx, 4).unwrap();
+        assert!(decompressed.contains("Alice"), "Entity should be restored, got: {decompressed}");
+        assert!(decompressed.contains("universe"), "Word distinction should be preserved, got: {decompressed}");
     }
 }

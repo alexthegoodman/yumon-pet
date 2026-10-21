@@ -37,6 +37,10 @@ path = "src/bin/build_yumon_talk_vocab.rs"
 name = "build_decompressor"
 path = "src/bin/build_decompressor.rs"
 
+[[bin]]
+name = "build_kilo_vocab"
+path = "src/bin/build_kilo_vocab.rs"
+
 [features]
 # Desktop/GUI bits (native window + webview + 3D engine + gamepad input) used by
 # the yumon_desktop/yumon_world/yumon_civ/train_ui/chat_ui bins. Not needed for

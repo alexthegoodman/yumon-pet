@@ -21,6 +21,10 @@ pub mod code_corpus;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod kilo;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod kilo_vocab;
+#[cfg(not(target_arch = "wasm32"))]
+pub use kilo_vocab::KiloVocab;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod yumon_talk;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod decompressor;
