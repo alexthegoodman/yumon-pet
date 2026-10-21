@@ -11,7 +11,7 @@ use {
     std::collections::HashMap,
     std::path::PathBuf,
     yumon_pet::brain::{
-        kilo_vocab::KiloVocab,
+        kilo_vocab::{self, ContextFrameHash, KiloVocab},
         sample_cache,
         yumon_talk::TranslationContext,
     },
@@ -36,6 +36,15 @@ struct Args {
     /// Maximum number of recurring multi-word phrases to mine and include (default: 300)
     #[arg(long, default_value_t = 300)]
     max_phrases: usize,
+
+    /// Minimum confidence score to map an open-class word into a canonical anchor (default: 0.60).
+    /// Words scoring below this threshold are strictly dropped.
+    #[arg(long, default_value_t = 0.60)]
+    min_mapping_score: f64,
+
+    /// Maximum number of mapped words per canonical anchor cluster (default: 25)
+    #[arg(long, default_value_t = 25)]
+    max_cluster_size: usize,
 
     /// Minimum word frequency in corpus to be considered (default: 2)
     #[arg(long, default_value_t = 2)]
@@ -95,6 +104,8 @@ fn main() -> Result<()> {
     println!("Output vocab:         {}", args.output_vocab.display());
     println!("Target vocab size:    {}", args.vocab_size);
     println!("Max phrase tokens:    {}", args.max_phrases);
+    println!("Min mapping score:    {:.2} (words below this are dropped)", args.min_mapping_score);
+    println!("Max cluster size:     {}", args.max_cluster_size);
     println!("Min word frequency:   {}", args.min_word_freq);
     println!("Min phrase frequency: {}", args.min_phrase_freq);
 
@@ -104,10 +115,11 @@ fn main() -> Result<()> {
         args.input_cache.display()
     );
 
-    // 1. Scan corpus and count unigrams & recurring multi-word collocations
-    println!("\n[1/4] Scanning {} for word and phrase statistics...", args.input_cache.display());
+    // 1. Scan corpus and count unigrams, recurring multi-word collocations, and N-gram context frames
+    println!("\n[1/4] Scanning {} for unigrams, phrases, and N-gram context frames...", args.input_cache.display());
     let mut word_counts: HashMap<String, usize> = HashMap::new();
     let mut phrase_counts: HashMap<String, usize> = HashMap::new();
+    let mut word_contexts: HashMap<String, Vec<ContextFrameHash>> = HashMap::new();
     let mut total_tokens = 0usize;
     let mut sample_count = 0usize;
     let started = std::time::Instant::now();
@@ -116,15 +128,26 @@ fn main() -> Result<()> {
         sample_count += 1;
         let combined = format!("{} {}", pair.0, pair.1);
         let words = extract_words(&combined);
+        let len = words.len();
 
-        // Count unigrams
-        for word in &words {
+        // Count unigrams and collect N-gram sandwich context frames (L, R)
+        for i in 0..len {
             total_tokens += 1;
-            *word_counts.entry(word.clone()).or_insert(0) += 1;
+            let w = &words[i];
+            *word_counts.entry(w.clone()).or_insert(0) += 1;
+
+            let l = if i > 0 { &words[i - 1] } else { "<s>" };
+            let r = if i + 1 < len { &words[i + 1] } else { "</s>" };
+            let h = kilo_vocab::hash_context(l, r);
+
+            let frames = word_contexts.entry(w.clone()).or_default();
+            // Cap at 100 context frames per word to maintain strict memory bounds
+            if frames.len() < 100 && !frames.contains(&h) {
+                frames.push(h);
+            }
         }
 
         // Count 2-word and 3-word n-gram phrases
-        let len = words.len();
         for i in 0..len {
             if i + 1 < len {
                 let bigram = format!("{} {}", words[i], words[i + 1]);
@@ -160,26 +183,36 @@ fn main() -> Result<()> {
         word_counts.len(), args.min_word_freq, phrase_counts.len(), args.min_phrase_freq
     );
 
-    // 2. Build KiloVocab mapping model
-    println!("\n[2/4] Inducing 4,096-token vocabulary (preserving distinct word meanings)...");
+    // 2. Build KiloVocab mapping model using empirical N-gram context distributions
+    println!("\n[2/4] Inducing 4,096-token vocabulary using N-gram context distributions (Zero WordNet)...");
     let model = KiloVocab::learn_from_corpus(
         &word_counts,
         &phrase_counts,
         args.vocab_size,
         args.max_phrases,
+        args.min_mapping_score,
+        args.max_cluster_size,
+        Some(&word_contexts),
     );
 
     let phrase_token_count = model.learned_vocab.iter().filter(|w| w.contains(' ')).count();
     let unigram_token_count = model.learned_vocab.len() - phrase_token_count;
+    let mapped_anchors = model.allowable_clusters.len();
+    let total_cluster_words: usize = model.allowable_clusters.values().map(|c| c.len()).sum();
+    let total_candidate_words = word_counts.len();
+    let unmapped_dropped = total_candidate_words.saturating_sub(unigram_token_count + total_cluster_words);
 
     println!("Vocabulary induction complete:");
-    println!("  Total vocabulary size:  {}", model.vocab_size);
-    println!("  Special tokens:         {}", model.special_tokens.len());
-    println!("  Punctuation:            {}", model.punctuation.len());
-    println!("  Placeholders:           {}", model.placeholders.len());
-    println!("  Learned entries:        {}", model.learned_vocab.len());
-    println!("    ↳ Single words:       {}", unigram_token_count);
-    println!("    ↳ Multi-word phrases: {}", phrase_token_count);
+    println!("  Total vocabulary size:      {}", model.vocab_size);
+    println!("  Special tokens:             {}", model.special_tokens.len());
+    println!("  Punctuation:                {}", model.punctuation.len());
+    println!("  Placeholders:               {}", model.placeholders.len());
+    println!("  Learned entries:            {}", model.learned_vocab.len());
+    println!("    ↳ Single words:           {}", unigram_token_count);
+    println!("    ↳ Multi-word phrases:     {}", phrase_token_count);
+    println!("  Allowable clusters:         {} anchors with mapped words", mapped_anchors);
+    println!("  Dynamically mapped words:   {} words (score >= {:.2})", total_cluster_words, args.min_mapping_score);
+    println!("  Strictly dropped words:     {} words (score < {:.2})", unmapped_dropped, args.min_mapping_score);
 
     // 3. Save to output JSON
     println!("\n[3/4] Saving model to {}...", args.output_vocab.display());
