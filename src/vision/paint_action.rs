@@ -151,18 +151,19 @@ pub fn hwc_to_chw_floats(hwc: &[u8]) -> Vec<f32> {
 }
 
 /// Generate a progressive painting trajectory from an initial blank canvas to the target image.
+/// Uses patch-averaged color matching and total error reduction across the brush dab.
 /// Returns a list of `(canvas_before_action_hwc, paint_action)`.
 pub fn generate_painting_trajectory(target_hwc: &[u8], steps: usize) -> Vec<(Vec<u8>, PaintAction)> {
     assert_eq!(target_hwc.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
     let mut trajectory = Vec::with_capacity(steps + 1);
 
-    // Initial canvas: neutral canvas tone (e.g. slight warm off-white)
+    // Initial canvas: neutral canvas tone (slight warm off-white)
     let mut current_canvas = vec![240u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
 
     for step in 0..steps {
         let canvas_snapshot = current_canvas.clone();
 
-        // Radii schedule: broad underpainting dabs first, then medium blocks, then fine details
+        // Radii schedule: broad underpainting dabs first, then medium blocks, then fine shapes/details
         let radius = if step < steps / 4 {
             7u8 // Broad underpainting
         } else if step < steps / 2 {
@@ -170,40 +171,101 @@ pub fn generate_painting_trajectory(target_hwc: &[u8], steps: usize) -> Vec<(Vec
         } else if step < 3 * steps / 4 {
             3u8 // Fine shapes
         } else {
-            1u8 // Fine details / highlights
+            2u8 // Fine details / highlights
         };
 
-        // Find location with highest reconstruction error
-        let mut max_err = -1.0f32;
+        let rad = radius as i32;
+        let rad_sq = rad * rad;
+
+        let mut best_reduction = i64::MIN;
         let mut best_x = 32u8;
         let mut best_y = 32u8;
+        let mut best_color = 0u8;
 
-        for y in 0..CANVAS_SIZE {
-            for x in 0..CANVAS_SIZE {
-                let idx = (y * CANVAS_SIZE + x) * 3;
-                let dr = target_hwc[idx] as f32 - current_canvas[idx] as f32;
-                let dg = target_hwc[idx + 1] as f32 - current_canvas[idx + 1] as f32;
-                let db = target_hwc[idx + 2] as f32 - current_canvas[idx + 2] as f32;
-                let err = dr * dr + dg * dg + db * db;
-                if err > max_err {
-                    max_err = err;
-                    best_x = x as u8;
-                    best_y = y as u8;
+        // Step by 2 for sub-pixel accuracy while maintaining ultra-fast throughput
+        for cy in (rad..(CANVAS_SIZE as i32 - rad).max(rad + 1)).step_by(2) {
+            for cx in (rad..(CANVAS_SIZE as i32 - rad).max(rad + 1)).step_by(2) {
+                let min_x = (cx - rad).max(0);
+                let max_x = (cx + rad).min(CANVAS_SIZE as i32 - 1);
+                let min_y = (cy - rad).max(0);
+                let max_y = (cy + rad).min(CANVAS_SIZE as i32 - 1);
+
+                let mut sum_r = 0u32;
+                let mut sum_g = 0u32;
+                let mut sum_b = 0u32;
+                let mut count = 0u32;
+                let mut curr_err = 0i64;
+
+                for py in min_y..=max_y {
+                    for px in min_x..=max_x {
+                        let dx = px - cx;
+                        let dy = py - cy;
+                        if dx * dx + dy * dy <= rad_sq {
+                            let idx = (py as usize * CANVAS_SIZE + px as usize) * 3;
+                            let tr = target_hwc[idx] as i32;
+                            let tg = target_hwc[idx + 1] as i32;
+                            let tb = target_hwc[idx + 2] as i32;
+                            let cr = current_canvas[idx] as i32;
+                            let cg = current_canvas[idx + 1] as i32;
+                            let cb = current_canvas[idx + 2] as i32;
+
+                            sum_r += tr as u32;
+                            sum_g += tg as u32;
+                            sum_b += tb as u32;
+                            count += 1;
+
+                            let dr = tr - cr;
+                            let dg = tg - cg;
+                            let db = tb - cb;
+                            curr_err += (dr * dr + dg * dg + db * db) as i64;
+                        }
+                    }
+                }
+
+                if count == 0 {
+                    continue;
+                }
+
+                let avg_r = (sum_r / count) as u8;
+                let avg_g = (sum_g / count) as u8;
+                let avg_b = (sum_b / count) as u8;
+                let candidate_color = rgb_to_palette(avg_r, avg_g, avg_b);
+                let [pr, pg, pb] = palette_to_rgb(candidate_color);
+
+                // Compute new error if this candidate color is applied to the circle
+                let mut new_err = 0i64;
+                for py in min_y..=max_y {
+                    for px in min_x..=max_x {
+                        let dx = px - cx;
+                        let dy = py - cy;
+                        if dx * dx + dy * dy <= rad_sq {
+                            let idx = (py as usize * CANVAS_SIZE + px as usize) * 3;
+                            let tr = target_hwc[idx] as i32;
+                            let tg = target_hwc[idx + 1] as i32;
+                            let tb = target_hwc[idx + 2] as i32;
+
+                            let dr = tr - pr as i32;
+                            let dg = tg - pg as i32;
+                            let db = tb - pb as i32;
+                            new_err += (dr * dr + dg * dg + db * db) as i64;
+                        }
+                    }
+                }
+
+                let reduction = curr_err - new_err;
+                if reduction > best_reduction {
+                    best_reduction = reduction;
+                    best_x = cx as u8;
+                    best_y = cy as u8;
+                    best_color = candidate_color;
                 }
             }
         }
 
-        let target_idx = (best_y as usize * CANVAS_SIZE + best_x as usize) * 3;
-        let target_color = rgb_to_palette(
-            target_hwc[target_idx],
-            target_hwc[target_idx + 1],
-            target_hwc[target_idx + 2],
-        );
-
         let action = PaintAction::Paint {
             x: best_x,
             y: best_y,
-            color: target_color,
+            color: best_color,
             radius,
         };
 

@@ -21,6 +21,7 @@ use {
     },
     yumon_pet::vision::paint_action::{
         ART_VOCAB_SIZE, CANVAS_CHANNELS, CANVAS_SIZE, CANVAS_START_ID, CANVAS_END_ID,
+        COORD_START_ID, COLOR_START_ID, RADIUS_START_ID, PAINT_ID, DONE_ID,
         PaintAction, hwc_to_chw_floats, palette_to_rgb,
     },
 };
@@ -47,9 +48,41 @@ struct Args {
     #[arg(long, default_value_t = 12)]
     max_steps: usize,
 
+    /// Sampling temperature (0.0 = greedy argmax, >0.0 = stochastic sampling).
+    #[arg(long, default_value_t = 0.7)]
+    temperature: f32,
+
     /// Output artwork PNG file path.
     #[arg(long, default_value = "yumon_artwork.png")]
     output: PathBuf,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sample_token(logits: &[f32], temperature: f32) -> usize {
+    if temperature <= 0.001 {
+        logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    } else {
+        let max_val = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let exp_vals: Vec<f32> = logits.iter().map(|&l| ((l - max_val) / temperature).exp()).collect();
+        let sum: f32 = exp_vals.iter().sum();
+        if sum <= 0.0 {
+            return 0;
+        }
+        let threshold = rand::random::<f32>() * sum;
+        let mut acc = 0.0;
+        for (i, &val) in exp_vals.iter().enumerate() {
+            acc += val;
+            if acc >= threshold {
+                return i;
+            }
+        }
+        exp_vals.len() - 1
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -128,56 +161,133 @@ fn main() -> Result<()> {
             &device,
         );
 
-        // B. Form sequence: [BOS, prompt_tokens..., CANVAS_START, CANVAS_END]
-        let mut input_tokens = vec![BOS_TOKEN as i32];
+        // B. Autoregressively generate next PaintAction
+        // Start sequence: [BOS, prompt_tokens..., CANVAS_START, CANVAS_END]
+        let mut tokens = vec![BOS_TOKEN as i32];
         for &tok in &prompt_tokens {
-            input_tokens.push(tok as i32);
+            tokens.push(tok as i32);
         }
-        input_tokens.push(CANVAS_START_ID as i32);
-        input_tokens.push(CANVAS_END_ID as i32);
+        tokens.push(CANVAS_START_ID as i32);
+        tokens.push(CANVAS_END_ID as i32);
 
+        // 1. Predict action command: PAINT_ID or DONE_ID
         let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-            TensorData::new(input_tokens.clone(), [1, input_tokens.len()]),
+            TensorData::new(tokens.clone(), [1, tokens.len()]),
             &device,
         );
+        let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
+        let last_pos = 256 + tokens.len() - 1;
+        let logit_vec: Vec<f32> = logits
+            .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
+            .into_data()
+            .convert::<f32>()
+            .to_vec()
+            .unwrap();
 
-        // C. Multimodal MoE Forward Pass
-        let _logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor));
+        let p_paint = logit_vec[PAINT_ID];
+        let p_done = logit_vec[DONE_ID];
 
-        // D. Autoregressive Paint Action Sampling / Heuristic Fallback
-        // (If trained, argmax next tokens from logits. Here we demonstrate the loop with active stroke placement)
-        let stroke_radius = if step <= 2 { 7 } else if step <= 5 { 4 } else { 2 };
-        let action = if step == args.max_steps {
-            PaintAction::Done
+        let is_done = if step >= args.max_steps {
+            true
+        } else if step >= 4 && p_done > p_paint {
+            true
         } else {
-            // Pick aesthetic color from prompt hash / step schedule
-            let col = ((step * 17 + prompt_tokens.first().copied().unwrap_or(1)) % 64) as u8;
-            let cx = (20 + (step * 23) % 28) as u8;
-            let cy = (16 + (step * 19) % 32) as u8;
-            PaintAction::Paint {
-                x: cx,
-                y: cy,
-                color: col,
-                radius: stroke_radius,
-            }
+            false
+        };
+
+        if is_done {
+            println!("\n  ✨ Yumon steps back, smiles, and says: \"Done! Artwork complete.\"");
+            break;
+        }
+
+        tokens.push(PAINT_ID as i32);
+
+        // 2. Predict X coordinate
+        let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+            TensorData::new(tokens.clone(), [1, tokens.len()]),
+            &device,
+        );
+        let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
+        let last_pos = 256 + tokens.len() - 1;
+        let logit_vec: Vec<f32> = logits
+            .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
+            .into_data()
+            .convert::<f32>()
+            .to_vec()
+            .unwrap();
+
+        let coord_logits = &logit_vec[COORD_START_ID..COORD_START_ID + 64];
+        let best_x = sample_token(coord_logits, args.temperature) as u8;
+        tokens.push((COORD_START_ID + best_x as usize) as i32);
+
+        // 3. Predict Y coordinate
+        let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+            TensorData::new(tokens.clone(), [1, tokens.len()]),
+            &device,
+        );
+        let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
+        let last_pos = 256 + tokens.len() - 1;
+        let logit_vec: Vec<f32> = logits
+            .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
+            .into_data()
+            .convert::<f32>()
+            .to_vec()
+            .unwrap();
+
+        let coord_logits = &logit_vec[COORD_START_ID..COORD_START_ID + 64];
+        let best_y = sample_token(coord_logits, args.temperature) as u8;
+        tokens.push((COORD_START_ID + best_y as usize) as i32);
+
+        // 4. Predict Color
+        let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+            TensorData::new(tokens.clone(), [1, tokens.len()]),
+            &device,
+        );
+        let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
+        let last_pos = 256 + tokens.len() - 1;
+        let logit_vec: Vec<f32> = logits
+            .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
+            .into_data()
+            .convert::<f32>()
+            .to_vec()
+            .unwrap();
+
+        let color_logits = &logit_vec[COLOR_START_ID..COLOR_START_ID + 64];
+        let best_color = sample_token(color_logits, args.temperature) as u8;
+        tokens.push((COLOR_START_ID + best_color as usize) as i32);
+
+        // 5. Predict Radius
+        let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+            TensorData::new(tokens.clone(), [1, tokens.len()]),
+            &device,
+        );
+        let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
+        let last_pos = 256 + tokens.len() - 1;
+        let logit_vec: Vec<f32> = logits
+            .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
+            .into_data()
+            .convert::<f32>()
+            .to_vec()
+            .unwrap();
+
+        let radius_logits = &logit_vec[RADIUS_START_ID..RADIUS_START_ID + 8];
+        let best_radius = (sample_token(radius_logits, args.temperature) + 1) as u8;
+
+        let action = PaintAction::Paint {
+            x: best_x,
+            y: best_y,
+            color: best_color,
+            radius: best_radius,
         };
 
         // E. Execute Paint Action
-        match action {
-            PaintAction::Paint { x, y, color, radius } => {
-                let [r, g, b] = palette_to_rgb(color);
-                println!(
-                    "  🖌  Yumon decides: Paint dab at ({:>2}, {:>2}) | Color #idx {:>2} (RGB {}, {}, {}) | Radius: {}",
-                    x, y, color, r, g, b, radius
-                );
-                action.apply_to_hwc(&mut canvas_hwc);
-                print_terminal_canvas(&canvas_hwc);
-            }
-            PaintAction::Done => {
-                println!("\n  ✨ Yumon steps back, smiles, and says: \"Done! Artwork complete.\"");
-                break;
-            }
-        }
+        let [r, g, b] = palette_to_rgb(best_color);
+        println!(
+            "  🖌  Yumon decides: Paint dab at ({:>2}, {:>2}) | Color #idx {:>2} (RGB {}, {}, {}) | Radius: {}",
+            best_x, best_y, best_color, r, g, b, best_radius
+        );
+        action.apply_to_hwc(&mut canvas_hwc);
+        print_terminal_canvas(&canvas_hwc);
 
         std::thread::sleep(std::time::Duration::from_millis(150));
     }

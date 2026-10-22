@@ -53,6 +53,10 @@ path = "src/bin/train_art_moe.rs"
 name = "yumon_paint"
 path = "src/bin/yumon_paint.rs"
 
+[[bin]]
+name = "inspect_dataset"
+path = "src/bin/inspect_dataset.rs"
+
 [features]
 # Desktop/GUI bits (native window + webview + 3D engine + gamepad input) used by
 # the yumon_desktop/yumon_world/yumon_civ/train_ui/chat_ui bins. Not needed for
