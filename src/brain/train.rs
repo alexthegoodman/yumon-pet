@@ -219,6 +219,8 @@ pub enum Architecture {
     Moe { num_experts: usize, top_k: usize },
     /// Stock `burn::nn::transformer` baseline (reference_model.rs).
     Reference,
+    /// Standalone isotropic generative Vision Transformer for 64x64 pixel-space diffusion.
+    VisionDiT { patch_size: usize },
 }
 
 pub struct RunConfig {
@@ -336,6 +338,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             Architecture::XLstm => "XLstm".to_string(),
             Architecture::EncoderDecoder => "EncoderDecoder".to_string(),
             Architecture::Reference => "Reference".to_string(),
+            Architecture::VisionDiT { patch_size } => format!("VisionDiT_p{patch_size}"),
         };
         let run = RunConfig {
             // Depth tiers carry their own expert widths in arch_tag.
@@ -393,6 +396,9 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
             Architecture::Reference => train_causal_lm::<YumonReferenceBrain<TrainBackend>>(
                 &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
+            Architecture::VisionDiT { .. } => {
+                println!("VisionDiT is trained via its dedicated vision pipeline (e.g. cargo run --bin train_dit).");
+            }
         }
     }
     Ok(())
@@ -1839,6 +1845,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     Architecture::EncoderDecoder => (1e-3, 1e-4),
                                     Architecture::XLstm          => (1e-3, 1e-4),
                                     Architecture::Reference      => (3e-4, 3e-5),
+                                    Architecture::VisionDiT { .. } => (2e-4, 2e-5),
                                 };
                                 let arch_tag = match architecture {
                                     Architecture::Moe { num_experts, top_k } => format!("Moe_e{num_experts}_k{top_k}"),
@@ -1846,6 +1853,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     Architecture::EncoderDecoder => "EncoderDecoder".to_string(),
                                     Architecture::XLstm          => "XLstm".to_string(),
                                     Architecture::Reference      => "Reference".to_string(),
+                                    Architecture::VisionDiT { patch_size } => format!("VisionDiT_p{patch_size}"),
                                 };
                                 let stage_tag = match stage {
                                     TrainingStage::Language   => "Language",
@@ -2760,6 +2768,10 @@ pub fn run_with_architecture(
 
         Architecture::Reference => {
             train_causal_lm::<YumonReferenceBrain<TrainBackend>>(&run_cfg, &run_dir, &tokenizer, &keyword_index, &prompts, &device, None)?;
+        }
+
+        Architecture::VisionDiT { .. } => {
+            println!("VisionDiT is executed via the vision module pipeline (cargo run --bin train_dit).");
         }
 
         } // match run_cfg.architecture

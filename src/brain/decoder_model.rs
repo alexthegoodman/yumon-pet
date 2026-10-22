@@ -19,7 +19,7 @@
 use super::{
     bpe::{BpeTokenizer, TokenizerKind},
     fixer::fix_json_syntax,
-    flash_attn::backend::{FlashAttention, causal_flash_attention},
+    flash_attn::backend::{FlashAttention, causal_flash_attention, flash_attention},
     model::{GenerationResult, MLP, MLPConfig, RMSNorm, RMSNormConfig, TEMPERATURE, TOP_K},
     samples::{Action, CardinalDir, TrainingStage},
     tokenizer::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN},
@@ -602,6 +602,12 @@ mod tests {
         assert!(worst <= tolerance, "{what}: max relative error {worst} > {tolerance}");
     }
 
+    fn naive_bidirectional<B: Backend>(q: Tensor<B, 4>, k: Tensor<B, 4>, v: Tensor<B, 4>) -> Tensor<B, 4> {
+        let [_, _, _, dim] = q.dims();
+        let scores = q.matmul(k.transpose()) / (dim as f64).sqrt();
+        softmax(scores, 3).matmul(v)
+    }
+
     fn naive_causal<B: Backend>(q: Tensor<B, 4>, k: Tensor<B, 4>, v: Tensor<B, 4>) -> Tensor<B, 4> {
         let [_, _, seq, dim] = q.dims();
         // tril_mask marks what to fill: everything above the diagonal, i.e. future keys.
@@ -731,6 +737,47 @@ mod tests {
     #[test]
     fn flash_matches_reference_balanced_checkpointing() {
         flash_matches_reference::<Balanced>();
+    }
+
+    fn flash_bidirectional_matches_reference<AD: AutodiffBackend + FlashAttention>() {
+        let device = Default::default();
+        for [batch, heads, seq, dim] in [
+            [2, 2, 1, 32],
+            [1, 3, 37, 32],
+            [1, 1, 100, 32],
+            [2, 2, 64, 64],
+            [1, 2, 48, 16],
+        ] {
+            let what = format!("bidirectional b{batch} h{heads} s{seq} d{dim}");
+            let rand = || Tensor::<AD, 4>::random([batch, heads, seq, dim], Distribution::Normal(0.0, 1.0), &device);
+            let (q, k, v, w) = (rand(), rand(), rand(), rand());
+            let run = |flash: bool| {
+                let (q, k, v) = (q.clone().require_grad(), k.clone().require_grad(), v.clone().require_grad());
+                let out = if flash {
+                    flash_attention(q.clone(), k.clone(), v.clone(), false)
+                } else {
+                    naive_bidirectional(q.clone(), k.clone(), v.clone())
+                };
+                let grads = (out.clone() * w.clone()).sum().backward();
+                (
+                    values(out.inner()),
+                    values(q.grad(&grads).unwrap()),
+                    values(k.grad(&grads).unwrap()),
+                    values(v.grad(&grads).unwrap()),
+                )
+            };
+            let (o, dq, dk, dv) = run(true);
+            let (o_ref, dq_ref, dk_ref, dv_ref) = run(false);
+            assert_close(o, o_ref, 1e-4, &format!("{what} output"));
+            assert_close(dq, dq_ref, 1e-3, &format!("{what} dQ"));
+            assert_close(dk, dk_ref, 1e-3, &format!("{what} dK"));
+            assert_close(dv, dv_ref, 1e-3, &format!("{what} dV"));
+        }
+    }
+
+    #[test]
+    fn flash_bidirectional_matches_reference_test() {
+        flash_bidirectional_matches_reference::<Plain>();
     }
 
     #[test]

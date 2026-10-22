@@ -67,9 +67,9 @@ pub const YUMON_SCHEMA: &str = r#"{
     "required": ["action", "motion_dir", "reply"]
 }"#;
 
-// ═════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // "Soft" Mixture of Experts
-// ═════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[derive(Config, Debug)]
 pub struct MoEConfig {
@@ -108,67 +108,125 @@ impl<B: Backend> MoE<B> {
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let [batch, seq, d_model] = x.dims();
 
-        // Router logits → softmax weights
+        // Router logits â†’ softmax weights
         // [batch, seq, n_experts]
         let logits = self.router.forward(x.clone());
         let weights = burn::tensor::activation::softmax(logits, 2);
 
-        // Run ALL experts, then mask — avoids dynamic indexing
+        // Run ALL experts, then mask â€” avoids dynamic indexing
         // [batch, seq, d_model] for each expert
         let expert_outputs: Vec<Tensor<B, 3>> = self.experts
             .iter()
             .map(|e| e.forward(x.clone()))
             .collect();
 
-        // Stack → [batch, seq, n_experts, d_model]
+        // Stack â†’ [batch, seq, n_experts, d_model]
         let stacked = Tensor::stack(expert_outputs, 2);
 
         // Weighted sum over experts
-        // weights: [batch, seq, n_experts] → [batch, seq, n_experts, 1]
+        // weights: [batch, seq, n_experts] â†’ [batch, seq, n_experts, 1]
         let w = weights.unsqueeze_dim::<4>(3);
 
         // [batch, seq, n_experts, d_model] * [batch, seq, n_experts, 1]
-        // → sum over expert dim → [batch, seq, d_model]
+        // â†’ sum over expert dim â†’ [batch, seq, d_model]
         // (stacked * w).sum_dim(2).squeeze(2)
         (stacked * w).sum_dim(2).squeeze::<3>()
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // RMSNorm
-// ═════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[derive(Config, Debug)]
 pub struct RMSNormConfig {
-    size: usize,
+    pub size: usize,
     #[config(default = 1e-6)]
-    eps: f64,
+    pub eps: f64,
+    #[config(default = true)]
+    pub elementwise_affine: bool,
 }
 
 impl RMSNormConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> RMSNorm<B> {
-        let weight = burn::module::Param::from_tensor(Tensor::ones([self.size], device));
+        let weight = if self.elementwise_affine {
+            Some(burn::module::Param::from_tensor(Tensor::ones([self.size], device)))
+        } else {
+            None
+        };
         RMSNorm { weight, eps: self.eps }
     }
 }
 
 #[derive(Module, Debug)]
 pub struct RMSNorm<B: Backend> {
-    weight: burn::module::Param<Tensor<B, 1>>,
-    eps: f64,
+    pub weight: Option<burn::module::Param<Tensor<B, 1>>>,
+    pub eps: f64,
 }
 
 impl<B: Backend> RMSNorm<B> {
     pub fn forward<const D: usize>(&self, x: Tensor<B, D>) -> Tensor<B, D> {
         let rms = (x.clone().powf_scalar(2.0).mean_dim(D - 1) + self.eps).sqrt();
-        (x / rms) * self.weight.val().unsqueeze()
+        let normed = x / rms;
+        if let Some(weight) = &self.weight {
+            normed * weight.val().unsqueeze()
+        } else {
+            normed
+        }
     }
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// LayerNorm
+// ═════════════════════════════════════════════════════════════════════════════
 
-// ═════════════════════════════════════════════════════════════════════════════
+#[derive(Config, Debug)]
+pub struct LayerNormConfig {
+    pub size: usize,
+    #[config(default = 1e-6)]
+    pub eps: f64,
+    #[config(default = true)]
+    pub elementwise_affine: bool,
+}
+
+impl LayerNormConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> LayerNorm<B> {
+        let (gamma, beta) = if self.elementwise_affine {
+            (
+                Some(burn::module::Param::from_tensor(Tensor::ones([self.size], device))),
+                Some(burn::module::Param::from_tensor(Tensor::zeros([self.size], device))),
+            )
+        } else {
+            (None, None)
+        };
+        LayerNorm { gamma, beta, eps: self.eps }
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct LayerNorm<B: Backend> {
+    pub gamma: Option<burn::module::Param<Tensor<B, 1>>>,
+    pub beta: Option<burn::module::Param<Tensor<B, 1>>>,
+    pub eps: f64,
+}
+
+impl<B: Backend> LayerNorm<B> {
+    pub fn forward<const D: usize>(&self, x: Tensor<B, D>) -> Tensor<B, D> {
+        let mean = x.clone().mean_dim(D - 1);
+        let diff = x - mean;
+        let var = diff.clone().powf_scalar(2.0).mean_dim(D - 1);
+        let normed = diff / (var + self.eps).sqrt();
+        match (&self.gamma, &self.beta) {
+            (Some(gamma), Some(beta)) => normed * gamma.val().unsqueeze() + beta.val().unsqueeze(),
+            (Some(gamma), None) => normed * gamma.val().unsqueeze(),
+            _ => normed,
+        }
+    }
+}
+
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // SiLU activation
-// ═════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[derive(Module, Clone, Debug)]
 pub struct SiLU {}
@@ -180,9 +238,9 @@ impl SiLU {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Linear Force
-// ═════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[derive(Config, Debug)]
 pub struct LinearForceConfig {
@@ -220,9 +278,9 @@ impl<B: Backend> LinearForce<B> {
 }
 
 
-// ═════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // SwiGLU MLP  (same gated structure as Llama)
-// ═════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[derive(Config, Debug)]
 pub struct MLPConfig {
@@ -271,9 +329,9 @@ impl<B: Backend> MLP<B> {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // YumonBrain
-// ═════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[derive(Module, Debug)]
 pub struct YumonBrain<B: Backend> {
@@ -346,7 +404,7 @@ impl YumonBrainConfig {
 }
 
 impl<B: Backend> YumonBrain<B> {
-    // ── Encoder ──────────────────────────────────────────────────────────────
+    // â”€â”€ Encoder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     pub fn encode<R: Runtime<Device = B::Device>>(
         &self,
         enc_tokens:  Tensor<B, 2, Int>,
@@ -369,7 +427,7 @@ impl<B: Backend> YumonBrain<B> {
         self.enc_norm.forward(x)
     }
 
-    // ── Decoder ──────────────────────────────────────────────────────────────
+    // â”€â”€ Decoder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     pub fn decode<R: Runtime<Device = B::Device>>(
         &self,
         dec_tokens:  Tensor<B, 2, Int>,
@@ -406,7 +464,7 @@ impl<B: Backend> YumonBrain<B> {
         token_logits
     }
 
-    // ── Forward ───────────────────────────────────────────────────────────────
+    // â”€â”€ Forward â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     pub fn forward<R: Runtime<Device = B::Device>>(
         &self,
         enc_tokens:  Tensor<B, 2, Int>,
@@ -418,7 +476,7 @@ impl<B: Backend> YumonBrain<B> {
         self.decode::<R>(dec_tokens, memory, Some(enc_pad_mask))
     }
 
-    // // ── Encoder ──────────────────────────────────────────────────────────────
+    // // â”€â”€ Encoder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // pub async fn encode_async<R: Runtime<Device = B::Device>>(
     //     &self,
     //     enc_tokens:  Tensor<B, 2, Int>,
@@ -440,7 +498,7 @@ impl<B: Backend> YumonBrain<B> {
     //     self.enc_norm.forward(x)
     // }
 
-    // // ── Decoder ──────────────────────────────────────────────────────────────
+    // // â”€â”€ Decoder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // pub async fn decode_async<R: Runtime<Device = B::Device>>(
     //     &self,
     //     dec_tokens:  Tensor<B, 2, Int>,
@@ -477,7 +535,7 @@ impl<B: Backend> YumonBrain<B> {
     //     token_logits
     // }
 
-    // ── Forward ───────────────────────────────────────────────────────────────
+    // â”€â”€ Forward â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // pub async fn forward_async<R: Runtime<Device = B::Device>>(
     //     &self,
     //     enc_tokens:  Tensor<B, 2, Int>,
@@ -496,7 +554,7 @@ impl<B: Backend> YumonBrain<B> {
         max_tokens:     usize,
         device:         &B::Device,
     ) -> GenerationResult {
-        // ── Encode input once ──────────────────────────────────────────────────
+        // â”€â”€ Encode input once â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         let enc_ids: Vec<i32> = {
             let mut ids = vec![BOS_TOKEN as i32];
             if !seed_text.is_empty() {
@@ -517,7 +575,7 @@ impl<B: Backend> YumonBrain<B> {
 
         let memory = self.encode::<R>(enc_tokens_t_cl);  // run once
 
-        // ── Decode autoregressively — no FSM masking ───────────────────────────
+        // â”€â”€ Decode autoregressively â€” no FSM masking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
         let mut rng = rand::thread_rng();
         let mut last_emote_logits: Option<Vec<f32>> = None;
@@ -542,7 +600,7 @@ impl<B: Backend> YumonBrain<B> {
                 .slice([0..1, clamped_len - 1..clamped_len, 0..vocab_size])
                 .reshape([vocab_size]);
 
-            // no masking — pure model output
+            // no masking â€” pure model output
             let logits_vec: Vec<f32> = last_logits.to_data().convert::<f32>().to_vec().unwrap();
             let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
 
@@ -550,7 +608,7 @@ impl<B: Backend> YumonBrain<B> {
             dec_ids.push(next_token);
         }
 
-        // ── Decode tokens → string (skip BOS) ─────────────────────────────────
+        // â”€â”€ Decode tokens â†’ string (skip BOS) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         let raw_output = tokenizer.decode(&dec_ids[1..]);
 
         let fixed = fix_json_syntax(&raw_output).fixed;
@@ -663,7 +721,7 @@ impl<B: Backend> YumonBrain<B> {
     //     max_tokens:     usize,
     //     device:         &B::Device,
     // ) -> GenerationResult {
-    //     // ── Encode input once ──────────────────────────────────────────────────
+    //     // â”€â”€ Encode input once â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     //     let enc_ids: Vec<i32> = {
     //         let mut ids = vec![BOS_TOKEN as i32];
     //         if !seed_text.is_empty() {
@@ -684,7 +742,7 @@ impl<B: Backend> YumonBrain<B> {
 
     //     let memory = self.encode_async::<R>(enc_tokens_t_cl).await;  // run once
 
-    //     // ── Decode autoregressively — no FSM masking ───────────────────────────
+    //     // â”€â”€ Decode autoregressively â€” no FSM masking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     //     let mut dec_ids: Vec<usize> = vec![BOS_TOKEN];
     //     let mut rng = rand::thread_rng();
     //     let mut last_emote_logits: Option<Vec<f32>> = None;
@@ -709,7 +767,7 @@ impl<B: Backend> YumonBrain<B> {
     //             .slice([0..1, clamped_len - 1..clamped_len, 0..vocab_size])
     //             .reshape([vocab_size]);
 
-    //         // no masking — pure model output
+    //         // no masking â€” pure model output
     //         let logits_vec: Vec<f32> = last_logits.to_data_async().await.expect("Need logits").to_vec().unwrap();
     //         let next_token = sample_top_k(&logits_vec, TOP_K, TEMPERATURE, &mut rng);
 
@@ -717,7 +775,7 @@ impl<B: Backend> YumonBrain<B> {
     //         dec_ids.push(next_token);
     //     }
 
-    //     // ── Decode tokens → string (skip BOS) ─────────────────────────────────
+    //     // â”€â”€ Decode tokens â†’ string (skip BOS) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     //     let raw_output = tokenizer.decode(&dec_ids[1..]);
 
     //     let fixed = fix_json_syntax(&raw_output).fixed;
@@ -805,7 +863,7 @@ impl<B: Backend> YumonBrain<B> {
     //     }
     // }
 
-    // ── Checkpoint I/O ────────────────────────────────────────────────────────
+    // â”€â”€ Checkpoint I/O â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     pub fn save(&self, directory: &str, tokenizer: &TokenizerKind, metadata: &BrainMetadata) -> Result<()> {
         let dir = std::path::Path::new(directory);
@@ -922,7 +980,7 @@ fn make_positions<B: Backend>(
     )
 }
 
-// ─── Generation Result ────────────────────────────────────────────────────────
+// â”€â”€â”€ Generation Result â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[derive(Debug, Clone)]
 pub struct GenerationResult {
@@ -931,11 +989,11 @@ pub struct GenerationResult {
     pub motion_dir:      CardinalDir,
     pub parsed_emotion: String,
     pub raw_output: String,
-    pub fsm_state:       u32,      // ← final FSM state
-    pub allowed_count:   Option<usize>, // ← None if masking never fired
+    pub fsm_state:       u32,      // â† final FSM state
+    pub allowed_count:   Option<usize>, // â† None if masking never fired
 }
 
-// ─── Metadata ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Metadata â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BrainMetadata {
@@ -952,7 +1010,7 @@ pub struct BrainMetadata {
     pub max_seq_len:    usize,
 }
 
-// ─── Sampling helpers ─────────────────────────────────────────────────────────
+// â”€â”€â”€ Sampling helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn sample_top_k(logits: &[f32], k: usize, temperature: f32, rng: &mut impl rand::Rng) -> usize {
     use rand::distributions::WeightedIndex;

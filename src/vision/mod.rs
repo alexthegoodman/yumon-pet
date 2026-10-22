@@ -7,6 +7,13 @@ pub mod loader;
 pub mod cifar;
 pub mod fer;
 pub mod train;
+pub mod dit;
+pub mod dataset;
+pub mod flow;
+
+pub use dit::{VisionDiT, VisionDiTConfig};
+pub use dataset::{discover_images, load_png_as_tensor, load_image_batch, save_tensor_as_png, save_batch_as_pngs};
+pub use flow::{EulerSampler, RectifiedFlow, EmaTracker, DiTTrainer};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 

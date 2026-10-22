@@ -1,8 +1,8 @@
-// kernel.rs - CubeCL causal FlashAttention (forward + two-pass backward)
+// kernel.rs - CubeCL FlashAttention (forward + two-pass backward, causal or bidirectional)
 //
 // Tensors are contiguous [batch*heads, seq, dim] FP32 or BF16.
 // Storage uses F; shared tiles, accumulators, LSE and delta stay FP32. Self-attention only
-// (seq_q == seq_k) and always causal: query row i sees keys 0..=i.
+// (seq_q == seq_k). When causal: query row i sees keys 0..=i. When not causal: query row i sees all keys 0..seq.
 //
 // Launch config for every kernel:
 //   cube_count = (batch * heads, ceil(seq / block), 1)
@@ -21,8 +21,8 @@
 // sync_cube(); they skip the math and the writes.
 //
 // The backward is split so every unit owns the rows it writes:
-//   causal_bwd_dq   - one unit per query row: delta = rowsum(dO * O), dQ
-//   causal_bwd_dkdv - one unit per key row:   dK, dV
+//   flash_bwd_dq   - one unit per query row: delta = rowsum(dO * O), dQ
+//   flash_bwd_dkdv - one unit per key row:   dK, dV
 // No atomics, no zero-initialized outputs.
 //
 // CubeCL note: `let mut x = 0.0_f32` (or f32::NEG_INFINITY) expands to a
@@ -33,7 +33,7 @@
 use cubecl::prelude::*;
 
 #[cube(launch)]
-pub fn causal_fwd<F: Float>(
+pub fn flash_fwd<F: Float>(
     q:     &Tensor<F>,
     k:     &Tensor<F>,
     v:     &Tensor<F>,
@@ -41,9 +41,11 @@ pub fn causal_fwd<F: Float>(
     lse:   &mut Tensor<f32>, // [bh, seq], log-sum-exp of the scaled scores
     scale: f32,
     seq:   usize,
-    #[comptime] block: usize,
-    #[comptime] dim:   usize,
-    #[comptime] tile:  usize, // block * dim
+    tiles: usize,
+    #[comptime] causal: bool,
+    #[comptime] block:  usize,
+    #[comptime] dim:    usize,
+    #[comptime] tile:   usize, // block * dim
 ) {
     let bh     = CUBE_POS_X as usize;
     let q_tile = CUBE_POS_Y as usize;
@@ -69,8 +71,8 @@ pub fn causal_fwd<F: Float>(
     let mut m = f32::min_value();
     let mut l = f32::from_int(0);
 
-    // Causal: key tiles past this query tile are fully masked, skip them.
-    for kt in 0..q_tile + 1 {
+    let k_tiles = if causal { q_tile + 1 } else { tiles };
+    for kt in 0..k_tiles {
         let k_row = kt * block + t;
         #[unroll]
         for d in 0..dim {
@@ -86,13 +88,15 @@ pub fn causal_fwd<F: Float>(
         sync_cube();
 
         if live {
-            // Every processed tile holds at least key kt*block <= row, so
+            // Every processed tile holds at least one active key, so
             // tile_max is a real score and m leaves min_value after the first
             // tile. Masked scores stay at min_value, so exp(score - m_new) == 0.
             let mut tile_max = f32::min_value();
             for j in 0..block {
                 let mut score = f32::min_value();
-                if kt * block + j <= row {
+                let k_idx = kt * block + j;
+                let active = if causal { k_idx <= row } else { k_idx < seq };
+                if active {
                     let mut dot = f32::from_int(0);
                     #[unroll]
                     for d in 0..dim {
@@ -136,20 +140,22 @@ pub fn causal_fwd<F: Float>(
 }
 
 #[cube(launch)]
-pub fn causal_bwd_dq<F: Float>(
+pub fn flash_bwd_dq<F: Float>(
     q:     &Tensor<F>,
     k:     &Tensor<F>,
     v:     &Tensor<F>,
     out:   &Tensor<F>,
     d_out: &Tensor<F>,
     lse:   &Tensor<f32>,
-    delta: &mut Tensor<f32>, // [bh, seq], written here, read by causal_bwd_dkdv
+    delta: &mut Tensor<f32>, // [bh, seq], written here, read by flash_bwd_dkdv
     d_q:   &mut Tensor<F>,
     scale: f32,
     seq:   usize,
-    #[comptime] block: usize,
-    #[comptime] dim:   usize,
-    #[comptime] tile:  usize,
+    tiles: usize,
+    #[comptime] causal: bool,
+    #[comptime] block:  usize,
+    #[comptime] dim:    usize,
+    #[comptime] tile:   usize,
 ) {
     let bh     = CUBE_POS_X as usize;
     let q_tile = CUBE_POS_Y as usize;
@@ -184,7 +190,8 @@ pub fn causal_bwd_dq<F: Float>(
         delta[bh * seq + row] = delta_r;
     }
 
-    for kt in 0..q_tile + 1 {
+    let k_tiles = if causal { q_tile + 1 } else { tiles };
+    for kt in 0..k_tiles {
         let k_row = kt * block + t;
         #[unroll]
         for d in 0..dim {
@@ -201,7 +208,9 @@ pub fn causal_bwd_dq<F: Float>(
 
         if live {
             for j in 0..block {
-                if kt * block + j <= row {
+                let k_idx = kt * block + j;
+                let active = if causal { k_idx <= row } else { k_idx < seq };
+                if active {
                     let mut dot = f32::from_int(0);
                     let mut dp = f32::from_int(0);
                     #[unroll]
@@ -230,7 +239,7 @@ pub fn causal_bwd_dq<F: Float>(
 }
 
 #[cube(launch)]
-pub fn causal_bwd_dkdv<F: Float>(
+pub fn flash_bwd_dkdv<F: Float>(
     q:     &Tensor<F>,
     k:     &Tensor<F>,
     v:     &Tensor<F>,
@@ -242,9 +251,10 @@ pub fn causal_bwd_dkdv<F: Float>(
     scale: f32,
     seq:   usize,
     tiles: usize, // ceil(seq / block)
-    #[comptime] block: usize,
-    #[comptime] dim:   usize,
-    #[comptime] tile:  usize,
+    #[comptime] causal: bool,
+    #[comptime] block:  usize,
+    #[comptime] dim:    usize,
+    #[comptime] tile:   usize,
 ) {
     let bh     = CUBE_POS_X as usize;
     let k_tile = CUBE_POS_Y as usize;
@@ -274,8 +284,9 @@ pub fn causal_bwd_dkdv<F: Float>(
         dv[d]  = f32::from_int(0);
     }
 
-    // Causal: only query tiles at or after this key tile see these keys.
-    for qt in k_tile..tiles {
+    let zero = tiles - tiles;
+    let start_qt = if causal { k_tile } else { zero };
+    for qt in start_qt..tiles {
         let q_row = qt * block + t;
         #[unroll]
         for d in 0..dim {
@@ -293,7 +304,8 @@ pub fn causal_bwd_dkdv<F: Float>(
         if live {
             for i in 0..block {
                 let r = qt * block + i;
-                if r >= col && r < seq {
+                let active = if causal { r >= col && r < seq } else { r < seq };
+                if active {
                     let mut dot = f32::from_int(0);
                     let mut dp = f32::from_int(0);
                     #[unroll]

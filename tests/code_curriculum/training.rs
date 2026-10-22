@@ -82,6 +82,7 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
             Architecture::Reference => {
                 exercise::<YumonReferenceBrain<TrainBackend>>(&mut run, &path, &tokenizer, &device)?
             }
+            Architecture::VisionDiT { .. } => {}
         }
     }
     Ok(())
