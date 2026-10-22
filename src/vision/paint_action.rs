@@ -150,130 +150,90 @@ pub fn hwc_to_chw_floats(hwc: &[u8]) -> Vec<f32> {
     chw
 }
 
-/// Generate a progressive painting trajectory from an initial blank canvas to the target image.
-/// Uses patch-averaged color matching and total error reduction across the brush dab.
+/// Generate a color-stripped painting trajectory where unpainted pixels are stripped
+/// and colors are progressively revealed from background/dominant layers to fine details.
 /// Returns a list of `(canvas_before_action_hwc, paint_action)`.
 pub fn generate_painting_trajectory(target_hwc: &[u8], steps: usize) -> Vec<(Vec<u8>, PaintAction)> {
     assert_eq!(target_hwc.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
+
+    // 1. Map every pixel to its palette index
+    let mut color_pixels: std::collections::HashMap<u8, Vec<(usize, usize)>> = std::collections::HashMap::new();
+    for y in 0..CANVAS_SIZE {
+        for x in 0..CANVAS_SIZE {
+            let idx = (y * CANVAS_SIZE + x) * 3;
+            let pal = rgb_to_palette(target_hwc[idx], target_hwc[idx + 1], target_hwc[idx + 2]);
+            color_pixels.entry(pal).or_default().push((x, y));
+        }
+    }
+
+    // 2. Sort colors by descending frequency (background/dominant to accents/details)
+    let mut sorted_colors: Vec<(u8, usize)> = color_pixels
+        .iter()
+        .map(|(&c, pts)| (c, pts.len()))
+        .collect();
+    sorted_colors.sort_by(|a, b| b.1.cmp(&a.1));
+
     let mut trajectory = Vec::with_capacity(steps + 1);
 
-    // Initial canvas: neutral canvas tone (slight warm off-white)
+    // Canvas starts with neutral off-white canvas tone (stripped pixels)
     let mut current_canvas = vec![240u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
 
-    for step in 0..steps {
+    let num_stages = steps.max(1);
+    let colors_per_stage = (sorted_colors.len() + num_stages - 1) / num_stages;
+
+    for stage in 0..num_stages {
         let canvas_snapshot = current_canvas.clone();
+        let start = stage * colors_per_stage;
+        let end = (start + colors_per_stage).min(sorted_colors.len());
 
-        // Radii schedule: broad underpainting dabs first, then medium blocks, then fine shapes/details
-        let radius = if step < steps / 4 {
-            7u8 // Broad underpainting
-        } else if step < steps / 2 {
-            5u8 // Medium blocking
-        } else if step < 3 * steps / 4 {
-            3u8 // Fine shapes
-        } else {
-            2u8 // Fine details / highlights
-        };
-
-        let rad = radius as i32;
-        let rad_sq = rad * rad;
-
-        let mut best_reduction = i64::MIN;
-        let mut best_x = 32u8;
-        let mut best_y = 32u8;
-        let mut best_color = 0u8;
-
-        // Step by 2 for sub-pixel accuracy while maintaining ultra-fast throughput
-        for cy in (rad..(CANVAS_SIZE as i32 - rad).max(rad + 1)).step_by(2) {
-            for cx in (rad..(CANVAS_SIZE as i32 - rad).max(rad + 1)).step_by(2) {
-                let min_x = (cx - rad).max(0);
-                let max_x = (cx + rad).min(CANVAS_SIZE as i32 - 1);
-                let min_y = (cy - rad).max(0);
-                let max_y = (cy + rad).min(CANVAS_SIZE as i32 - 1);
-
-                let mut sum_r = 0u32;
-                let mut sum_g = 0u32;
-                let mut sum_b = 0u32;
-                let mut count = 0u32;
-                let mut curr_err = 0i64;
-
-                for py in min_y..=max_y {
-                    for px in min_x..=max_x {
-                        let dx = px - cx;
-                        let dy = py - cy;
-                        if dx * dx + dy * dy <= rad_sq {
-                            let idx = (py as usize * CANVAS_SIZE + px as usize) * 3;
-                            let tr = target_hwc[idx] as i32;
-                            let tg = target_hwc[idx + 1] as i32;
-                            let tb = target_hwc[idx + 2] as i32;
-                            let cr = current_canvas[idx] as i32;
-                            let cg = current_canvas[idx + 1] as i32;
-                            let cb = current_canvas[idx + 2] as i32;
-
-                            sum_r += tr as u32;
-                            sum_g += tg as u32;
-                            sum_b += tb as u32;
-                            count += 1;
-
-                            let dr = tr - cr;
-                            let dg = tg - cg;
-                            let db = tb - cb;
-                            curr_err += (dr * dr + dg * dg + db * db) as i64;
-                        }
-                    }
-                }
-
-                if count == 0 {
-                    continue;
-                }
-
-                let avg_r = (sum_r / count) as u8;
-                let avg_g = (sum_g / count) as u8;
-                let avg_b = (sum_b / count) as u8;
-                let candidate_color = rgb_to_palette(avg_r, avg_g, avg_b);
-                let [pr, pg, pb] = palette_to_rgb(candidate_color);
-
-                // Compute new error if this candidate color is applied to the circle
-                let mut new_err = 0i64;
-                for py in min_y..=max_y {
-                    for px in min_x..=max_x {
-                        let dx = px - cx;
-                        let dy = py - cy;
-                        if dx * dx + dy * dy <= rad_sq {
-                            let idx = (py as usize * CANVAS_SIZE + px as usize) * 3;
-                            let tr = target_hwc[idx] as i32;
-                            let tg = target_hwc[idx + 1] as i32;
-                            let tb = target_hwc[idx + 2] as i32;
-
-                            let dr = tr - pr as i32;
-                            let dg = tg - pg as i32;
-                            let db = tb - pb as i32;
-                            new_err += (dr * dr + dg * dg + db * db) as i64;
-                        }
-                    }
-                }
-
-                let reduction = curr_err - new_err;
-                if reduction > best_reduction {
-                    best_reduction = reduction;
-                    best_x = cx as u8;
-                    best_y = cy as u8;
-                    best_color = candidate_color;
-                }
-            }
+        if start >= sorted_colors.len() {
+            break;
         }
 
+        // Primary color for this stage's action is the first/largest in this group
+        let (primary_color, _) = sorted_colors[start];
+        let primary_pts = &color_pixels[&primary_color];
+
+        // Compute centroid of this color
+        let sum_x: usize = primary_pts.iter().map(|&(x, _)| x).sum();
+        let sum_y: usize = primary_pts.iter().map(|&(_, y)| y).sum();
+        let cx = (sum_x / primary_pts.len()) as u8;
+        let cy = (sum_y / primary_pts.len()) as u8;
+
+        // Radius based on pixel count
+        let count = primary_pts.len();
+        let radius = if count > 600 {
+            7u8
+        } else if count > 250 {
+            5u8
+        } else if count > 80 {
+            3u8
+        } else {
+            1u8 // Crisp pixel detail!
+        };
+
         let action = PaintAction::Paint {
-            x: best_x,
-            y: best_y,
-            color: best_color,
+            x: cx,
+            y: cy,
+            color: primary_color,
             radius,
         };
 
-        action.apply_to_hwc(&mut current_canvas);
+        // Reveal the pixels for all colors in this stage onto current_canvas
+        for &(c, _) in &sorted_colors[start..end] {
+            let [r, g, b] = palette_to_rgb(c);
+            for &(px, py) in &color_pixels[&c] {
+                let idx = (py * CANVAS_SIZE + px) * 3;
+                current_canvas[idx] = r;
+                current_canvas[idx + 1] = g;
+                current_canvas[idx + 2] = b;
+            }
+        }
+
         trajectory.push((canvas_snapshot, action));
     }
 
-    // Final step: canvas is complete, action is Done
+    // Final state: canvas is 100% the DiffusionDb image, action is Done!
     trajectory.push((current_canvas, PaintAction::Done));
     trajectory
 }
@@ -307,9 +267,18 @@ mod tests {
 
     #[test]
     fn test_trajectory_generation() {
-        let dummy_target = vec![128u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
-        let traj = generate_painting_trajectory(&dummy_target, 6);
-        assert_eq!(traj.len(), 7); // 6 steps + Done
+        let mut multi_color_target = vec![0u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
+        for y in 0..CANVAS_SIZE {
+            for x in 0..CANVAS_SIZE {
+                let idx = (y * CANVAS_SIZE + x) * 3;
+                let col = ((x / 8) * 32) as u8;
+                multi_color_target[idx] = col;
+                multi_color_target[idx + 1] = 255 - col;
+                multi_color_target[idx + 2] = (y * 4) as u8;
+            }
+        }
+        let traj = generate_painting_trajectory(&multi_color_target, 6);
+        assert!(traj.len() >= 2);
         assert_eq!(traj.last().unwrap().1, PaintAction::Done);
     }
 }
