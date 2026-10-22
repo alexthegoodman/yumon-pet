@@ -150,6 +150,66 @@ pub fn hwc_to_chw_floats(hwc: &[u8]) -> Vec<f32> {
     chw
 }
 
+/// Generate pixel-stream training samples for an image.
+/// Returns a list of `(canvas_before_chunk_hwc, pixel_tokens, is_done)`.
+/// Each sample contains `chunk_len` pixels in format `[x, y, color, x, y, color, ...]`.
+pub fn generate_pixel_stream_samples(
+    target_hwc: &[u8],
+    num_samples: usize,
+    chunk_len: usize,
+) -> Vec<(Vec<u8>, Vec<usize>, bool)> {
+    assert_eq!(target_hwc.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
+    let total_pixels = CANVAS_SIZE * CANVAS_SIZE; // 4096
+
+    // Precompute target palette color index for every pixel
+    let mut target_colors = Vec::with_capacity(total_pixels);
+    for i in 0..total_pixels {
+        let pal = rgb_to_palette(target_hwc[i * 3], target_hwc[i * 3 + 1], target_hwc[i * 3 + 2]);
+        target_colors.push(pal);
+    }
+
+    let mut samples = Vec::with_capacity(num_samples);
+    let chunk = chunk_len.max(1);
+
+    // Sample progression points across the image
+    for s in 0..num_samples {
+        let start_pixel = if num_samples <= 1 {
+            0
+        } else {
+            (s * (total_pixels - chunk)) / (num_samples - 1)
+        };
+        let end_pixel = (start_pixel + chunk).min(total_pixels);
+
+        // Build canvas: pixels 0..start_pixel are painted with true ground-truth colors,
+        // and pixels from start_pixel onwards are stripped (neutral 240).
+        let mut canvas = vec![240u8; total_pixels * CANVAS_CHANNELS];
+        for p in 0..start_pixel {
+            let [r, g, b] = palette_to_rgb(target_colors[p]);
+            let idx = p * 3;
+            canvas[idx] = r;
+            canvas[idx + 1] = g;
+            canvas[idx + 2] = b;
+        }
+
+        // Action tokens for the next chunk of pixels: [x, y, color, ...]
+        let mut tokens = Vec::with_capacity((end_pixel - start_pixel) * 3);
+        for p in start_pixel..end_pixel {
+            let x = p % CANVAS_SIZE;
+            let y = p / CANVAS_SIZE;
+            let c = target_colors[p] as usize;
+
+            tokens.push(COORD_START_ID + x);
+            tokens.push(COORD_START_ID + y);
+            tokens.push(COLOR_START_ID + c);
+        }
+
+        let is_done = end_pixel >= total_pixels;
+        samples.push((canvas, tokens, is_done));
+    }
+
+    samples
+}
+
 /// Generate a color-stripped painting trajectory where unpainted pixels are stripped
 /// and colors are progressively revealed from background/dominant layers to fine details.
 /// Returns a list of `(canvas_before_action_hwc, paint_action)`.
@@ -266,19 +326,12 @@ mod tests {
     }
 
     #[test]
-    fn test_trajectory_generation() {
-        let mut multi_color_target = vec![0u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
-        for y in 0..CANVAS_SIZE {
-            for x in 0..CANVAS_SIZE {
-                let idx = (y * CANVAS_SIZE + x) * 3;
-                let col = ((x / 8) * 32) as u8;
-                multi_color_target[idx] = col;
-                multi_color_target[idx + 1] = 255 - col;
-                multi_color_target[idx + 2] = (y * 4) as u8;
-            }
+    fn test_pixel_stream_samples() {
+        let dummy_target = vec![100u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
+        let samples = generate_pixel_stream_samples(&dummy_target, 8, 16);
+        assert_eq!(samples.len(), 8);
+        for (_, tokens, _) in samples {
+            assert_eq!(tokens.len(), 16 * 3); // 16 pixels * 3 tokens [x, y, color]
         }
-        let traj = generate_painting_trajectory(&multi_color_target, 6);
-        assert!(traj.len() >= 2);
-        assert_eq!(traj.last().unwrap().1, PaintAction::Done);
     }
 }

@@ -131,10 +131,6 @@ fn main() -> Result<()> {
         reader.read_exact(&mut sample_bytes)?;
         let sample: ArtSample = bincode::deserialize(&sample_bytes)?;
 
-        // Decode action
-        let tok_usize: Vec<usize> = sample.action_tokens.iter().map(|&t| t as usize).collect();
-        let action = PaintAction::from_tokens(&tok_usize);
-
         // File names
         let img_filename = format!("sample_{:03}.png", idx);
         let raw_filename = format!("sample_{:03}_64.png", idx);
@@ -159,22 +155,39 @@ fn main() -> Result<()> {
         upscaled_img.save(&img_path)?;
 
         // Format action description
-        let (action_desc, swatch_html) = match action {
-            Some(PaintAction::Paint { x, y, color, radius }) => {
-                let [r, g, b] = palette_to_rgb(color);
-                (
-                    format!("Paint dab at ({}, {}) | Color #{} | Radius {}", x, y, color, radius),
-                    format!(
-                        "<span class=\"swatch\" style=\"background: rgb({}, {}, {});\"></span> RGB({}, {}, {})",
-                        r, g, b, r, g, b
-                    ),
-                )
+        let (action_desc, swatch_html) = if sample.action_tokens.len() >= 3 {
+            let num_pixels = sample.action_tokens.len() / 3;
+            let x = sample.action_tokens[0] as usize - yumon_pet::vision::paint_action::COORD_START_ID;
+            let y = sample.action_tokens[1] as usize - yumon_pet::vision::paint_action::COORD_START_ID;
+            let c = (sample.action_tokens[2] as usize - yumon_pet::vision::paint_action::COLOR_START_ID) as u8;
+            let [r, g, b] = palette_to_rgb(c);
+            (
+                format!("Pixel stream chunk: {} pixels at ({}, {})", num_pixels, x, y),
+                format!(
+                    "<span class=\"swatch\" style=\"background: rgb({}, {}, {});\"></span> Color #{} RGB({}, {}, {})",
+                    r, g, b, c, r, g, b
+                ),
+            )
+        } else {
+            let tok_usize: Vec<usize> = sample.action_tokens.iter().map(|&t| t as usize).collect();
+            let action = PaintAction::from_tokens(&tok_usize);
+            match action {
+                Some(PaintAction::Paint { x, y, color, radius }) => {
+                    let [r, g, b] = palette_to_rgb(color);
+                    (
+                        format!("Paint dab at ({}, {}) | Color #{} | Radius {}", x, y, color, radius),
+                        format!(
+                            "<span class=\"swatch\" style=\"background: rgb({}, {}, {});\"></span> RGB({}, {}, {})",
+                            r, g, b, r, g, b
+                        ),
+                    )
+                }
+                Some(PaintAction::Done) => (
+                    "Done (Artwork Complete)".to_string(),
+                    "<span class=\"done-badge\">DONE</span>".to_string(),
+                ),
+                None => ("Pixel Stream Sample".to_string(), "".to_string()),
             }
-            Some(PaintAction::Done) => (
-                "Done (Artwork Complete)".to_string(),
-                "<span class=\"done-badge\">DONE</span>".to_string(),
-            ),
-            None => ("Unknown Action".to_string(), "".to_string()),
         };
 
         // Add to text manifest

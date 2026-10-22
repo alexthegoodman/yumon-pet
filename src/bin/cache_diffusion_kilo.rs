@@ -19,8 +19,7 @@ use {
         yumon_talk::TranslationContext,
     },
     yumon_pet::vision::paint_action::{
-        ART_VOCAB_SIZE, CANVAS_CHANNELS, CANVAS_SIZE, PaintAction,
-        generate_painting_trajectory,
+        ART_VOCAB_SIZE, CANVAS_SIZE, generate_pixel_stream_samples,
     },
 };
 
@@ -49,14 +48,6 @@ pub struct ArtSample {
 #[derive(Deserialize, Debug)]
 struct ManifestItem {
     p: String,
-    #[serde(default)]
-    se: Option<u64>,
-    #[serde(default)]
-    c: Option<f32>,
-    #[serde(default)]
-    st: Option<u32>,
-    #[serde(default)]
-    sa: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -79,9 +70,13 @@ struct Args {
     #[arg(long)]
     limit: Option<usize>,
 
-    /// Number of intermediate painting steps per image trajectory.
-    #[arg(long, default_value_t = 6)]
-    trajectory_steps: usize,
+    /// Number of training samples per image across canvas progression.
+    #[arg(long, default_value_t = 8)]
+    samples_per_image: usize,
+
+    /// Number of consecutive pixels to predict per sample.
+    #[arg(long, default_value_t = 16)]
+    chunk_len: usize,
 
     /// Number of sample previews to print upon completion.
     #[arg(long, default_value_t = 3)]
@@ -92,11 +87,12 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    println!("=== Yumon Art: DiffusionDb -> Kilo Talk Preprocessor ===");
-    println!("Images directory : {}", args.images_dir.display());
-    println!("Vocabulary file  : {}", args.vocab.display());
-    println!("Output cache     : {}", args.output.display());
-    println!("Trajectory steps : {}", args.trajectory_steps);
+    println!("=== Yumon Art: DiffusionDb -> Kilo Talk Pixel Stream Preprocessor ===");
+    println!("Images directory   : {}", args.images_dir.display());
+    println!("Vocabulary file    : {}", args.vocab.display());
+    println!("Output cache       : {}", args.output.display());
+    println!("Samples per image  : {}", args.samples_per_image);
+    println!("Pixels per sample  : {}", args.chunk_len);
 
     // 1. Load Kilo Talk vocabulary
     println!("\nLoading Kilo Talk vocabulary...");
@@ -178,13 +174,12 @@ fn main() -> Result<()> {
                 Err(_) => return Vec::new(),
             };
 
-            // Generate intermediate painting trajectory
-            let trajectory = generate_painting_trajectory(&raw_hwc, args.trajectory_steps);
+            // Generate pixel-stream training samples
+            let pixel_samples = generate_pixel_stream_samples(&raw_hwc, args.samples_per_image, args.chunk_len);
 
-            let mut out = Vec::with_capacity(trajectory.len());
-            for (canvas_hwc, action) in trajectory {
-                let action_tokens = action.to_tokens().into_iter().map(|t| t as u32).collect();
-                let is_done = matches!(action, PaintAction::Done);
+            let mut out = Vec::with_capacity(pixel_samples.len());
+            for (canvas_hwc, tokens, is_done) in pixel_samples {
+                let action_tokens = tokens.into_iter().map(|t| t as u32).collect();
 
                 out.push(ArtSample {
                     prompt_text: prompt_text.clone(),
@@ -220,7 +215,7 @@ fn main() -> Result<()> {
         images_processed: items.len(),
         canvas_size: CANVAS_SIZE,
         vocab_size: ART_VOCAB_SIZE,
-        trajectory_steps: args.trajectory_steps,
+        trajectory_steps: args.samples_per_image,
     };
     let meta_bytes = bincode::serialize(&metadata)?;
     writer.write_all(&(meta_bytes.len() as u32).to_le_bytes())?;
@@ -242,8 +237,7 @@ fn main() -> Result<()> {
         println!("Sample #{}", i + 1);
         println!("  Prompt : {}", s.prompt_text);
         println!("  Tokens : {:?}", s.prompt_tokens);
-        let action = PaintAction::from_tokens(&s.action_tokens.iter().map(|&t| t as usize).collect::<Vec<_>>());
-        println!("  Action : {:?}", action);
+        println!("  Pixel tokens count: {}", s.action_tokens.len());
         println!("  Done   : {}", s.is_done);
     }
 

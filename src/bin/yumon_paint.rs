@@ -21,8 +21,8 @@ use {
     },
     yumon_pet::vision::paint_action::{
         ART_VOCAB_SIZE, CANVAS_CHANNELS, CANVAS_SIZE, CANVAS_START_ID, CANVAS_END_ID,
-        COORD_START_ID, COLOR_START_ID, RADIUS_START_ID, PAINT_ID, DONE_ID,
-        PaintAction, hwc_to_chw_floats, palette_to_rgb,
+        COORD_START_ID, COLOR_START_ID,
+        hwc_to_chw_floats, palette_to_rgb,
     },
 };
 
@@ -51,6 +51,10 @@ struct Args {
     /// Sampling temperature (0.0 = greedy argmax, >0.0 = stochastic sampling).
     #[arg(long, default_value_t = 0.7)]
     temperature: f32,
+
+    /// How often Yumon re-glances at the visual canvas (every N pixels).
+    #[arg(long, default_value_t = 8)]
+    glance_interval: usize,
 
     /// Output artwork PNG file path.
     #[arg(long, default_value = "yumon_artwork.png")]
@@ -144,107 +148,53 @@ fn main() -> Result<()> {
     };
 
     // 4. Initialize Blank Canvas
-    let mut canvas_hwc = vec![245u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
+    let mut canvas_hwc = vec![240u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
     println!("\n🖼  Initial Canvas State (Blank):");
     print_terminal_canvas(&canvas_hwc);
 
-    // 5. The Art Creation Loop: Observe -> Decide -> Paint -> Repeat
-    println!("\nStarting creation loop...\n");
+    // 5. The Art Creation Loop: Pixel-by-Pixel Stream (4,096 Pixels)
+    println!("\n🎨 Yumon is picking up the stylus to paint the 64x64 canvas pixel-by-pixel...\n");
 
-    for step in 1..=args.max_steps {
-        println!("─── [Step {:>2}/{}] Yumon is viewing the canvas...", step, args.max_steps);
+    let total_pixels = CANVAS_SIZE * CANVAS_SIZE; // 4096
+    let glance_interval = args.glance_interval.max(1);
 
-        // A. Tokenize canvas into [1, 3, 64, 64] float tensor
-        let chw = hwc_to_chw_floats(&canvas_hwc);
-        let canvas_tensor = Tensor::<BackendType, 4>::from_floats(
-            TensorData::new(chw, [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
-            &device,
-        );
+    let mut canvas_tensor = Tensor::<BackendType, 4>::from_floats(
+        TensorData::new(hwc_to_chw_floats(&canvas_hwc), [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
+        &device,
+    );
 
-        // B. Autoregressively generate next PaintAction
-        // Start sequence: [BOS, prompt_tokens..., CANVAS_START, CANVAS_END]
-        let mut tokens = vec![BOS_TOKEN as i32];
-        for &tok in &prompt_tokens {
-            tokens.push(tok as i32);
-        }
-        tokens.push(CANVAS_START_ID as i32);
-        tokens.push(CANVAS_END_ID as i32);
+    let mut prefix_tokens = vec![BOS_TOKEN as i32];
+    for &tok in &prompt_tokens {
+        prefix_tokens.push(tok as i32);
+    }
+    prefix_tokens.push(CANVAS_START_ID as i32);
+    prefix_tokens.push(CANVAS_END_ID as i32);
 
-        // 1. Predict action command: PAINT_ID or DONE_ID
-        let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-            TensorData::new(tokens.clone(), [1, tokens.len()]),
-            &device,
-        );
-        let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
-        let last_pos = 256 + tokens.len() - 1;
-        let logit_vec: Vec<f32> = logits
-            .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
-            .into_data()
-            .convert::<f32>()
-            .to_vec()
-            .unwrap();
+    for p in 0..total_pixels {
+        let x = (p % CANVAS_SIZE) as u8;
+        let y = (p / CANVAS_SIZE) as u8;
 
-        let p_paint = logit_vec[PAINT_ID];
-        let p_done = logit_vec[DONE_ID];
-
-        let is_done = if step >= args.max_steps {
-            true
-        } else if step >= 4 && p_done > p_paint {
-            true
-        } else {
-            false
-        };
-
-        if is_done {
-            println!("\n  ✨ Yumon steps back, smiles, and says: \"Done! Artwork complete.\"");
-            break;
+        // Re-glance at the canvas according to glance_interval
+        if p > 0 && p % glance_interval == 0 {
+            let chw = hwc_to_chw_floats(&canvas_hwc);
+            canvas_tensor = Tensor::<BackendType, 4>::from_floats(
+                TensorData::new(chw, [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
+                &device,
+            );
         }
 
-        tokens.push(PAINT_ID as i32);
+        // Form query sequence: [prefix, x_tok, y_tok]
+        let mut query_tokens = prefix_tokens.clone();
+        query_tokens.push((COORD_START_ID + x as usize) as i32);
+        query_tokens.push((COORD_START_ID + y as usize) as i32);
 
-        // 2. Predict X coordinate
         let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-            TensorData::new(tokens.clone(), [1, tokens.len()]),
+            TensorData::new(query_tokens.clone(), [1, query_tokens.len()]),
             &device,
         );
+
         let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
-        let last_pos = 256 + tokens.len() - 1;
-        let logit_vec: Vec<f32> = logits
-            .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
-            .into_data()
-            .convert::<f32>()
-            .to_vec()
-            .unwrap();
-
-        let coord_logits = &logit_vec[COORD_START_ID..COORD_START_ID + 64];
-        let best_x = sample_token(coord_logits, args.temperature) as u8;
-        tokens.push((COORD_START_ID + best_x as usize) as i32);
-
-        // 3. Predict Y coordinate
-        let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-            TensorData::new(tokens.clone(), [1, tokens.len()]),
-            &device,
-        );
-        let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
-        let last_pos = 256 + tokens.len() - 1;
-        let logit_vec: Vec<f32> = logits
-            .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
-            .into_data()
-            .convert::<f32>()
-            .to_vec()
-            .unwrap();
-
-        let coord_logits = &logit_vec[COORD_START_ID..COORD_START_ID + 64];
-        let best_y = sample_token(coord_logits, args.temperature) as u8;
-        tokens.push((COORD_START_ID + best_y as usize) as i32);
-
-        // 4. Predict Color
-        let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-            TensorData::new(tokens.clone(), [1, tokens.len()]),
-            &device,
-        );
-        let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
-        let last_pos = 256 + tokens.len() - 1;
+        let last_pos = 256 + query_tokens.len() - 1;
         let logit_vec: Vec<f32> = logits
             .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
             .into_data()
@@ -254,43 +204,23 @@ fn main() -> Result<()> {
 
         let color_logits = &logit_vec[COLOR_START_ID..COLOR_START_ID + 64];
         let best_color = sample_token(color_logits, args.temperature) as u8;
-        tokens.push((COLOR_START_ID + best_color as usize) as i32);
 
-        // 5. Predict Radius
-        let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-            TensorData::new(tokens.clone(), [1, tokens.len()]),
-            &device,
-        );
-        let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
-        let last_pos = 256 + tokens.len() - 1;
-        let logit_vec: Vec<f32> = logits
-            .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
-            .into_data()
-            .convert::<f32>()
-            .to_vec()
-            .unwrap();
-
-        let radius_logits = &logit_vec[RADIUS_START_ID..RADIUS_START_ID + 8];
-        let best_radius = (sample_token(radius_logits, args.temperature) + 1) as u8;
-
-        let action = PaintAction::Paint {
-            x: best_x,
-            y: best_y,
-            color: best_color,
-            radius: best_radius,
-        };
-
-        // E. Execute Paint Action
         let [r, g, b] = palette_to_rgb(best_color);
-        println!(
-            "  🖌  Yumon decides: Paint dab at ({:>2}, {:>2}) | Color #idx {:>2} (RGB {}, {}, {}) | Radius: {}",
-            best_x, best_y, best_color, r, g, b, best_radius
-        );
-        action.apply_to_hwc(&mut canvas_hwc);
-        print_terminal_canvas(&canvas_hwc);
+        let idx = (y as usize * CANVAS_SIZE + x as usize) * 3;
+        canvas_hwc[idx] = r;
+        canvas_hwc[idx + 1] = g;
+        canvas_hwc[idx + 2] = b;
 
-        std::thread::sleep(std::time::Duration::from_millis(150));
+        // Progress rendering in terminal
+        if x == (CANVAS_SIZE - 1) as u8 {
+            println!("  [Row {:>2}/64] Rendered pixels {:>4}/4096...", y + 1, p + 1);
+            if (y + 1) % 8 == 0 || y == (CANVAS_SIZE - 1) as u8 {
+                print_terminal_canvas(&canvas_hwc);
+            }
+        }
     }
+
+    println!("\n  ✨ Yumon steps back, smiles, and says: \"Done! Artwork complete.\"");
 
     // 6. Save final image to PNG
     let img_buf = image::RgbImage::from_raw(
