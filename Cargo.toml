@@ -41,6 +41,18 @@ path = "src/bin/build_decompressor.rs"
 name = "build_kilo_vocab"
 path = "src/bin/build_kilo_vocab.rs"
 
+[[bin]]
+name = "cache_diffusion_kilo"
+path = "src/bin/cache_diffusion_kilo.rs"
+
+[[bin]]
+name = "train_art_moe"
+path = "src/bin/train_art_moe.rs"
+
+[[bin]]
+name = "yumon_paint"
+path = "src/bin/yumon_paint.rs"
+
 [features]
 # Desktop/GUI bits (native window + webview + 3D engine + gamepad input) used by
 # the yumon_desktop/yumon_world/yumon_civ/train_ui/chat_ui bins. Not needed for

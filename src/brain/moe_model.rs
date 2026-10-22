@@ -9,6 +9,7 @@ use super::{
     samples::TrainingStage,
     tokenizer::PAD_TOKEN,
 };
+use crate::vision::{VisionPatchEncoder, VisionPatchEncoderConfig};
 use anyhow::Result;
 use burn::{
     module::Ignored,
@@ -253,6 +254,8 @@ pub struct YumonMoeBrain<B: Backend> {
     pub token_head: Linear<B>,
     /// One per depth tier after the first; empty without `adaptive_depth`.
     exit_gates: Vec<ExitGate<B>>,
+    /// 0 or 1 vision patch encoders for multimodal canvas processing.
+    pub vision_encoders: Vec<VisionPatchEncoder<B>>,
 }
 
 /// Record layout of checkpoints saved before adaptive depth (no `exit_gates`).
@@ -266,6 +269,19 @@ struct LegacyMoeBrain<B: Backend> {
     dropout: Dropout,
     token_head: Linear<B>,
 }
+/// Record layout of checkpoints saved before vision encoder integration.
+#[derive(Module, Debug)]
+struct LegacyMoeBrainV1<B: Backend> {
+    config: Ignored<YumonMoeBrainConfig>,
+    embedding: Embedding<B>,
+    rope: RotaryEncoding<B>,
+    blocks: Vec<MoeBlock<B>>,
+    norm: RMSNorm<B>,
+    dropout: Dropout,
+    token_head: Linear<B>,
+    exit_gates: Vec<ExitGate<B>>,
+}
+
 #[derive(Config, Debug)]
 pub struct YumonMoeBrainConfig {
     pub vocab_size: usize,
@@ -298,6 +314,9 @@ pub struct YumonMoeBrainConfig {
     /// Key/value heads for grouped-query attention; None = attn_heads (MHA).
     #[config(default = "None")]
     pub kv_heads: Option<usize>,
+    /// Whether this model includes a vision patch encoder for multimodal input.
+    #[config(default = false)]
+    pub is_multimodal: bool,
 }
 impl YumonMoeBrainConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> YumonMoeBrain<B> {
@@ -322,6 +341,11 @@ impl YumonMoeBrainConfig {
         let kv_width = self.effective_kv_heads() * (self.embed_dim / self.attn_heads);
         let kv_linear = || LinearConfig::new(self.embed_dim, kv_width).with_bias(false).init(device);
         let tiers = self.adaptive_depth.as_ref().map(|d| d.layer_tiers());
+        let vision_encoders = if self.is_multimodal {
+            vec![VisionPatchEncoderConfig::new(self.embed_dim).init(device)]
+        } else {
+            Vec::new()
+        };
         YumonMoeBrain {
             config: Ignored(self.clone()),
             embedding: EmbeddingConfig::new(self.vocab_size, self.embed_dim).init(device),
@@ -356,6 +380,7 @@ impl YumonMoeBrainConfig {
                     .with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 0.02 })
                     .init(device),
             }).collect(),
+            vision_encoders,
         }
     }
 }
@@ -490,6 +515,147 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         )
     }
 
+    /// Forward pass for multimodal input (64x64 canvas image + text tokens).
+    pub fn forward_multimodal(&self, tokens: Tensor<B, 2, Int>, canvas: Option<Tensor<B, 4>>) -> Tensor<B, 3> {
+        self.forward_multimodal_with_depth(tokens, canvas).0
+    }
+
+    /// Multimodal forward pass returning logits, auxiliary loss, counts, and reached depth tiers.
+    pub fn forward_multimodal_with_depth(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        canvas: Option<Tensor<B, 4>>,
+    ) -> (Tensor<B, 3>, Tensor<B, 1>, Vec<Vec<usize>>, Vec<u8>) {
+        let Some(canvas) = canvas else {
+            return self.forward_with_depth(tokens);
+        };
+        let encoder = match self.vision_encoders.first() {
+            Some(enc) => enc,
+            None => panic!("forward_multimodal called but no vision_encoder is configured on YumonMoeBrain"),
+        };
+        let [batch, text_seq] = tokens.dims();
+        let vis_patches = encoder.num_patches; // 256
+        let total_seq = vis_patches + text_seq;
+        assert!(batch > 0 && total_seq <= self.config.max_seq_len, "total multimodal sequence exceeds max_seq_len");
+
+        let device = tokens.device();
+
+        // 1. Linearly project 4x4 canvas patches with 2D coordinate embeddings: [batch, 256, embed_dim]
+        let vis_emb = encoder.forward(canvas);
+
+        // 2. Token embeddings for text: [batch, text_seq, embed_dim]
+        let text_emb = self.embedding.forward(tokens.clone());
+
+        // 3. Concatenate visual patches + text tokens: [batch, total_seq, embed_dim]
+        let mut x = self.dropout.forward(Tensor::cat(vec![vis_emb, text_emb], 1));
+
+        // 4. Identify active tokens
+        let ids = tokens
+            .reshape([batch * text_seq])
+            .to_data()
+            .to_vec::<i32>()
+            .expect("token ids");
+
+        let mut active = Vec::with_capacity(batch * total_seq);
+        for b in 0..batch {
+            let base = b * total_seq;
+            for i in 0..vis_patches {
+                active.push((base + i) as i32);
+            }
+            let text_base = b * text_seq;
+            for i in 0..text_seq {
+                if ids[text_base + i] != PAD_TOKEN as i32 {
+                    active.push((base + vis_patches + i) as i32);
+                }
+            }
+        }
+
+        let active_count = active.len();
+        let rows = batch * total_seq;
+        let mut deepest = vec![0u8; rows];
+        let mut auxiliary = Tensor::<B, 1>::zeros([1], &device).cast(FloatDType::F32);
+        let mut counts = Vec::new();
+
+        if active_count == 0 {
+            return (
+                self.token_head.forward(self.norm.forward(x)),
+                auxiliary,
+                self.blocks.iter().map(|b| vec![0; b.moe.num_experts()]).collect(),
+                deepest,
+            );
+        }
+
+        let rope = RopeTables::new(total_seq, self.config.embed_dim / self.config.attn_heads, &device);
+        let pad = None; // Multimodal prefix is always active
+
+        let layer_tiers = self.config.adaptive_depth.as_ref().map(|d| d.layer_tiers());
+        let tier_of = |layer: usize| layer_tiers.as_ref().map_or(0, |t| t[layer]);
+        let mut budget = Tensor::<B, 1>::zeros([1], &device).cast(FloatDType::F32);
+        let mut current = active;
+        let mut keep: Option<Tensor<B, 3>> = None;
+        let mut tier_start: Option<(Tensor<B, 3>, Tensor<B, 3>)> = None;
+
+        for (layer, block) in self.blocks.iter().enumerate() {
+            let tier = tier_of(layer);
+            if tier > 0 && tier_of(layer - 1) != tier {
+                let depth = self.config.adaptive_depth.as_ref().unwrap();
+                let gate = &self.exit_gates[tier - 1];
+                let score = sigmoid(gate.score.forward(gate.norm.forward(x.clone()))
+                    .reshape([rows]).cast(FloatDType::F32));
+                let previous: Vec<f32> = if current.is_empty() { Vec::new() } else {
+                    score.clone().detach()
+                        .select(0, Tensor::from_ints(TensorData::new(current.clone(), [current.len()]), &device))
+                        .into_data().convert::<f32>().to_vec().expect("exit gate scores")
+                };
+                let mut prev_mask = vec![0f32; rows];
+                let mut hard = vec![0f32; rows];
+                for (&row, &s) in current.iter().zip(&previous) {
+                    prev_mask[row as usize] = 1.0;
+                    hard[row as usize] = (s >= 0.5) as u8 as f32;
+                }
+                current.retain(|&row| hard[row as usize] == 1.0);
+                for &row in &current { deepest[row as usize] = tier as u8; }
+                let floats = |v: Vec<f32>| Tensor::<B, 1>::from_data_dtype(
+                    TensorData::new(v, [rows]), &device, burn::tensor::DType::F32);
+                let soft = score * floats(prev_mask);
+                let hard = floats(hard);
+                let straight = hard.clone() + soft.clone() - soft.detach();
+                let reached = straight.clone().sum() / active_count as f64;
+                budget = budget + (reached - depth.tiers[tier].capacity).powf_scalar(2.0);
+                keep = Some(hard.reshape([batch, total_seq, 1]).cast(x.dtype()));
+                tier_start = Some((x.clone(), straight.reshape([batch, total_seq, 1]).cast(x.dtype())));
+            }
+            if current.is_empty() {
+                counts.push(vec![0; block.moe.num_experts()]);
+            } else {
+                let index = Tensor::<B, 1, Int>::from_ints(
+                    TensorData::new(current.clone(), [current.len()]), &device);
+                let (next, balance, z_loss, dispatched) = block.forward(x.clone(), &rope, index, pad.clone());
+                x = match &keep {
+                    Some(keep) if tier > 0 => x.clone() + keep.clone() * (next - x),
+                    _ => next,
+                };
+                auxiliary = auxiliary
+                    + balance * self.config.aux_loss_weight
+                    + z_loss * self.config.z_loss_weight;
+                counts.push(dispatched);
+            }
+            let tier_ends = layer + 1 == self.blocks.len() || tier_of(layer + 1) != tier;
+            if tier > 0 && tier_ends {
+                let (input, straight) = tier_start.take().unwrap();
+                x = input.clone() + straight * (x - input);
+            }
+        }
+
+        let budget_weight = self.config.adaptive_depth.as_ref().map_or(0.0, |d| d.budget_loss_weight);
+        (
+            self.token_head.forward(self.norm.forward(x)),
+            auxiliary / self.blocks.len() as f64 + budget * budget_weight,
+            counts,
+            deepest,
+        )
+    }
+
     /// Fraction of non-padding tokens that reached each depth tier, from the
     /// per-layer dispatch counts of `forward_with_aux`. Empty without tiers.
     pub fn depth_reach(&self, counts: &[Vec<usize>]) -> Vec<f64> {
@@ -602,17 +768,25 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
         let record = match recorder.load(dir.join("model").into(), device) {
             Ok(record) => record,
-            // Checkpoints from before adaptive depth have no exit gate field.
-            Err(error) if metadata.adaptive_depth.is_none() => {
-                let legacy: LegacyMoeBrainRecord<B> = recorder.load(dir.join("model").into(), device)
-                    .map_err(|e| anyhow::anyhow!("load: {error:?}; legacy layout: {e:?}"))?;
-                YumonMoeBrainRecord {
-                    config: legacy.config, embedding: legacy.embedding, rope: legacy.rope,
-                    blocks: legacy.blocks, norm: legacy.norm, dropout: legacy.dropout,
-                    token_head: legacy.token_head, exit_gates: Vec::new(),
+            Err(_) => {
+                if let Ok(v1) = recorder.load::<LegacyMoeBrainV1Record<B>>(dir.join("model").into(), device) {
+                    YumonMoeBrainRecord {
+                        config: v1.config, embedding: v1.embedding, rope: v1.rope,
+                        blocks: v1.blocks, norm: v1.norm, dropout: v1.dropout,
+                        token_head: v1.token_head, exit_gates: v1.exit_gates,
+                        vision_encoders: Vec::new(),
+                    }
+                } else if let Ok(legacy) = recorder.load::<LegacyMoeBrainRecord<B>>(dir.join("model").into(), device) {
+                    YumonMoeBrainRecord {
+                        config: legacy.config, embedding: legacy.embedding, rope: legacy.rope,
+                        blocks: legacy.blocks, norm: legacy.norm, dropout: legacy.dropout,
+                        token_head: legacy.token_head, exit_gates: Vec::new(),
+                        vision_encoders: Vec::new(),
+                    }
+                } else {
+                    anyhow::bail!("failed to load checkpoint from {}", dir.display());
                 }
             }
-            Err(error) => anyhow::bail!("load: {error:?}"),
         };
 
         let config = YumonMoeBrainConfig {
@@ -631,6 +805,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             z_loss_weight: metadata.z_loss_weight,
             adaptive_depth: metadata.adaptive_depth,
             kv_heads: metadata.kv_heads,
+            is_multimodal: metadata.is_multimodal,
         };
 
         let model = config.init::<B>(device).load_record(record);
@@ -651,17 +826,25 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
         let record = match recorder.load(model_bytes.to_vec(), device) {
             Ok(record) => record,
-            // Checkpoints from before adaptive depth have no exit gate field.
-            Err(error) if metadata.adaptive_depth.is_none() => {
-                let legacy: LegacyMoeBrainRecord<B> = recorder.load(model_bytes.to_vec(), device)
-                    .map_err(|e| anyhow::anyhow!("load: {error:?}; legacy layout: {e:?}"))?;
-                YumonMoeBrainRecord {
-                    config: legacy.config, embedding: legacy.embedding, rope: legacy.rope,
-                    blocks: legacy.blocks, norm: legacy.norm, dropout: legacy.dropout,
-                    token_head: legacy.token_head, exit_gates: Vec::new(),
+            Err(_) => {
+                if let Ok(v1) = recorder.load::<LegacyMoeBrainV1Record<B>>(model_bytes.to_vec(), device) {
+                    YumonMoeBrainRecord {
+                        config: v1.config, embedding: v1.embedding, rope: v1.rope,
+                        blocks: v1.blocks, norm: v1.norm, dropout: v1.dropout,
+                        token_head: v1.token_head, exit_gates: v1.exit_gates,
+                        vision_encoders: Vec::new(),
+                    }
+                } else if let Ok(legacy) = recorder.load::<LegacyMoeBrainRecord<B>>(model_bytes.to_vec(), device) {
+                    YumonMoeBrainRecord {
+                        config: legacy.config, embedding: legacy.embedding, rope: legacy.rope,
+                        blocks: legacy.blocks, norm: legacy.norm, dropout: legacy.dropout,
+                        token_head: legacy.token_head, exit_gates: Vec::new(),
+                        vision_encoders: Vec::new(),
+                    }
+                } else {
+                    anyhow::bail!("failed to load checkpoint from bytes");
                 }
             }
-            Err(error) => anyhow::bail!("load from bytes: {error:?}"),
         };
 
         let config = YumonMoeBrainConfig {
@@ -680,6 +863,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             z_loss_weight: metadata.z_loss_weight,
             adaptive_depth: metadata.adaptive_depth,
             kv_heads: metadata.kv_heads,
+            is_multimodal: metadata.is_multimodal,
         };
 
         let model = config.init::<B>(device).load_record(record);
@@ -718,6 +902,9 @@ pub struct MoeMetadata {
     /// Grouped-query KV heads; absent = attn_heads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_heads: Option<usize>,
+    /// Whether this model includes a vision patch encoder for multimodal input.
+    #[serde(default)]
+    pub is_multimodal: bool,
 }
 
 #[cfg(test)]
@@ -1051,6 +1238,7 @@ mod tests {
             epochs_trained: 1,
             final_loss: 1.0,
             val_loss: None,
+            is_multimodal: false,
             batch_size: 1,
             training_stage: config.training_stage,
             embed_dim: config.embed_dim,
@@ -1193,7 +1381,7 @@ mod tests {
                 final_loss: 1.0, val_loss: None, batch_size: 1, training_stage: config.training_stage,
                 embed_dim: config.embed_dim, hidden_units: config.hidden_units, n_layers: config.n_layers,
                 attn_heads: config.attn_heads, ff_dim: config.ff_dim, max_seq_len: config.max_seq_len,
-                adaptive_depth: config.adaptive_depth.clone(), kv_heads: config.kv_heads };
+                adaptive_depth: config.adaptive_depth.clone(), kv_heads: config.kv_heads, is_multimodal: false };
             model.save(path.to_str().unwrap(), &tokenizer, &meta).unwrap();
             if !depth {
                 // Rewrite the weights in the pre-adaptive-depth record layout.
@@ -1369,5 +1557,26 @@ mod tests {
             println!("{name}: context {prompt}-{}: full prefix {uncached:?}/token, KV cache {cached:?}/token ({:.1}x), prefill {prefill:?}",
                 prompt + steps, uncached.as_secs_f64() / cached.as_secs_f64());
         }
+    }
+
+    #[test]
+    fn test_multimodal_forward_and_backward() {
+        let device = Default::default();
+        let config = tiny_config()
+            .with_max_seq_len(260)
+            .with_is_multimodal(true);
+        let model: YumonMoeBrain<B> = config.init(&device);
+        assert_eq!(model.vision_encoders.len(), 1);
+
+        let canvas = Tensor::<B, 4>::zeros([1, 3, 64, 64], &device);
+        let tokens = Tensor::<B, 2, Int>::from_ints([[1, 2, 3, 4]], &device);
+
+        let (logits, aux_loss, _counts, deepest) = model.forward_multimodal_with_depth(tokens, Some(canvas));
+        assert_eq!(logits.dims(), [1, 260, 32]);
+        assert_eq!(deepest.len(), 260);
+
+        let loss = logits.powf_scalar(2.0).mean() + aux_loss;
+        let grads = GradientsParams::from_grads(loss.backward(), &model);
+        assert!(grads.get::<Wgpu, 2>(model.token_head.weight.id).is_some());
     }
 }
