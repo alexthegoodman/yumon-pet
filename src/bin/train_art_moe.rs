@@ -29,7 +29,7 @@ use {
         tokenizer::{BOS_TOKEN, PAD_TOKEN},
     },
     yumon_pet::vision::paint_action::{
-        CANVAS_SIZE, CANVAS_START_ID, CANVAS_END_ID,
+        CANVAS_SIZE, CANVAS_START_ID,
         hwc_to_chw_floats,
     },
 };
@@ -223,7 +223,7 @@ fn main() -> Result<()> {
                 &device,
             );
 
-            // B. Pack Tokens: [BOS, prompt..., CANVAS_START, CANVAS_END, coord_x, coord_y]
+            // B. Pack Tokens: [BOS, prompt..., CANVAS_START, pass_tag, row_y, col_x]
             let mut batch_token_rows = Vec::with_capacity(bs);
             let mut targets = Vec::with_capacity(bs);
             let mut max_len = 0;
@@ -234,10 +234,10 @@ fn main() -> Result<()> {
                     row.push(tok as i32);
                 }
                 row.push(CANVAS_START_ID as i32);
-                row.push(CANVAS_END_ID as i32);
-                row.push(s.action_tokens[0] as i32);
-                row.push(s.action_tokens[1] as i32);
-                targets.push(s.action_tokens[2] as i32);
+                row.push(s.action_tokens[0] as i32); // PASS_TAG
+                row.push(s.action_tokens[1] as i32); // ROW_y
+                row.push(s.action_tokens[2] as i32); // COL_x
+                targets.push(s.action_tokens[3] as i32); // COLOR_c
 
                 if row.len() > max_len {
                     max_len = row.len();
@@ -328,10 +328,10 @@ fn main() -> Result<()> {
                     row.push(tok as i32);
                 }
                 row.push(CANVAS_START_ID as i32);
-                row.push(CANVAS_END_ID as i32);
-                row.push(s.action_tokens[0] as i32);
-                row.push(s.action_tokens[1] as i32);
-                targets.push(s.action_tokens[2] as i32);
+                row.push(s.action_tokens[0] as i32); // PASS_TAG
+                row.push(s.action_tokens[1] as i32); // ROW_y
+                row.push(s.action_tokens[2] as i32); // COL_x
+                targets.push(s.action_tokens[3] as i32); // COLOR_c
 
                 if row.len() > max_len {
                     max_len = row.len();

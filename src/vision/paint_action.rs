@@ -15,10 +15,19 @@ pub const CANVAS_START_ID: usize = 4096;
 pub const CANVAS_END_ID: usize   = 4097;
 pub const PAINT_ID: usize        = 4098;
 pub const DONE_ID: usize         = 4099;
-pub const COORD_START_ID: usize  = 4100; // 4100..4163 (64 coordinates for x and y: 0..63)
-pub const COLOR_START_ID: usize  = 4164; // 4164..4419 (256 8-bit palette colors: 0..255)
-pub const RADIUS_START_ID: usize = 4420; // 4420..4427 (8 brush radii: 1..8)
-pub const ART_VOCAB_SIZE: usize  = 4428;
+
+pub const PASS_1_ID: usize       = 4100; // Composition (8x8 blocks)
+pub const PASS_2_ID: usize       = 4101; // Shapes & Silhouettes (16x16 patches)
+pub const PASS_3_ID: usize       = 4102; // Fine pixel art details (64x64 pixels)
+
+pub const ROW_START_ID: usize    = 4110; // 4110..4173 (64 row coordinates y: 0..63)
+pub const COL_START_ID: usize    = 4174; // 4174..4237 (64 col coordinates x: 0..63)
+pub const COLOR_START_ID: usize  = 4238; // 4238..4493 (256 8-bit palette colors: 0..255)
+pub const RADIUS_START_ID: usize = 4494; // 4494..4501 (8 brush radii: 1..8)
+pub const ART_VOCAB_SIZE: usize  = 4512;
+
+/// Backward compatibility alias
+pub const COORD_START_ID: usize  = 4110;
 
 /// Map standard 24-bit RGB [0..255] into an 8-bit palette (3 bits R, 3 bits G, 2 bits B).
 #[inline]
@@ -61,8 +70,8 @@ impl PaintAction {
     pub fn to_tokens(&self) -> Vec<usize> {
         match *self {
             PaintAction::Paint { x, y, color, radius } => {
-                let x_tok = COORD_START_ID + (x as usize).min(63);
-                let y_tok = COORD_START_ID + (y as usize).min(63);
+                let x_tok = COL_START_ID + (x as usize).min(63);
+                let y_tok = ROW_START_ID + (y as usize).min(63);
                 let c_tok = COLOR_START_ID + color as usize;
                 let r_clamped = radius.clamp(1, 8) as usize;
                 let r_tok = RADIUS_START_ID + (r_clamped - 1);
@@ -86,13 +95,13 @@ impl PaintAction {
             let c_tok = tokens[3];
             let r_tok = tokens[4];
 
-            if x_tok >= COORD_START_ID && x_tok < COORD_START_ID + 64
-                && y_tok >= COORD_START_ID && y_tok < COORD_START_ID + 64
+            if x_tok >= COL_START_ID && x_tok < COL_START_ID + 64
+                && y_tok >= ROW_START_ID && y_tok < ROW_START_ID + 64
                 && c_tok >= COLOR_START_ID && c_tok < COLOR_START_ID + PALETTE_SIZE
                 && r_tok >= RADIUS_START_ID && r_tok < RADIUS_START_ID + 8
             {
-                let x = (x_tok - COORD_START_ID) as u8;
-                let y = (y_tok - COORD_START_ID) as u8;
+                let x = (x_tok - COL_START_ID) as u8;
+                let y = (y_tok - ROW_START_ID) as u8;
                 let color = (c_tok - COLOR_START_ID) as u8;
                 let radius = (r_tok - RADIUS_START_ID + 1) as u8;
                 return Some(PaintAction::Paint { x, y, color, radius });
@@ -244,71 +253,84 @@ pub fn generate_multiscale_samples(
         canvas_mixed[idx + 2] = target_hwc[idx + 2];
     }
 
+    // Deterministic image seed to distribute sampled coordinates across images
+    let mut seed = 2166136261usize;
+    for &b in target_hwc.iter().step_by(48) {
+        seed = (seed ^ (b as usize)).wrapping_mul(16777619);
+    }
+
     // Pass 1: Composition samples (Canvas 0 [Blank] -> 8x8 block colors)
+    // Sample 16 blocks covering all 8 rows and both left/right halves
     for i in 0..16 {
-        let b_idx = i * 4; // Spans all 8 rows across 64 blocks
-        let bx = b_idx % 8;
-        let by = b_idx / 8;
+        let by = i % 8;
+        let bx_half = i / 8; // 0 for left half (0..3), 1 for right half (4..7)
+        let bx = bx_half * 4 + (by * 3 + seed) % 4;
+        let b_idx = by * 8 + bx;
         let x = bx * 8 + 4;
         let y = by * 8 + 4;
         let c = comp_colors_8x8[b_idx];
         let tokens = vec![
-            COORD_START_ID + x,
-            COORD_START_ID + y,
+            PASS_1_ID,
+            ROW_START_ID + y,
+            COL_START_ID + x,
             COLOR_START_ID + c as usize,
         ];
         samples.push((canvas_blank.clone(), tokens, false));
     }
 
     // Pass 2: Shapes samples (Canvas 1 [8x8] -> 16x16 patch colors)
+    // Sample 16 patches covering every single row (0..15) and every single column (0..15)
     for i in 0..16 {
-        let p_idx = i * 16; // Spans all 16 rows across 256 patches
-        let px = p_idx % 16;
-        let py = p_idx / 16;
+        let py = i;
+        let px = (i * 7 + (seed % 16)) % 16;
+        let p_idx = py * 16 + px;
         let x = px * 4 + 2;
         let y = py * 4 + 2;
         let c = shape_colors_16x16[p_idx];
         let tokens = vec![
-            COORD_START_ID + x,
-            COORD_START_ID + y,
+            PASS_2_ID,
+            ROW_START_ID + y,
+            COL_START_ID + x,
             COLOR_START_ID + c as usize,
         ];
         samples.push((canvas_8x8.clone(), tokens, false));
     }
 
     // Pass 3a: Fine detail samples on shape canvas (Canvas 2 [16x16] -> native 64x64 pixels)
+    // Sample 8 pixels spanning the 8 vertical octave bands and distinct horizontal columns
     for i in 0..8 {
-        let pix_idx = i * 256 + 128;
-        let x = pix_idx % CANVAS_SIZE;
-        let y = pix_idx / CANVAS_SIZE;
-        let target_idx = pix_idx * 3;
+        let y = (i * 8 + (seed % 8)) % CANVAS_SIZE;
+        let x = (i * 19 + ((seed >> 4) % 64)) % CANVAS_SIZE;
+        let target_idx = (y * CANVAS_SIZE + x) * 3;
         let c = rgb_to_palette(
             target_hwc[target_idx],
             target_hwc[target_idx + 1],
             target_hwc[target_idx + 2],
         );
         let tokens = vec![
-            COORD_START_ID + x,
-            COORD_START_ID + y,
+            PASS_3_ID,
+            ROW_START_ID + y,
+            COL_START_ID + x,
             COLOR_START_ID + c as usize,
         ];
         samples.push((canvas_16x16.clone(), tokens, false));
     }
 
     // Pass 3b: Fine detail samples on partially painted canvas (Canvas 3 [Mixed] -> native pixels)
+    // Sample 8 pixels from the unpainted bottom half (y in 32..63)
     for i in 0..8 {
-        let pix_idx = (2048 + i * 250).min(4095);
-        let x = pix_idx % CANVAS_SIZE;
-        let y = pix_idx / CANVAS_SIZE;
-        let target_idx = pix_idx * 3;
+        let y = 32 + (i * 4 + (seed % 4)) % 32;
+        let x = (i * 23 + ((seed >> 8) % 64)) % CANVAS_SIZE;
+        let target_idx = (y * CANVAS_SIZE + x) * 3;
         let c = rgb_to_palette(
             target_hwc[target_idx],
             target_hwc[target_idx + 1],
             target_hwc[target_idx + 2],
         );
         let tokens = vec![
-            COORD_START_ID + x,
-            COORD_START_ID + y,
+            PASS_3_ID,
+            ROW_START_ID + y,
+            COL_START_ID + x,
             COLOR_START_ID + c as usize,
         ];
         let is_last = i == 7;
@@ -499,7 +521,7 @@ mod tests {
         let samples = generate_multiscale_samples(&dummy_target);
         assert_eq!(samples.len(), 48); // 16 + 16 + 8 + 8 = 48 samples
         for s in &samples {
-            assert_eq!(s.1.len(), 3); // [x, y, color]
+            assert_eq!(s.1.len(), 4); // [pass, row, col, color]
         }
         assert!(samples.last().unwrap().2); // is_done is true for last sample
     }

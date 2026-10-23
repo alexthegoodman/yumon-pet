@@ -155,20 +155,31 @@ fn main() -> Result<()> {
         upscaled_img.save(&img_path)?;
 
         // Format action description
-        let (action_desc, swatch_html) = if sample.action_tokens.len() >= 3 {
-            let x = sample.action_tokens[0] as usize - yumon_pet::vision::paint_action::COORD_START_ID;
-            let y = sample.action_tokens[1] as usize - yumon_pet::vision::paint_action::COORD_START_ID;
-            let c = (sample.action_tokens[2] as usize - yumon_pet::vision::paint_action::COLOR_START_ID) as u8;
+        let (action_desc, swatch_html) = if sample.action_tokens.len() >= 4 {
+            let pass_tag = sample.action_tokens[0] as usize;
+            let y = (sample.action_tokens[1] as usize).saturating_sub(yumon_pet::vision::paint_action::ROW_START_ID);
+            let x = (sample.action_tokens[2] as usize).saturating_sub(yumon_pet::vision::paint_action::COL_START_ID);
+            let c = ((sample.action_tokens[3] as usize).saturating_sub(yumon_pet::vision::paint_action::COLOR_START_ID)) as u8;
             let [r, g, b] = palette_to_rgb(c);
-            let pass_name = if idx % 48 < 16 {
-                "Pass 1 (8x8 Composition)"
-            } else if idx % 48 < 32 {
-                "Pass 2 (16x16 Shapes)"
-            } else {
-                "Pass 3 (64x64 Details)"
+            let pass_name = match pass_tag {
+                yumon_pet::vision::paint_action::PASS_1_ID => "Pass 1 (8x8 Composition)",
+                yumon_pet::vision::paint_action::PASS_2_ID => "Pass 2 (16x16 Shapes)",
+                _ => "Pass 3 (64x64 Details)",
             };
             (
                 format!("{} • ({}, {})", pass_name, x, y),
+                format!(
+                    "<span class=\"swatch\" style=\"background: rgb({}, {}, {});\"></span> Color #{} RGB({}, {}, {})",
+                    r, g, b, c, r, g, b
+                ),
+            )
+        } else if sample.action_tokens.len() >= 3 {
+            let x = (sample.action_tokens[0] as usize).saturating_sub(yumon_pet::vision::paint_action::COORD_START_ID);
+            let y = (sample.action_tokens[1] as usize).saturating_sub(yumon_pet::vision::paint_action::COORD_START_ID);
+            let c = ((sample.action_tokens[2] as usize).saturating_sub(yumon_pet::vision::paint_action::COLOR_START_ID)) as u8;
+            let [r, g, b] = palette_to_rgb(c);
+            (
+                format!("Legacy • ({}, {})", x, y),
                 format!(
                     "<span class=\"swatch\" style=\"background: rgb({}, {}, {});\"></span> Color #{} RGB({}, {}, {})",
                     r, g, b, c, r, g, b

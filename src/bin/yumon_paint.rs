@@ -20,8 +20,9 @@ use {
         yumon_talk::TranslationContext,
     },
     yumon_pet::vision::paint_action::{
-        ART_VOCAB_SIZE, CANVAS_CHANNELS, CANVAS_SIZE, CANVAS_START_ID, CANVAS_END_ID,
-        COORD_START_ID, COLOR_START_ID, PALETTE_SIZE,
+        ART_VOCAB_SIZE, CANVAS_CHANNELS, CANVAS_SIZE, CANVAS_START_ID,
+        PASS_1_ID, PASS_2_ID, PASS_3_ID,
+        ROW_START_ID, COL_START_ID, COLOR_START_ID, PALETTE_SIZE,
         hwc_to_chw_floats, palette_to_rgb,
     },
 };
@@ -188,7 +189,6 @@ fn main() -> Result<()> {
         prefix_tokens.push(tok as i32);
     }
     prefix_tokens.push(CANVAS_START_ID as i32);
-    prefix_tokens.push(CANVAS_END_ID as i32);
 
     // PASS 1: Broad Composition (8x8 Blocks, 64 queries)
     println!("\n═══════════════════════════════════════════════════════");
@@ -202,8 +202,9 @@ fn main() -> Result<()> {
             let y = (by * 8 + 4) as u8;
 
             let mut query_tokens = prefix_tokens.clone();
-            query_tokens.push((COORD_START_ID + x as usize) as i32);
-            query_tokens.push((COORD_START_ID + y as usize) as i32);
+            query_tokens.push(PASS_1_ID as i32);
+            query_tokens.push((ROW_START_ID + y as usize) as i32);
+            query_tokens.push((COL_START_ID + x as usize) as i32);
 
             let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
                 TensorData::new(query_tokens.clone(), [1, query_tokens.len()]),
@@ -256,8 +257,9 @@ fn main() -> Result<()> {
                 let y = (py * 4 + 2) as u8;
 
                 let mut query_tokens = prefix_tokens.clone();
-                query_tokens.push((COORD_START_ID + x as usize) as i32);
-                query_tokens.push((COORD_START_ID + y as usize) as i32);
+                query_tokens.push(PASS_2_ID as i32);
+                query_tokens.push((ROW_START_ID + y as usize) as i32);
+                query_tokens.push((COL_START_ID + x as usize) as i32);
 
                 let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
                     TensorData::new(query_tokens.clone(), [1, query_tokens.len()]),
@@ -328,8 +330,9 @@ fn main() -> Result<()> {
             }
 
             let mut query_tokens = prefix_tokens.clone();
-            query_tokens.push((COORD_START_ID + x as usize) as i32);
-            query_tokens.push((COORD_START_ID + y as usize) as i32);
+            query_tokens.push(PASS_3_ID as i32);
+            query_tokens.push((ROW_START_ID + y as usize) as i32);
+            query_tokens.push((COL_START_ID + x as usize) as i32);
 
             let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
                 TensorData::new(query_tokens.clone(), [1, query_tokens.len()]),

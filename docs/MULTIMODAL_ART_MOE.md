@@ -48,7 +48,7 @@ $$\text{Palette Index} = (R_3 \ll 5) \mid (G_3 \ll 2) \mid B_2$$
 
 This preserves skin tones, skies, atmospheric lighting, and subtle shadows with zero loss of distinct colors across 256 discrete tokens.
 
-### Dedicated Vocabulary Space (`vocab_size = 4428`)
+### Dedicated Vocabulary Space (`vocab_size = 4512`)
 The vocabulary extends the 4,096-token Kilo Talk language vocabulary:
 
 | ID Range | Token Name | Purpose |
@@ -58,9 +58,13 @@ The vocabulary extends the 4,096-token Kilo Talk language vocabulary:
 | `4097` | `<CANVAS_END>` | Closes the canvas context tag |
 | `4098` | `<PAINT>` | Reserved paint action tag |
 | `4099` | `<DONE>` | Reserved completion tag |
-| `4100..4163` | `<C_0>` .. `<C_63>` | 64 discrete coordinate indices for $x$ and $y$ |
-| `4164..4419` | `<COL_0>` .. `<COL_255>` | 256 discrete 8-bit palette colors |
-| `4420..4427` | `<RAD_1>` .. `<RAD_8>` | Brush radii |
+| `4100` | `<PASS_1>` | Pass 1: Composition mode ($8 \times 8$ blocks) |
+| `4101` | `<PASS_2>` | Pass 2: Shapes & Silhouettes mode ($16 \times 16$ patches) |
+| `4102` | `<PASS_3>` | Pass 3: Fine Pixel Art mode ($64 \times 64$ native pixels) |
+| `4110..4173` | `<ROW_0>` .. `<ROW_63>` | 64 discrete row coordinates ($Y \in 0..63$) |
+| `4174..4237` | `<COL_0>` .. `<COL_63>` | 64 discrete column coordinates ($X \in 0..63$) |
+| `4238..4493` | `<COL_0>` .. `<COL_255>` | 256 discrete 8-bit palette colors |
+| `4494..4501` | `<RAD_1>` .. `<RAD_8>` | Brush radii |
 
 ---
 
@@ -143,20 +147,21 @@ In both training and inference, the sequence fed into `YumonMoeBrain` is constru
 [Position 256]        : BOS_TOKEN
 [Position 257..256+P] : Prompt Tokens (P tokens from English prompt)
 [Position 256+P+1]    : <CANVAS_START> (Token 4096)
-[Position 256+P+2]    : <CANVAS_END>   (Token 4097)
-[Position 256+P+3]    : Coordinate X   (<C_x>, Token 4100 + x)
-[Position 256+P+4]    : Coordinate Y   (<C_y>, Token 4100 + y)  <--- QUERY POSITION
+[Position 256+P+2]    : <PASS_k>       (Tokens 4100, 4101, or 4102)
+[Position 256+P+3]    : <ROW_y>        (Token 4110 + y)
+[Position 256+P+4]    : <COL_x>        (Token 4174 + x)  <--- QUERY POSITION
 ```
 
 ### Why Position Alignment Matters
-Because causal self-attention masks all subsequent positions, token representations up to `<C_y>` depend only on:
-1. All 256 visual canvas patches (bidirectionally visible or causally prior).
+Because causal self-attention masks all subsequent positions, token representations up to `<COL_x>` depend only on:
+1. All 256 visual canvas patches.
 2. The user's text prompt.
-3. The query coordinates $(x, y)$.
+3. The explicit pass mode (`<PASS_1>`, `<PASS_2>`, or `<PASS_3>`).
+4. The exact 2D coordinate query: `<ROW_y>` and `<COL_x>`.
 
 At sequence index:
 $$pos = 256 + 4 + \text{prompt\_len}$$
-The model's linear language head produces a logit vector across `ART_VOCAB_SIZE` ($4,428$). In next-token prediction, the token that immediately follows `<C_y>` is the target palette color `<COL_c>`.
+The model's linear language head produces a logit vector across `ART_VOCAB_SIZE` ($4,512$). In next-token prediction, the token that immediately follows `<COL_x>` is the target palette color `<COL_c>`.
 
 ---
 
