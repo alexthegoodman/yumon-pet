@@ -49,11 +49,11 @@ $$\text{Palette Index} = (R_3 \ll 5) \mid (G_3 \ll 2) \mid B_2$$
 This preserves skin tones, skies, atmospheric lighting, and subtle shadows with zero loss of distinct colors across 256 discrete tokens.
 
 ### Dedicated Vocabulary Space (`vocab_size = 4512`)
-The vocabulary extends the 4,096-token Kilo Talk language vocabulary:
+The vocabulary extends the 4,096-token Diffusion Talk art vocabulary (`training-cache/diffusion_talk_vocab.json`), trained directly on 10,000 DiffusionDB prompts with 400 mined recurring art phrases (e.g. `concept art`, `trending on artstation`, `octane render`, `digital painting`, `sharp focus`):
 
 | ID Range | Token Name | Purpose |
 | :--- | :--- | :--- |
-| `0..4095` | Kilo Talk Text Tokens | BPE text vocabulary for English conversation & prompts |
+| `0..4095` | Diffusion Talk Text Tokens | BPE text vocabulary specifically induced from DiffusionDb art prompts |
 | `4096` | `<CANVAS_START>` | Delimiter indicating the canvas state is being queried |
 | `4097` | `<CANVAS_END>` | Closes the canvas context tag |
 | `4098` | `<PAINT>` | Reserved paint action tag |

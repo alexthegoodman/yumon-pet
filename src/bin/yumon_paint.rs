@@ -42,7 +42,7 @@ struct Args {
     checkpoint: Option<PathBuf>,
 
     /// Path to Kilo Talk vocabulary.
-    #[arg(long, default_value = "training-cache/kilo_talk_vocab.json")]
+    #[arg(long, default_value = "training-cache/diffusion_talk_vocab.json")]
     vocab: PathBuf,
 
     /// Sampling temperature (0.0 = greedy argmax, >0.0 = stochastic sampling).

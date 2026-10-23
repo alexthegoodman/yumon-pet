@@ -59,7 +59,7 @@ struct Args {
     images_dir: PathBuf,
 
     /// Path to Kilo Talk vocabulary JSON file.
-    #[arg(long, default_value = "training-cache/kilo_talk_vocab.json")]
+    #[arg(long, default_value = "training-cache/diffusion_talk_vocab.json")]
     vocab: PathBuf,
 
     /// Output binary cache path.

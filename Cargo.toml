@@ -61,6 +61,10 @@ path = "src/bin/inspect_dataset.rs"
 name = "export_cache_samples"
 path = "src/bin/export_cache_samples.rs"
 
+[[bin]]
+name = "build_diffusion_vocab"
+path = "src/bin/build_diffusion_vocab.rs"
+
 
 
 [features]

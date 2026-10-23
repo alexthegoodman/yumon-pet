@@ -3,7 +3,7 @@
   "num_experts": 4,
   "top_k": 1,
   "cache": "training-cache/diffusion_kilo_samples.bin",
-  "vocab_file": "training-cache/kilo_talk_vocab.json",
+  "vocab_file": "training-cache/diffusion_talk_vocab.json",
   "max_seq_len": 512,
   "seed": 4815162342,
   "vocab_size": 4512,
@@ -16,5 +16,5 @@
   "first_lr": 0.0003,
   "last_lr": 0.00003,
   "validation_fraction": 0.02,
-  "out_dir": "checkpoints/yumon-art-moe-6"
+  "out_dir": "checkpoints/yumon-art-moe-7"
 }
