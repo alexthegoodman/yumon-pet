@@ -20,6 +20,7 @@ use {
     },
     yumon_pet::vision::paint_action::{
         ART_VOCAB_SIZE, CANVAS_SIZE, generate_multiscale_samples,
+        PASS_1_ID, PASS_2_ID, PASS_3_ID,
     },
 };
 
@@ -71,6 +72,10 @@ struct Args {
     #[arg(long)]
     limit: Option<usize>,
 
+    /// Filter to a specific pass (1, 2, or 3). If omitted, caches all passes.
+    #[arg(long)]
+    pass: Option<usize>,
+
     /// Number of training samples per image across canvas progression.
     #[arg(long, default_value_t = 8)]
     samples_per_image: usize,
@@ -92,8 +97,11 @@ fn main() -> Result<()> {
     println!("Images directory   : {}", args.images_dir.display());
     println!("Vocabulary file    : {}", args.vocab.display());
     println!("Output cache       : {}", args.output.display());
-    println!("Samples per image  : {}", args.samples_per_image);
-    println!("Pixels per sample  : {}", args.chunk_len);
+    if let Some(p) = args.pass {
+        println!("Pass filter        : Pass {}", p);
+    } else {
+        println!("Pass filter        : All passes (1, 2, 3)");
+    }
 
     // 1. Load Kilo Talk vocabulary
     println!("\nLoading Kilo Talk vocabulary...");
@@ -142,7 +150,15 @@ fn main() -> Result<()> {
     println!("Total images to process: {}", items.len());
     ensure!(!items.is_empty(), "No valid image files found in manifest");
 
-    // 4. Process images and generate intermediate painting trajectories
+    let target_pass_tag = match args.pass {
+        Some(1) => Some(PASS_1_ID),
+        Some(2) => Some(PASS_2_ID),
+        Some(3) => Some(PASS_3_ID),
+        Some(p) => anyhow::bail!("Invalid pass {p}; must be 1, 2, or 3"),
+        None => None,
+    };
+
+    // 4. Process images and generate multiscale painting samples
     let pb = ProgressBar::new(items.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -180,6 +196,11 @@ fn main() -> Result<()> {
 
             let mut out = Vec::with_capacity(multiscale_samples.len());
             for (canvas_hwc, tokens, is_done, target_edge) in multiscale_samples {
+                if let Some(target_tag) = target_pass_tag {
+                    if tokens.is_empty() || tokens[0] != target_tag {
+                        continue;
+                    }
+                }
                 let action_tokens = tokens.into_iter().map(|t| t as u32).collect();
 
                 out.push(ArtSample {
@@ -217,7 +238,7 @@ fn main() -> Result<()> {
         images_processed: items.len(),
         canvas_size: CANVAS_SIZE,
         vocab_size: ART_VOCAB_SIZE,
-        trajectory_steps: args.samples_per_image,
+        trajectory_steps: args.pass.unwrap_or(0),
     };
     let meta_bytes = bincode::serialize(&metadata)?;
     writer.write_all(&(meta_bytes.len() as u32).to_le_bytes())?;

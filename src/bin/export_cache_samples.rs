@@ -139,16 +139,64 @@ fn main() -> Result<()> {
         let img_path = args.output_dir.join(&img_filename);
         let raw_path = args.output_dir.join(&raw_filename);
 
+        // Apply target paint action to canvas preview so the visual shows what is being painted
+        let mut preview_canvas = sample.canvas_hwc.clone();
+        if sample.action_tokens.len() >= 4 {
+            let pass_tag = sample.action_tokens[0] as usize;
+            let y = (sample.action_tokens[1] as usize).saturating_sub(yumon_pet::vision::paint_action::ROW_START_ID);
+            let x = (sample.action_tokens[2] as usize).saturating_sub(yumon_pet::vision::paint_action::COL_START_ID);
+            let c = ((sample.action_tokens[3] as usize).saturating_sub(yumon_pet::vision::paint_action::COLOR_START_ID)) as u8;
+            let [r, g, b] = palette_to_rgb(c);
+            match pass_tag {
+                yumon_pet::vision::paint_action::PASS_1_ID => {
+                    let by = y / 8;
+                    let bx = x / 8;
+                    for dy in 0..8 {
+                        for dx in 0..8 {
+                            let cy = (by * 8 + dy).min(CANVAS_SIZE - 1);
+                            let cx = (bx * 8 + dx).min(CANVAS_SIZE - 1);
+                            let idx = (cy * CANVAS_SIZE + cx) * 3;
+                            preview_canvas[idx] = r;
+                            preview_canvas[idx + 1] = g;
+                            preview_canvas[idx + 2] = b;
+                        }
+                    }
+                }
+                yumon_pet::vision::paint_action::PASS_2_ID => {
+                    let py = y / 4;
+                    let px = x / 4;
+                    for dy in 0..4 {
+                        for dx in 0..4 {
+                            let cy = (py * 4 + dy).min(CANVAS_SIZE - 1);
+                            let cx = (px * 4 + dx).min(CANVAS_SIZE - 1);
+                            let idx = (cy * CANVAS_SIZE + cx) * 3;
+                            preview_canvas[idx] = r;
+                            preview_canvas[idx + 1] = g;
+                            preview_canvas[idx + 2] = b;
+                        }
+                    }
+                }
+                _ => {
+                    let cy = y.min(CANVAS_SIZE - 1);
+                    let cx = x.min(CANVAS_SIZE - 1);
+                    let idx = (cy * CANVAS_SIZE + cx) * 3;
+                    preview_canvas[idx] = r;
+                    preview_canvas[idx + 1] = g;
+                    preview_canvas[idx + 2] = b;
+                }
+            }
+        }
+
         // Save raw 64x64 PNG
         let raw_img = image::RgbImage::from_raw(
             CANVAS_SIZE as u32,
             CANVAS_SIZE as u32,
-            sample.canvas_hwc.clone(),
+            preview_canvas.clone(),
         ).context("creating 64x64 ImageBuffer")?;
         raw_img.save(&raw_path)?;
 
         // Save upscaled 256x256 PNG for crisp display
-        let upscaled_bytes = upscale_nn(&sample.canvas_hwc, CANVAS_SIZE, CANVAS_SIZE, args.scale);
+        let upscaled_bytes = upscale_nn(&preview_canvas, CANVAS_SIZE, CANVAS_SIZE, args.scale);
         let upscaled_img = image::RgbImage::from_raw(
             (CANVAS_SIZE * args.scale) as u32,
             (CANVAS_SIZE * args.scale) as u32,

@@ -29,6 +29,7 @@ use {
     },
     yumon_pet::vision::paint_action::{
         CANVAS_SIZE, CANVAS_START_ID,
+        PASS_1_ID, PASS_2_ID, PASS_3_ID,
         hwc_to_chw_floats,
     },
 };
@@ -88,6 +89,10 @@ pub struct ArtConfig {
     pub last_lr: f64,
     pub validation_fraction: f64,
     pub out_dir: String,
+    #[serde(default)]
+    pub pass: Option<usize>,
+    #[serde(default)]
+    pub is_multimodal: Option<bool>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -113,6 +118,14 @@ struct Args {
     /// Override output directory.
     #[arg(long)]
     out_dir: Option<PathBuf>,
+
+    /// Override target pass (1, 2, or 3).
+    #[arg(long)]
+    pass: Option<usize>,
+
+    /// Override is_multimodal.
+    #[arg(long)]
+    is_multimodal: Option<bool>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -178,9 +191,17 @@ fn main() -> Result<()> {
     let epochs = args.epochs.unwrap_or(cfg.epochs);
     let batch_size = args.batch_size.unwrap_or(cfg.batch_size);
     let out_dir = args.out_dir.unwrap_or_else(|| PathBuf::from(&cfg.out_dir));
+    let target_pass = args.pass.or(cfg.pass);
+    let is_multimodal = args.is_multimodal.or(cfg.is_multimodal).unwrap_or(true);
 
     println!("Cache binary   : {}", cache_path.display());
     println!("Output dir     : {}", out_dir.display());
+    if let Some(p) = target_pass {
+        println!("Target pass    : Pass {}", p);
+    } else {
+        println!("Target pass    : All passes");
+    }
+    println!("Multimodal mode: {}", is_multimodal);
     println!("Batch size     : {}", batch_size);
     println!("Epochs         : {}", epochs);
     println!("Embed dim      : {}", cfg.embed_dim);
@@ -192,6 +213,19 @@ fn main() -> Result<()> {
     let mut all_samples = load_samples_from_cache(&cache_path)?;
     println!("Total samples loaded: {}", all_samples.len());
     ensure!(!all_samples.is_empty(), "Cache contains 0 samples");
+
+    // Filter by pass if specified
+    if let Some(p) = target_pass {
+        let tag = match p {
+            1 => PASS_1_ID as u32,
+            2 => PASS_2_ID as u32,
+            3 => PASS_3_ID as u32,
+            other => anyhow::bail!("Invalid pass {other}; must be 1, 2, or 3"),
+        };
+        all_samples.retain(|s| !s.action_tokens.is_empty() && s.action_tokens[0] == tag);
+        println!("Filtered to Pass {} samples: {}", p, all_samples.len());
+        ensure!(!all_samples.is_empty(), "No samples found for Pass {}", p);
+    }
 
     // Shuffle and split train / val
     let mut rng = thread_rng();
@@ -214,7 +248,7 @@ fn main() -> Result<()> {
         .with_max_seq_len(cfg.max_seq_len)
         .with_num_experts(cfg.num_experts)
         .with_top_k(cfg.top_k)
-        .with_is_multimodal(true);
+        .with_is_multimodal(is_multimodal);
 
     let mut model: YumonMoeBrain<TrainBackend> = brain_config.init(&device);
     let mut optimizer = AdamWConfig::new()
@@ -227,6 +261,7 @@ fn main() -> Result<()> {
     println!("\nStarting training ({} batches/epoch)...", num_batches);
 
     let mut best_val_loss = f32::INFINITY;
+    let vis_offset = if is_multimodal { 256 } else { 0 };
 
     for epoch in 1..=epochs {
         let t0 = Instant::now();
@@ -247,16 +282,20 @@ fn main() -> Result<()> {
                 continue;
             }
 
-            // A. Pack Canvas Tensors [bs, 3, 64, 64]
-            let mut flat_canvas = Vec::with_capacity(bs * 3 * CANVAS_SIZE * CANVAS_SIZE);
-            for s in chunk {
-                let chw = hwc_to_chw_floats(&s.canvas_hwc);
-                flat_canvas.extend(chw);
-            }
-            let canvas_tensor = Tensor::<TrainBackend, 4>::from_floats(
-                TensorData::new(flat_canvas, [bs, 3, CANVAS_SIZE, CANVAS_SIZE]),
-                &device,
-            );
+            // A. Pack Canvas Tensors [bs, 3, 64, 64] if multimodal
+            let canvas_tensor = if is_multimodal {
+                let mut flat_canvas = Vec::with_capacity(bs * 3 * CANVAS_SIZE * CANVAS_SIZE);
+                for s in chunk {
+                    let chw = hwc_to_chw_floats(&s.canvas_hwc);
+                    flat_canvas.extend(chw);
+                }
+                Some(Tensor::<TrainBackend, 4>::from_floats(
+                    TensorData::new(flat_canvas, [bs, 3, CANVAS_SIZE, CANVAS_SIZE]),
+                    &device,
+                ))
+            } else {
+                None
+            };
 
             // B. Pack Tokens & Target Edges
             let mut batch_token_rows = Vec::with_capacity(bs);
@@ -284,8 +323,9 @@ fn main() -> Result<()> {
                 batch_token_rows.push(row);
             }
 
-            // Cap at max_seq_len - 256
-            let max_text = max_len.min(cfg.max_seq_len - 256);
+            // Cap at max_seq_len - vis_offset
+            let max_text_limit = cfg.max_seq_len.saturating_sub(vis_offset);
+            let max_text = max_len.min(max_text_limit);
             let mut flat_tokens = Vec::with_capacity(bs * max_text);
 
             for mut row in batch_token_rows {
@@ -313,32 +353,34 @@ fn main() -> Result<()> {
                 &device,
             );
 
-            // C. Forward pass with Conv2D edge detection head
+            // C. Forward pass
             let (logits, edge_preds, aux_loss, _, _) = model.forward_multimodal_with_edges(
                 token_tensor,
-                Some(canvas_tensor),
+                canvas_tensor,
             );
 
             // Extract the active logit vector and edge prediction at the (x, y) query coordinate for each sample
             let mut logit_slices = Vec::with_capacity(bs);
             let mut edge_slices = Vec::with_capacity(bs);
             for (b, s) in chunk.iter().enumerate() {
-                let pos = 256 + 4 + s.prompt_tokens.len();
+                let pos = vis_offset + 4 + s.prompt_tokens.len();
                 logit_slices.push(logits.clone().slice([b..b + 1, pos..pos + 1, 0..cfg.vocab_size]));
                 edge_slices.push(edge_preds.clone().slice([b..b + 1, pos..pos + 1, 0..1]));
             }
             let active_logits = Tensor::cat(logit_slices, 0).reshape([bs, cfg.vocab_size]);
             let active_edges = Tensor::cat(edge_slices, 0).reshape([bs, 1]);
 
-            // 1. Target Conv2D Edge-weighted Cross Entropy Loss
+            // Loss: CE (+ auxiliary edge detection if multimodal)
             let log_probs = burn::tensor::activation::log_softmax(active_logits, 1);
             let nll = log_probs.gather(1, target_labels.reshape([bs, 1])).reshape([bs]).neg();
-            let weighted_ce = (nll * edge_weights).mean();
 
-            // 2. Auxiliary Conv2D Edge Detection Loss (MSE against target image edges)
-            let edge_mse = (active_edges - target_edges).powf_scalar(2.0).mean();
-
-            let loss = weighted_ce + edge_mse * 0.5 + aux_loss;
+            let loss = if is_multimodal {
+                let weighted_ce = (nll * edge_weights).mean();
+                let edge_mse = (active_edges - target_edges).powf_scalar(2.0).mean();
+                weighted_ce + edge_mse * 0.5 + aux_loss
+            } else {
+                nll.mean() + aux_loss
+            };
 
             let loss_val: f32 = loss.clone().into_data().convert::<f32>().to_vec().unwrap()[0];
             total_loss += loss_val;
@@ -363,17 +405,20 @@ fn main() -> Result<()> {
         let mut val_total = 0usize;
         let mut val_steps = 0usize;
 
-        // NOTE: disable validation check to avoid Our of Memory error at end of epoch
         for chunk in val_samples.chunks(batch_size) {
             let bs = chunk.len();
-            let mut flat_canvas = Vec::with_capacity(bs * 3 * CANVAS_SIZE * CANVAS_SIZE);
-            for s in chunk {
-                flat_canvas.extend(hwc_to_chw_floats(&s.canvas_hwc));
-            }
-            let canvas_tensor = Tensor::<TrainBackend, 4>::from_floats(
-                TensorData::new(flat_canvas, [bs, 3, CANVAS_SIZE, CANVAS_SIZE]),
-                &device,
-            );
+            let canvas_tensor = if is_multimodal {
+                let mut flat_canvas = Vec::with_capacity(bs * 3 * CANVAS_SIZE * CANVAS_SIZE);
+                for s in chunk {
+                    flat_canvas.extend(hwc_to_chw_floats(&s.canvas_hwc));
+                }
+                Some(Tensor::<TrainBackend, 4>::from_floats(
+                    TensorData::new(flat_canvas, [bs, 3, CANVAS_SIZE, CANVAS_SIZE]),
+                    &device,
+                ))
+            } else {
+                None
+            };
 
             let mut batch_token_rows = Vec::with_capacity(bs);
             let mut targets = Vec::with_capacity(bs);
@@ -398,7 +443,8 @@ fn main() -> Result<()> {
                 }
                 batch_token_rows.push(row);
             }
-            let max_text = max_len.min(cfg.max_seq_len - 256);
+            let max_text_limit = cfg.max_seq_len.saturating_sub(vis_offset);
+            let max_text = max_len.min(max_text_limit);
             let mut flat_tokens = Vec::with_capacity(bs * max_text);
 
             for mut row in batch_token_rows {
@@ -428,13 +474,13 @@ fn main() -> Result<()> {
 
             let (logits, edge_preds, _, _, _) = model.forward_multimodal_with_edges(
                 token_tensor,
-                Some(canvas_tensor),
+                canvas_tensor,
             );
 
             let mut logit_slices = Vec::with_capacity(bs);
             let mut edge_slices = Vec::with_capacity(bs);
             for (b, s) in chunk.iter().enumerate() {
-                let pos = 256 + 4 + s.prompt_tokens.len();
+                let pos = vis_offset + 4 + s.prompt_tokens.len();
                 logit_slices.push(logits.clone().slice([b..b + 1, pos..pos + 1, 0..cfg.vocab_size]));
                 edge_slices.push(edge_preds.clone().slice([b..b + 1, pos..pos + 1, 0..1]));
             }
@@ -443,9 +489,17 @@ fn main() -> Result<()> {
 
             let log_probs = burn::tensor::activation::log_softmax(active_logits.clone(), 1);
             let nll = log_probs.gather(1, target_labels.reshape([bs, 1])).reshape([bs]).neg();
-            let loss = (nll * edge_weights).mean();
+            let loss = if is_multimodal {
+                (nll * edge_weights).mean()
+            } else {
+                nll.mean()
+            };
 
-            let edge_mse = (active_edges - target_edges).powf_scalar(2.0).mean();
+            let edge_mse = if is_multimodal {
+                (active_edges - target_edges).powf_scalar(2.0).mean()
+            } else {
+                Tensor::zeros([1], &device)
+            };
             let e_mse_val: f32 = edge_mse.into_data().convert::<f32>().to_vec().unwrap()[0];
             val_edge_sum += e_mse_val;
 
@@ -503,8 +557,8 @@ fn main() -> Result<()> {
                 max_seq_len: cfg.max_seq_len,
                 adaptive_depth: None,
                 kv_heads: None,
-                is_multimodal: true,
-                has_edge_head: true,
+                is_multimodal,
+                has_edge_head: is_multimodal,
             };
 
             let meta_json = serde_json::to_string_pretty(&meta)?;

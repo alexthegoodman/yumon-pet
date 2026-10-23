@@ -37,9 +37,21 @@ struct Args {
     #[arg(long, default_value = "a cute friendly dragon in an enchanted forest, vibrant colors, oil painting")]
     prompt: String,
 
-    /// Optional checkpoint directory.
+    /// Optional checkpoint directory (fallback for all passes if specific checkpoint is omitted).
     #[arg(long)]
     checkpoint: Option<PathBuf>,
+
+    /// Pass 1 checkpoint directory (Broad Composition, e.g. checkpoints/yumon-art-pass1).
+    #[arg(long)]
+    checkpoint_pass1: Option<PathBuf>,
+
+    /// Pass 2 checkpoint directory (Shapes & Silhouettes, e.g. checkpoints/yumon-art-pass2).
+    #[arg(long)]
+    checkpoint_pass2: Option<PathBuf>,
+
+    /// Pass 3 checkpoint directory (Fine Pixel Art Details, e.g. checkpoints/yumon-art-pass3).
+    #[arg(long)]
+    checkpoint_pass3: Option<PathBuf>,
 
     /// Path to Kilo Talk vocabulary.
     #[arg(long, default_value = "training-cache/diffusion_talk_vocab.json")]
@@ -133,12 +145,41 @@ fn print_terminal_canvas(canvas: &[u8]) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn load_or_init_pass_brain(
+    pass_name: &str,
+    pass_ckpt: Option<&PathBuf>,
+    fallback_ckpt: Option<&PathBuf>,
+    is_multimodal_default: bool,
+    device: &<BackendType as Backend>::Device,
+) -> Result<YumonMoeBrain<BackendType>> {
+    let target = pass_ckpt.or(fallback_ckpt);
+    if let Some(ckpt) = target {
+        println!("Loading {} checkpoint from {}...", pass_name, ckpt.display());
+        let (model, _, _) = YumonMoeBrain::<BackendType>::load(ckpt.to_str().unwrap(), device)?;
+        Ok(model)
+    } else {
+        println!("No {} checkpoint specified — initializing compact untrained MoE architecture...", pass_name);
+        let cfg = YumonMoeBrainConfig::new(ART_VOCAB_SIZE, TrainingStage::Language)
+            .with_embed_dim(64)
+            .with_hidden_units(64)
+            .with_n_layers(4)
+            .with_attn_heads(4)
+            .with_ff_dim(256)
+            .with_max_seq_len(512)
+            .with_num_experts(4)
+            .with_top_k(1)
+            .with_is_multimodal(is_multimodal_default);
+        Ok(cfg.init(device))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     let args = Args::parse();
     let device: <BackendType as Backend>::Device = Default::default();
 
     println!("╔═══════════════════════════════════════════════════════╗");
-    println!("║       🎨 Yumon Art Studio: Pixel-Aware Vision MoE    ║");
+    println!("║       🎨 Yumon Art Studio: Cascaded Vision MoE        ║");
     println!("╚═══════════════════════════════════════════════════════╝");
     println!("Prompt: \"{}\"\n", args.prompt);
 
@@ -151,33 +192,46 @@ fn main() -> Result<()> {
     let prompt_tokens = vocab.encode(&args.prompt, &mut ctx)?;
     println!("Kilo Talk tokens ({}): {:?}", prompt_tokens.len(), prompt_tokens);
 
-    // 3. Initialize / Load Multimodal MoE Brain
-    let brain = if let Some(ckpt) = &args.checkpoint {
-        println!("Loading checkpoint from {}...", ckpt.display());
-        let (model, _, _) = YumonMoeBrain::<BackendType>::load(ckpt.to_str().unwrap(), &device)?;
-        model
+    // 3. Initialize / Load Multimodal MoE Brains for Cascaded Passes
+    let brain_p1 = load_or_init_pass_brain(
+        "Pass 1",
+        args.checkpoint_pass1.as_ref(),
+        args.checkpoint.as_ref(),
+        false, // default Pass 1 to pure text-to-image (not multimodal)
+        &device,
+    )?;
+
+    let brain_p2 = if args.passes >= 2 {
+        Some(load_or_init_pass_brain(
+            "Pass 2",
+            args.checkpoint_pass2.as_ref(),
+            args.checkpoint.as_ref(),
+            true, // Pass 2 is multimodal
+            &device,
+        )?)
     } else {
-        println!("No checkpoint specified — initializing compact untrained MoE architecture for studio demonstration...");
-        let cfg = YumonMoeBrainConfig::new(ART_VOCAB_SIZE, TrainingStage::Language)
-            .with_embed_dim(64)
-            .with_hidden_units(64)
-            .with_n_layers(4)
-            .with_attn_heads(4)
-            .with_ff_dim(256)
-            .with_max_seq_len(512)
-            .with_num_experts(4)
-            .with_top_k(1)
-            .with_is_multimodal(true);
-        cfg.init(&device)
+        None
     };
 
-    // 4. Initialize Blank Canvas
+    let brain_p3 = if args.passes >= 3 {
+        Some(load_or_init_pass_brain(
+            "Pass 3",
+            args.checkpoint_pass3.as_ref(),
+            args.checkpoint.as_ref(),
+            true, // Pass 3 is multimodal
+            &device,
+        )?)
+    } else {
+        None
+    };
+
+    // 4. Initialize Canvas
     let mut canvas_hwc = vec![240u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
     println!("\n🖼  Initial Canvas State (Blank):");
     print_terminal_canvas(&canvas_hwc);
 
-    // 5. The Art Creation Loop: 3-Pass Multiscale Studio
-    println!("\n🎨 Yumon is picking up the stylus to paint the 64x64 canvas across 3 multiscale passes...\n");
+    // 5. The Cascaded Art Creation Loop
+    println!("\n🎨 Yumon is picking up the stylus to paint the 64x64 canvas across {} passes...\n", args.passes);
 
     let mut canvas_tensor = Tensor::<BackendType, 4>::from_floats(
         TensorData::new(hwc_to_chw_floats(&canvas_hwc), [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
@@ -192,9 +246,11 @@ fn main() -> Result<()> {
 
     // PASS 1: Broad Composition (8x8 Blocks, 64 queries)
     println!("\n═══════════════════════════════════════════════════════");
-    println!("  🎨 Pass 1 / 3: Broad Composition (8x8 Blocks)");
+    println!("  🎨 Pass 1 / {}: Broad Composition (8x8 Blocks)", args.passes);
     println!("═══════════════════════════════════════════════════════");
     let t_pass1 = Instant::now();
+    let p1_multimodal = brain_p1.config.is_multimodal;
+    let p1_vis_offset = if p1_multimodal { 256 } else { 0 };
 
     for by in 0..8 {
         for bx in 0..8 {
@@ -211,8 +267,13 @@ fn main() -> Result<()> {
                 &device,
             );
 
-            let (logits, edge_preds) = brain.forward_multimodal_predict(token_tensor, Some(canvas_tensor.clone()));
-            let last_pos = 256 + query_tokens.len() - 1;
+            let canvas_arg = if p1_multimodal {
+                Some(canvas_tensor.clone())
+            } else {
+                None
+            };
+            let (logits, edge_preds) = brain_p1.forward_multimodal_predict(token_tensor, canvas_arg);
+            let last_pos = p1_vis_offset + query_tokens.len() - 1;
             let logit_vec: Vec<f32> = logits
                 .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
                 .into_data()
@@ -257,11 +318,13 @@ fn main() -> Result<()> {
     print_terminal_canvas(&canvas_hwc);
 
     // PASS 2: Shapes & Silhouettes (16x16 Patches, 256 queries)
-    if args.passes >= 2 {
+    if let Some(brain_p2) = brain_p2 {
         println!("\n═══════════════════════════════════════════════════════");
-        println!("  🎨 Pass 2 / 3: Shapes & Silhouettes (16x16 Patches)");
+        println!("  🎨 Pass 2 / {}: Shapes & Silhouettes (16x16 Patches)", args.passes);
         println!("═══════════════════════════════════════════════════════");
         let t_pass2 = Instant::now();
+        let p2_multimodal = brain_p2.config.is_multimodal;
+        let p2_vis_offset = if p2_multimodal { 256 } else { 0 };
 
         for py in 0..16 {
             for px in 0..16 {
@@ -278,8 +341,13 @@ fn main() -> Result<()> {
                     &device,
                 );
 
-                let (logits, edge_preds) = brain.forward_multimodal_predict(token_tensor, Some(canvas_tensor.clone()));
-                let last_pos = 256 + query_tokens.len() - 1;
+                let canvas_arg = if p2_multimodal {
+                    Some(canvas_tensor.clone())
+                } else {
+                    None
+                };
+                let (logits, edge_preds) = brain_p2.forward_multimodal_predict(token_tensor, canvas_arg);
+                let last_pos = p2_vis_offset + query_tokens.len() - 1;
                 let logit_vec: Vec<f32> = logits
                     .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
                     .into_data()
@@ -333,13 +401,15 @@ fn main() -> Result<()> {
     }
 
     // PASS 3: Fine Pixel Art Details (64x64 Pixels, 4,096 queries)
-    if args.passes >= 3 {
+    if let Some(brain_p3) = brain_p3 {
         println!("\n═══════════════════════════════════════════════════════");
-        println!("  🎨 Pass 3 / 3: Fine Pixel Art Details (64x64 Pixels)");
+        println!("  🎨 Pass 3 / {}: Fine Pixel Art Details (64x64 Pixels)", args.passes);
         println!("═══════════════════════════════════════════════════════");
         let t_pass3 = Instant::now();
         let total_pixels = CANVAS_SIZE * CANVAS_SIZE;
         let glance_interval = args.glance_interval.max(1);
+        let p3_multimodal = brain_p3.config.is_multimodal;
+        let p3_vis_offset = if p3_multimodal { 256 } else { 0 };
 
         for p in 0..total_pixels {
             let x = (p % CANVAS_SIZE) as u8;
@@ -363,8 +433,13 @@ fn main() -> Result<()> {
                 &device,
             );
 
-            let (logits, edge_preds) = brain.forward_multimodal_predict(token_tensor, Some(canvas_tensor.clone()));
-            let last_pos = 256 + query_tokens.len() - 1;
+            let canvas_arg = if p3_multimodal {
+                Some(canvas_tensor.clone())
+            } else {
+                None
+            };
+            let (logits, edge_preds) = brain_p3.forward_multimodal_predict(token_tensor, canvas_arg);
+            let last_pos = p3_vis_offset + query_tokens.len() - 1;
             let logit_vec: Vec<f32> = logits
                 .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
                 .into_data()

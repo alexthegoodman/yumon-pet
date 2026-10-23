@@ -309,79 +309,75 @@ pub fn generate_multiscale_samples(
         seed = (seed ^ (b as usize)).wrapping_mul(16777619);
     }
 
-    // Pass 1: Composition samples (Canvas 0 [Blank] -> 8x8 block colors)
-    // 2 samples per image: 1 left half, 1 right half
-    for i in 0..2 {
-        let bx_base = if i == 0 { 0 } else { 4 };
-        let bx = bx_base + ((seed >> (i * 3)) % 4);
-        let by = (i * 4 + ((seed >> 6) % 4)) % 8;
-        let b_idx = by * 8 + bx;
-        let x = bx * 8 + 4;
-        let y = by * 8 + 4;
-        let c = comp_colors_8x8[b_idx];
+    // Pass 1: Full 8x8 Composition coverage (all 64 blocks per image)
+    for by in 0..8 {
+        for bx in 0..8 {
+            let b_idx = by * 8 + bx;
+            let x = bx * 8 + 4;
+            let y = by * 8 + 4;
+            let c = comp_colors_8x8[b_idx];
 
-        // Average edge magnitude within this 8x8 block
-        let mut block_edge_sum = 0.0f32;
-        for dy in 0..8 {
-            for dx in 0..8 {
-                block_edge_sum += edge_map[(by * 8 + dy) * CANVAS_SIZE + (bx * 8 + dx)];
+            let mut block_edge_sum = 0.0f32;
+            for dy in 0..8 {
+                for dx in 0..8 {
+                    block_edge_sum += edge_map[(by * 8 + dy) * CANVAS_SIZE + (bx * 8 + dx)];
+                }
             }
-        }
-        let target_edge = block_edge_sum / 64.0;
+            let target_edge = block_edge_sum / 64.0;
 
-        let tokens = vec![
-            PASS_1_ID,
-            ROW_START_ID + y,
-            COL_START_ID + x,
-            COLOR_START_ID + c as usize,
-        ];
-        samples.push((canvas_blank.clone(), tokens, false, target_edge));
+            let tokens = vec![
+                PASS_1_ID,
+                ROW_START_ID + y,
+                COL_START_ID + x,
+                COLOR_START_ID + c as usize,
+            ];
+            samples.push((canvas_blank.clone(), tokens, false, target_edge));
+        }
     }
 
-    // Pass 2: Shapes samples (Canvas 1 [8x8] -> 16x16 patch colors)
-    // 2 samples per image: 1 top half, 1 bottom half
-    for i in 0..2 {
-        let py_base = if i == 0 { 0 } else { 8 };
-        let py = py_base + ((seed >> (8 + i * 3)) % 8);
-        let px = (i * 8 + ((seed >> 14) % 8)) % 16;
-        let p_idx = py * 16 + px;
-        let x = px * 4 + 2;
-        let y = py * 4 + 2;
-        let c = shape_colors_16x16[p_idx];
+    // Pass 2: Full 16x16 Shapes coverage (all 256 patches per image)
+    for py in 0..16 {
+        for px in 0..16 {
+            let p_idx = py * 16 + px;
+            let x = px * 4 + 2;
+            let y = py * 4 + 2;
+            let c = shape_colors_16x16[p_idx];
 
-        // Average edge magnitude within this 4x4 patch
-        let mut patch_edge_sum = 0.0f32;
-        for dy in 0..4 {
-            for dx in 0..4 {
-                patch_edge_sum += edge_map[(py * 4 + dy) * CANVAS_SIZE + (px * 4 + dx)];
+            let mut patch_edge_sum = 0.0f32;
+            for dy in 0..4 {
+                for dx in 0..4 {
+                    patch_edge_sum += edge_map[(py * 4 + dy) * CANVAS_SIZE + (px * 4 + dx)];
+                }
             }
-        }
-        let target_edge = patch_edge_sum / 16.0;
+            let target_edge = patch_edge_sum / 16.0;
 
-        let tokens = vec![
-            PASS_2_ID,
-            ROW_START_ID + y,
-            COL_START_ID + x,
-            COLOR_START_ID + c as usize,
-        ];
-        samples.push((canvas_8x8.clone(), tokens, false, target_edge));
+            let tokens = vec![
+                PASS_2_ID,
+                ROW_START_ID + y,
+                COL_START_ID + x,
+                COLOR_START_ID + c as usize,
+            ];
+            samples.push((canvas_8x8.clone(), tokens, false, target_edge));
+        }
     }
 
     // Pass 3a: Fine detail samples on shape canvas (Canvas 2 [16x16] -> native 64x64 pixels)
     // 4 samples per image distributed across 4 quadrants.
     // 50% are actively mined on high-gradient target edges, 50% on area interior pixels.
     const EDGE_THRESH: f32 = 0.10;
-    for i in 0..4 {
-        let quad_y = (i % 2) * 32;
-        let quad_x = (i / 2) * 32;
+    for i in 0..32 {
+        let quad_y = ((i % 4) / 2) * 32;
+        let quad_x = (i % 2) * 32;
         let want_edge = i % 2 == 0;
 
+        let hash_i = seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add((i as usize).wrapping_mul(0x517CC1B727220A95));
+
         // Find candidate coordinates in this quadrant
-        let mut chosen_x = quad_x + ((i * 23 + (seed >> 4)) % 32);
-        let mut chosen_y = quad_y + ((i * 17 + seed) % 32);
+        let mut chosen_x = quad_x + ((i * 23 + (hash_i >> 4)) % 32);
+        let mut chosen_y = quad_y + ((i * 17 + hash_i) % 32);
 
         let mut best_coord = None;
-        let offset = (seed >> (i * 2)) % 32;
+        let offset = (hash_i >> 16) % 32;
         for dy in 0..32 {
             for dx in 0..32 {
                 let cy = quad_y + ((dy + offset) % 32);
@@ -421,14 +417,15 @@ pub fn generate_multiscale_samples(
     // Pass 3b: Fine detail samples on partially painted canvas (Canvas 3 [Mixed] -> native pixels)
     // 4 samples per image: in the unpainted bottom half (y in 32..63)
     // 50% are actively mined on high-gradient target edges, 50% on interior pixels.
-    for i in 0..4 {
+    for i in 0..32 {
         let want_edge = i % 2 == 0;
-        let mut chosen_x = ((i * 19 + (seed >> 12)) % CANVAS_SIZE);
-        let mut chosen_y = 32 + ((i * 7 + (seed >> 8)) % 32);
+        let hash_b = seed.wrapping_mul(0xD6E8FEB86659FD93).wrapping_add((i as usize).wrapping_mul(0xA24BAED4963EE407));
+        let mut chosen_x = (i * 19 + (hash_b >> 8)) % CANVAS_SIZE;
+        let mut chosen_y = 32 + ((i * 7 + (hash_b >> 12)) % 32);
 
         let mut best_coord = None;
-        let offset_x = (seed >> (4 + i * 2)) % CANVAS_SIZE;
-        let offset_y = (seed >> (8 + i * 2)) % 32;
+        let offset_x = (hash_b >> 16) % CANVAS_SIZE;
+        let offset_y = (hash_b >> 24) % 32;
         for dy in 0..32 {
             for dx in 0..CANVAS_SIZE {
                 let cy = 32 + ((dy + offset_y) % 32);
@@ -462,7 +459,7 @@ pub fn generate_multiscale_samples(
             COL_START_ID + chosen_x,
             COLOR_START_ID + c as usize,
         ];
-        let is_last = i == 3;
+        let is_last = i == 31;
         samples.push((canvas_mixed.clone(), tokens, is_last, target_edge));
     }
 
@@ -648,7 +645,7 @@ mod tests {
     fn test_multiscale_samples() {
         let dummy_target = vec![120u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
         let samples = generate_multiscale_samples(&dummy_target);
-        assert_eq!(samples.len(), 12); // 2 + 2 + 4 + 4 = 12 samples
+        assert_eq!(samples.len(), 384); // 64 (Pass 1) + 256 (Pass 2) + 32 (Pass 3a) + 32 (Pass 3b) = 384 samples
         for s in &samples {
             assert_eq!(s.1.len(), 4); // [pass, row, col, color]
             assert!(s.3 >= 0.0 && s.3 <= 1.0); // target_edge in [0, 1]
