@@ -67,6 +67,77 @@ impl<B: Backend> RopeTables<B> {
         let table = |v: Vec<f32>| Tensor::from_data(TensorData::new(v, [1, 1, seq, half, 1]), device);
         Self { cos: table(cos), sin: table(sin) }
     }
+
+    /// Multimodal Rotary Position Embedding (M-RoPE) for (t, y, x) 3D coordinate trajectories.
+    /// coords: [batch][seq] of (t, y, x) coordinates.
+    pub(super) fn new_mrope(
+        coords: &[Vec<(f32, f32, f32)>],
+        dim: usize,
+        device: &B::Device,
+    ) -> Self {
+        let batch = coords.len();
+        assert!(batch > 0, "mrope requires at least 1 batch sequence");
+        let seq = coords[0].len();
+        let half = dim / 2;
+        assert!(half > 0, "mrope head dim must be at least 2");
+
+        let (dt_pairs, dy_pairs, dx_pairs) = if half >= 3 {
+            let dt = (half + 1) / 2;
+            let rem = half - dt;
+            let dy = rem / 2;
+            let dx = rem - dy;
+            if dy == 0 {
+                (dt.saturating_sub(1), 1, 1)
+            } else {
+                (dt, dy, dx)
+            }
+        } else {
+            (half, 0, 0)
+        };
+
+        let total = batch * seq * half;
+        let mut cos_vec = Vec::with_capacity(total);
+        let mut sin_vec = Vec::with_capacity(total);
+
+        for b in 0..batch {
+            assert_eq!(coords[b].len(), seq, "all batch sequences must have identical seq len");
+            for pos in 0..seq {
+                let (t, y, x) = coords[b][pos];
+
+                // 1. T axis (temporal / sequence)
+                for i in 0..dt_pairs {
+                    let d = (2 * dt_pairs) as f64;
+                    let angle = t as f64 * ROPE_THETA.powf(-((2 * i) as f64) / d);
+                    cos_vec.push(angle.cos() as f32);
+                    sin_vec.push(angle.sin() as f32);
+                }
+
+                // 2. Y axis (spatial height / row)
+                for i in 0..dy_pairs {
+                    let d = (2 * dy_pairs) as f64;
+                    let angle = y as f64 * ROPE_THETA.powf(-((2 * i) as f64) / d);
+                    cos_vec.push(angle.cos() as f32);
+                    sin_vec.push(angle.sin() as f32);
+                }
+
+                // 3. X axis (spatial width / col)
+                for i in 0..dx_pairs {
+                    let d = (2 * dx_pairs) as f64;
+                    let angle = x as f64 * ROPE_THETA.powf(-((2 * i) as f64) / d);
+                    cos_vec.push(angle.cos() as f32);
+                    sin_vec.push(angle.sin() as f32);
+                }
+            }
+        }
+
+        let table = |v: Vec<f32>| {
+            Tensor::from_data(TensorData::new(v, [batch, 1, seq, half, 1]), device)
+        };
+        Self {
+            cos: table(cos_vec),
+            sin: table(sin_vec),
+        }
+    }
 }
 
 /// Rotates interleaved pairs (x[2i], x[2i+1]) of x: [batch, heads, seq, dim],
@@ -914,5 +985,34 @@ mod tests {
             start += n;
         }
         assert_close(cached, full, 1e-4, "cached logits");
+    }
+    #[test]
+    fn test_mrope_spatial_properties() {
+        let device = Default::default();
+        let dim = 16;
+        let coords = vec![vec![
+            (0.0, 0.0, 0.0), // Patch (0, 0)
+            (0.0, 0.0, 1.0), // Patch (0, 1) -> dx = 1, dy = 0
+            (0.0, 1.0, 0.0), // Patch (1, 0) -> dx = 0, dy = 1
+            (1.0, 0.0, 0.0), // Query token at (0, 0)
+        ]];
+        let rope = RopeTables::<Inner>::new_mrope(&coords, dim, &device);
+        assert_eq!(rope.cos.dims(), [1, 1, 4, 8, 1]);
+        assert_eq!(rope.sin.dims(), [1, 1, 4, 8, 1]);
+
+        let x = Tensor::<Inner, 4>::ones([1, 1, 4, dim], &device);
+        let rotated = apply_rope(x, &rope);
+        assert_eq!(rotated.dims(), [1, 1, 4, dim]);
+
+        // Dot product between Patch (0, 0) and Patch (0, 1) [dx=1, dy=0]
+        let p00 = rotated.clone().slice([0..1, 0..1, 0..1, 0..dim]);
+        let p01 = rotated.clone().slice([0..1, 0..1, 1..2, 0..dim]);
+        let p10 = rotated.clone().slice([0..1, 0..1, 2..3, 0..dim]);
+
+        let dot_h: f32 = (p00.clone() * p01).sum().into_data().convert::<f32>().to_vec().unwrap()[0];
+        let dot_v: f32 = (p00 * p10).sum().into_data().convert::<f32>().to_vec().unwrap()[0];
+
+        // Horizontal and vertical 1-step displacements have exact rotational symmetry
+        assert!((dot_h - dot_v).abs() < 1e-5, "M-RoPE horizontal ({dot_h}) and vertical ({dot_v}) dot products should match");
     }
 }

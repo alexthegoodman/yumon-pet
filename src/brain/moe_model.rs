@@ -169,6 +169,7 @@ impl<B: FlashAttention> MoeBlock<B> {
         rope: &RopeTables<B>,
         active: Tensor<B, 1, Int>,
         pad: Option<Tensor<B, 2, Bool>>,
+        custom_mask: Option<Tensor<B, 4, Bool>>,
     ) -> (Tensor<B, 3>, Tensor<B, 1>, Tensor<B, 1>, Vec<usize>) {
         let [_, seq, width] = x.dims();
         let device = x.device();
@@ -176,7 +177,13 @@ impl<B: FlashAttention> MoeBlock<B> {
         let (q, k, v) = self.qkv(&x, rope);
         let groups = self.heads / k.dims()[1];
         let (k, v) = (repeat_kv(k, groups), repeat_kv(v, groups));
-        let attn = if let Some(pad) = pad {
+        let attn = if let Some(mask) = custom_mask {
+            let dtype = v.dtype();
+            let scores = q.cast(FloatDType::F32)
+                .matmul(k.cast(FloatDType::F32).transpose()) / (hd as f64).sqrt();
+            softmax(scores.mask_fill(mask, -1e9), 3)
+                .matmul(v.cast(FloatDType::F32)).cast(dtype)
+        } else if let Some(pad) = pad {
             // Compatibility for left/interior padding. Normal training is right-padded
             // and uses flash; a causal-only kernel cannot mask these PAD keys.
             let future = Tensor::<B, 2>::ones([seq, seq], &device).triu(1).bool();
@@ -512,7 +519,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             } else {
                 let index = Tensor::<B, 1, Int>::from_ints(
                     TensorData::new(current.clone(), [current.len()]), &device);
-                let (next, balance, z_loss, dispatched) = block.forward(x.clone(), &rope, index, pad.clone());
+                let (next, balance, z_loss, dispatched) = block.forward(x.clone(), &rope, index, pad.clone(), None);
                 // Exited positions keep their state; it still serves as keys and values.
                 x = match &keep {
                     Some(keep) if tier > 0 => x.clone() + keep.clone() * (next - x),
@@ -640,8 +647,86 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             );
         }
 
-        let rope = RopeTables::new(total_seq, self.config.embed_dim / self.config.attn_heads, &device);
-        let pad = None; // Multimodal prefix is always active
+        // 5. Build M-RoPE coordinates and Prefix-LM attention mask
+        use crate::vision::paint_action::{ROW_START_ID, COL_START_ID, COLOR_START_ID};
+        let grid_size = (vis_patches as f32).sqrt().round() as usize; // 16 for 256 patches
+        let patch_scale = 64.0 / grid_size as f32; // 4.0
+
+        let mut coords = Vec::with_capacity(batch);
+        let mut mask_vec = vec![false; batch * total_seq * total_seq];
+
+        for b in 0..batch {
+            let mut b_coords = Vec::with_capacity(total_seq);
+
+            // A. Canvas patches (0..vis_patches): grid [0..grid_size, 0..grid_size]
+            for p in 0..vis_patches {
+                let r = (p / grid_size) as f32;
+                let c = (p % grid_size) as f32;
+                b_coords.push((0.0, r, c));
+            }
+
+            // B. Find target coordinates in text/query sequence (if present)
+            let text_base = b * text_seq;
+            let mut target_y = None;
+            let mut target_x = None;
+            for i in 0..text_seq {
+                let tok = ids[text_base + i] as usize;
+                if tok >= ROW_START_ID && tok < COL_START_ID {
+                    target_y = Some((tok - ROW_START_ID) as f32 / patch_scale);
+                } else if tok >= COL_START_ID && tok < COLOR_START_ID {
+                    target_x = Some((tok - COL_START_ID) as f32 / patch_scale);
+                }
+            }
+
+            // C. Assign (t, y, x) M-RoPE coordinates
+            for i in 0..text_seq {
+                let tok = ids[text_base + i] as usize;
+                let t_pos = (i + 1) as f32;
+
+                if tok >= COL_START_ID && tok < COLOR_START_ID {
+                    let cur_x = (tok - COL_START_ID) as f32 / patch_scale;
+                    let cur_y = target_y.unwrap_or(0.0);
+                    b_coords.push((t_pos, cur_y, cur_x));
+                } else if tok >= ROW_START_ID && tok < COL_START_ID {
+                    let cur_y = (tok - ROW_START_ID) as f32 / patch_scale;
+                    let cur_x = target_x.unwrap_or(0.0);
+                    b_coords.push((t_pos, cur_y, cur_x));
+                } else {
+                    b_coords.push((t_pos, 0.0, 0.0));
+                }
+            }
+            coords.push(b_coords);
+
+            // D. Prefix-LM Attention Mask for batch item b:
+            // - Canvas patches attend bidirectionally to each other
+            // - Canvas patches cannot attend to future text tokens
+            // - Text tokens attend to all canvas patches
+            // - Text tokens attend causally to previous text tokens
+            let b_offset = b * total_seq * total_seq;
+            for i in 0..total_seq {
+                for j in 0..total_seq {
+                    let idx = b_offset + i * total_seq + j;
+                    let masked = if i < vis_patches {
+                        j >= vis_patches
+                    } else {
+                        if j < vis_patches {
+                            false
+                        } else {
+                            let text_j = j - vis_patches;
+                            let is_pad = ids[text_base + text_j] == PAD_TOKEN as i32;
+                            j > i || is_pad
+                        }
+                    };
+                    mask_vec[idx] = masked;
+                }
+            }
+        }
+
+        let rope = RopeTables::new_mrope(&coords, self.config.embed_dim / self.config.attn_heads, &device);
+        let custom_mask = Tensor::<B, 4, Bool>::from_bool(
+            TensorData::new(mask_vec, [batch, 1, total_seq, total_seq]),
+            &device,
+        );
 
         let layer_tiers = self.config.adaptive_depth.as_ref().map(|d| d.layer_tiers());
         let tier_of = |layer: usize| layer_tiers.as_ref().map_or(0, |t| t[layer]);
@@ -685,7 +770,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             } else {
                 let index = Tensor::<B, 1, Int>::from_ints(
                     TensorData::new(current.clone(), [current.len()]), &device);
-                let (next, balance, z_loss, dispatched) = block.forward(x.clone(), &rope, index, pad.clone());
+                let (next, balance, z_loss, dispatched) = block.forward(x.clone(), &rope, index, None, Some(custom_mask.clone()));
                 x = match &keep {
                     Some(keep) if tier > 0 => x.clone() + keep.clone() * (next - x),
                     _ => next,
@@ -1171,7 +1256,7 @@ mod tests {
         let active = Tensor::from_ints([0, 1, 2, 3], &device);
         let pad = Tensor::<B, 2, Int>::from_ints([[1, 1, 1, 1, 0, 0]], &device).equal_elem(0);
         let run = |mask| {
-            let (out, balance, z, counts) = block.forward(input.clone(), &rope, active.clone(), mask);
+            let (out, balance, z, counts) = block.forward(input.clone(), &rope, active.clone(), mask, None);
             // Only real tokens: padded queries may attend differently.
             let out = out.slice([0..1, 0..4, 0..16]);
             let grads = (out.clone().square().mean() + balance * 0.01 + z * 0.001).backward();

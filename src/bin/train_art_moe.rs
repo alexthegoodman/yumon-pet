@@ -363,6 +363,7 @@ fn main() -> Result<()> {
         let mut val_total = 0usize;
         let mut val_steps = 0usize;
 
+        // NOTE: disable validation check to avoid Our of Memory error at end of epoch
         for chunk in val_samples.chunks(batch_size) {
             let bs = chunk.len();
             let mut flat_canvas = Vec::with_capacity(bs * 3 * CANVAS_SIZE * CANVAS_SIZE);
