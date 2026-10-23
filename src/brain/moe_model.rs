@@ -265,6 +265,23 @@ pub struct YumonMoeBrain<B: Backend> {
     pub vision_encoders: Vec<VisionPatchEncoder<B>>,
     /// 0 or 1 edge prediction heads for multimodal edge feature supervision.
     pub edge_heads: Vec<Linear<B>>,
+    /// 0 or 1 subpixel offset embeddings for multimodal pixel-level query resolution (16 states: 4x4 subgrid).
+    pub subpixel_embeds: Vec<Embedding<B>>,
+}
+
+/// Record layout of checkpoints saved before subpixel embedding integration.
+#[derive(Module, Debug)]
+struct LegacyMoeBrainV3<B: Backend> {
+    config: Ignored<YumonMoeBrainConfig>,
+    embedding: Embedding<B>,
+    rope: RotaryEncoding<B>,
+    blocks: Vec<MoeBlock<B>>,
+    norm: RMSNorm<B>,
+    dropout: Dropout,
+    token_head: Linear<B>,
+    exit_gates: Vec<ExitGate<B>>,
+    vision_encoders: Vec<VisionPatchEncoder<B>>,
+    edge_heads: Vec<Linear<B>>,
 }
 
 /// Record layout of checkpoints saved before adaptive depth (no `exit_gates`).
@@ -375,6 +392,11 @@ impl YumonMoeBrainConfig {
         } else {
             Vec::new()
         };
+        let subpixel_embeds = if self.is_multimodal {
+            vec![EmbeddingConfig::new(16, self.embed_dim).init(device)]
+        } else {
+            Vec::new()
+        };
         YumonMoeBrain {
             config: Ignored(self.clone()),
             embedding: EmbeddingConfig::new(self.vocab_size, self.embed_dim).init(device),
@@ -411,6 +433,7 @@ impl YumonMoeBrainConfig {
             }).collect(),
             vision_encoders,
             edge_heads,
+            subpixel_embeds,
         }
     }
 }
@@ -595,21 +618,67 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
 
         let device = tokens.device();
 
-        // 1. Linearly project 4x4 canvas patches with 2D coordinate embeddings: [batch, 256, embed_dim]
+        // 1. Linearly project 4x4 canvas patches: [batch, 256, embed_dim]
         let vis_emb = encoder.forward(canvas);
 
         // 2. Token embeddings for text: [batch, text_seq, embed_dim]
-        let text_emb = self.embedding.forward(tokens.clone());
+        let mut text_emb = self.embedding.forward(tokens.clone());
 
-        // 3. Concatenate visual patches + text tokens: [batch, total_seq, embed_dim]
-        let mut x = self.dropout.forward(Tensor::cat(vec![vis_emb, text_emb], 1));
-
-        // 4. Identify active tokens
+        // Identify active tokens
         let ids = tokens
             .reshape([batch * text_seq])
             .to_data()
             .to_vec::<i32>()
             .expect("token ids");
+
+        // 2b. Inject 16-state sub-pixel offset embedding on query tokens:
+        // dy = y % 4, dx = x % 4 -> sub_idx = dy * 4 + dx (0..15).
+        use crate::vision::paint_action::{ROW_START_ID, COL_START_ID, COLOR_START_ID};
+        let mut sub_indices = vec![0i32; batch * text_seq];
+        let mut sub_mask_vec = vec![0.0f32; batch * text_seq];
+        let mut has_sub = false;
+
+        for b in 0..batch {
+            let text_base = b * text_seq;
+            let mut target_y_raw = None;
+            let mut target_x_raw = None;
+            let mut col_token_pos = None;
+
+            for i in 0..text_seq {
+                let tok = ids[text_base + i] as usize;
+                if tok >= ROW_START_ID && tok < COL_START_ID {
+                    target_y_raw = Some((tok - ROW_START_ID) % 4);
+                } else if tok >= COL_START_ID && tok < COLOR_START_ID {
+                    target_x_raw = Some((tok - COL_START_ID) % 4);
+                    col_token_pos = Some(i);
+                }
+            }
+
+            if let (Some(dy), Some(dx), Some(pos)) = (target_y_raw, target_x_raw, col_token_pos) {
+                let sub_idx = (dy * 4 + dx) as i32;
+                sub_indices[text_base + pos] = sub_idx;
+                sub_mask_vec[text_base + pos] = 1.0;
+                has_sub = true;
+            }
+        }
+
+        if has_sub {
+            if let Some(sub_layer) = self.subpixel_embeds.first() {
+                let sub_ids = Tensor::<B, 2, Int>::from_ints(
+                    TensorData::new(sub_indices, [batch, text_seq]),
+                    &device,
+                );
+                let sub_mask = Tensor::<B, 3>::from_floats(
+                    TensorData::new(sub_mask_vec, [batch, text_seq, 1]),
+                    &device,
+                );
+                let sub_emb = sub_layer.forward(sub_ids);
+                text_emb = text_emb + sub_emb * sub_mask;
+            }
+        }
+
+        // 3. Concatenate visual patches + text tokens: [batch, total_seq, embed_dim]
+        let mut x = self.dropout.forward(Tensor::cat(vec![vis_emb, text_emb], 1));
 
         let mut active = Vec::with_capacity(batch * total_seq);
         for b in 0..batch {
@@ -648,7 +717,6 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         }
 
         // 5. Build M-RoPE coordinates and Prefix-LM attention mask
-        use crate::vision::paint_action::{ROW_START_ID, COL_START_ID, COLOR_START_ID};
         let grid_size = (vis_patches as f32).sqrt().round() as usize; // 16 for 256 patches
         let patch_scale = 64.0 / grid_size as f32; // 4.0
 
@@ -916,13 +984,23 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         let record = match recorder.load(dir.join("model").into(), device) {
             Ok(record) => record,
             Err(_) => {
-                if let Ok(v2) = recorder.load::<LegacyMoeBrainV2Record<B>>(dir.join("model").into(), device) {
+                if let Ok(v3) = recorder.load::<LegacyMoeBrainV3Record<B>>(dir.join("model").into(), device) {
+                    YumonMoeBrainRecord {
+                        config: v3.config, embedding: v3.embedding, rope: v3.rope,
+                        blocks: v3.blocks, norm: v3.norm, dropout: v3.dropout,
+                        token_head: v3.token_head, exit_gates: v3.exit_gates,
+                        vision_encoders: v3.vision_encoders,
+                        edge_heads: v3.edge_heads,
+                        subpixel_embeds: Vec::new(),
+                    }
+                } else if let Ok(v2) = recorder.load::<LegacyMoeBrainV2Record<B>>(dir.join("model").into(), device) {
                     YumonMoeBrainRecord {
                         config: v2.config, embedding: v2.embedding, rope: v2.rope,
                         blocks: v2.blocks, norm: v2.norm, dropout: v2.dropout,
                         token_head: v2.token_head, exit_gates: v2.exit_gates,
                         vision_encoders: v2.vision_encoders,
                         edge_heads: Vec::new(),
+                        subpixel_embeds: Vec::new(),
                     }
                 } else if let Ok(v1) = recorder.load::<LegacyMoeBrainV1Record<B>>(dir.join("model").into(), device) {
                     YumonMoeBrainRecord {
@@ -931,6 +1009,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                         token_head: v1.token_head, exit_gates: v1.exit_gates,
                         vision_encoders: Vec::new(),
                         edge_heads: Vec::new(),
+                        subpixel_embeds: Vec::new(),
                     }
                 } else if let Ok(legacy) = recorder.load::<LegacyMoeBrainRecord<B>>(dir.join("model").into(), device) {
                     YumonMoeBrainRecord {
@@ -939,6 +1018,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                         token_head: legacy.token_head, exit_gates: Vec::new(),
                         vision_encoders: Vec::new(),
                         edge_heads: Vec::new(),
+                        subpixel_embeds: Vec::new(),
                     }
                 } else {
                     anyhow::bail!("failed to load checkpoint from {}", dir.display());
@@ -984,13 +1064,23 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         let record = match recorder.load(model_bytes.to_vec(), device) {
             Ok(record) => record,
             Err(_) => {
-                if let Ok(v2) = recorder.load::<LegacyMoeBrainV2Record<B>>(model_bytes.to_vec(), device) {
+                if let Ok(v3) = recorder.load::<LegacyMoeBrainV3Record<B>>(model_bytes.to_vec(), device) {
+                    YumonMoeBrainRecord {
+                        config: v3.config, embedding: v3.embedding, rope: v3.rope,
+                        blocks: v3.blocks, norm: v3.norm, dropout: v3.dropout,
+                        token_head: v3.token_head, exit_gates: v3.exit_gates,
+                        vision_encoders: v3.vision_encoders,
+                        edge_heads: v3.edge_heads,
+                        subpixel_embeds: Vec::new(),
+                    }
+                } else if let Ok(v2) = recorder.load::<LegacyMoeBrainV2Record<B>>(model_bytes.to_vec(), device) {
                     YumonMoeBrainRecord {
                         config: v2.config, embedding: v2.embedding, rope: v2.rope,
                         blocks: v2.blocks, norm: v2.norm, dropout: v2.dropout,
                         token_head: v2.token_head, exit_gates: v2.exit_gates,
                         vision_encoders: v2.vision_encoders,
                         edge_heads: Vec::new(),
+                        subpixel_embeds: Vec::new(),
                     }
                 } else if let Ok(v1) = recorder.load::<LegacyMoeBrainV1Record<B>>(model_bytes.to_vec(), device) {
                     YumonMoeBrainRecord {
@@ -999,6 +1089,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                         token_head: v1.token_head, exit_gates: v1.exit_gates,
                         vision_encoders: Vec::new(),
                         edge_heads: Vec::new(),
+                        subpixel_embeds: Vec::new(),
                     }
                 } else if let Ok(legacy) = recorder.load::<LegacyMoeBrainRecord<B>>(model_bytes.to_vec(), device) {
                     YumonMoeBrainRecord {
@@ -1007,6 +1098,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                         token_head: legacy.token_head, exit_gates: Vec::new(),
                         vision_encoders: Vec::new(),
                         edge_heads: Vec::new(),
+                        subpixel_embeds: Vec::new(),
                     }
                 } else {
                     anyhow::bail!("failed to load checkpoint from bytes");
@@ -1739,6 +1831,7 @@ mod tests {
         let model: YumonMoeBrain<B> = config.init(&device);
         assert_eq!(model.vision_encoders.len(), 1);
         assert_eq!(model.edge_heads.len(), 1);
+        assert_eq!(model.subpixel_embeds.len(), 1);
 
         let canvas = Tensor::<B, 4>::zeros([1, 3, 64, 64], &device);
         let tokens = Tensor::<B, 2, Int>::from_ints([[1, 2, 3, 4]], &device);
@@ -1752,5 +1845,26 @@ mod tests {
         let grads = GradientsParams::from_grads(loss.backward(), &model);
         assert!(grads.get::<Wgpu, 2>(model.token_head.weight.id).is_some());
         assert!(grads.get::<Wgpu, 2>(model.edge_heads[0].weight.id).is_some());
+    }
+
+    #[test]
+    fn test_multimodal_subpixel_embedding_gradient() {
+        use crate::vision::paint_action::{ROW_START_ID, COL_START_ID};
+        let device = Default::default();
+        let config = tiny_config()
+            .with_max_seq_len(262)
+            .with_is_multimodal(true);
+        let model: YumonMoeBrain<B> = config.init(&device);
+
+        let canvas = Tensor::<B, 4>::zeros([1, 3, 64, 64], &device);
+        let row_token = (ROW_START_ID + 17) as i32;
+        let col_token = (COL_START_ID + 22) as i32;
+        let tokens = Tensor::<B, 2, Int>::from_ints([[1, 2, row_token, col_token]], &device);
+
+        let (logits, edge_preds, aux_loss, _, _) = model.forward_multimodal_with_edges(tokens, Some(canvas));
+        let loss = logits.powf_scalar(2.0).mean() + edge_preds.powf_scalar(2.0).mean() + aux_loss;
+        let grads = GradientsParams::from_grads(loss.backward(), &model);
+
+        assert!(grads.get::<Wgpu, 2>(model.subpixel_embeds[0].weight.id).is_some(), "subpixel_embeds should receive gradients");
     }
 }
