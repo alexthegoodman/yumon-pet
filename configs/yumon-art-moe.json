@@ -6,7 +6,7 @@
   "vocab_file": "training-cache/kilo_talk_vocab.json",
   "max_seq_len": 512,
   "seed": 4815162342,
-  "vocab_size": 4240,
+  "vocab_size": 4428,
   "embed_dim": 64,
   "n_layers": 4,
   "attn_heads": 4,
@@ -16,5 +16,5 @@
   "first_lr": 0.0003,
   "last_lr": 0.00003,
   "validation_fraction": 0.02,
-  "out_dir": "checkpoints/yumon-art-moe-3"
+  "out_dir": "checkpoints/yumon-art-moe-4"
 }

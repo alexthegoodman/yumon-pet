@@ -12,14 +12,14 @@ use {
         collections::HashMap,
         fs::File,
         io::{BufReader, BufWriter, Write},
-        path::{Path, PathBuf},
+        path::PathBuf,
     },
     yumon_pet::brain::{
         kilo_vocab::KiloVocab,
         yumon_talk::TranslationContext,
     },
     yumon_pet::vision::paint_action::{
-        ART_VOCAB_SIZE, CANVAS_SIZE, generate_pixel_stream_samples,
+        ART_VOCAB_SIZE, CANVAS_SIZE, generate_multiscale_samples,
     },
 };
 
@@ -174,11 +174,11 @@ fn main() -> Result<()> {
                 Err(_) => return Vec::new(),
             };
 
-            // Generate pixel-stream training samples
-            let pixel_samples = generate_pixel_stream_samples(&raw_hwc, args.samples_per_image, args.chunk_len);
+            // Generate coarse-to-fine multiscale training samples
+            let multiscale_samples = generate_multiscale_samples(&raw_hwc);
 
-            let mut out = Vec::with_capacity(pixel_samples.len());
-            for (canvas_hwc, tokens, is_done) in pixel_samples {
+            let mut out = Vec::with_capacity(multiscale_samples.len());
+            for (canvas_hwc, tokens, is_done) in multiscale_samples {
                 let action_tokens = tokens.into_iter().map(|t| t as u32).collect();
 
                 out.push(ArtSample {

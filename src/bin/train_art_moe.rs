@@ -29,7 +29,8 @@ use {
         tokenizer::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN},
     },
     yumon_pet::vision::paint_action::{
-        CANVAS_SIZE, CANVAS_START_ID, CANVAS_END_ID, hwc_to_chw_floats,
+        CANVAS_SIZE, CANVAS_START_ID, CANVAS_END_ID, COLOR_START_ID, PALETTE_SIZE,
+        hwc_to_chw_floats,
     },
 };
 
@@ -249,17 +250,34 @@ fn main() -> Result<()> {
             // Cap at max_seq_len - 256
             let max_text = max_len.min(cfg.max_seq_len - 256);
             let mut flat_tokens = Vec::with_capacity(bs * max_text);
+            let mut flat_targets = Vec::with_capacity(bs * (max_text - 1));
 
             for mut row in batch_token_rows {
                 row.truncate(max_text);
                 while row.len() < max_text {
                     row.push(PAD_TOKEN as i32);
                 }
-                flat_tokens.extend(row);
+                flat_tokens.extend_from_slice(&row);
+
+                // Loss masking: only predict next tokens that are palette colors
+                for i in 0..max_text - 1 {
+                    let next_tok = row[i + 1];
+                    if next_tok >= COLOR_START_ID as i32
+                        && next_tok < (COLOR_START_ID + PALETTE_SIZE) as i32
+                    {
+                        flat_targets.push(next_tok);
+                    } else {
+                        flat_targets.push(PAD_TOKEN as i32);
+                    }
+                }
             }
 
             let token_tensor = Tensor::<TrainBackend, 2, Int>::from_ints(
                 TensorData::new(flat_tokens, [bs, max_text]),
+                &device,
+            );
+            let target_labels = Tensor::<TrainBackend, 2, Int>::from_ints(
+                TensorData::new(flat_targets, [bs, max_text - 1]),
                 &device,
             );
 
@@ -272,7 +290,6 @@ fn main() -> Result<()> {
             // Logits have shape [bs, 256 + max_text, vocab_size]
             // We train on predicting target tokens (shifted by 1)
             let text_logits = logits.slice([0..bs, 256..256 + max_text - 1, 0..cfg.vocab_size]);
-            let target_labels = token_tensor.slice([0..bs, 1..max_text]);
 
             // Reshape for cross entropy
             let [_, seq_m1, vocab_sz] = text_logits.dims();
@@ -333,16 +350,33 @@ fn main() -> Result<()> {
             }
             let max_text = max_len.min(cfg.max_seq_len - 256);
             let mut flat_tokens = Vec::with_capacity(bs * max_text);
+            let mut flat_targets = Vec::with_capacity(bs * (max_text - 1));
+
             for mut row in batch_token_rows {
                 row.truncate(max_text);
                 while row.len() < max_text {
                     row.push(PAD_TOKEN as i32);
                 }
-                flat_tokens.extend(row);
+                flat_tokens.extend_from_slice(&row);
+
+                for i in 0..max_text - 1 {
+                    let next_tok = row[i + 1];
+                    if next_tok >= COLOR_START_ID as i32
+                        && next_tok < (COLOR_START_ID + PALETTE_SIZE) as i32
+                    {
+                        flat_targets.push(next_tok);
+                    } else {
+                        flat_targets.push(PAD_TOKEN as i32);
+                    }
+                }
             }
 
             let token_tensor = Tensor::<TrainBackend, 2, Int>::from_ints(
                 TensorData::new(flat_tokens, [bs, max_text]),
+                &device,
+            );
+            let target_labels = Tensor::<TrainBackend, 2, Int>::from_ints(
+                TensorData::new(flat_targets, [bs, max_text - 1]),
                 &device,
             );
 
@@ -352,7 +386,6 @@ fn main() -> Result<()> {
             );
 
             let text_logits = logits.slice([0..bs, 256..256 + max_text - 1, 0..cfg.vocab_size]);
-            let target_labels = token_tensor.slice([0..bs, 1..max_text]);
             let [_, seq_m1, vocab_sz] = text_logits.dims();
             let loss = ce_loss.forward(
                 text_logits.reshape([bs * seq_m1, vocab_sz]),
