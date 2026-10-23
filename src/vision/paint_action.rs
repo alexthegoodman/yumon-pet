@@ -260,11 +260,11 @@ pub fn generate_multiscale_samples(
     }
 
     // Pass 1: Composition samples (Canvas 0 [Blank] -> 8x8 block colors)
-    // Sample 16 blocks covering all 8 rows and both left/right halves
-    for i in 0..16 {
-        let by = i % 8;
-        let bx_half = i / 8; // 0 for left half (0..3), 1 for right half (4..7)
-        let bx = bx_half * 4 + (by * 3 + seed) % 4;
+    // 2 samples per image: 1 left half, 1 right half
+    for i in 0..2 {
+        let bx_base = if i == 0 { 0 } else { 4 };
+        let bx = bx_base + ((seed >> (i * 3)) % 4);
+        let by = (i * 4 + ((seed >> 6) % 4)) % 8;
         let b_idx = by * 8 + bx;
         let x = bx * 8 + 4;
         let y = by * 8 + 4;
@@ -279,10 +279,11 @@ pub fn generate_multiscale_samples(
     }
 
     // Pass 2: Shapes samples (Canvas 1 [8x8] -> 16x16 patch colors)
-    // Sample 16 patches covering every single row (0..15) and every single column (0..15)
-    for i in 0..16 {
-        let py = i;
-        let px = (i * 7 + (seed % 16)) % 16;
+    // 2 samples per image: 1 top half, 1 bottom half
+    for i in 0..2 {
+        let py_base = if i == 0 { 0 } else { 8 };
+        let py = py_base + ((seed >> (8 + i * 3)) % 8);
+        let px = (i * 8 + ((seed >> 14) % 8)) % 16;
         let p_idx = py * 16 + px;
         let x = px * 4 + 2;
         let y = py * 4 + 2;
@@ -297,10 +298,12 @@ pub fn generate_multiscale_samples(
     }
 
     // Pass 3a: Fine detail samples on shape canvas (Canvas 2 [16x16] -> native 64x64 pixels)
-    // Sample 8 pixels spanning the 8 vertical octave bands and distinct horizontal columns
-    for i in 0..8 {
-        let y = (i * 8 + (seed % 8)) % CANVAS_SIZE;
-        let x = (i * 19 + ((seed >> 4) % 64)) % CANVAS_SIZE;
+    // 4 samples per image: distributed across 4 quadrants
+    for i in 0..4 {
+        let quad_y = (i % 2) * 32;
+        let quad_x = (i / 2) * 32;
+        let y = quad_y + ((i * 17 + seed) % 32);
+        let x = quad_x + ((i * 23 + (seed >> 4)) % 32);
         let target_idx = (y * CANVAS_SIZE + x) * 3;
         let c = rgb_to_palette(
             target_hwc[target_idx],
@@ -317,10 +320,10 @@ pub fn generate_multiscale_samples(
     }
 
     // Pass 3b: Fine detail samples on partially painted canvas (Canvas 3 [Mixed] -> native pixels)
-    // Sample 8 pixels from the unpainted bottom half (y in 32..63)
-    for i in 0..8 {
-        let y = 32 + (i * 4 + (seed % 4)) % 32;
-        let x = (i * 23 + ((seed >> 8) % 64)) % CANVAS_SIZE;
+    // 4 samples per image: in the unpainted bottom half (y in 32..63)
+    for i in 0..4 {
+        let y = 32 + ((i * 7 + (seed >> 8)) % 32);
+        let x = ((i * 19 + (seed >> 12)) % CANVAS_SIZE);
         let target_idx = (y * CANVAS_SIZE + x) * 3;
         let c = rgb_to_palette(
             target_hwc[target_idx],
@@ -333,7 +336,7 @@ pub fn generate_multiscale_samples(
             COL_START_ID + x,
             COLOR_START_ID + c as usize,
         ];
-        let is_last = i == 7;
+        let is_last = i == 3;
         samples.push((canvas_mixed.clone(), tokens, is_last));
     }
 
@@ -519,7 +522,7 @@ mod tests {
     fn test_multiscale_samples() {
         let dummy_target = vec![120u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
         let samples = generate_multiscale_samples(&dummy_target);
-        assert_eq!(samples.len(), 48); // 16 + 16 + 8 + 8 = 48 samples
+        assert_eq!(samples.len(), 12); // 2 + 2 + 4 + 4 = 12 samples
         for s in &samples {
             assert_eq!(s.1.len(), 4); // [pass, row, col, color]
         }

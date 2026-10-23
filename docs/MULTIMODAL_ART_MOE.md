@@ -113,27 +113,29 @@ flowchart LR
 
 ## 5. Training Dataset Generation
 
-The dataset generator ([`src/bin/cache_diffusion_kilo.rs`](file:///D:/projects/common/yumon-pet/src/bin/cache_diffusion_kilo.rs)) ingests 1,000 DiffusionDB images and synthesizes **48 multiscale samples per image** (48,000 samples total, ~570 MB binary cache):
+The dataset generator ([`src/bin/cache_diffusion_kilo.rs`](file:///D:/projects/common/yumon-pet/src/bin/cache_diffusion_kilo.rs)) ingests 1,000 DiffusionDB images and synthesizes **12 multiscale samples per image** (12,000 samples total, ~151 MB binary cache):
 
-1. **Composition Samples (Pass 1 - 16 samples/image)**:
+1. **Composition Samples (Pass 1 - 2 samples/image, 16.7%)**:
    - Canvas: Blank.
-   - Coordinate: One of the 64 block centers.
-   - Action: `[COORD_START + x, COORD_START + y, COLOR_START + comp_color]`.
+   - Coordinate: 2 block centers (left and right halves).
+   - Action: `[PASS_1, ROW_y, COL_x, COLOR_c]`.
 
-2. **Shape Samples (Pass 2 - 16 samples/image)**:
+2. **Shape Samples (Pass 2 - 2 samples/image, 16.7%)**:
    - Canvas: Pre-rendered $8 \times 8$ composition canvas.
-   - Coordinate: One of the 256 patch centers.
-   - Action: `[COORD_START + x, COORD_START + y, COLOR_START + shape_color]`.
+   - Coordinate: 2 patch centers (top and bottom halves).
+   - Action: `[PASS_2, ROW_y, COL_x, COLOR_c]`.
 
-3. **Fine Detail Samples (Pass 3a - 8 samples/image)**:
+3. **Fine Detail Samples (Pass 3a - 4 samples/image, 33.3%)**:
    - Canvas: Pre-rendered $16 \times 16$ shape canvas.
-   - Coordinate: A native pixel coordinate $(x, y)$.
-   - Action: `[COORD_START + x, COORD_START + y, COLOR_START + pixel_color]`.
+   - Coordinate: 4 native pixel coordinates spread across the 4 canvas quadrants.
+   - Action: `[PASS_3, ROW_y, COL_x, COLOR_c]`.
 
-4. **Refining Samples (Pass 3b - 8 samples/image)**:
+4. **Refining Samples (Pass 3b - 4 samples/image, 33.3%)**:
    - Canvas: Half-painted mixed canvas (top half finished pixels, bottom half shapes).
-   - Coordinate: A pixel coordinate from the unpainted area.
-   - Action: `[COORD_START + x, COORD_START + y, COLOR_START + pixel_color]`.
+   - Coordinate: 4 pixel coordinates from the unpainted bottom half ($y \ge 32$).
+   - Action: `[PASS_3, ROW_y, COL_x, COLOR_c]`.
+
+This concentrates **66.7% of all training compute on fine native pixel details** while reducing epoch training time from 23 minutes down to ~5.5 minutes.
 
 ---
 

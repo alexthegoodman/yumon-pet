@@ -16,5 +16,5 @@
   "first_lr": 0.0003,
   "last_lr": 0.00003,
   "validation_fraction": 0.02,
-  "out_dir": "checkpoints/yumon-art-moe-7"
+  "out_dir": "checkpoints/yumon-art-moe-8"
 }
