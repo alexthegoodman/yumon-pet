@@ -26,10 +26,10 @@ use {
     yumon_pet::brain::{
         moe_model::{MoeMetadata, YumonMoeBrain, YumonMoeBrainConfig},
         samples::TrainingStage,
-        tokenizer::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN},
+        tokenizer::{BOS_TOKEN, PAD_TOKEN},
     },
     yumon_pet::vision::paint_action::{
-        CANVAS_SIZE, CANVAS_START_ID, CANVAS_END_ID, COLOR_START_ID, PALETTE_SIZE,
+        CANVAS_SIZE, CANVAS_START_ID, CANVAS_END_ID,
         hwc_to_chw_floats,
     },
 };
@@ -185,7 +185,6 @@ fn main() -> Result<()> {
         .init();
 
     let ce_loss = CrossEntropyLossConfig::new()
-        .with_pad_tokens(Some(vec![PAD_TOKEN]))
         .init(&device);
 
     // 3. Training Loop
@@ -224,9 +223,9 @@ fn main() -> Result<()> {
                 &device,
             );
 
-            // B. Pack Tokens: [BOS, prompt..., CANVAS_START, CANVAS_END, action_tokens...]
-            // We find max token length in this batch for padding
+            // B. Pack Tokens: [BOS, prompt..., CANVAS_START, CANVAS_END, coord_x, coord_y]
             let mut batch_token_rows = Vec::with_capacity(bs);
+            let mut targets = Vec::with_capacity(bs);
             let mut max_len = 0;
 
             for s in chunk {
@@ -236,10 +235,9 @@ fn main() -> Result<()> {
                 }
                 row.push(CANVAS_START_ID as i32);
                 row.push(CANVAS_END_ID as i32);
-                for &tok in &s.action_tokens {
-                    row.push(tok as i32);
-                }
-                row.push(EOS_TOKEN as i32);
+                row.push(s.action_tokens[0] as i32);
+                row.push(s.action_tokens[1] as i32);
+                targets.push(s.action_tokens[2] as i32);
 
                 if row.len() > max_len {
                     max_len = row.len();
@@ -250,7 +248,6 @@ fn main() -> Result<()> {
             // Cap at max_seq_len - 256
             let max_text = max_len.min(cfg.max_seq_len - 256);
             let mut flat_tokens = Vec::with_capacity(bs * max_text);
-            let mut flat_targets = Vec::with_capacity(bs * (max_text - 1));
 
             for mut row in batch_token_rows {
                 row.truncate(max_text);
@@ -258,45 +255,35 @@ fn main() -> Result<()> {
                     row.push(PAD_TOKEN as i32);
                 }
                 flat_tokens.extend_from_slice(&row);
-
-                // Loss masking: only predict next tokens that are palette colors
-                for i in 0..max_text - 1 {
-                    let next_tok = row[i + 1];
-                    if next_tok >= COLOR_START_ID as i32
-                        && next_tok < (COLOR_START_ID + PALETTE_SIZE) as i32
-                    {
-                        flat_targets.push(next_tok);
-                    } else {
-                        flat_targets.push(PAD_TOKEN as i32);
-                    }
-                }
             }
 
             let token_tensor = Tensor::<TrainBackend, 2, Int>::from_ints(
                 TensorData::new(flat_tokens, [bs, max_text]),
                 &device,
             );
-            let target_labels = Tensor::<TrainBackend, 2, Int>::from_ints(
-                TensorData::new(flat_targets, [bs, max_text - 1]),
+            let target_labels = Tensor::<TrainBackend, 1, Int>::from_ints(
+                TensorData::new(targets, [bs]),
                 &device,
             );
 
             // C. Forward pass
             let (logits, aux_loss, _, _) = model.forward_multimodal_with_depth(
-                token_tensor.clone(),
+                token_tensor,
                 Some(canvas_tensor),
             );
 
-            // Logits have shape [bs, 256 + max_text, vocab_size]
-            // We train on predicting target tokens (shifted by 1)
-            let text_logits = logits.slice([0..bs, 256..256 + max_text - 1, 0..cfg.vocab_size]);
+            // Extract the active logit vector at the (x, y) query coordinate for each sample
+            // Visual tokens (256) are prepended. In token_tensor, coord_y is at index 4 + prompt_tokens.len().
+            // So its multimodal sequence position is 256 + 4 + prompt_tokens.len().
+            let mut logit_slices = Vec::with_capacity(bs);
+            for (b, s) in chunk.iter().enumerate() {
+                let pos = 256 + 4 + s.prompt_tokens.len();
+                let slice = logits.clone().slice([b..b + 1, pos..pos + 1, 0..cfg.vocab_size]);
+                logit_slices.push(slice);
+            }
+            let active_logits = Tensor::cat(logit_slices, 0).reshape([bs, cfg.vocab_size]);
 
-            // Reshape for cross entropy
-            let [_, seq_m1, vocab_sz] = text_logits.dims();
-            let flat_logits = text_logits.reshape([bs * seq_m1, vocab_sz]);
-            let flat_targets = target_labels.reshape([bs * seq_m1]);
-
-            let ce = ce_loss.forward(flat_logits, flat_targets);
+            let ce = ce_loss.forward(active_logits, target_labels);
             let loss = ce + aux_loss;
 
             let loss_val: f32 = loss.clone().into_data().convert::<f32>().to_vec().unwrap()[0];
@@ -317,6 +304,8 @@ fn main() -> Result<()> {
 
         // 4. Validation
         let mut val_loss_sum = 0.0f32;
+        let mut val_correct = 0usize;
+        let mut val_total = 0usize;
         let mut val_steps = 0usize;
 
         for chunk in val_samples.chunks(batch_size) {
@@ -331,6 +320,7 @@ fn main() -> Result<()> {
             );
 
             let mut batch_token_rows = Vec::with_capacity(bs);
+            let mut targets = Vec::with_capacity(bs);
             let mut max_len = 0;
             for s in chunk {
                 let mut row = vec![BOS_TOKEN as i32];
@@ -339,10 +329,10 @@ fn main() -> Result<()> {
                 }
                 row.push(CANVAS_START_ID as i32);
                 row.push(CANVAS_END_ID as i32);
-                for &tok in &s.action_tokens {
-                    row.push(tok as i32);
-                }
-                row.push(EOS_TOKEN as i32);
+                row.push(s.action_tokens[0] as i32);
+                row.push(s.action_tokens[1] as i32);
+                targets.push(s.action_tokens[2] as i32);
+
                 if row.len() > max_len {
                     max_len = row.len();
                 }
@@ -350,7 +340,6 @@ fn main() -> Result<()> {
             }
             let max_text = max_len.min(cfg.max_seq_len - 256);
             let mut flat_tokens = Vec::with_capacity(bs * max_text);
-            let mut flat_targets = Vec::with_capacity(bs * (max_text - 1));
 
             for mut row in batch_token_rows {
                 row.truncate(max_text);
@@ -358,39 +347,40 @@ fn main() -> Result<()> {
                     row.push(PAD_TOKEN as i32);
                 }
                 flat_tokens.extend_from_slice(&row);
-
-                for i in 0..max_text - 1 {
-                    let next_tok = row[i + 1];
-                    if next_tok >= COLOR_START_ID as i32
-                        && next_tok < (COLOR_START_ID + PALETTE_SIZE) as i32
-                    {
-                        flat_targets.push(next_tok);
-                    } else {
-                        flat_targets.push(PAD_TOKEN as i32);
-                    }
-                }
             }
 
             let token_tensor = Tensor::<TrainBackend, 2, Int>::from_ints(
                 TensorData::new(flat_tokens, [bs, max_text]),
                 &device,
             );
-            let target_labels = Tensor::<TrainBackend, 2, Int>::from_ints(
-                TensorData::new(flat_targets, [bs, max_text - 1]),
+            let target_labels = Tensor::<TrainBackend, 1, Int>::from_ints(
+                TensorData::new(targets.clone(), [bs]),
                 &device,
             );
 
             let (logits, _, _, _) = model.forward_multimodal_with_depth(
-                token_tensor.clone(),
+                token_tensor,
                 Some(canvas_tensor),
             );
 
-            let text_logits = logits.slice([0..bs, 256..256 + max_text - 1, 0..cfg.vocab_size]);
-            let [_, seq_m1, vocab_sz] = text_logits.dims();
-            let loss = ce_loss.forward(
-                text_logits.reshape([bs * seq_m1, vocab_sz]),
-                target_labels.reshape([bs * seq_m1]),
-            );
+            let mut logit_slices = Vec::with_capacity(bs);
+            for (b, s) in chunk.iter().enumerate() {
+                let pos = 256 + 4 + s.prompt_tokens.len();
+                let slice = logits.clone().slice([b..b + 1, pos..pos + 1, 0..cfg.vocab_size]);
+                logit_slices.push(slice);
+            }
+            let active_logits = Tensor::cat(logit_slices, 0).reshape([bs, cfg.vocab_size]);
+
+            let loss = ce_loss.forward(active_logits.clone(), target_labels);
+
+            let preds = active_logits.argmax(1).reshape([bs]);
+            let pred_vec: Vec<i32> = preds.into_data().convert::<i32>().to_vec().unwrap();
+            for (pred, target) in pred_vec.iter().zip(targets.iter()) {
+                if *pred == *target {
+                    val_correct += 1;
+                }
+                val_total += 1;
+            }
 
             let l: f32 = loss.into_data().convert::<f32>().to_vec().unwrap()[0];
             val_loss_sum += l;
@@ -398,11 +388,16 @@ fn main() -> Result<()> {
         }
 
         let avg_val_loss = val_loss_sum / val_steps.max(1) as f32;
+        let val_acc = if val_total > 0 {
+            (val_correct as f32 / val_total as f32) * 100.0
+        } else {
+            0.0
+        };
         let elapsed = t0.elapsed();
 
         println!(
-            "Epoch {:>2}/{} | Train Loss: {:.4} | Val Loss: {:.4} | Elapsed: {:.1}s",
-            epoch, epochs, avg_train_loss, avg_val_loss, elapsed.as_secs_f32()
+            "Epoch {:>2}/{} | Train Loss: {:.4} | Val Loss: {:.4} (Val Color Acc: {:.1}%) | Elapsed: {:.1}s",
+            epoch, epochs, avg_train_loss, avg_val_loss, val_acc, elapsed.as_secs_f32()
         );
 
         // Save best checkpoint
