@@ -1,5 +1,5 @@
 //! Preprocess DiffusionDb images and JSON manifests into Kilo Talk tokenized
-//! canvas progression training pairs stored in `diffusion_kilo_samples.bin`.
+//! truecolor bounding box sequences stored in `diffusion_kilo_samples.bin`.
 
 #[cfg(not(target_arch = "wasm32"))]
 use {
@@ -18,8 +18,9 @@ use {
         kilo_vocab::KiloVocab,
         yumon_talk::TranslationContext,
     },
-    yumon_pet::vision::paint_action::{
-        ART_VOCAB_SIZE, CANVAS_SIZE, generate_multiscale_samples,
+    yumon_pet::vision::{
+        BOX_VOCAB_SIZE, CANVAS_SIZE,
+        boxes_to_tokens, decode_box_tokens, extract_truecolor_boxes,
     },
 };
 
@@ -52,7 +53,7 @@ struct ManifestItem {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser, Debug)]
-#[command(about = "Convert DiffusionDb manifests and images into Kilo Talk multimodal art training cache")]
+#[command(about = "Convert DiffusionDb manifests and images into Kilo Talk truecolor bounding box training cache")]
 struct Args {
     /// Directory containing DiffusionDb images and part-*.json manifests.
     #[arg(long, default_value = "data/DiffusionDb/images-64")]
@@ -70,16 +71,12 @@ struct Args {
     #[arg(long)]
     limit: Option<usize>,
 
-    /// Number of training samples per image across canvas progression.
-    #[arg(long, default_value_t = 8)]
-    samples_per_image: usize,
-
-    /// Number of consecutive pixels to predict per sample.
-    #[arg(long, default_value_t = 16)]
-    chunk_len: usize,
+    /// Maximum bounding boxes to extract per image.
+    #[arg(long, default_value_t = 24)]
+    max_boxes: usize,
 
     /// Number of sample previews to print upon completion.
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 5)]
     previews: usize,
 }
 
@@ -87,12 +84,11 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    println!("=== Yumon Art: DiffusionDb -> Kilo Talk Pixel Stream Preprocessor ===");
+    println!("=== Yumon Art: DiffusionDb -> Kilo Talk Bounding Box Preprocessor ===");
     println!("Images directory   : {}", args.images_dir.display());
     println!("Vocabulary file    : {}", args.vocab.display());
     println!("Output cache       : {}", args.output.display());
-    println!("Samples per image  : {}", args.samples_per_image);
-    println!("Pixels per sample  : {}", args.chunk_len);
+    println!("Max boxes / image  : {}", args.max_boxes);
 
     // 1. Load Kilo Talk vocabulary
     println!("\nLoading Kilo Talk vocabulary...");
@@ -141,7 +137,7 @@ fn main() -> Result<()> {
     println!("Total images to process: {}", items.len());
     ensure!(!items.is_empty(), "No valid image files found in manifest");
 
-    // 4. Process images and generate intermediate painting trajectories
+    // 4. Process images and extract truecolor bounding box sequences
     let pb = ProgressBar::new(items.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -152,17 +148,17 @@ fn main() -> Result<()> {
 
     let samples: Vec<ArtSample> = items
         .par_iter()
-        .flat_map(|(img_path, prompt_text)| {
+        .filter_map(|(img_path, prompt_text)| {
             pb.inc(1);
 
             // Load and verify image
             let img = match image::open(img_path) {
                 Ok(img) => img.to_rgb8(),
-                Err(_) => return Vec::new(),
+                Err(_) => return None,
             };
 
             if img.width() != CANVAS_SIZE as u32 || img.height() != CANVAS_SIZE as u32 {
-                return Vec::new();
+                return None;
             }
 
             let raw_hwc = img.into_raw();
@@ -171,26 +167,23 @@ fn main() -> Result<()> {
             let mut ctx = TranslationContext::new();
             let prompt_toks = match vocab.encode(prompt_text, &mut ctx) {
                 Ok(toks) => toks.into_iter().map(|t| t as u32).collect::<Vec<u32>>(),
-                Err(_) => return Vec::new(),
+                Err(_) => return None,
             };
 
-            // Generate coarse-to-fine multiscale training samples
-            let multiscale_samples = generate_multiscale_samples(&raw_hwc);
+            // Extract truecolor bounding boxes
+            let boxes = extract_truecolor_boxes(&raw_hwc, args.max_boxes);
+            let action_tokens = boxes_to_tokens(&boxes)
+                .into_iter()
+                .map(|t| t as u32)
+                .collect();
 
-            let mut out = Vec::with_capacity(multiscale_samples.len());
-            for (canvas_hwc, tokens, is_done) in multiscale_samples {
-                let action_tokens = tokens.into_iter().map(|t| t as u32).collect();
-
-                out.push(ArtSample {
-                    prompt_text: prompt_text.clone(),
-                    prompt_tokens: prompt_toks.clone(),
-                    canvas_hwc,
-                    action_tokens,
-                    is_done,
-                });
-            }
-
-            out
+            Some(ArtSample {
+                prompt_text: prompt_text.clone(),
+                prompt_tokens: prompt_toks,
+                canvas_hwc: raw_hwc,
+                action_tokens,
+                is_done: true,
+            })
         })
         .collect();
 
@@ -214,8 +207,8 @@ fn main() -> Result<()> {
         total_samples: samples.len(),
         images_processed: items.len(),
         canvas_size: CANVAS_SIZE,
-        vocab_size: ART_VOCAB_SIZE,
-        trajectory_steps: args.samples_per_image,
+        vocab_size: BOX_VOCAB_SIZE,
+        trajectory_steps: args.max_boxes,
     };
     let meta_bytes = bincode::serialize(&metadata)?;
     writer.write_all(&(meta_bytes.len() as u32).to_le_bytes())?;
@@ -234,11 +227,20 @@ fn main() -> Result<()> {
     // Previews
     println!("\n--- Previews ({} samples) ---", args.previews.min(samples.len()));
     for (i, s) in samples.iter().take(args.previews).enumerate() {
+        let token_usizes: Vec<usize> = s.action_tokens.iter().map(|&t| t as usize).collect();
+        let (boxes, is_done) = decode_box_tokens(&token_usizes);
         println!("Sample #{}", i + 1);
         println!("  Prompt : {}", s.prompt_text);
-        println!("  Tokens : {:?}", s.prompt_tokens);
-        println!("  Pixel tokens count: {}", s.action_tokens.len());
-        println!("  Done   : {}", s.is_done);
+        println!("  Prompt Tokens ({}): {:?}", s.prompt_tokens.len(), s.prompt_tokens);
+        println!("  Box Tokens ({}): {} boxes extracted, is_done={}", s.action_tokens.len(), boxes.len(), is_done);
+        if let Some(b0) = boxes.first() {
+            println!("    Box #1: ({}, {}) -> ({}, {}), color {}", b0.x1, b0.y1, b0.x2, b0.y2, b0.color);
+        }
+        if let Some(b_last) = boxes.last() {
+            if boxes.len() > 1 {
+                println!("    Box #{}: ({}, {}) -> ({}, {}), color {}", boxes.len(), b_last.x1, b_last.y1, b_last.x2, b_last.y2, b_last.color);
+            }
+        }
     }
 
     Ok(())

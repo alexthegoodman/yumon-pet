@@ -1,7 +1,8 @@
-//! Interactive Studio: Watch Yumon create art on a 64x64 canvas.
+//! Interactive Studio: Watch Yumon create art with bounding boxes on a 64x64 canvas.
 //!
-//! Yumon views the canvas, decides which pixels/strokes to paint,
-//! updates the canvas, and loops until satisfied.
+//! Given an art prompt, Yumon outputs a sequence of bounding boxes:
+//!   [CANVAS_START, BOX, x1, y1, x2, y2, color, BOX, ..., DONE]
+//! Each box is rendered live to the terminal using 24-bit ANSI truecolor.
 
 #[cfg(not(target_arch = "wasm32"))]
 use {
@@ -11,19 +12,18 @@ use {
         tensor::{Int, TensorData},
     },
     clap::Parser,
-    std::{path::PathBuf, time::Instant},
+    std::{path::PathBuf, thread::sleep, time::{Duration, Instant}},
     yumon_pet::brain::{
         kilo_vocab::KiloVocab,
         moe_model::{YumonMoeBrain, YumonMoeBrainConfig},
         samples::TrainingStage,
-        tokenizer::BOS_TOKEN,
+        tokenizer::{BOS_TOKEN, EOS_TOKEN},
         yumon_talk::TranslationContext,
     },
-    yumon_pet::vision::paint_action::{
-        ART_VOCAB_SIZE, CANVAS_CHANNELS, CANVAS_SIZE, CANVAS_START_ID,
-        PASS_1_ID, PASS_2_ID, PASS_3_ID,
-        ROW_START_ID, COL_START_ID, COLOR_START_ID, PALETTE_SIZE,
-        hwc_to_chw_floats, palette_to_rgb,
+    yumon_pet::vision::{
+        BOX_TOKEN_ID, BOX_VOCAB_SIZE, CANVAS_SIZE, CANVAS_START_ID, COLOR_START_ID,
+        DONE_TOKEN_ID, LayerBox, X_START_ID, Y_START_ID,
+        palette_to_rgb, render_boxes_to_hwc,
     },
 };
 
@@ -31,7 +31,7 @@ type BackendType = burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32,
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser, Debug)]
-#[command(about = "Interactive Art Creation: Watch Yumon paint a 64x64 canvas")]
+#[command(about = "Interactive Art Creation: Watch Yumon paint a 64x64 canvas using Bounding Boxes")]
 struct Args {
     /// Art prompt to guide Yumon.
     #[arg(long, default_value = "a cute friendly dragon in an enchanted forest, vibrant colors, oil painting")]
@@ -46,16 +46,16 @@ struct Args {
     vocab: PathBuf,
 
     /// Sampling temperature (0.0 = greedy argmax, >0.0 = stochastic sampling).
-    #[arg(long, default_value_t = 0.7)]
+    #[arg(long, default_value_t = 0.5)]
     temperature: f32,
 
-    /// Number of multiscale passes to execute (1 = Composition, 2 = Shapes, 3 = Fine Details).
-    #[arg(long, default_value_t = 3)]
-    passes: usize,
+    /// Maximum bounding boxes Yumon can place.
+    #[arg(long, default_value_t = 100)]
+    max_boxes: usize,
 
-    /// How often Yumon re-glances at the visual canvas during Pass 3 (every N pixels).
-    #[arg(long, default_value_t = 32)]
-    glance_interval: usize,
+    /// Milliseconds to pause between rendering each box for live animation.
+    #[arg(long, default_value_t = 60)]
+    box_delay_ms: u64,
 
     /// Output artwork PNG file path.
     #[arg(long, default_value = "yumon_artwork.png")]
@@ -115,7 +115,7 @@ fn sample_token(logits: &[f32], temperature: f32) -> usize {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn print_terminal_canvas(canvas: &[u8]) {
-    // Print a compact 32x16 ANSI-colored terminal preview
+    // Print a compact 32x16 ANSI-colored terminal preview (downsampling 2x2 pixels)
     println!("\n  ┌────────────────────────────────┐");
     for y in (0..CANVAS_SIZE).step_by(4) {
         print!("  │");
@@ -138,7 +138,7 @@ fn main() -> Result<()> {
     let device: <BackendType as Backend>::Device = Default::default();
 
     println!("╔═══════════════════════════════════════════════════════╗");
-    println!("║       🎨 Yumon Art Studio: Pixel-Aware Vision MoE    ║");
+    println!("║     🎨 Yumon Art Studio: Bounding Box Painter         ║");
     println!("╚═══════════════════════════════════════════════════════╝");
     println!("Prompt: \"{}\"\n", args.prompt);
 
@@ -151,250 +151,174 @@ fn main() -> Result<()> {
     let prompt_tokens = vocab.encode(&args.prompt, &mut ctx)?;
     println!("Kilo Talk tokens ({}): {:?}", prompt_tokens.len(), prompt_tokens);
 
-    // 3. Initialize / Load Multimodal MoE Brain
+    // 3. Initialize / Load MoE Brain
     let brain = if let Some(ckpt) = &args.checkpoint {
         println!("Loading checkpoint from {}...", ckpt.display());
         let (model, _, _) = YumonMoeBrain::<BackendType>::load(ckpt.to_str().unwrap(), &device)?;
         model
     } else {
         println!("No checkpoint specified — initializing compact untrained MoE architecture for studio demonstration...");
-        let cfg = YumonMoeBrainConfig::new(ART_VOCAB_SIZE, TrainingStage::Language)
+        let cfg = YumonMoeBrainConfig::new(BOX_VOCAB_SIZE, TrainingStage::Language)
             .with_embed_dim(64)
             .with_hidden_units(64)
             .with_n_layers(4)
             .with_attn_heads(4)
             .with_ff_dim(256)
-            .with_max_seq_len(512)
+            .with_max_seq_len(768)
             .with_num_experts(4)
             .with_top_k(1)
-            .with_is_multimodal(true);
+            .with_is_multimodal(false);
         cfg.init(&device)
     };
 
     // 4. Initialize Blank Canvas
-    let mut canvas_hwc = vec![240u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
+    let mut canvas_hwc = vec![240u8; CANVAS_SIZE * CANVAS_SIZE * 3];
     println!("\n🖼  Initial Canvas State (Blank):");
     print_terminal_canvas(&canvas_hwc);
 
-    // 5. The Art Creation Loop: 3-Pass Multiscale Studio
-    println!("\n🎨 Yumon is picking up the stylus to paint the 64x64 canvas across 3 multiscale passes...\n");
+    // 5. The Art Creation Loop: Autoregressive Box Emission
+    println!("\n🎨 Yumon is picking up the stylus to paint bounding boxes...\n");
+    let t_start = Instant::now();
 
-    let mut canvas_tensor = Tensor::<BackendType, 4>::from_floats(
-        TensorData::new(hwc_to_chw_floats(&canvas_hwc), [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
-        &device,
-    );
-
-    let mut prefix_tokens = vec![BOS_TOKEN as i32];
+    let mut generated_tokens: Vec<usize> = Vec::new();
+    generated_tokens.push(BOS_TOKEN);
     for &tok in &prompt_tokens {
-        prefix_tokens.push(tok as i32);
+        generated_tokens.push(tok);
     }
-    prefix_tokens.push(CANVAS_START_ID as i32);
+    generated_tokens.push(CANVAS_START_ID);
 
-    // PASS 1: Broad Composition (8x8 Blocks, 64 queries)
-    println!("\n═══════════════════════════════════════════════════════");
-    println!("  🎨 Pass 1 / 3: Broad Composition (8x8 Blocks)");
-    println!("═══════════════════════════════════════════════════════");
-    let t_pass1 = Instant::now();
+    let mut boxes: Vec<LayerBox> = Vec::new();
+    let max_gen_steps = args.max_boxes * 6 + 10;
 
-    for by in 0..8 {
-        for bx in 0..8 {
-            let x = (bx * 8 + 4) as u8;
-            let y = (by * 8 + 4) as u8;
+    // Current box builder accumulator: [BOX, x1, y1, x2, y2, color]
+    let mut box_buf: Vec<usize> = Vec::new();
 
-            let mut query_tokens = prefix_tokens.clone();
-            query_tokens.push(PASS_1_ID as i32);
-            query_tokens.push((ROW_START_ID + y as usize) as i32);
-            query_tokens.push((COL_START_ID + x as usize) as i32);
-
-            let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-                TensorData::new(query_tokens.clone(), [1, query_tokens.len()]),
-                &device,
-            );
-
-            let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
-            let last_pos = 256 + query_tokens.len() - 1;
-            let logit_vec: Vec<f32> = logits
-                .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
-                .into_data()
-                .convert::<f32>()
-                .to_vec()
-                .unwrap();
-
-            let color_logits = &logit_vec[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-            let best_color = sample_token(color_logits, args.temperature) as u8;
-            let [r, g, b] = palette_to_rgb(best_color);
-
-            for py in 0..8 {
-                for px in 0..8 {
-                    let cy = by * 8 + py;
-                    let cx = bx * 8 + px;
-                    let idx = (cy * CANVAS_SIZE + cx) * 3;
-                    canvas_hwc[idx] = r;
-                    canvas_hwc[idx + 1] = g;
-                    canvas_hwc[idx + 2] = b;
-                }
-            }
-        }
-    }
-
-    canvas_tensor = Tensor::<BackendType, 4>::from_floats(
-        TensorData::new(hwc_to_chw_floats(&canvas_hwc), [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
-        &device,
-    );
-    println!("  ✓ Pass 1 Complete ({:.2?}): Global composition established.", t_pass1.elapsed());
-    print_terminal_canvas(&canvas_hwc);
-
-    // PASS 2: Shapes & Silhouettes (16x16 Patches, 256 queries)
-    if args.passes >= 2 {
-        println!("\n═══════════════════════════════════════════════════════");
-        println!("  🎨 Pass 2 / 3: Shapes & Silhouettes (16x16 Patches)");
-        println!("═══════════════════════════════════════════════════════");
-        let t_pass2 = Instant::now();
-
-        for py in 0..16 {
-            for px in 0..16 {
-                let x = (px * 4 + 2) as u8;
-                let y = (py * 4 + 2) as u8;
-
-                let mut query_tokens = prefix_tokens.clone();
-                query_tokens.push(PASS_2_ID as i32);
-                query_tokens.push((ROW_START_ID + y as usize) as i32);
-                query_tokens.push((COL_START_ID + x as usize) as i32);
-
-                let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-                    TensorData::new(query_tokens.clone(), [1, query_tokens.len()]),
-                    &device,
-                );
-
-                let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
-                let last_pos = 256 + query_tokens.len() - 1;
-                let logit_vec: Vec<f32> = logits
-                    .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
-                    .into_data()
-                    .convert::<f32>()
-                    .to_vec()
-                    .unwrap();
-
-                let color_logits = &logit_vec[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-                let best_color = sample_token(color_logits, args.temperature) as u8;
-                let [r, g, b] = palette_to_rgb(best_color);
-
-                for dy in 0..4 {
-                    for dx in 0..4 {
-                        let cy = py * 4 + dy;
-                        let cx = px * 4 + dx;
-                        let idx = (cy * CANVAS_SIZE + cx) * 3;
-                        canvas_hwc[idx] = r;
-                        canvas_hwc[idx + 1] = g;
-                        canvas_hwc[idx + 2] = b;
-                    }
-                }
-            }
-
-            if (py + 1) % 4 == 0 {
-                canvas_tensor = Tensor::<BackendType, 4>::from_floats(
-                    TensorData::new(hwc_to_chw_floats(&canvas_hwc), [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
-                    &device,
-                );
-                println!("  [Pass 2 Progress] Row {:>2}/16 refined...", py + 1);
-            }
+    for step in 0..max_gen_steps {
+        if generated_tokens.len() >= 768 {
+            println!("  [Context window full: 768 tokens reached]");
+            break;
         }
 
-        canvas_tensor = Tensor::<BackendType, 4>::from_floats(
-            TensorData::new(hwc_to_chw_floats(&canvas_hwc), [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
+        let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+            TensorData::new(
+                generated_tokens.iter().map(|&t| t as i32).collect::<Vec<i32>>(),
+                [1, generated_tokens.len()],
+            ),
             &device,
         );
-        println!("  ✓ Pass 2 Complete ({:.2?}): Subject shapes and silhouettes refined.", t_pass2.elapsed());
-        print_terminal_canvas(&canvas_hwc);
-    }
 
-    // PASS 3: Fine Pixel Art Details (64x64 Pixels, 4,096 queries)
-    if args.passes >= 3 {
-        println!("\n═══════════════════════════════════════════════════════");
-        println!("  🎨 Pass 3 / 3: Fine Pixel Art Details (64x64 Pixels)");
-        println!("═══════════════════════════════════════════════════════");
-        let t_pass3 = Instant::now();
-        let total_pixels = CANVAS_SIZE * CANVAS_SIZE;
-        let glance_interval = args.glance_interval.max(1);
+        let (logits, _, _, _) = brain.forward_with_depth(token_tensor);
+        let last_pos = generated_tokens.len() - 1;
+        let logit_vec: Vec<f32> = logits
+            .slice([0..1, last_pos..last_pos + 1, 0..BOX_VOCAB_SIZE])
+            .into_data()
+            .convert::<f32>()
+            .to_vec()
+            .unwrap();
 
-        for p in 0..total_pixels {
-            let x = (p % CANVAS_SIZE) as u8;
-            let y = (p / CANVAS_SIZE) as u8;
-
-            if p > 0 && p % glance_interval == 0 {
-                let chw = hwc_to_chw_floats(&canvas_hwc);
-                canvas_tensor = Tensor::<BackendType, 4>::from_floats(
-                    TensorData::new(chw, [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
-                    &device,
-                );
+        // Constrain logits depending on what slot in the 6-token box tuple is expected
+        // Slot 0: BOX or DONE
+        // Slot 1: X1 (4100..4163)
+        // Slot 2: Y1 (4164..4227)
+        // Slot 3: X2 (4100..4163)
+        // Slot 4: Y2 (4164..4227)
+        // Slot 5: COLOR (4228..4483)
+        let next_tok = match box_buf.len() {
+            0 => {
+                // Can emit BOX_TOKEN_ID or DONE_TOKEN_ID
+                let p_box = logit_vec[BOX_TOKEN_ID];
+                let p_done = logit_vec[DONE_TOKEN_ID];
+                if p_done > p_box && !boxes.is_empty() {
+                    DONE_TOKEN_ID
+                } else {
+                    BOX_TOKEN_ID
+                }
             }
-
-            let mut query_tokens = prefix_tokens.clone();
-            query_tokens.push(PASS_3_ID as i32);
-            query_tokens.push((ROW_START_ID + y as usize) as i32);
-            query_tokens.push((COL_START_ID + x as usize) as i32);
-
-            let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-                TensorData::new(query_tokens.clone(), [1, query_tokens.len()]),
-                &device,
-            );
-
-            let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
-            let last_pos = 256 + query_tokens.len() - 1;
-            let logit_vec: Vec<f32> = logits
-                .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
-                .into_data()
-                .convert::<f32>()
-                .to_vec()
-                .unwrap();
-
-            let color_logits = &logit_vec[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-            let best_color = sample_token(color_logits, args.temperature) as u8;
-            let [r, g, b] = palette_to_rgb(best_color);
-
-            let idx = (y as usize * CANVAS_SIZE + x as usize) * 3;
-            canvas_hwc[idx] = r;
-            canvas_hwc[idx + 1] = g;
-            canvas_hwc[idx + 2] = b;
-
-            if x == (CANVAS_SIZE - 1) as u8 && ((y + 1) % 8 == 0 || y == (CANVAS_SIZE - 1) as u8) {
-                println!("  [Pass 3 Progress] Row {:>2}/64 rendered...", y + 1);
-                print_terminal_canvas(&canvas_hwc);
+            1 | 3 => {
+                // X coordinate (0..63)
+                let x_logits = &logit_vec[X_START_ID..X_START_ID + 64];
+                let x_val = sample_token(x_logits, args.temperature);
+                X_START_ID + x_val
             }
+            2 | 4 => {
+                // Y coordinate (0..63)
+                let y_logits = &logit_vec[Y_START_ID..Y_START_ID + 64];
+                let y_val = sample_token(y_logits, args.temperature);
+                Y_START_ID + y_val
+            }
+            5 => {
+                // Color (0..255)
+                let c_logits = &logit_vec[COLOR_START_ID..COLOR_START_ID + 256];
+                let c_val = sample_token(c_logits, args.temperature);
+                COLOR_START_ID + c_val
+            }
+            _ => DONE_TOKEN_ID,
+        };
+
+        if next_tok == DONE_TOKEN_ID || next_tok == EOS_TOKEN {
+            println!("\n  ✨ Yumon finished the composition! Emitted <DONE> at step {}.", step);
+            break;
         }
 
-        println!("  ✓ Pass 3 Complete ({:.2?}): Full pixel-level shading & highlights applied.", t_pass3.elapsed());
+        generated_tokens.push(next_tok);
+        box_buf.push(next_tok);
+
+        // When 6 tokens are assembled, decode the box and render it!
+        if box_buf.len() == 6 {
+            let raw_x1 = (box_buf[1] - X_START_ID) as u8;
+            let raw_y1 = (box_buf[2] - Y_START_ID) as u8;
+            let raw_x2 = (box_buf[3] - X_START_ID) as u8;
+            let raw_y2 = (box_buf[4] - Y_START_ID) as u8;
+            let color = (box_buf[5] - COLOR_START_ID) as u8;
+
+            let x1 = raw_x1.min(raw_x2);
+            let x2 = raw_x1.max(raw_x2);
+            let y1 = raw_y1.min(raw_y2);
+            let y2 = raw_y1.max(raw_y2);
+
+            let new_box = LayerBox { x1, y1, x2, y2, color };
+            boxes.push(new_box);
+
+            // Re-render canvas with new box
+            render_boxes_to_hwc(&[new_box], &mut canvas_hwc);
+
+            let [r, g, b] = palette_to_rgb(color);
+            let w = x2 - x1 + 1;
+            let h = y2 - y1 + 1;
+
+            print!(
+                "  Box #{:>2}: [{}, {}] -> [{}, {}] ({}x{}) | Color #{:>3} \x1b[38;2;{};{};{}m████\x1b[0m\r\n",
+                boxes.len(), x1, y1, x2, y2, w, h, color, r, g, b
+            );
+            print_terminal_canvas(&canvas_hwc);
+
+            if args.box_delay_ms > 0 {
+                sleep(Duration::from_millis(args.box_delay_ms));
+            }
+
+            box_buf.clear();
+
+            if boxes.len() >= args.max_boxes {
+                println!("\n  ✨ Reached max boxes limit ({}).", args.max_boxes);
+                break;
+            }
+        }
     }
 
-    println!("\n  ✨ Yumon steps back, smiles, and says: \"Done! Artwork complete.\"");
+    println!("\n═══════════════════════════════════════════════════════");
+    println!("  🎨 Artwork Summary: {} bounding boxes placed in {:.2?}", boxes.len(), t_start.elapsed());
+    println!("═══════════════════════════════════════════════════════");
+    print_terminal_canvas(&canvas_hwc);
 
-    // Save final raw 64x64 PNG
-    let raw_output = if let Some(ext) = args.output.extension() {
-        let stem = args.output.file_stem().unwrap().to_string_lossy();
-        args.output.with_file_name(format!("{}_64.{}", stem, ext.to_string_lossy()))
-    } else {
-        PathBuf::from("yumon_artwork_64.png")
-    };
-
-    let raw_buf = image::RgbImage::from_raw(
-        CANVAS_SIZE as u32,
-        CANVAS_SIZE as u32,
-        canvas_hwc.clone(),
-    ).context("creating raw 64x64 ImageBuffer")?;
-    raw_buf.save(&raw_output)?;
-
-    // Save upscaled PNG (e.g. 256x256)
-    let upscaled_bytes = upscale_nn(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE, args.scale);
-    let upscaled_buf = image::RgbImage::from_raw(
+    // Save final PNG
+    let upscaled = upscale_nn(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE, args.scale);
+    let final_img = image::RgbImage::from_raw(
         (CANVAS_SIZE * args.scale) as u32,
         (CANVAS_SIZE * args.scale) as u32,
-        upscaled_bytes,
-    ).context("creating upscaled ImageBuffer")?;
-    upscaled_buf.save(&args.output)?;
-
-    println!("\n🎨 Artwork saved successfully:");
-    println!("   - Upscaled ({}x{}): {}", CANVAS_SIZE * args.scale, CANVAS_SIZE * args.scale, args.output.display());
-    println!("   - Raw      (64x64):   {}", raw_output.display());
+        upscaled,
+    ).context("creating final ImageBuffer")?;
+    final_img.save(&args.output)?;
+    println!("\n💾 Saved final artwork to: {}", args.output.display());
 
     Ok(())
 }

@@ -4,7 +4,7 @@
   "top_k": 1,
   "cache": "training-cache/diffusion_kilo_samples.bin",
   "vocab_file": "training-cache/diffusion_talk_vocab.json",
-  "max_seq_len": 512,
+  "max_seq_len": 768,
   "seed": 4815162342,
   "vocab_size": 4512,
   "embed_dim": 64,
@@ -16,5 +16,5 @@
   "first_lr": 0.0003,
   "last_lr": 0.00003,
   "validation_fraction": 0.02,
-  "out_dir": "checkpoints/yumon-art-moe-8"
+  "out_dir": "checkpoints/yumon-art-moe-13"
 }
