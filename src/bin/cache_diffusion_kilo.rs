@@ -24,7 +24,7 @@ use {
 };
 
 pub const ART_CACHE_MAGIC: &[u8; 8] = b"YUMONART";
-pub const ART_CACHE_VERSION: u32 = 1;
+pub const ART_CACHE_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ArtCacheMetadata {
@@ -43,6 +43,7 @@ pub struct ArtSample {
     pub canvas_hwc: Vec<u8>,
     pub action_tokens: Vec<u32>,
     pub is_done: bool,
+    pub target_edge: f32,
 }
 
 #[derive(Deserialize, Debug)]
@@ -178,7 +179,7 @@ fn main() -> Result<()> {
             let multiscale_samples = generate_multiscale_samples(&raw_hwc);
 
             let mut out = Vec::with_capacity(multiscale_samples.len());
-            for (canvas_hwc, tokens, is_done) in multiscale_samples {
+            for (canvas_hwc, tokens, is_done, target_edge) in multiscale_samples {
                 let action_tokens = tokens.into_iter().map(|t| t as u32).collect();
 
                 out.push(ArtSample {
@@ -187,6 +188,7 @@ fn main() -> Result<()> {
                     canvas_hwc,
                     action_tokens,
                     is_done,
+                    target_edge,
                 });
             }
 
@@ -238,6 +240,7 @@ fn main() -> Result<()> {
         println!("  Prompt : {}", s.prompt_text);
         println!("  Tokens : {:?}", s.prompt_tokens);
         println!("  Pixel tokens count: {}", s.action_tokens.len());
+        println!("  Target edge: {:.4}", s.target_edge);
         println!("  Done   : {}", s.is_done);
     }
 

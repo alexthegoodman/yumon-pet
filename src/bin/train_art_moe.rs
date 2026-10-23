@@ -8,7 +8,6 @@ use {
             autodiff::checkpoint::strategy::BalancedCheckpointing,
             Autodiff,
         },
-        nn::loss::CrossEntropyLossConfig,
         optim::{AdamWConfig, GradientsParams, Optimizer},
         prelude::*,
         tensor::{Int, TensorData},
@@ -46,6 +45,27 @@ pub struct ArtSample {
     pub canvas_hwc: Vec<u8>,
     pub action_tokens: Vec<u32>,
     pub is_done: bool,
+    #[serde(default)]
+    pub target_edge: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct LegacyArtSampleV1 {
+    pub prompt_text: String,
+    pub prompt_tokens: Vec<u32>,
+    pub canvas_hwc: Vec<u8>,
+    pub action_tokens: Vec<u32>,
+    pub is_done: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ArtCacheMetadata {
+    pub version: u32,
+    pub total_samples: usize,
+    pub images_processed: usize,
+    pub canvas_size: usize,
+    pub vocab_size: usize,
+    pub trajectory_steps: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -110,16 +130,34 @@ fn load_samples_from_cache(path: &Path) -> Result<Vec<ArtSample>> {
 
     let mut meta_bytes = vec![0u8; meta_len];
     reader.read_exact(&mut meta_bytes)?;
+    let meta: ArtCacheMetadata = bincode::deserialize(&meta_bytes)?;
 
     let mut samples = Vec::new();
     let mut len_buf = [0u8; 4];
 
-    while reader.read_exact(&mut len_buf).is_ok() {
-        let sample_len = u32::from_le_bytes(len_buf) as usize;
-        let mut sample_bytes = vec![0u8; sample_len];
-        reader.read_exact(&mut sample_bytes)?;
-        let sample: ArtSample = bincode::deserialize(&sample_bytes)?;
-        samples.push(sample);
+    if meta.version >= 2 {
+        while reader.read_exact(&mut len_buf).is_ok() {
+            let sample_len = u32::from_le_bytes(len_buf) as usize;
+            let mut sample_bytes = vec![0u8; sample_len];
+            reader.read_exact(&mut sample_bytes)?;
+            let sample: ArtSample = bincode::deserialize(&sample_bytes)?;
+            samples.push(sample);
+        }
+    } else {
+        while reader.read_exact(&mut len_buf).is_ok() {
+            let sample_len = u32::from_le_bytes(len_buf) as usize;
+            let mut sample_bytes = vec![0u8; sample_len];
+            reader.read_exact(&mut sample_bytes)?;
+            let v1: LegacyArtSampleV1 = bincode::deserialize(&sample_bytes)?;
+            samples.push(ArtSample {
+                prompt_text: v1.prompt_text,
+                prompt_tokens: v1.prompt_tokens,
+                canvas_hwc: v1.canvas_hwc,
+                action_tokens: v1.action_tokens,
+                is_done: v1.is_done,
+                target_edge: 0.0,
+            });
+        }
     }
 
     Ok(samples)
@@ -184,9 +222,6 @@ fn main() -> Result<()> {
         .with_weight_decay(1e-4)
         .init();
 
-    let ce_loss = CrossEntropyLossConfig::new()
-        .init(&device);
-
     // 3. Training Loop
     let num_batches = (train_samples.len() + batch_size - 1) / batch_size;
     println!("\nStarting training ({} batches/epoch)...", num_batches);
@@ -223,9 +258,11 @@ fn main() -> Result<()> {
                 &device,
             );
 
-            // B. Pack Tokens: [BOS, prompt..., CANVAS_START, pass_tag, row_y, col_x]
+            // B. Pack Tokens & Target Edges
             let mut batch_token_rows = Vec::with_capacity(bs);
             let mut targets = Vec::with_capacity(bs);
+            let mut batch_edges = Vec::with_capacity(bs);
+            let mut edge_weights_vec = Vec::with_capacity(bs);
             let mut max_len = 0;
 
             for s in chunk {
@@ -238,6 +275,8 @@ fn main() -> Result<()> {
                 row.push(s.action_tokens[1] as i32); // ROW_y
                 row.push(s.action_tokens[2] as i32); // COL_x
                 targets.push(s.action_tokens[3] as i32); // COLOR_c
+                batch_edges.push(s.target_edge);
+                edge_weights_vec.push(1.0 + 2.0 * s.target_edge);
 
                 if row.len() > max_len {
                     max_len = row.len();
@@ -265,26 +304,41 @@ fn main() -> Result<()> {
                 TensorData::new(targets, [bs]),
                 &device,
             );
+            let target_edges = Tensor::<TrainBackend, 2>::from_floats(
+                TensorData::new(batch_edges, [bs, 1]),
+                &device,
+            );
+            let edge_weights = Tensor::<TrainBackend, 1>::from_floats(
+                TensorData::new(edge_weights_vec, [bs]),
+                &device,
+            );
 
-            // C. Forward pass
-            let (logits, aux_loss, _, _) = model.forward_multimodal_with_depth(
+            // C. Forward pass with Conv2D edge detection head
+            let (logits, edge_preds, aux_loss, _, _) = model.forward_multimodal_with_edges(
                 token_tensor,
                 Some(canvas_tensor),
             );
 
-            // Extract the active logit vector at the (x, y) query coordinate for each sample
-            // Visual tokens (256) are prepended. In token_tensor, coord_y is at index 4 + prompt_tokens.len().
-            // So its multimodal sequence position is 256 + 4 + prompt_tokens.len().
+            // Extract the active logit vector and edge prediction at the (x, y) query coordinate for each sample
             let mut logit_slices = Vec::with_capacity(bs);
+            let mut edge_slices = Vec::with_capacity(bs);
             for (b, s) in chunk.iter().enumerate() {
                 let pos = 256 + 4 + s.prompt_tokens.len();
-                let slice = logits.clone().slice([b..b + 1, pos..pos + 1, 0..cfg.vocab_size]);
-                logit_slices.push(slice);
+                logit_slices.push(logits.clone().slice([b..b + 1, pos..pos + 1, 0..cfg.vocab_size]));
+                edge_slices.push(edge_preds.clone().slice([b..b + 1, pos..pos + 1, 0..1]));
             }
             let active_logits = Tensor::cat(logit_slices, 0).reshape([bs, cfg.vocab_size]);
+            let active_edges = Tensor::cat(edge_slices, 0).reshape([bs, 1]);
 
-            let ce = ce_loss.forward(active_logits, target_labels);
-            let loss = ce + aux_loss;
+            // 1. Target Conv2D Edge-weighted Cross Entropy Loss
+            let log_probs = burn::tensor::activation::log_softmax(active_logits, 1);
+            let nll = log_probs.gather(1, target_labels.reshape([bs, 1])).reshape([bs]).neg();
+            let weighted_ce = (nll * edge_weights).mean();
+
+            // 2. Auxiliary Conv2D Edge Detection Loss (MSE against target image edges)
+            let edge_mse = (active_edges - target_edges).powf_scalar(2.0).mean();
+
+            let loss = weighted_ce + edge_mse * 0.5 + aux_loss;
 
             let loss_val: f32 = loss.clone().into_data().convert::<f32>().to_vec().unwrap()[0];
             total_loss += loss_val;
@@ -304,6 +358,7 @@ fn main() -> Result<()> {
 
         // 4. Validation
         let mut val_loss_sum = 0.0f32;
+        let mut val_edge_sum = 0.0f32;
         let mut val_correct = 0usize;
         let mut val_total = 0usize;
         let mut val_steps = 0usize;
@@ -321,6 +376,8 @@ fn main() -> Result<()> {
 
             let mut batch_token_rows = Vec::with_capacity(bs);
             let mut targets = Vec::with_capacity(bs);
+            let mut batch_edges = Vec::with_capacity(bs);
+            let mut edge_weights_vec = Vec::with_capacity(bs);
             let mut max_len = 0;
             for s in chunk {
                 let mut row = vec![BOS_TOKEN as i32];
@@ -332,6 +389,8 @@ fn main() -> Result<()> {
                 row.push(s.action_tokens[1] as i32); // ROW_y
                 row.push(s.action_tokens[2] as i32); // COL_x
                 targets.push(s.action_tokens[3] as i32); // COLOR_c
+                batch_edges.push(s.target_edge);
+                edge_weights_vec.push(1.0 + 2.0 * s.target_edge);
 
                 if row.len() > max_len {
                     max_len = row.len();
@@ -357,21 +416,37 @@ fn main() -> Result<()> {
                 TensorData::new(targets.clone(), [bs]),
                 &device,
             );
+            let target_edges = Tensor::<TrainBackend, 2>::from_floats(
+                TensorData::new(batch_edges, [bs, 1]),
+                &device,
+            );
+            let edge_weights = Tensor::<TrainBackend, 1>::from_floats(
+                TensorData::new(edge_weights_vec, [bs]),
+                &device,
+            );
 
-            let (logits, _, _, _) = model.forward_multimodal_with_depth(
+            let (logits, edge_preds, _, _, _) = model.forward_multimodal_with_edges(
                 token_tensor,
                 Some(canvas_tensor),
             );
 
             let mut logit_slices = Vec::with_capacity(bs);
+            let mut edge_slices = Vec::with_capacity(bs);
             for (b, s) in chunk.iter().enumerate() {
                 let pos = 256 + 4 + s.prompt_tokens.len();
-                let slice = logits.clone().slice([b..b + 1, pos..pos + 1, 0..cfg.vocab_size]);
-                logit_slices.push(slice);
+                logit_slices.push(logits.clone().slice([b..b + 1, pos..pos + 1, 0..cfg.vocab_size]));
+                edge_slices.push(edge_preds.clone().slice([b..b + 1, pos..pos + 1, 0..1]));
             }
             let active_logits = Tensor::cat(logit_slices, 0).reshape([bs, cfg.vocab_size]);
+            let active_edges = Tensor::cat(edge_slices, 0).reshape([bs, 1]);
 
-            let loss = ce_loss.forward(active_logits.clone(), target_labels);
+            let log_probs = burn::tensor::activation::log_softmax(active_logits.clone(), 1);
+            let nll = log_probs.gather(1, target_labels.reshape([bs, 1])).reshape([bs]).neg();
+            let loss = (nll * edge_weights).mean();
+
+            let edge_mse = (active_edges - target_edges).powf_scalar(2.0).mean();
+            let e_mse_val: f32 = edge_mse.into_data().convert::<f32>().to_vec().unwrap()[0];
+            val_edge_sum += e_mse_val;
 
             let preds = active_logits.argmax(1).reshape([bs]);
             let pred_vec: Vec<i32> = preds.into_data().convert::<i32>().to_vec().unwrap();
@@ -388,6 +463,7 @@ fn main() -> Result<()> {
         }
 
         let avg_val_loss = val_loss_sum / val_steps.max(1) as f32;
+        let avg_val_edge_mse = val_edge_sum / val_steps.max(1) as f32;
         let val_acc = if val_total > 0 {
             (val_correct as f32 / val_total as f32) * 100.0
         } else {
@@ -396,8 +472,8 @@ fn main() -> Result<()> {
         let elapsed = t0.elapsed();
 
         println!(
-            "Epoch {:>2}/{} | Train Loss: {:.4} | Val Loss: {:.4} (Val Color Acc: {:.1}%) | Elapsed: {:.1}s",
-            epoch, epochs, avg_train_loss, avg_val_loss, val_acc, elapsed.as_secs_f32()
+            "Epoch {:>2}/{} | Train Loss: {:.4} | Val Loss: {:.4} (Val Color Acc: {:.1}% | Edge MSE: {:.4}) | Elapsed: {:.1}s",
+            epoch, epochs, avg_train_loss, avg_val_loss, val_acc, avg_val_edge_mse, elapsed.as_secs_f32()
         );
 
         // Save best checkpoint
@@ -427,6 +503,7 @@ fn main() -> Result<()> {
                 adaptive_depth: None,
                 kv_heads: None,
                 is_multimodal: true,
+                has_edge_head: true,
             };
 
             let meta_json = serde_json::to_string_pretty(&meta)?;

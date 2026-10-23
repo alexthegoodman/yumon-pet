@@ -211,7 +211,7 @@ fn main() -> Result<()> {
                 &device,
             );
 
-            let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
+            let (logits, edge_preds) = brain.forward_multimodal_predict(token_tensor, Some(canvas_tensor.clone()));
             let last_pos = 256 + query_tokens.len() - 1;
             let logit_vec: Vec<f32> = logits
                 .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
@@ -219,9 +219,21 @@ fn main() -> Result<()> {
                 .convert::<f32>()
                 .to_vec()
                 .unwrap();
+            let pred_edge: f32 = edge_preds
+                .slice([0..1, last_pos..last_pos + 1, 0..1])
+                .into_data()
+                .convert::<f32>()
+                .to_vec()
+                .map(|v| v.get(0).copied().unwrap_or(0.0))
+                .unwrap_or(0.0);
 
             let color_logits = &logit_vec[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-            let best_color = sample_token(color_logits, args.temperature) as u8;
+            let effective_temp = if pred_edge > 0.3 {
+                args.temperature * (1.0 - 0.5 * pred_edge.min(1.0))
+            } else {
+                args.temperature
+            };
+            let best_color = sample_token(color_logits, effective_temp) as u8;
             let [r, g, b] = palette_to_rgb(best_color);
 
             for py in 0..8 {
@@ -266,7 +278,7 @@ fn main() -> Result<()> {
                     &device,
                 );
 
-                let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
+                let (logits, edge_preds) = brain.forward_multimodal_predict(token_tensor, Some(canvas_tensor.clone()));
                 let last_pos = 256 + query_tokens.len() - 1;
                 let logit_vec: Vec<f32> = logits
                     .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
@@ -274,9 +286,21 @@ fn main() -> Result<()> {
                     .convert::<f32>()
                     .to_vec()
                     .unwrap();
+                let pred_edge: f32 = edge_preds
+                    .slice([0..1, last_pos..last_pos + 1, 0..1])
+                    .into_data()
+                    .convert::<f32>()
+                    .to_vec()
+                    .map(|v| v.get(0).copied().unwrap_or(0.0))
+                    .unwrap_or(0.0);
 
                 let color_logits = &logit_vec[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-                let best_color = sample_token(color_logits, args.temperature) as u8;
+                let effective_temp = if pred_edge > 0.3 {
+                    args.temperature * (1.0 - 0.5 * pred_edge.min(1.0))
+                } else {
+                    args.temperature
+                };
+                let best_color = sample_token(color_logits, effective_temp) as u8;
                 let [r, g, b] = palette_to_rgb(best_color);
 
                 for dy in 0..4 {
@@ -339,7 +363,7 @@ fn main() -> Result<()> {
                 &device,
             );
 
-            let logits = brain.forward_multimodal(token_tensor, Some(canvas_tensor.clone()));
+            let (logits, edge_preds) = brain.forward_multimodal_predict(token_tensor, Some(canvas_tensor.clone()));
             let last_pos = 256 + query_tokens.len() - 1;
             let logit_vec: Vec<f32> = logits
                 .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
@@ -347,9 +371,21 @@ fn main() -> Result<()> {
                 .convert::<f32>()
                 .to_vec()
                 .unwrap();
+            let pred_edge: f32 = edge_preds
+                .slice([0..1, last_pos..last_pos + 1, 0..1])
+                .into_data()
+                .convert::<f32>()
+                .to_vec()
+                .map(|v| v.get(0).copied().unwrap_or(0.0))
+                .unwrap_or(0.0);
 
             let color_logits = &logit_vec[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-            let best_color = sample_token(color_logits, args.temperature) as u8;
+            let effective_temp = if pred_edge > 0.3 {
+                args.temperature * (1.0 - 0.5 * pred_edge.min(1.0))
+            } else {
+                args.temperature
+            };
+            let best_color = sample_token(color_logits, effective_temp) as u8;
             let [r, g, b] = palette_to_rgb(best_color);
 
             let idx = (y as usize * CANVAS_SIZE + x as usize) * 3;

@@ -256,6 +256,8 @@ pub struct YumonMoeBrain<B: Backend> {
     exit_gates: Vec<ExitGate<B>>,
     /// 0 or 1 vision patch encoders for multimodal canvas processing.
     pub vision_encoders: Vec<VisionPatchEncoder<B>>,
+    /// 0 or 1 edge prediction heads for multimodal edge feature supervision.
+    pub edge_heads: Vec<Linear<B>>,
 }
 
 /// Record layout of checkpoints saved before adaptive depth (no `exit_gates`).
@@ -280,6 +282,19 @@ struct LegacyMoeBrainV1<B: Backend> {
     dropout: Dropout,
     token_head: Linear<B>,
     exit_gates: Vec<ExitGate<B>>,
+}
+/// Record layout of checkpoints saved before edge head integration.
+#[derive(Module, Debug)]
+struct LegacyMoeBrainV2<B: Backend> {
+    config: Ignored<YumonMoeBrainConfig>,
+    embedding: Embedding<B>,
+    rope: RotaryEncoding<B>,
+    blocks: Vec<MoeBlock<B>>,
+    norm: RMSNorm<B>,
+    dropout: Dropout,
+    token_head: Linear<B>,
+    exit_gates: Vec<ExitGate<B>>,
+    vision_encoders: Vec<VisionPatchEncoder<B>>,
 }
 
 #[derive(Config, Debug)]
@@ -346,6 +361,13 @@ impl YumonMoeBrainConfig {
         } else {
             Vec::new()
         };
+        let edge_heads = if self.is_multimodal {
+            vec![LinearConfig::new(self.embed_dim, 1)
+                .with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 0.02 })
+                .init(device)]
+        } else {
+            Vec::new()
+        };
         YumonMoeBrain {
             config: Ignored(self.clone()),
             embedding: EmbeddingConfig::new(self.vocab_size, self.embed_dim).init(device),
@@ -381,6 +403,7 @@ impl YumonMoeBrainConfig {
                     .init(device),
             }).collect(),
             vision_encoders,
+            edge_heads,
         }
     }
 }
@@ -517,7 +540,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
 
     /// Forward pass for multimodal input (64x64 canvas image + text tokens).
     pub fn forward_multimodal(&self, tokens: Tensor<B, 2, Int>, canvas: Option<Tensor<B, 4>>) -> Tensor<B, 3> {
-        self.forward_multimodal_with_depth(tokens, canvas).0
+        self.forward_multimodal_with_edges(tokens, canvas).0
     }
 
     /// Multimodal forward pass returning logits, auxiliary loss, counts, and reached depth tiers.
@@ -526,8 +549,33 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         tokens: Tensor<B, 2, Int>,
         canvas: Option<Tensor<B, 4>>,
     ) -> (Tensor<B, 3>, Tensor<B, 1>, Vec<Vec<usize>>, Vec<u8>) {
+        let (logits, _, aux, counts, deepest) = self.forward_multimodal_with_edges(tokens, canvas);
+        (logits, aux, counts, deepest)
+    }
+
+    /// Multimodal inference forward returning color logits and auxiliary edge predictions.
+    pub fn forward_multimodal_predict(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        canvas: Option<Tensor<B, 4>>,
+    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+        let (logits, edges, _, _, _) = self.forward_multimodal_with_edges(tokens, canvas);
+        (logits, edges)
+    }
+
+    /// Multimodal forward pass returning:
+    /// (color_logits [batch, seq, vocab], edge_preds [batch, seq, 1], aux_loss, counts, deepest)
+    pub fn forward_multimodal_with_edges(
+        &self,
+        tokens: Tensor<B, 2, Int>,
+        canvas: Option<Tensor<B, 4>>,
+    ) -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 1>, Vec<Vec<usize>>, Vec<u8>) {
         let Some(canvas) = canvas else {
-            return self.forward_with_depth(tokens);
+            let (logits, aux, counts, deepest) = self.forward_with_depth(tokens);
+            let [batch, seq, _] = logits.dims();
+            let device = logits.device();
+            let edges = Tensor::zeros([batch, seq, 1], &device);
+            return (logits, edges, aux, counts, deepest);
         };
         let encoder = match self.vision_encoders.first() {
             Some(enc) => enc,
@@ -577,8 +625,15 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         let mut counts = Vec::new();
 
         if active_count == 0 {
+            let normed = self.norm.forward(x);
+            let edge_preds = if let Some(eh) = self.edge_heads.first() {
+                sigmoid(eh.forward(normed.clone()))
+            } else {
+                Tensor::zeros([batch, total_seq, 1], &device)
+            };
             return (
-                self.token_head.forward(self.norm.forward(x)),
+                self.token_head.forward(normed),
+                edge_preds,
                 auxiliary,
                 self.blocks.iter().map(|b| vec![0; b.moe.num_experts()]).collect(),
                 deepest,
@@ -648,8 +703,15 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         }
 
         let budget_weight = self.config.adaptive_depth.as_ref().map_or(0.0, |d| d.budget_loss_weight);
+        let normed = self.norm.forward(x);
+        let edge_preds = if let Some(eh) = self.edge_heads.first() {
+            sigmoid(eh.forward(normed.clone()))
+        } else {
+            Tensor::zeros([batch, total_seq, 1], &device)
+        };
         (
-            self.token_head.forward(self.norm.forward(x)),
+            self.token_head.forward(normed),
+            edge_preds,
             auxiliary / self.blocks.len() as f64 + budget * budget_weight,
             counts,
             deepest,
@@ -769,12 +831,21 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         let record = match recorder.load(dir.join("model").into(), device) {
             Ok(record) => record,
             Err(_) => {
-                if let Ok(v1) = recorder.load::<LegacyMoeBrainV1Record<B>>(dir.join("model").into(), device) {
+                if let Ok(v2) = recorder.load::<LegacyMoeBrainV2Record<B>>(dir.join("model").into(), device) {
+                    YumonMoeBrainRecord {
+                        config: v2.config, embedding: v2.embedding, rope: v2.rope,
+                        blocks: v2.blocks, norm: v2.norm, dropout: v2.dropout,
+                        token_head: v2.token_head, exit_gates: v2.exit_gates,
+                        vision_encoders: v2.vision_encoders,
+                        edge_heads: Vec::new(),
+                    }
+                } else if let Ok(v1) = recorder.load::<LegacyMoeBrainV1Record<B>>(dir.join("model").into(), device) {
                     YumonMoeBrainRecord {
                         config: v1.config, embedding: v1.embedding, rope: v1.rope,
                         blocks: v1.blocks, norm: v1.norm, dropout: v1.dropout,
                         token_head: v1.token_head, exit_gates: v1.exit_gates,
                         vision_encoders: Vec::new(),
+                        edge_heads: Vec::new(),
                     }
                 } else if let Ok(legacy) = recorder.load::<LegacyMoeBrainRecord<B>>(dir.join("model").into(), device) {
                     YumonMoeBrainRecord {
@@ -782,6 +853,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                         blocks: legacy.blocks, norm: legacy.norm, dropout: legacy.dropout,
                         token_head: legacy.token_head, exit_gates: Vec::new(),
                         vision_encoders: Vec::new(),
+                        edge_heads: Vec::new(),
                     }
                 } else {
                     anyhow::bail!("failed to load checkpoint from {}", dir.display());
@@ -827,12 +899,21 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         let record = match recorder.load(model_bytes.to_vec(), device) {
             Ok(record) => record,
             Err(_) => {
-                if let Ok(v1) = recorder.load::<LegacyMoeBrainV1Record<B>>(model_bytes.to_vec(), device) {
+                if let Ok(v2) = recorder.load::<LegacyMoeBrainV2Record<B>>(model_bytes.to_vec(), device) {
+                    YumonMoeBrainRecord {
+                        config: v2.config, embedding: v2.embedding, rope: v2.rope,
+                        blocks: v2.blocks, norm: v2.norm, dropout: v2.dropout,
+                        token_head: v2.token_head, exit_gates: v2.exit_gates,
+                        vision_encoders: v2.vision_encoders,
+                        edge_heads: Vec::new(),
+                    }
+                } else if let Ok(v1) = recorder.load::<LegacyMoeBrainV1Record<B>>(model_bytes.to_vec(), device) {
                     YumonMoeBrainRecord {
                         config: v1.config, embedding: v1.embedding, rope: v1.rope,
                         blocks: v1.blocks, norm: v1.norm, dropout: v1.dropout,
                         token_head: v1.token_head, exit_gates: v1.exit_gates,
                         vision_encoders: Vec::new(),
+                        edge_heads: Vec::new(),
                     }
                 } else if let Ok(legacy) = recorder.load::<LegacyMoeBrainRecord<B>>(model_bytes.to_vec(), device) {
                     YumonMoeBrainRecord {
@@ -840,6 +921,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                         blocks: legacy.blocks, norm: legacy.norm, dropout: legacy.dropout,
                         token_head: legacy.token_head, exit_gates: Vec::new(),
                         vision_encoders: Vec::new(),
+                        edge_heads: Vec::new(),
                     }
                 } else {
                     anyhow::bail!("failed to load checkpoint from bytes");
@@ -905,6 +987,9 @@ pub struct MoeMetadata {
     /// Whether this model includes a vision patch encoder for multimodal input.
     #[serde(default)]
     pub is_multimodal: bool,
+    /// Whether this model includes an auxiliary edge head for edge detection.
+    #[serde(default)]
+    pub has_edge_head: bool,
 }
 
 #[cfg(test)]
@@ -1239,6 +1324,7 @@ mod tests {
             final_loss: 1.0,
             val_loss: None,
             is_multimodal: false,
+            has_edge_head: false,
             batch_size: 1,
             training_stage: config.training_stage,
             embed_dim: config.embed_dim,
@@ -1381,7 +1467,7 @@ mod tests {
                 final_loss: 1.0, val_loss: None, batch_size: 1, training_stage: config.training_stage,
                 embed_dim: config.embed_dim, hidden_units: config.hidden_units, n_layers: config.n_layers,
                 attn_heads: config.attn_heads, ff_dim: config.ff_dim, max_seq_len: config.max_seq_len,
-                adaptive_depth: config.adaptive_depth.clone(), kv_heads: config.kv_heads, is_multimodal: false };
+                adaptive_depth: config.adaptive_depth.clone(), kv_heads: config.kv_heads, is_multimodal: false, has_edge_head: false };
             model.save(path.to_str().unwrap(), &tokenizer, &meta).unwrap();
             if !depth {
                 // Rewrite the weights in the pre-adaptive-depth record layout.
@@ -1567,16 +1653,19 @@ mod tests {
             .with_is_multimodal(true);
         let model: YumonMoeBrain<B> = config.init(&device);
         assert_eq!(model.vision_encoders.len(), 1);
+        assert_eq!(model.edge_heads.len(), 1);
 
         let canvas = Tensor::<B, 4>::zeros([1, 3, 64, 64], &device);
         let tokens = Tensor::<B, 2, Int>::from_ints([[1, 2, 3, 4]], &device);
 
-        let (logits, aux_loss, _counts, deepest) = model.forward_multimodal_with_depth(tokens, Some(canvas));
+        let (logits, edge_preds, aux_loss, _counts, deepest) = model.forward_multimodal_with_edges(tokens, Some(canvas));
         assert_eq!(logits.dims(), [1, 260, 32]);
+        assert_eq!(edge_preds.dims(), [1, 260, 1]);
         assert_eq!(deepest.len(), 260);
 
-        let loss = logits.powf_scalar(2.0).mean() + aux_loss;
+        let loss = logits.powf_scalar(2.0).mean() + edge_preds.powf_scalar(2.0).mean() + aux_loss;
         let grads = GradientsParams::from_grads(loss.backward(), &model);
         assert!(grads.get::<Wgpu, 2>(model.token_head.weight.id).is_some());
+        assert!(grads.get::<Wgpu, 2>(model.edge_heads[0].weight.id).is_some());
     }
 }

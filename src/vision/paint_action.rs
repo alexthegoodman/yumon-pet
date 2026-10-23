@@ -162,16 +162,66 @@ pub fn hwc_to_chw_floats(hwc: &[u8]) -> Vec<f32> {
     chw
 }
 
-/// Generate Coarse-to-Fine Multiscale training samples for an image:
+/// Compute 2D Sobel edge gradient magnitude for an HWC [64x64x3] image.
+/// Returns a flat vector of 64*64 f32 values in [0.0, 1.0].
+pub fn compute_sobel_edges(hwc: &[u8]) -> Vec<f32> {
+    assert_eq!(hwc.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
+    let mut lum = [0.0f32; CANVAS_SIZE * CANVAS_SIZE];
+    for y in 0..CANVAS_SIZE {
+        for x in 0..CANVAS_SIZE {
+            let idx = (y * CANVAS_SIZE + x) * 3;
+            // Standard perceptual luminance: 0.299 R + 0.587 G + 0.114 B
+            lum[y * CANVAS_SIZE + x] = (0.299 * hwc[idx] as f32
+                + 0.587 * hwc[idx + 1] as f32
+                + 0.114 * hwc[idx + 2] as f32) / 255.0;
+        }
+    }
+
+    let mut edges = vec![0.0f32; CANVAS_SIZE * CANVAS_SIZE];
+    for y in 0..CANVAS_SIZE {
+        let ym1 = if y == 0 { 0 } else { y - 1 };
+        let yp1 = if y + 1 >= CANVAS_SIZE { CANVAS_SIZE - 1 } else { y + 1 };
+        for x in 0..CANVAS_SIZE {
+            let xm1 = if x == 0 { 0 } else { x - 1 };
+            let xp1 = if x + 1 >= CANVAS_SIZE { CANVAS_SIZE - 1 } else { x + 1 };
+
+            // Sobel X kernel:
+            // -1  0 +1
+            // -2  0 +2
+            // -1  0 +1
+            let gx = (lum[ym1 * CANVAS_SIZE + xp1] + 2.0 * lum[y * CANVAS_SIZE + xp1] + lum[yp1 * CANVAS_SIZE + xp1])
+                   - (lum[ym1 * CANVAS_SIZE + xm1] + 2.0 * lum[y * CANVAS_SIZE + xm1] + lum[yp1 * CANVAS_SIZE + xm1]);
+
+            // Sobel Y kernel:
+            // -1 -2 -1
+            //  0  0  0
+            // +1 +2 +1
+            let gy = (lum[yp1 * CANVAS_SIZE + xm1] + 2.0 * lum[yp1 * CANVAS_SIZE + x] + lum[yp1 * CANVAS_SIZE + xp1])
+                   - (lum[ym1 * CANVAS_SIZE + xm1] + 2.0 * lum[ym1 * CANVAS_SIZE + x] + lum[ym1 * CANVAS_SIZE + xp1]);
+
+            // Normalized gradient magnitude
+            let mag = (gx * gx + gy * gy).sqrt() / 4.0;
+            edges[y * CANVAS_SIZE + x] = mag.clamp(0.0, 1.0);
+        }
+    }
+    edges
+}
+
+/// Generate Coarse-to-Fine Multiscale training samples for an image with
+/// Conv2D edge detection and edge-aware coordinate mining:
 /// - Pass 1: Composition (blank canvas -> 8x8 composition blocks)
 /// - Pass 2: Shapes (8x8 canvas -> 16x16 shape patches)
-/// - Pass 3: Details (16x16 canvas -> 64x64 pixel details)
-/// Returns a list of `(canvas_hwc, action_tokens, is_done)`.
+/// - Pass 3a: Details (16x16 canvas -> native 64x64 pixels, 50% mined edges, 50% interior)
+/// - Pass 3b: Refining (mixed canvas -> unpainted half, 50% mined edges, 50% interior)
+/// Returns a list of `(canvas_hwc, action_tokens, is_done, target_edge)`.
 pub fn generate_multiscale_samples(
     target_hwc: &[u8],
-) -> Vec<(Vec<u8>, Vec<usize>, bool)> {
+) -> Vec<(Vec<u8>, Vec<usize>, bool, f32)> {
     assert_eq!(target_hwc.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
     let mut samples = Vec::new();
+
+    // 0. Compute 2D Sobel edge gradient map on the training target image
+    let edge_map = compute_sobel_edges(target_hwc);
 
     // 1. Compute 8-bit quantized image and multi-level canvases:
     let canvas_blank = vec![240u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
@@ -269,13 +319,23 @@ pub fn generate_multiscale_samples(
         let x = bx * 8 + 4;
         let y = by * 8 + 4;
         let c = comp_colors_8x8[b_idx];
+
+        // Average edge magnitude within this 8x8 block
+        let mut block_edge_sum = 0.0f32;
+        for dy in 0..8 {
+            for dx in 0..8 {
+                block_edge_sum += edge_map[(by * 8 + dy) * CANVAS_SIZE + (bx * 8 + dx)];
+            }
+        }
+        let target_edge = block_edge_sum / 64.0;
+
         let tokens = vec![
             PASS_1_ID,
             ROW_START_ID + y,
             COL_START_ID + x,
             COLOR_START_ID + c as usize,
         ];
-        samples.push((canvas_blank.clone(), tokens, false));
+        samples.push((canvas_blank.clone(), tokens, false, target_edge));
     }
 
     // Pass 2: Shapes samples (Canvas 1 [8x8] -> 16x16 patch colors)
@@ -288,56 +348,122 @@ pub fn generate_multiscale_samples(
         let x = px * 4 + 2;
         let y = py * 4 + 2;
         let c = shape_colors_16x16[p_idx];
+
+        // Average edge magnitude within this 4x4 patch
+        let mut patch_edge_sum = 0.0f32;
+        for dy in 0..4 {
+            for dx in 0..4 {
+                patch_edge_sum += edge_map[(py * 4 + dy) * CANVAS_SIZE + (px * 4 + dx)];
+            }
+        }
+        let target_edge = patch_edge_sum / 16.0;
+
         let tokens = vec![
             PASS_2_ID,
             ROW_START_ID + y,
             COL_START_ID + x,
             COLOR_START_ID + c as usize,
         ];
-        samples.push((canvas_8x8.clone(), tokens, false));
+        samples.push((canvas_8x8.clone(), tokens, false, target_edge));
     }
 
     // Pass 3a: Fine detail samples on shape canvas (Canvas 2 [16x16] -> native 64x64 pixels)
-    // 4 samples per image: distributed across 4 quadrants
+    // 4 samples per image distributed across 4 quadrants.
+    // 50% are actively mined on high-gradient target edges, 50% on area interior pixels.
+    const EDGE_THRESH: f32 = 0.10;
     for i in 0..4 {
         let quad_y = (i % 2) * 32;
         let quad_x = (i / 2) * 32;
-        let y = quad_y + ((i * 17 + seed) % 32);
-        let x = quad_x + ((i * 23 + (seed >> 4)) % 32);
-        let target_idx = (y * CANVAS_SIZE + x) * 3;
+        let want_edge = i % 2 == 0;
+
+        // Find candidate coordinates in this quadrant
+        let mut chosen_x = quad_x + ((i * 23 + (seed >> 4)) % 32);
+        let mut chosen_y = quad_y + ((i * 17 + seed) % 32);
+
+        let mut best_coord = None;
+        let offset = (seed >> (i * 2)) % 32;
+        for dy in 0..32 {
+            for dx in 0..32 {
+                let cy = quad_y + ((dy + offset) % 32);
+                let cx = quad_x + ((dx + offset) % 32);
+                let e = edge_map[cy * CANVAS_SIZE + cx];
+                if (want_edge && e >= EDGE_THRESH) || (!want_edge && e < EDGE_THRESH) {
+                    best_coord = Some((cx, cy));
+                    break;
+                }
+            }
+            if best_coord.is_some() {
+                break;
+            }
+        }
+
+        if let Some((cx, cy)) = best_coord {
+            chosen_x = cx;
+            chosen_y = cy;
+        }
+
+        let target_idx = (chosen_y * CANVAS_SIZE + chosen_x) * 3;
         let c = rgb_to_palette(
             target_hwc[target_idx],
             target_hwc[target_idx + 1],
             target_hwc[target_idx + 2],
         );
+        let target_edge = edge_map[chosen_y * CANVAS_SIZE + chosen_x];
         let tokens = vec![
             PASS_3_ID,
-            ROW_START_ID + y,
-            COL_START_ID + x,
+            ROW_START_ID + chosen_y,
+            COL_START_ID + chosen_x,
             COLOR_START_ID + c as usize,
         ];
-        samples.push((canvas_16x16.clone(), tokens, false));
+        samples.push((canvas_16x16.clone(), tokens, false, target_edge));
     }
 
     // Pass 3b: Fine detail samples on partially painted canvas (Canvas 3 [Mixed] -> native pixels)
     // 4 samples per image: in the unpainted bottom half (y in 32..63)
+    // 50% are actively mined on high-gradient target edges, 50% on interior pixels.
     for i in 0..4 {
-        let y = 32 + ((i * 7 + (seed >> 8)) % 32);
-        let x = ((i * 19 + (seed >> 12)) % CANVAS_SIZE);
-        let target_idx = (y * CANVAS_SIZE + x) * 3;
+        let want_edge = i % 2 == 0;
+        let mut chosen_x = ((i * 19 + (seed >> 12)) % CANVAS_SIZE);
+        let mut chosen_y = 32 + ((i * 7 + (seed >> 8)) % 32);
+
+        let mut best_coord = None;
+        let offset_x = (seed >> (4 + i * 2)) % CANVAS_SIZE;
+        let offset_y = (seed >> (8 + i * 2)) % 32;
+        for dy in 0..32 {
+            for dx in 0..CANVAS_SIZE {
+                let cy = 32 + ((dy + offset_y) % 32);
+                let cx = (dx + offset_x) % CANVAS_SIZE;
+                let e = edge_map[cy * CANVAS_SIZE + cx];
+                if (want_edge && e >= EDGE_THRESH) || (!want_edge && e < EDGE_THRESH) {
+                    best_coord = Some((cx, cy));
+                    break;
+                }
+            }
+            if best_coord.is_some() {
+                break;
+            }
+        }
+
+        if let Some((cx, cy)) = best_coord {
+            chosen_x = cx;
+            chosen_y = cy;
+        }
+
+        let target_idx = (chosen_y * CANVAS_SIZE + chosen_x) * 3;
         let c = rgb_to_palette(
             target_hwc[target_idx],
             target_hwc[target_idx + 1],
             target_hwc[target_idx + 2],
         );
+        let target_edge = edge_map[chosen_y * CANVAS_SIZE + chosen_x];
         let tokens = vec![
             PASS_3_ID,
-            ROW_START_ID + y,
-            COL_START_ID + x,
+            ROW_START_ID + chosen_y,
+            COL_START_ID + chosen_x,
             COLOR_START_ID + c as usize,
         ];
         let is_last = i == 3;
-        samples.push((canvas_mixed.clone(), tokens, is_last));
+        samples.push((canvas_mixed.clone(), tokens, is_last, target_edge));
     }
 
     samples
@@ -525,7 +651,32 @@ mod tests {
         assert_eq!(samples.len(), 12); // 2 + 2 + 4 + 4 = 12 samples
         for s in &samples {
             assert_eq!(s.1.len(), 4); // [pass, row, col, color]
+            assert!(s.3 >= 0.0 && s.3 <= 1.0); // target_edge in [0, 1]
         }
         assert!(samples.last().unwrap().2); // is_done is true for last sample
+    }
+
+    #[test]
+    fn test_sobel_edge_detection() {
+        // Create an image with a high-contrast vertical edge at x = 32
+        let mut img = vec![0u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
+        for y in 0..CANVAS_SIZE {
+            for x in 32..CANVAS_SIZE {
+                let idx = (y * CANVAS_SIZE + x) * 3;
+                img[idx] = 255;
+                img[idx + 1] = 255;
+                img[idx + 2] = 255;
+            }
+        }
+        let edges = compute_sobel_edges(&img);
+        assert_eq!(edges.len(), CANVAS_SIZE * CANVAS_SIZE);
+
+        // Pixels on the vertical boundary (x = 31, 32) should have strong gradient
+        let edge_val = edges[16 * CANVAS_SIZE + 32];
+        assert!(edge_val > 0.4, "expected strong edge at boundary, got {}", edge_val);
+
+        // Flat interior pixels (x = 10, y = 16) should have near-zero gradient
+        let flat_val = edges[16 * CANVAS_SIZE + 10];
+        assert!(flat_val < 0.01, "expected flat region to have 0 gradient, got {}", flat_val);
     }
 }

@@ -1044,6 +1044,7 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             batch_size:      p.batch_size,
             training_stage:  p.stage,
             is_multimodal:   self.config.is_multimodal,
+            has_edge_head:   self.config.is_multimodal,
             embed_dim:       p.run_cfg.embed_dim,
             hidden_units:    p.run_cfg.hidden_units,
             n_layers:        p.run_cfg.n_layers,

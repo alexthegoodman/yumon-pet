@@ -68,16 +68,19 @@ The vocabulary extends the 4,096-token Diffusion Talk art vocabulary (`training-
 
 ---
 
-## 3. The 2D Coordinate-Aware Vision Tokenizer
+## 3. The 2D Coordinate-Aware Vision Tokenizer & Conv2D Stem
 
-Traditional convolutional neural networks downsample images using pooling (`MaxPool2d`, `AdaptiveAvgPool2d`), creating *translation invariance*. That destroys the exact 2D position of edges and pixels.
+Traditional convolutional neural networks downsample images using pooling (`MaxPool2d`, `AdaptiveAvgPool2d`), creating *translation invariance*. That destroys the exact 2D position of edges and pixels. Pure ViT patch projection, on the other hand, breaks edge continuity across patch boundaries.
 
-Yumon uses a **2D Coordinate-Aware Linear Patch Encoder** ([`src/vision/patch_encoder.rs`](file:///D:/projects/common/yumon-pet/src/vision/patch_encoder.rs)):
-1. **Patch Grid**: The $64 \times 64$ canvas is partitioned into a $16 \times 16$ grid of non-overlapping $4 \times 4$ pixel patches ($256$ visual tokens).
-2. **Zero-Pooling Projection**: Each $4 \times 4 \times 3$ patch (48 floating-point values) is projected via a `Conv2d` (kernel size 4, stride 4) directly into `embed_dim` (e.g., 64).
-3. **2D Coordinate Embeddings**: To inform the transformer of where each patch is located on the 2D plane, two learned embedding tables (`row_embed` for $y \in [0..15]$ and `col_embed` for $x \in [0..15]$) are added:
+Yumon uses a **Conv2D-Enhanced 2D Coordinate-Aware Patch Encoder** ([`src/vision/patch_encoder.rs`](file:///D:/projects/common/yumon-pet/src/vision/patch_encoder.rs)):
+1. **Multi-Scale Conv2D Stem**: The $64 \times 64 \times 3$ canvas passes through overlapping $3 \times 3$ convolutions with `PaddingConfig2d::Same` and GELU activation ($3 \to 16 \to 16$ channels). This computes 2D spatial gradients and captures edge continuity across the 8-pixel neighborhood before downsampling.
+2. **Patch Grid Projection**: The feature map is projected into non-overlapping $4 \times 4$ patches ($16 \times 16$ grid, 256 visual tokens) directly into `embed_dim` (e.g., 64).
+3. **2D Spatial Patch Mixer**: A $3 \times 3$ convolution operates across the $16 \times 16$ macro-patch grid with a residual connection:
+   $$\mathbf{P}_{\text{mixed}} = \mathbf{P} + \text{GELU}(\text{Conv2D}_{3\times3}(\mathbf{P}))$$
+   This directly links each patch to its vertical and horizontal neighbors $(r \pm 1, c \pm 1)$, bridging the 1D row-wrap discontinuity and eliminating MoE routing jitter along edges.
+4. **2D Coordinate Embeddings**: Learned embedding tables (`row_embed` for $y \in [0..15]$ and `col_embed` for $x \in [0..15]$) and RMSNorm anchor the visual tokens:
    $$\mathbf{z}_{r, c} = \text{RMSNorm}\left(\mathbf{W}_{\text{patch}} \mathbf{p}_{r, c} + \mathbf{E}_{\text{row}}(r) + \mathbf{E}_{\text{col}}(c)\right)$$
-4. The resulting 256 visual vectors are prepended to the text sequence.
+5. The resulting 256 visual vectors are prepended to the text sequence.
 
 ---
 
@@ -127,15 +130,15 @@ The dataset generator ([`src/bin/cache_diffusion_kilo.rs`](file:///D:/projects/c
 
 3. **Fine Detail Samples (Pass 3a - 4 samples/image, 33.3%)**:
    - Canvas: Pre-rendered $16 \times 16$ shape canvas.
-   - Coordinate: 4 native pixel coordinates spread across the 4 canvas quadrants.
-   - Action: `[PASS_3, ROW_y, COL_x, COLOR_c]`.
+   - Coordinate: 4 native pixel coordinates spread across the 4 canvas quadrants. **50% actively mined on target Conv2D Sobel edges ($E \ge 0.10$), 50% on interior pixels.**
+   - Action: `[PASS_3, ROW_y, COL_x, COLOR_c]`, with target edge magnitude $E_{\text{target}}$.
 
 4. **Refining Samples (Pass 3b - 4 samples/image, 33.3%)**:
    - Canvas: Half-painted mixed canvas (top half finished pixels, bottom half shapes).
-   - Coordinate: 4 pixel coordinates from the unpainted bottom half ($y \ge 32$).
-   - Action: `[PASS_3, ROW_y, COL_x, COLOR_c]`.
+   - Coordinate: 4 pixel coordinates from the unpainted bottom half ($y \ge 32$). **50% actively mined on target Conv2D edges, 50% on interior pixels.**
+   - Action: `[PASS_3, ROW_y, COL_x, COLOR_c]`, with target edge magnitude $E_{\text{target}}$.
 
-This concentrates **66.7% of all training compute on fine native pixel details** while reducing epoch training time from 23 minutes down to ~5.5 minutes.
+This concentrates **66.7% of all training compute on fine native pixel details**, with **half of all detail queries specifically focused on sharp high-contrast boundary transitions** rather than uniform background fill.
 
 ---
 
@@ -163,7 +166,7 @@ Because causal self-attention masks all subsequent positions, token representati
 
 At sequence index:
 $$pos = 256 + 4 + \text{prompt\_len}$$
-The model's linear language head produces a logit vector across `ART_VOCAB_SIZE` ($4,512$). In next-token prediction, the token that immediately follows `<COL_x>` is the target palette color `<COL_c>`.
+The model's linear language head produces a logit vector across `ART_VOCAB_SIZE` ($4,512$), while the auxiliary edge head produces an edge prediction $\hat{E} \in [0.0, 1.0]$. In next-token prediction, the token that immediately follows `<COL_x>` is the target palette color `<COL_c>`.
 
 ---
 
@@ -172,35 +175,49 @@ The model's linear language head produces a logit vector across `ART_VOCAB_SIZE`
 In [`src/bin/train_art_moe.rs`](file:///D:/projects/common/yumon-pet/src/bin/train_art_moe.rs):
 
 ### Direct Coordinate Logit Slicing
-Rather than padding the sequence with `PAD_TOKEN` and masking, the trainer directly slices the logit vector at the $(x, y)$ coordinate position for each item $b$ in the batch:
+Rather than padding the sequence with `PAD_TOKEN` and masking, the trainer directly slices the logit vector and edge prediction at the $(x, y)$ coordinate position for each item $b$ in the batch:
 
 ```rust
 let mut logit_slices = Vec::with_capacity(bs);
+let mut edge_slices = Vec::with_capacity(bs);
 for (b, s) in chunk.iter().enumerate() {
     let pos = 256 + 4 + s.prompt_tokens.len(); // Coordinate Y position
-    let slice = logits.clone().slice([b..b + 1, pos..pos + 1, 0..cfg.vocab_size]);
-    logit_slices.push(slice);
+    logit_slices.push(logits.clone().slice([b..b + 1, pos..pos + 1, 0..cfg.vocab_size]));
+    edge_slices.push(edge_preds.clone().slice([b..b + 1, pos..pos + 1, 0..1]));
 }
 let active_logits = Tensor::cat(logit_slices, 0).reshape([bs, cfg.vocab_size]);
+let active_edges = Tensor::cat(edge_slices, 0).reshape([bs, 1]);
 ```
 
-### Unpadded Cross-Entropy Loss
-The loss is computed directly between `active_logits` ($B \times 4428$) and `target_labels` ($B$):
+### Conv2D Target Edge-Weighted Cross-Entropy Loss
+To prevent the model from collapsing into a smooth average "happy color" across the image, errors along sharp boundaries are scaled proportionally to the target image's Conv2D Sobel edge magnitude:
 
-$$\mathcal{L}_{\text{CE}} = -\frac{1}{B} \sum_{b=1}^B \ln P(\text{target\_color}_b)$$
+$$w_b = 1.0 + 2.0 \cdot E_{\text{target}}(x_b, y_b)$$
 
-$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{CE}} + \mathcal{L}_{\text{aux}}$$
+$$\mathcal{L}_{\text{weighted\_CE}} = -\frac{1}{B} \sum_{b=1}^B w_b \ln P(\text{target\_color}_b)$$
 
+### Auxiliary Target Edge Loss
+An auxiliary linear head on the MoE hidden states is supervised directly against the target image's Conv2D edge map:
+
+$$\mathcal{L}_{\text{edge}} = \frac{1}{B} \sum_{b=1}^B (\hat{E}_b - E_{\text{target}, b})^2$$
+
+$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{weighted\_CE}} + 0.5 \cdot \mathcal{L}_{\text{edge}} + \mathcal{L}_{\text{aux}}$$
+
+- **Visual Feature Association**: Supervised target edge detection forces self-attention heads to map descriptive prompt words to sharp geometric contours.
 - **Zero Gradient Dilution**: The minibatch gradient scale is $\frac{1}{B}$, ensuring 100% full-strength weight updates from AdamW.
-- **MoE Router Balance**: $\mathcal{L}_{\text{aux}}$ regularizes top-$k$ expert load balancing without dominating the color gradients.
-- **Live Validation Metric**: Top-1 exact color match accuracy:
-  $$\text{Color Acc} = \frac{\sum_{b=1}^B \mathbf{1}[\operatorname{argmax}(\mathbf{z}_b) = \mathbf{y}_b]}{B} \times 100\%$$
+- **Live Validation Metrics**:
+  - Color Accuracy: Exact match percentage $\mathbf{1}[\operatorname{argmax}(\mathbf{z}_b) = \mathbf{y}_b]$
+  - Edge MSE: Mean squared error between predicted and target Sobel edge magnitudes.
 
 ---
 
 ## 8. Interactive Studio Inference Loop
 
 When running [`src/bin/yumon_paint.rs`](file:///D:/projects/common/yumon-pet/src/bin/yumon_paint.rs):
+
+At inference time, **no target image is provided by the user**—generation starts from a blank canvas. The model's learned edge head and Conv2D canvas stem drive crisp visual creation:
+1. **Edge-Adaptive Sampling**: The model predicts both the color logits and the expected edge strength $\hat{E}(x, y)$. When $\hat{E} > 0.3$, sampling temperature is automatically sharpened to enforce crisp, high-contrast palette choices along borders instead of fuzzy dithering.
+2. **Progressive Canvas Edge Feedback**: Every glance interval (default: 32 pixels in Pass 3), the updated canvas is re-encoded through the $3 \times 3$ Conv2D stem, giving subsequent pixels crisp spatial grounding from strokes already drawn.
 
 1. **Pass 1 (Composition)**:
    - Loops over $8 \times 8$ block centers (64 queries).
