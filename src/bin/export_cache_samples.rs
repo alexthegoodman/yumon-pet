@@ -32,6 +32,8 @@ pub struct ArtSample {
     pub canvas_hwc: Vec<u8>,
     pub action_tokens: Vec<u32>,
     pub is_done: bool,
+    #[serde(default)]
+    pub target_edge: f32,
 }
 
 #[derive(Parser, Debug)]

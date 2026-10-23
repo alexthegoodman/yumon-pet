@@ -1,4 +1,4 @@
-//! Preprocess DiffusionDb images and JSON manifests into Kilo Talk tokenized
+//! Preprocess art images and JSON manifests into Kilo Talk tokenized
 //! canvas progression training pairs stored in `diffusion_kilo_samples.bin`.
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -53,10 +53,10 @@ struct ManifestItem {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser, Debug)]
-#[command(about = "Convert DiffusionDb manifests and images into Kilo Talk multimodal art training cache")]
+#[command(about = "Convert art manifests and images into Kilo Talk multimodal art training cache")]
 struct Args {
-    /// Directory containing DiffusionDb images and part-*.json manifests.
-    #[arg(long, default_value = "data/DiffusionDb/images-64")]
+    /// Directory containing art images and part-*.json manifests.
+    #[arg(long, default_value = "data/animals_images/images-64")]
     images_dir: PathBuf,
 
     /// Path to Kilo Talk vocabulary JSON file.
@@ -88,7 +88,7 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    println!("=== Yumon Art: DiffusionDb -> Kilo Talk Pixel Stream Preprocessor ===");
+    println!("=== Yumon Art: Art Images -> Kilo Talk Pixel Stream Preprocessor ===");
     println!("Images directory   : {}", args.images_dir.display());
     println!("Vocabulary file    : {}", args.vocab.display());
     println!("Output cache       : {}", args.output.display());

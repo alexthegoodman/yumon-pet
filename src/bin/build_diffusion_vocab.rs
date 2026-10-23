@@ -1,13 +1,13 @@
-//! Build a data-driven 4,096-token Kilo Vocab Model specifically from DiffusionDb art prompts.
+//! Build a data-driven 4,096-token Kilo Vocab Model specifically from art prompts.
 //!
-//! Scans all prompt texts across `data/DiffusionDb/images-64/part-*.json`, learns unigram
-//! frequencies and recurring multi-word collocations (e.g. "digital painting", "concept art",
-//! "octane render", "sharp focus", "volumetric lighting"), ensuring artistic styles, subjects,
+//! Scans all prompt texts across `data/animals_images/images-64/part-*.json` (or DiffusionDb),
+//! learns unigram frequencies and recurring multi-word collocations (e.g. "digital painting",
+//! "concept art", "octane render", "sharp focus"), ensuring artistic styles, subjects,
 //! and descriptors have dedicated canonical tokens rather than collapsing into generic <SLOT_x> tags.
 
 #[cfg(not(target_arch = "wasm32"))]
 use {
-    anyhow::{Context, Result, ensure},
+    anyhow::{Result, ensure},
     clap::Parser,
     serde::Deserialize,
     std::collections::{HashMap, HashSet},
@@ -28,10 +28,10 @@ struct ManifestItem {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser, Debug)]
-#[command(about = "Build a data-driven 4,096-token vocabulary specifically for DiffusionDb art prompts")]
+#[command(about = "Build a data-driven 4,096-token vocabulary specifically for art prompts")]
 struct Args {
-    /// Directory containing DiffusionDb part-*.json manifests
-    #[arg(long, default_value = "data/DiffusionDb/images-64")]
+    /// Directory containing part-*.json manifests
+    #[arg(long, default_value = "data/animals_images/images-64")]
     images_dir: PathBuf,
 
     /// Path to save generated vocabulary JSON
@@ -263,7 +263,7 @@ fn main() -> Result<()> {
     println!("  Allowable clusters:         {} anchors", model.allowable_clusters.len());
 
     // Print top phrases mined
-    let mut top_phrases: Vec<_> = model.learned_vocab.iter().filter(|w| w.contains(' ')).take(15).collect();
+    let top_phrases: Vec<_> = model.learned_vocab.iter().filter(|w| w.contains(' ')).take(15).collect();
     println!("  Top mined art phrases:      {:?}", top_phrases);
 
     // 4. Save to JSON
@@ -274,8 +274,8 @@ fn main() -> Result<()> {
     model.save_to_json(&args.output_vocab)?;
     println!("Successfully saved {}!", args.output_vocab.display());
 
-    // 5. Analytics & Tokenization Previews on real Diffusion prompts
-    println!("\n[4/4] Evaluating tokenization quality on real DiffusionDb prompts...");
+    // 5. Analytics & Tokenization Previews on real prompts
+    println!("\n[4/4] Evaluating tokenization quality on real prompts...");
     for (i, p) in sample_prompts.iter().take(5).enumerate() {
         println!("\n--- Prompt #{} ---", i + 1);
         println!("Raw: \"{}\"", p);
