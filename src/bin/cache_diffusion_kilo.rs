@@ -53,9 +53,9 @@ struct ManifestItem {
 #[derive(Parser, Debug)]
 #[command(about = "Convert art manifests and images into Kilo Talk multimodal art training cache")]
 struct Args {
-    /// Directory containing art images and part-*.json manifests.
-    #[arg(long, default_value = "data/animals_images/images-64")]
-    images_dir: PathBuf,
+    /// Directory or directories containing art images and part-*.json manifests (comma-separated or repeated).
+    #[arg(long = "images-dir", alias = "images-dirs", value_delimiter = ',', num_args = 1..)]
+    images_dir: Vec<PathBuf>,
 
     /// Path to Kilo Talk vocabulary JSON file.
     #[arg(long, default_value = "training-cache/diffusion_talk_vocab.json")]
@@ -89,9 +89,16 @@ struct Args {
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     let args = Args::parse();
+    let images_dirs = if args.images_dir.is_empty() {
+        vec![PathBuf::from("data/animals_images/images-64")]
+    } else {
+        args.images_dir
+    };
 
     println!("=== Yumon Art: Art Images -> Kilo Talk Pixel Stream Preprocessor ===");
-    println!("Images directory   : {}", args.images_dir.display());
+    for dir in &images_dirs {
+        println!("Images directory   : {}", dir.display());
+    }
     println!("Vocabulary file    : {}", args.vocab.display());
     println!("Output cache       : {}", args.output.display());
     if let Some(p) = args.pass {
@@ -106,40 +113,41 @@ fn main() -> Result<()> {
         .with_context(|| format!("loading vocabulary from {}", args.vocab.display()))?;
     println!("Vocabulary loaded (size: {})", vocab.vocab_size);
 
-    // 2. Discover manifest files
-    let mut manifest_files = Vec::new();
-    for entry in std::fs::read_dir(&args.images_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() && path.extension().map_or(false, |ext| ext == "json") {
-            manifest_files.push(path);
+    // 2. Discover manifest files across all specified directories
+    let mut manifest_files: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for dir in &images_dirs {
+        ensure!(dir.exists(), "Images directory not found: {}", dir.display());
+        let mut dir_manifests = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() && path.extension().map_or(false, |ext| ext == "json") {
+                dir_manifests.push((dir.clone(), path));
+            }
         }
+        dir_manifests.sort_by(|a, b| a.1.cmp(&b.1));
+        println!("Found {} manifest JSON files in {}", dir_manifests.len(), dir.display());
+        manifest_files.extend(dir_manifests);
     }
-    manifest_files.sort();
-    println!("Found {} manifest JSON files", manifest_files.len());
+    println!("Total manifest JSON files found: {}", manifest_files.len());
 
     // 3. Collect image items from manifests
     let mut items: Vec<(PathBuf, String)> = Vec::new();
-    for manifest_path in &manifest_files {
+    'collect: for (dir, manifest_path) in &manifest_files {
         let file = File::open(manifest_path)?;
         let reader = BufReader::new(file);
         let manifest: HashMap<String, ManifestItem> = serde_json::from_reader(reader)
             .with_context(|| format!("reading manifest {}", manifest_path.display()))?;
 
         for (filename, item) in manifest {
-            let img_path = args.images_dir.join(&filename);
+            let img_path = dir.join(&filename);
             if img_path.exists() {
                 items.push((img_path, item.p));
             }
             if let Some(limit) = args.limit {
                 if items.len() >= limit {
-                    break;
+                    break 'collect;
                 }
-            }
-        }
-        if let Some(limit) = args.limit {
-            if items.len() >= limit {
-                break;
             }
         }
     }

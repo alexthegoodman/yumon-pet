@@ -30,9 +30,9 @@ struct ManifestItem {
 #[derive(Parser, Debug)]
 #[command(about = "Build a data-driven 4,096-token vocabulary specifically for art prompts")]
 struct Args {
-    /// Directory containing part-*.json manifests
-    #[arg(long, default_value = "data/animals_images/images-64")]
-    images_dir: PathBuf,
+    /// Directory or directories containing part-*.json manifests (comma-separated or repeated).
+    #[arg(long = "images-dir", alias = "images-dirs", value_delimiter = ',', num_args = 1..)]
+    images_dir: Vec<PathBuf>,
 
     /// Path to save generated vocabulary JSON
     #[arg(long, default_value = "training-cache/diffusion_talk_vocab.json")]
@@ -96,39 +96,51 @@ fn extract_words(text: &str) -> Vec<String> {
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     let args = Args::parse();
+    let images_dirs = if args.images_dir.is_empty() {
+        vec![PathBuf::from("data/animals_images/images-64")]
+    } else {
+        args.images_dir
+    };
 
     println!("============================================================");
     println!("=== Building Diffusion Art Vocab Model (4096 tokens)    ===");
     println!("============================================================");
-    println!("Images directory:     {}", args.images_dir.display());
+    for dir in &images_dirs {
+        println!("Images directory:     {}", dir.display());
+    }
     println!("Output vocabulary:    {}", args.output_vocab.display());
     println!("Target vocab size:    {}", args.vocab_size);
     println!("Max phrase tokens:    {}", args.max_phrases);
     println!("Min word freq:        {}", args.min_word_freq);
     println!("Min phrase freq:      {}", args.min_phrase_freq);
 
-    ensure!(
-        args.images_dir.exists(),
-        "Images directory not found: {}",
-        args.images_dir.display()
-    );
-
-    // 1. Scan all manifest files
+    // 1. Scan all manifest files across all directories
     let mut manifest_paths = Vec::new();
-    for entry in std::fs::read_dir(&args.images_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("part-") && name.ends_with(".json") {
-                    manifest_paths.push(path);
+    for dir in &images_dirs {
+        ensure!(
+            dir.exists(),
+            "Images directory not found: {}",
+            dir.display()
+        );
+
+        let mut dir_manifests = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("part-") && name.ends_with(".json") {
+                        dir_manifests.push(path);
+                    }
                 }
             }
         }
+        dir_manifests.sort();
+        println!("Found {} manifest JSON files in {}", dir_manifests.len(), dir.display());
+        manifest_paths.extend(dir_manifests);
     }
-    manifest_paths.sort();
-    println!("Found {} manifest JSON files", manifest_paths.len());
-    ensure!(!manifest_paths.is_empty(), "No part-*.json manifests found in {}", args.images_dir.display());
+    println!("Total manifest JSON files found: {}", manifest_paths.len());
+    ensure!(!manifest_paths.is_empty(), "No part-*.json manifests found in any specified directory");
 
     // 2. Extract prompts and count n-grams
     println!("\n[1/4] Scanning prompts for unigrams, phrases, and N-gram context frames...");

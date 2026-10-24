@@ -230,3 +230,24 @@ vocab_size                                                             │ 4096 
 batch_size                                                             │ 2                                                                      │ Batch size
 
 epochs                                                                 │ 10                                                                     │ Total training epochs
+
+## Yumon Paint
+
+#### Step 1: Build the Combined Vocabulary
+
+   cargo run --release --bin build_diffusion_vocab -- `
+   --images-dir data/animals_images/images-64,data/DiffusionDb/images-64 `
+   --output-vocab training-cache/diffusion_talk_vocab.json
+
+(Takes under 1 second and learns phrases from all 18,626 prompts across both datasets).
+
+#### Step 2: Build the Multi-Dataset Training Cache
+
+You can process all images or pass --limit (e.g. --limit 10000 or omit --limit for all ~18.6k):
+
+   cargo run --release --bin cache_diffusion_kilo -- `
+   --images-dir data/animals_images/images-64,data/DiffusionDb/images-64 `
+   --vocab training-cache/diffusion_talk_vocab.json `
+   --output training-cache/diffusion_kilo_samples.bin
+
+(You can also pass repeated flags if you prefer: --images-dir data/animals_images/images-64 --images-dir data/DiffusionDb/images-64).
