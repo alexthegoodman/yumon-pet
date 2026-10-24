@@ -24,15 +24,14 @@ use {
     },
     yumon_pet::vision::paint_action::{
         ART_VOCAB_SIZE, CANVAS_SIZE, CANVAS_CHANNELS,
-        PASS_1_ID, PASS_2_ID, PASS_3_ID,
+        PASS_1_ID, PASS_2_ID, PASS_3_ID, PASS_4_ID,
         COLOR_START_ID, PALETTE_SIZE,
-        pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image,
+        pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
     },
 };
 
 use chrono::Local;
 use std::fs;
-use std::time::SystemTime;
 
 type BackendType = burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>;
 
@@ -56,9 +55,13 @@ struct Args {
     #[arg(long)]
     checkpoint_pass2: Option<PathBuf>,
 
-    /// Pass 3 checkpoint directory (Fine Pixel Art Details, e.g. checkpoints/yumon-art-pass3).
+    /// Pass 3 checkpoint directory (Anatomy & Features, e.g. checkpoints/yumon-art-pass3).
     #[arg(long)]
     checkpoint_pass3: Option<PathBuf>,
+
+    /// Pass 4 checkpoint directory (Fine Pixel Art Details, e.g. checkpoints/yumon-art-pass4).
+    #[arg(long)]
+    checkpoint_pass4: Option<PathBuf>,
 
     /// Path to Kilo Talk vocabulary.
     #[arg(long, default_value = "training-cache/diffusion_talk_vocab.json")]
@@ -80,12 +83,12 @@ struct Args {
     #[arg(long, default_value_t = 1.0)]
     repeat_penalty: f32,
 
-    /// Optional shape guidance weight from Pass 2 silhouette prior onto Pass 3 (0.0 to disable).
+    /// Optional shape guidance weight from prior silhouette pass (0.0 to disable).
     #[arg(long, default_value_t = 0.5)]
     shape_guidance: f32,
 
-    /// Number of multiscale passes to execute (1 = Composition, 2 = Shapes, 3 = Fine Details).
-    #[arg(long, default_value_t = 3)]
+    /// Number of multiscale passes to execute (1 = Composition, 2 = Shapes, 3 = Features, 4 = Details).
+    #[arg(long, default_value_t = 4)]
     passes: usize,
 
     /// Output artwork PNG file path.
@@ -293,7 +296,19 @@ fn main() -> Result<()> {
             "Pass 3",
             args.checkpoint_pass3.as_ref(),
             args.checkpoint.as_ref(),
-            4608,
+            1536,
+            &device,
+        )?)
+    } else {
+        None
+    };
+
+    let brain_p4 = if args.passes >= 4 {
+        Some(load_or_init_pass_brain(
+            "Pass 4",
+            args.checkpoint_pass4.as_ref(),
+            args.checkpoint.as_ref(),
+            5500,
             &device,
         )?)
     } else {
@@ -438,10 +453,11 @@ fn main() -> Result<()> {
         print_terminal_canvas(&canvas_hwc);
     }
 
-    // PASS 3: Fine Pixel Art Details (64x64 Pixels, 4,096 color tokens)
+    // PASS 3: Anatomy & Features (32x32 Sub-Patches, 1,024 color tokens)
+    let mut pass3_colors = Vec::with_capacity(1024);
     if let Some(brain_p3) = &brain_p3 {
         println!("\n═══════════════════════════════════════════════════════");
-        println!("  🎨 Pass 3 / {}: Fine Pixel Art Details (4,096 Pixels)", args.passes);
+        println!("  🎨 Pass 3 / {}: Anatomy & Features (1,024 Sub-Patches)", args.passes);
         println!("═══════════════════════════════════════════════════════");
         let t_pass3 = Instant::now();
 
@@ -468,14 +484,13 @@ fn main() -> Result<()> {
             .to_vec()
             .unwrap();
 
-        let mut pass3_colors = Vec::with_capacity(4096);
         let mut p3_last_color = None;
         let mut p3_consecutive = 0;
-        for i in 0..4096 {
+        for i in 0..1024 {
             let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-            let y = i / CANVAS_SIZE;
-            let x = i % CANVAS_SIZE;
-            let patch_idx = (y / 4) * 16 + (x / 4);
+            let py = i / 32;
+            let px = i % 32;
+            let patch_idx = (py / 2) * 16 + (px / 2);
 
             let mut working_logits = color_logits.to_vec();
             if args.shape_guidance > 0.0 && patch_idx < pass2_colors.len() {
@@ -513,14 +528,100 @@ fn main() -> Result<()> {
             let step_logits = brain_p3.forward_cached(step_tensor, &mut cache_p3);
             last_logit = step_logits.reshape([ART_VOCAB_SIZE]).into_data().convert::<f32>().to_vec().unwrap();
 
-            if (i + 1) % 512 == 0 || i == 4095 {
-                let y = (i + 1) / CANVAS_SIZE;
-                println!("  [Pass 3 Progress] Pixel {:>4}/4096 (Row {:>2}/64 rendered)...", i + 1, y);
+            if (i + 1) % 256 == 0 || i == 1023 {
+                let y = (i + 1) / 32;
+                println!("  [Pass 3 Progress] Sub-patch {:>4}/1024 (Row {:>2}/32 refined)...", i + 1, y);
             }
         }
 
         canvas_hwc = pass3_tokens_to_image(&pass3_colors);
-        println!("  ✓ Pass 3 Complete ({:.2?}): Full pixel-level shading & highlights applied.", t_pass3.elapsed());
+        println!("  ✓ Pass 3 Complete ({:.2?}): Subject anatomy, features, and contours established.", t_pass3.elapsed());
+        print_terminal_canvas(&canvas_hwc);
+    }
+
+    // PASS 4: Fine Pixel Art Details (64x64 Pixels, 4,096 color tokens)
+    if let Some(brain_p4) = &brain_p4 {
+        println!("\n═══════════════════════════════════════════════════════");
+        println!("  🎨 Pass 4 / {}: Fine Pixel Art Details (4,096 Pixels)", args.passes);
+        println!("═══════════════════════════════════════════════════════");
+        let t_pass4 = Instant::now();
+
+        let mut p4_prefix = vec![BOS_TOKEN as i32];
+        for &tok in &prompt_tokens {
+            p4_prefix.push(tok as i32);
+        }
+        p4_prefix.push(PASS_3_ID as i32);
+        for &tok in &pass3_colors {
+            p4_prefix.push(tok as i32);
+        }
+        p4_prefix.push(PASS_4_ID as i32);
+
+        let mut cache_p4 = brain_p4.new_kv_cache(&device);
+        let prefill_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+            TensorData::new(p4_prefix.clone(), [1, p4_prefix.len()]),
+            &device,
+        );
+        let logits = brain_p4.forward_cached(prefill_tensor, &mut cache_p4);
+        let mut last_logit: Vec<f32> = logits
+            .slice([0..1, p4_prefix.len() - 1..p4_prefix.len(), 0..ART_VOCAB_SIZE])
+            .into_data()
+            .convert::<f32>()
+            .to_vec()
+            .unwrap();
+
+        let mut pass4_colors = Vec::with_capacity(4096);
+        let mut p4_last_color = None;
+        let mut p4_consecutive = 0;
+        for i in 0..4096 {
+            let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
+            let y = i / CANVAS_SIZE;
+            let x = i % CANVAS_SIZE;
+            let sub_patch_idx = (y / 2) * 32 + (x / 2);
+
+            let mut working_logits = color_logits.to_vec();
+            if args.shape_guidance > 0.0 && sub_patch_idx < pass3_colors.len() {
+                let shape_token = pass3_colors[sub_patch_idx];
+                let shape_color = (shape_token as usize).saturating_sub(COLOR_START_ID);
+                if shape_color < PALETTE_SIZE {
+                    working_logits[shape_color] += args.shape_guidance;
+                }
+            }
+
+            let best_palette_idx = sample_color_token(
+                &working_logits,
+                args.temperature,
+                args.top_k,
+                args.top_p,
+                p4_last_color,
+                p4_consecutive,
+                args.repeat_penalty,
+            ) as u8;
+
+            if Some(best_palette_idx as usize) == p4_last_color {
+                p4_consecutive += 1;
+            } else {
+                p4_last_color = Some(best_palette_idx as usize);
+                p4_consecutive = 1;
+            }
+
+            let next_token = (COLOR_START_ID + best_palette_idx as usize) as u32;
+            pass4_colors.push(next_token);
+
+            let step_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+                TensorData::new(vec![next_token as i32], [1, 1]),
+                &device,
+            );
+            let step_logits = brain_p4.forward_cached(step_tensor, &mut cache_p4);
+            last_logit = step_logits.reshape([ART_VOCAB_SIZE]).into_data().convert::<f32>().to_vec().unwrap();
+
+            if (i + 1) % 512 == 0 || i == 4095 {
+                let y = (i + 1) / CANVAS_SIZE;
+                println!("  [Pass 4 Progress] Pixel {:>4}/4096 (Row {:>2}/64 rendered)...", i + 1, y);
+            }
+        }
+
+        canvas_hwc = pass4_tokens_to_image(&pass4_colors);
+        println!("  ✓ Pass 4 Complete ({:.2?}): Full pixel-level shading & highlights applied.", t_pass4.elapsed());
         print_terminal_canvas(&canvas_hwc);
     }
 

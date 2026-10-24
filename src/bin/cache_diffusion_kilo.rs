@@ -69,7 +69,7 @@ struct Args {
     #[arg(long)]
     limit: Option<usize>,
 
-    /// Filter to a specific pass (1, 2, or 3). If omitted, caches all passes.
+    /// Filter to a specific pass (1, 2, 3, or 4). If omitted, caches all passes.
     #[arg(long)]
     pass: Option<usize>,
 
@@ -97,7 +97,7 @@ fn main() -> Result<()> {
     if let Some(p) = args.pass {
         println!("Pass filter        : Pass {}", p);
     } else {
-        println!("Pass filter        : All passes (1, 2, 3)");
+        println!("Pass filter        : All passes (1, 2, 3, 4)");
     }
 
     // 1. Load Kilo Talk vocabulary
@@ -148,7 +148,7 @@ fn main() -> Result<()> {
     ensure!(!items.is_empty(), "No valid image files found in manifest");
 
     if let Some(p) = args.pass {
-        anyhow::ensure!(p >= 1 && p <= 3, "Invalid pass {p}; must be 1, 2, or 3");
+        anyhow::ensure!(p >= 1 && p <= 4, "Invalid pass {p}; must be 1, 2, 3, or 4");
     }
 
     // 4. Process images and generate cascaded sequence training samples

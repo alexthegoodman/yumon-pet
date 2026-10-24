@@ -16,9 +16,10 @@ pub const CANVAS_END_ID: usize   = 4097;
 pub const PAINT_ID: usize        = 4098;
 pub const DONE_ID: usize         = 4099;
 
-pub const PASS_1_ID: usize       = 4100; // Composition (8x8 blocks)
-pub const PASS_2_ID: usize       = 4101; // Shapes & Silhouettes (16x16 patches)
-pub const PASS_3_ID: usize       = 4102; // Fine pixel art details (64x64 pixels)
+pub const PASS_1_ID: usize       = 4100; // Composition (8x8 blocks, 64 tokens)
+pub const PASS_2_ID: usize       = 4101; // Shapes & Silhouettes (16x16 patches, 256 tokens)
+pub const PASS_3_ID: usize       = 4102; // Anatomy & Features (32x32 sub-patches, 1,024 tokens)
+pub const PASS_4_ID: usize       = 4103; // Fine pixel art details (64x64 pixels, 4,096 tokens)
 
 pub const ROW_START_ID: usize    = 4110; // 4110..4173 (64 row coordinates y: 0..63)
 pub const COL_START_ID: usize    = 4174; // 4174..4237 (64 col coordinates x: 0..63)
@@ -673,8 +674,37 @@ pub fn image_to_pass2_tokens(target_hwc: &[u8]) -> Vec<u32> {
     tokens
 }
 
-/// Convert a 64x64x3 RGB image into 4096 Pass 3 palette color tokens (1 pixel per token).
+/// Convert a 64x64x3 RGB image into 1024 Pass 3 palette color tokens (32x32 sub-patches, 2x2 pixels each).
 pub fn image_to_pass3_tokens(target_hwc: &[u8]) -> Vec<u32> {
+    assert_eq!(target_hwc.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
+    let mut tokens = Vec::with_capacity(32 * 32);
+    for py in 0..32 {
+        for px in 0..32 {
+            let mut r_sum = 0usize;
+            let mut g_sum = 0usize;
+            let mut b_sum = 0usize;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let cy = py * 2 + dy;
+                    let cx = px * 2 + dx;
+                    let idx = (cy * CANVAS_SIZE + cx) * 3;
+                    r_sum += target_hwc[idx] as usize;
+                    g_sum += target_hwc[idx + 1] as usize;
+                    b_sum += target_hwc[idx + 2] as usize;
+                }
+            }
+            let r = (r_sum / 4) as u8;
+            let g = (g_sum / 4) as u8;
+            let b = (b_sum / 4) as u8;
+            let c = rgb_to_palette(r, g, b);
+            tokens.push((COLOR_START_ID + c as usize) as u32);
+        }
+    }
+    tokens
+}
+
+/// Convert a 64x64x3 RGB image into 4096 Pass 4 palette color tokens (1 pixel per token).
+pub fn image_to_pass4_tokens(target_hwc: &[u8]) -> Vec<u32> {
     assert_eq!(target_hwc.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
     let mut tokens = Vec::with_capacity(CANVAS_SIZE * CANVAS_SIZE);
     for p in 0..(CANVAS_SIZE * CANVAS_SIZE) {
@@ -729,8 +759,30 @@ pub fn pass2_tokens_to_image(tokens: &[u32]) -> Vec<u8> {
     canvas
 }
 
-/// Reconstruct a 64x64x3 RGB image from 4096 Pass 3 palette color tokens.
+/// Reconstruct a 64x64x3 RGB image from 1024 Pass 3 palette color tokens (32x32 sub-patches, 2x2 pixels each).
 pub fn pass3_tokens_to_image(tokens: &[u32]) -> Vec<u8> {
+    let mut canvas = vec![0u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
+    for (i, &tok) in tokens.iter().take(32 * 32).enumerate() {
+        let c = (tok as usize).saturating_sub(COLOR_START_ID).min(255) as u8;
+        let [r, g, b] = palette_to_rgb(c);
+        let py = i / 32;
+        let px = i % 32;
+        for dy in 0..2 {
+            for dx in 0..2 {
+                let cy = py * 2 + dy;
+                let cx = px * 2 + dx;
+                let idx = (cy * CANVAS_SIZE + cx) * 3;
+                canvas[idx] = r;
+                canvas[idx + 1] = g;
+                canvas[idx + 2] = b;
+            }
+        }
+    }
+    canvas
+}
+
+/// Reconstruct a 64x64x3 RGB image from 4096 Pass 4 palette color tokens.
+pub fn pass4_tokens_to_image(tokens: &[u32]) -> Vec<u8> {
     let mut canvas = vec![0u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
     for (i, &tok) in tokens.iter().take(CANVAS_SIZE * CANVAS_SIZE).enumerate() {
         let c = (tok as usize).saturating_sub(COLOR_START_ID).min(255) as u8;
@@ -743,7 +795,7 @@ pub fn pass3_tokens_to_image(tokens: &[u32]) -> Vec<u8> {
     canvas
 }
 
-/// Generate cascaded autoregressive sequence samples for an image.
+/// Generate cascaded autoregressive sequence samples for an image across 4 dyadic passes.
 /// Returns a list of `(pass: u8, tokens: Vec<u32>, target_start: usize)`.
 pub fn generate_cascaded_sequence_samples(
     prompt_tokens: &[u32],
@@ -752,10 +804,11 @@ pub fn generate_cascaded_sequence_samples(
     let pass1_colors = image_to_pass1_tokens(target_hwc);
     let pass2_colors = image_to_pass2_tokens(target_hwc);
     let pass3_colors = image_to_pass3_tokens(target_hwc);
+    let pass4_colors = image_to_pass4_tokens(target_hwc);
 
-    let mut samples = Vec::with_capacity(3);
+    let mut samples = Vec::with_capacity(4);
 
-    // Pass 1: [BOS, prompt..., PASS_1_ID, c_0..c_63, DONE_ID]
+    // Pass 1 (8x8 blocks): [BOS, prompt..., PASS_1_ID, c_0..c_63, DONE_ID]
     let mut p1_tokens = vec![1u32]; // BOS_TOKEN
     p1_tokens.extend_from_slice(prompt_tokens);
     p1_tokens.push(PASS_1_ID as u32);
@@ -764,7 +817,7 @@ pub fn generate_cascaded_sequence_samples(
     p1_tokens.push(DONE_ID as u32);
     samples.push((1, p1_tokens, p1_target_start));
 
-    // Pass 2: [BOS, prompt..., PASS_1_ID, c_0..c_63, PASS_2_ID, s_0..s_255, DONE_ID]
+    // Pass 2 (16x16 patches): [BOS, prompt..., PASS_1_ID, c_0..c_63, PASS_2_ID, s_0..s_255, DONE_ID]
     let mut p2_tokens = vec![1u32]; // BOS_TOKEN
     p2_tokens.extend_from_slice(prompt_tokens);
     p2_tokens.push(PASS_1_ID as u32);
@@ -775,7 +828,7 @@ pub fn generate_cascaded_sequence_samples(
     p2_tokens.push(DONE_ID as u32);
     samples.push((2, p2_tokens, p2_target_start));
 
-    // Pass 3: [BOS, prompt..., PASS_2_ID, s_0..s_255, PASS_3_ID, p_0..p_4095, DONE_ID]
+    // Pass 3 (32x32 sub-patches): [BOS, prompt..., PASS_2_ID, s_0..s_255, PASS_3_ID, m_0..m_1023, DONE_ID]
     let mut p3_tokens = vec![1u32]; // BOS_TOKEN
     p3_tokens.extend_from_slice(prompt_tokens);
     p3_tokens.push(PASS_2_ID as u32);
@@ -785,6 +838,17 @@ pub fn generate_cascaded_sequence_samples(
     p3_tokens.extend(&pass3_colors);
     p3_tokens.push(DONE_ID as u32);
     samples.push((3, p3_tokens, p3_target_start));
+
+    // Pass 4 (64x64 pixels): [BOS, prompt..., PASS_3_ID, m_0..m_1023, PASS_4_ID, p_0..p_4095, DONE_ID]
+    let mut p4_tokens = vec![1u32]; // BOS_TOKEN
+    p4_tokens.extend_from_slice(prompt_tokens);
+    p4_tokens.push(PASS_3_ID as u32);
+    p4_tokens.extend(&pass3_colors);
+    p4_tokens.push(PASS_4_ID as u32);
+    let p4_target_start = p4_tokens.len();
+    p4_tokens.extend(&pass4_colors);
+    p4_tokens.push(DONE_ID as u32);
+    samples.push((4, p4_tokens, p4_target_start));
 
     samples
 }
@@ -866,18 +930,25 @@ mod tests {
         assert_eq!(img2.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
 
         let p3 = image_to_pass3_tokens(&dummy);
-        assert_eq!(p3.len(), 4096);
+        assert_eq!(p3.len(), 1024);
         let img3 = pass3_tokens_to_image(&p3);
         assert_eq!(img3.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
 
+        let p4 = image_to_pass4_tokens(&dummy);
+        assert_eq!(p4.len(), 4096);
+        let img4 = pass4_tokens_to_image(&p4);
+        assert_eq!(img4.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
+
         let samples = generate_cascaded_sequence_samples(&[10, 20, 30], &dummy);
-        assert_eq!(samples.len(), 3);
+        assert_eq!(samples.len(), 4);
         assert_eq!(samples[0].0, 1);
         assert_eq!(samples[0].1.len(), 1 + 3 + 1 + 64 + 1);
         assert_eq!(samples[1].0, 2);
         assert_eq!(samples[1].1.len(), 1 + 3 + 1 + 64 + 1 + 256 + 1);
         assert_eq!(samples[2].0, 3);
-        assert_eq!(samples[2].1.len(), 1 + 3 + 1 + 256 + 1 + 4096 + 1);
+        assert_eq!(samples[2].1.len(), 1 + 3 + 1 + 256 + 1 + 1024 + 1);
+        assert_eq!(samples[3].0, 4);
+        assert_eq!(samples[3].1.len(), 1 + 3 + 1 + 1024 + 1 + 4096 + 1);
     }
 
 }

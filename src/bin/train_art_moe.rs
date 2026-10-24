@@ -100,7 +100,7 @@ struct Args {
     #[arg(long)]
     out_dir: Option<PathBuf>,
 
-    /// Override target pass (1, 2, or 3).
+    /// Override target pass (1, 2, 3, or 4).
     #[arg(long)]
     pass: Option<usize>,
 }
@@ -181,7 +181,7 @@ fn main() -> Result<()> {
 
     // Filter by pass if specified
     if let Some(p) = target_pass {
-        anyhow::ensure!(p >= 1 && p <= 3, "Invalid pass {p}; must be 1, 2, or 3");
+        anyhow::ensure!(p >= 1 && p <= 4, "Invalid pass {p}; must be 1, 2, 3, or 4");
         all_samples.retain(|s| s.pass == p as u8);
         println!("Filtered to Pass {} samples: {}", p, all_samples.len());
         ensure!(!all_samples.is_empty(), "No samples found for Pass {}", p);
@@ -435,9 +435,9 @@ fn main() -> Result<()> {
             let meta_json = serde_json::to_string_pretty(&meta)?;
             std::fs::write(out_dir.join("metadata.json"), meta_json)?;
 
-            let tok_src = Path::new("training-cache/kilo_talk_tokenizer/tokenizer.json");
-            if tok_src.exists() {
-                let _ = std::fs::copy(tok_src, out_dir.join("tokenizer.json"));
+            let vocab_path = Path::new(&cfg.vocab_file);
+            if let Ok(vocab) = yumon_pet::brain::kilo_vocab::KiloVocab::load_from_json(vocab_path) {
+                let _ = vocab.save_tokenizer_json(&out_dir);
             }
 
             let recorder = burn::record::BinFileRecorder::<burn::record::FullPrecisionSettings>::new();

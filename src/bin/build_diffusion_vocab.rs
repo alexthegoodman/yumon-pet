@@ -274,6 +274,10 @@ fn main() -> Result<()> {
     model.save_to_json(&args.output_vocab)?;
     println!("Successfully saved {}!", args.output_vocab.display());
 
+    let tokenizer_dir = args.output_vocab.parent().unwrap_or(std::path::Path::new(".")).join("diffusion_tokenizer");
+    model.save_tokenizer_json(&tokenizer_dir)?;
+    println!("Successfully saved matching tokenizer.json at {}!", tokenizer_dir.display());
+
     // 5. Analytics & Tokenization Previews on real prompts
     println!("\n[4/4] Evaluating tokenization quality on real prompts...");
     for (i, p) in sample_prompts.iter().take(5).enumerate() {
