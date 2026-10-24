@@ -30,6 +30,10 @@ use {
     },
 };
 
+use chrono::Local;
+use std::fs;
+use std::time::SystemTime;
+
 type BackendType = burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -64,6 +68,22 @@ struct Args {
     #[arg(long, default_value_t = 0.7)]
     temperature: f32,
 
+    /// Top-K sampling filter (0 to disable, e.g. 12).
+    #[arg(long, default_value_t = 12)]
+    top_k: usize,
+
+    /// Top-P (nucleus) sampling filter (1.0 to disable, e.g. 0.90).
+    #[arg(long, default_value_t = 0.90)]
+    top_p: f32,
+
+    /// Repetition penalty applied to runs of identical consecutive colors (0.0 to disable).
+    #[arg(long, default_value_t = 1.0)]
+    repeat_penalty: f32,
+
+    /// Optional shape guidance weight from Pass 2 silhouette prior onto Pass 3 (0.0 to disable).
+    #[arg(long, default_value_t = 0.5)]
+    shape_guidance: f32,
+
     /// Number of multiscale passes to execute (1 = Composition, 2 = Shapes, 3 = Fine Details).
     #[arg(long, default_value_t = 3)]
     passes: usize,
@@ -97,31 +117,89 @@ fn upscale_nn(src: &[u8], width: usize, height: usize, scale: usize) -> Vec<u8> 
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn sample_token(logits: &[f32], temperature: f32) -> usize {
+fn sample_color_token(
+    logits: &[f32],
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    last_color: Option<usize>,
+    consecutive_repeats: usize,
+    repeat_penalty: f32,
+) -> usize {
+    let mut working_logits = logits.to_vec();
+
+    // Consecutive repetition penalty:
+    // If the exact same color has been emitted 4+ times consecutively in a raster row,
+    // apply a penalty to break out of runaway absorbing loops.
+    if let Some(c) = last_color {
+        if consecutive_repeats >= 4 && c < working_logits.len() && repeat_penalty > 0.0 {
+            let penalty = (consecutive_repeats as f32 - 3.0) * repeat_penalty;
+            working_logits[c] -= penalty;
+        }
+    }
+
     if temperature <= 0.001 {
-        logits
+        return working_logits
             .iter()
             .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, _)| i)
-            .unwrap_or(0)
-    } else {
-        let max_val = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let exp_vals: Vec<f32> = logits.iter().map(|&l| ((l - max_val) / temperature).exp()).collect();
-        let sum: f32 = exp_vals.iter().sum();
-        if sum <= 0.0 {
-            return 0;
-        }
-        let threshold = rand::random::<f32>() * sum;
-        let mut acc = 0.0;
-        for (i, &val) in exp_vals.iter().enumerate() {
-            acc += val;
-            if acc >= threshold {
-                return i;
+            .unwrap_or(0);
+    }
+
+    // Sort candidates descending by logit
+    let mut candidates: Vec<(usize, f32)> = working_logits.iter().cloned().enumerate().collect();
+    candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Top-K truncation
+    if top_k > 0 && top_k < candidates.len() {
+        candidates.truncate(top_k);
+    }
+
+    // Softmax with temperature
+    let max_logit = candidates[0].1;
+    let mut exp_probs: Vec<(usize, f32)> = candidates
+        .into_iter()
+        .map(|(idx, l)| (idx, ((l - max_logit) / temperature).exp()))
+        .collect();
+    let sum_exp: f32 = exp_probs.iter().map(|(_, p)| p).sum();
+    if sum_exp <= 0.0 {
+        return exp_probs.first().map(|(idx, _)| *idx).unwrap_or(0);
+    }
+    for (_, p) in &mut exp_probs {
+        *p /= sum_exp;
+    }
+
+    // Top-P (Nucleus) truncation
+    if top_p > 0.0 && top_p < 1.0 {
+        let mut cum_p = 0.0;
+        let mut cut = exp_probs.len();
+        for (i, &(_, p)) in exp_probs.iter().enumerate() {
+            cum_p += p;
+            if cum_p >= top_p {
+                cut = (i + 1).max(1);
+                break;
             }
         }
-        exp_vals.len() - 1
+        exp_probs.truncate(cut);
+        let renorm_sum: f32 = exp_probs.iter().map(|(_, p)| p).sum();
+        if renorm_sum > 0.0 {
+            for (_, p) in &mut exp_probs {
+                *p /= renorm_sum;
+            }
+        }
     }
+
+    // Stochastic sample from remaining candidates
+    let r = rand::random::<f32>();
+    let mut acc = 0.0;
+    for &(idx, p) in &exp_probs {
+        acc += p;
+        if acc >= r {
+            return idx;
+        }
+    }
+    exp_probs.last().map(|&(idx, _)| idx).unwrap_or(0)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -256,9 +334,25 @@ fn main() -> Result<()> {
         .unwrap();
 
     let mut pass1_colors = Vec::with_capacity(64);
+    let mut p1_last_color = None;
+    let mut p1_consecutive = 0;
     for _ in 0..64 {
         let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-        let best_palette_idx = sample_token(color_logits, args.temperature) as u8;
+        let best_palette_idx = sample_color_token(
+            color_logits,
+            args.temperature,
+            args.top_k,
+            args.top_p,
+            p1_last_color,
+            p1_consecutive,
+            args.repeat_penalty,
+        ) as u8;
+        if Some(best_palette_idx as usize) == p1_last_color {
+            p1_consecutive += 1;
+        } else {
+            p1_last_color = Some(best_palette_idx as usize);
+            p1_consecutive = 1;
+        }
         let next_token = (COLOR_START_ID + best_palette_idx as usize) as u32;
         pass1_colors.push(next_token);
 
@@ -305,9 +399,25 @@ fn main() -> Result<()> {
             .to_vec()
             .unwrap();
 
+        let mut p2_last_color = None;
+        let mut p2_consecutive = 0;
         for i in 0..256 {
             let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-            let best_palette_idx = sample_token(color_logits, args.temperature) as u8;
+            let best_palette_idx = sample_color_token(
+                color_logits,
+                args.temperature,
+                args.top_k,
+                args.top_p,
+                p2_last_color,
+                p2_consecutive,
+                args.repeat_penalty,
+            ) as u8;
+            if Some(best_palette_idx as usize) == p2_last_color {
+                p2_consecutive += 1;
+            } else {
+                p2_last_color = Some(best_palette_idx as usize);
+                p2_consecutive = 1;
+            }
             let next_token = (COLOR_START_ID + best_palette_idx as usize) as u32;
             pass2_colors.push(next_token);
 
@@ -359,9 +469,40 @@ fn main() -> Result<()> {
             .unwrap();
 
         let mut pass3_colors = Vec::with_capacity(4096);
+        let mut p3_last_color = None;
+        let mut p3_consecutive = 0;
         for i in 0..4096 {
             let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-            let best_palette_idx = sample_token(color_logits, args.temperature) as u8;
+            let y = i / CANVAS_SIZE;
+            let x = i % CANVAS_SIZE;
+            let patch_idx = (y / 4) * 16 + (x / 4);
+
+            let mut working_logits = color_logits.to_vec();
+            if args.shape_guidance > 0.0 && patch_idx < pass2_colors.len() {
+                let shape_token = pass2_colors[patch_idx];
+                let shape_color = (shape_token as usize).saturating_sub(COLOR_START_ID);
+                if shape_color < PALETTE_SIZE {
+                    working_logits[shape_color] += args.shape_guidance;
+                }
+            }
+
+            let best_palette_idx = sample_color_token(
+                &working_logits,
+                args.temperature,
+                args.top_k,
+                args.top_p,
+                p3_last_color,
+                p3_consecutive,
+                args.repeat_penalty,
+            ) as u8;
+
+            if Some(best_palette_idx as usize) == p3_last_color {
+                p3_consecutive += 1;
+            } else {
+                p3_last_color = Some(best_palette_idx as usize);
+                p3_consecutive = 1;
+            }
+
             let next_token = (COLOR_START_ID + best_palette_idx as usize) as u32;
             pass3_colors.push(next_token);
 
@@ -383,31 +524,91 @@ fn main() -> Result<()> {
         print_terminal_canvas(&canvas_hwc);
     }
 
+    // println!("\n  ✨ Yumon steps back, smiles, and says: \"Done! Artwork complete.\"");
+
+    // // Save final raw 64x64 PNG
+    // let raw_output = if let Some(ext) = args.output.extension() {
+    //     let stem = args.output.file_stem().unwrap().to_string_lossy();
+    //     args.output.with_file_name(format!("{}_64.{}", stem, ext.to_string_lossy()))
+    // } else {
+    //     PathBuf::from("yumon_artwork_64.png")
+    // };
+
+    // let raw_buf = image::RgbImage::from_raw(
+    //     CANVAS_SIZE as u32,
+    //     CANVAS_SIZE as u32,
+    //     canvas_hwc.clone(),
+    // ).context("creating raw 64x64 ImageBuffer")?;
+    // raw_buf.save(&raw_output)?;
+
+    // // Save upscaled PNG (e.g. 256x256)
+    // let upscaled_bytes = upscale_nn(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE, args.scale);
+    // let upscaled_buf = image::RgbImage::from_raw(
+    //     (CANVAS_SIZE * args.scale) as u32,
+    //     (CANVAS_SIZE * args.scale) as u32,
+    //     upscaled_bytes,
+    // ).context("creating upscaled ImageBuffer")?;
+    // upscaled_buf.save(&args.output)?;
+
     println!("\n  ✨ Yumon steps back, smiles, and says: \"Done! Artwork complete.\"");
 
-    // Save final raw 64x64 PNG
-    let raw_output = if let Some(ext) = args.output.extension() {
-        let stem = args.output.file_stem().unwrap().to_string_lossy();
-        args.output.with_file_name(format!("{}_64.{}", stem, ext.to_string_lossy()))
-    } else {
-        PathBuf::from("yumon_artwork_64.png")
-    };
+    // Get local date and hour.
+    let now = Local::now();
+
+    let day_dir = now.format("%Y-%m-%d").to_string();
+    let hour_dir = now.format("%H").to_string();
+    let timestamp = now.format("%Y-%m-%d_%H-%M-%S").to_string();
+
+    // Build inference-cache/YYYY-MM-DD/HH/
+    let cache_dir = PathBuf::from("inference-cache")
+        .join(&day_dir)
+        .join(&hour_dir);
+
+    fs::create_dir_all(&cache_dir)
+        .context("creating inference-cache directory")?;
+
+    // Use the requested output filename as the base.
+    let stem = args.output
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+
+    // Save raw 64x64 PNG.
+    let raw_output = cache_dir.join(format!(
+        "{}_64_{}.png",
+        stem, timestamp
+    ));
 
     let raw_buf = image::RgbImage::from_raw(
         CANVAS_SIZE as u32,
         CANVAS_SIZE as u32,
         canvas_hwc.clone(),
-    ).context("creating raw 64x64 ImageBuffer")?;
+    )
+    .context("creating raw 64x64 ImageBuffer")?;
+
     raw_buf.save(&raw_output)?;
 
-    // Save upscaled PNG (e.g. 256x256)
-    let upscaled_bytes = upscale_nn(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE, args.scale);
+    // Save upscaled PNG.
+    let upscaled_output = cache_dir.join(format!(
+        "{}_{}.png",
+        stem, timestamp
+    ));
+
+    let upscaled_bytes = upscale_nn(
+        &canvas_hwc,
+        CANVAS_SIZE,
+        CANVAS_SIZE,
+        args.scale,
+    );
+
     let upscaled_buf = image::RgbImage::from_raw(
         (CANVAS_SIZE * args.scale) as u32,
         (CANVAS_SIZE * args.scale) as u32,
         upscaled_bytes,
-    ).context("creating upscaled ImageBuffer")?;
-    upscaled_buf.save(&args.output)?;
+    )
+    .context("creating upscaled ImageBuffer")?;
+
+    upscaled_buf.save(&upscaled_output)?;
 
     println!("\n🎨 Artwork saved successfully:");
     println!("   - Upscaled ({}x{}): {}", CANVAS_SIZE * args.scale, CANVAS_SIZE * args.scale, args.output.display());
