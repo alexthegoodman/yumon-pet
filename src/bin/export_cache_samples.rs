@@ -12,7 +12,7 @@ use std::{
     path::PathBuf,
 };
 use yumon_pet::vision::paint_action::{
-    CANVAS_SIZE, pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image,
+    CANVAS_SIZE, pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
 };
 
 #[derive(Deserialize, Debug)]
@@ -150,7 +150,9 @@ fn main() -> Result<()> {
         let preview_canvas = match sample.pass {
             1 => pass1_tokens_to_image(target_colors),
             2 => pass2_tokens_to_image(target_colors),
-            _ => pass3_tokens_to_image(target_colors),
+            3 => pass3_tokens_to_image(target_colors),
+            4 => pass4_tokens_to_image(target_colors),
+            _ => pass4_tokens_to_image(target_colors),
         };
 
         // Save raw 64x64 PNG
@@ -173,7 +175,9 @@ fn main() -> Result<()> {
         let pass_name = match sample.pass {
             1 => "Pass 1 (8x8 Composition)",
             2 => "Pass 2 (16x16 Shapes)",
-            _ => "Pass 3 (64x64 Pixel Art)",
+            3 => "Pass 3 (32x32 Features)",
+            4 => "Pass 4 (64x64 Pixel Art)",
+            _ => "Unknown Pass",
         };
         let action_desc = format!("{} • {} tokens", pass_name, target_colors.len());
         let swatch_html = format!("<span class=\"action-tag\">{}</span>", pass_name);
@@ -331,7 +335,7 @@ fn main() -> Result<()> {
 <body>
   <header>
     <h1>🎨 Yumon Art Multimodal Cache: Sample Inspection</h1>
-    <p class="subtitle">Inspecting {} progressive canvas states and corresponding DiffusionDb prompts from <code>{}</code></p>
+    <p class="subtitle">Inspecting {} progressive canvas states and corresponding prompts from <code>{}</code></p>
   </header>
   <div class="grid">
 {}
