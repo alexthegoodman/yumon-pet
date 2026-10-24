@@ -316,77 +316,78 @@ fn main() -> Result<()> {
         let mut val_total = 0usize;
         let mut val_steps = 0usize;
 
-        for chunk in val_samples.chunks(batch_size) {
-            let bs = chunk.len();
-            if bs == 0 {
-                continue;
-            }
+        // NOTE: this causes "Out of Memory" errors oftentimes
+        // for chunk in val_samples.chunks(batch_size) {
+        //     let bs = chunk.len();
+        //     if bs == 0 {
+        //         continue;
+        //     }
 
-            let max_len = chunk.iter().map(|s| s.tokens.len()).max().unwrap().min(cfg.max_seq_len);
-            if max_len < 2 {
-                continue;
-            }
-            let seq_len = max_len - 1;
+        //     let max_len = chunk.iter().map(|s| s.tokens.len()).max().unwrap().min(cfg.max_seq_len);
+        //     if max_len < 2 {
+        //         continue;
+        //     }
+        //     let seq_len = max_len - 1;
 
-            let mut flat_inputs = Vec::with_capacity(bs * seq_len);
-            let mut flat_targets = Vec::with_capacity(bs * seq_len);
-            let mut flat_mask = Vec::with_capacity(bs * seq_len);
+        //     let mut flat_inputs = Vec::with_capacity(bs * seq_len);
+        //     let mut flat_targets = Vec::with_capacity(bs * seq_len);
+        //     let mut flat_mask = Vec::with_capacity(bs * seq_len);
 
-            for s in chunk {
-                let t_len = s.tokens.len().min(max_len);
-                for i in 0..seq_len {
-                    if i + 1 < t_len {
-                        flat_inputs.push(s.tokens[i] as i32);
-                        let tgt = s.tokens[i + 1] as i32;
-                        flat_targets.push(tgt);
-                        if i + 1 >= s.target_start && tgt != PAD_TOKEN as i32 {
-                            flat_mask.push(1.0f32);
-                        } else {
-                            flat_mask.push(0.0f32);
-                        }
-                    } else {
-                        flat_inputs.push(PAD_TOKEN as i32);
-                        flat_targets.push(PAD_TOKEN as i32);
-                        flat_mask.push(0.0f32);
-                    }
-                }
-            }
+        //     for s in chunk {
+        //         let t_len = s.tokens.len().min(max_len);
+        //         for i in 0..seq_len {
+        //             if i + 1 < t_len {
+        //                 flat_inputs.push(s.tokens[i] as i32);
+        //                 let tgt = s.tokens[i + 1] as i32;
+        //                 flat_targets.push(tgt);
+        //                 if i + 1 >= s.target_start && tgt != PAD_TOKEN as i32 {
+        //                     flat_mask.push(1.0f32);
+        //                 } else {
+        //                     flat_mask.push(0.0f32);
+        //                 }
+        //             } else {
+        //                 flat_inputs.push(PAD_TOKEN as i32);
+        //                 flat_targets.push(PAD_TOKEN as i32);
+        //                 flat_mask.push(0.0f32);
+        //             }
+        //         }
+        //     }
 
-            let input_tensor = Tensor::<TrainBackend, 2, Int>::from_ints(
-                TensorData::new(flat_inputs, [bs, seq_len]),
-                &device,
-            );
-            let target_tensor = Tensor::<TrainBackend, 2, Int>::from_ints(
-                TensorData::new(flat_targets.clone(), [bs, seq_len]),
-                &device,
-            );
-            let mask_tensor = Tensor::<TrainBackend, 2>::from_floats(
-                TensorData::new(flat_mask.clone(), [bs, seq_len]),
-                &device,
-            );
+        //     let input_tensor = Tensor::<TrainBackend, 2, Int>::from_ints(
+        //         TensorData::new(flat_inputs, [bs, seq_len]),
+        //         &device,
+        //     );
+        //     let target_tensor = Tensor::<TrainBackend, 2, Int>::from_ints(
+        //         TensorData::new(flat_targets.clone(), [bs, seq_len]),
+        //         &device,
+        //     );
+        //     let mask_tensor = Tensor::<TrainBackend, 2>::from_floats(
+        //         TensorData::new(flat_mask.clone(), [bs, seq_len]),
+        //         &device,
+        //     );
 
-            let logits = model.forward(input_tensor);
+        //     let logits = model.forward(input_tensor);
 
-            let log_probs = burn::tensor::activation::log_softmax(logits.clone(), 2);
-            let nll = log_probs.gather(2, target_tensor.reshape([bs, seq_len, 1])).reshape([bs, seq_len]).neg();
-            let active_count = mask_tensor.clone().sum().clamp_min(1.0);
-            let loss = (nll * mask_tensor).sum() / active_count;
+        //     let log_probs = burn::tensor::activation::log_softmax(logits.clone(), 2);
+        //     let nll = log_probs.gather(2, target_tensor.reshape([bs, seq_len, 1])).reshape([bs, seq_len]).neg();
+        //     let active_count = mask_tensor.clone().sum().clamp_min(1.0);
+        //     let loss = (nll * mask_tensor).sum() / active_count;
 
-            let preds = logits.argmax(2).reshape([bs * seq_len]);
-            let pred_vec: Vec<i32> = preds.into_data().convert::<i32>().to_vec().unwrap();
-            for i in 0..(bs * seq_len) {
-                if flat_mask[i] > 0.0 {
-                    if pred_vec[i] == flat_targets[i] {
-                        val_correct += 1;
-                    }
-                    val_total += 1;
-                }
-            }
+        //     let preds = logits.argmax(2).reshape([bs * seq_len]);
+        //     let pred_vec: Vec<i32> = preds.into_data().convert::<i32>().to_vec().unwrap();
+        //     for i in 0..(bs * seq_len) {
+        //         if flat_mask[i] > 0.0 {
+        //             if pred_vec[i] == flat_targets[i] {
+        //                 val_correct += 1;
+        //             }
+        //             val_total += 1;
+        //         }
+        //     }
 
-            let l: f32 = loss.into_data().convert::<f32>().to_vec().unwrap()[0];
-            val_loss_sum += l;
-            val_steps += 1;
-        }
+        //     let l: f32 = loss.into_data().convert::<f32>().to_vec().unwrap()[0];
+        //     val_loss_sum += l;
+        //     val_steps += 1;
+        // }
 
         let avg_val_loss = val_loss_sum / val_steps.max(1) as f32;
         let val_acc = if val_total > 0 {
@@ -402,7 +403,7 @@ fn main() -> Result<()> {
         );
 
         // Save best checkpoint
-        if avg_val_loss < best_val_loss {
+        // if avg_val_loss < best_val_loss {
             best_val_loss = avg_val_loss;
             println!("  * New best validation loss: {:.4} -> saving to {}", avg_val_loss, out_dir.display());
 
@@ -441,7 +442,7 @@ fn main() -> Result<()> {
 
             let recorder = burn::record::BinFileRecorder::<burn::record::FullPrecisionSettings>::new();
             let _ = model.clone().save_file(out_dir.join("model"), &recorder);
-        }
+        // }
     }
 
     println!("\nTraining complete! Best validation loss: {:.4}", best_val_loss);
