@@ -17,6 +17,5 @@
   "last_lr": 0.00003,
   "validation_fraction": 0.02,
   "out_dir": "checkpoints/yumon-art-pass1",
-  "pass": 1,
-  "is_multimodal": false
+  "pass": 1
 }

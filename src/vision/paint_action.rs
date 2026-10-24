@@ -614,6 +614,181 @@ pub fn generate_painting_trajectory(target_hwc: &[u8], steps: usize) -> Vec<(Vec
     trajectory
 }
 
+
+/// Convert a 64x64x3 RGB image into 64 Pass 1 palette color tokens (8x8 blocks).
+pub fn image_to_pass1_tokens(target_hwc: &[u8]) -> Vec<u32> {
+    assert_eq!(target_hwc.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
+    let mut tokens = Vec::with_capacity(64);
+    for by in 0..8 {
+        for bx in 0..8 {
+            let mut r_sum = 0usize;
+            let mut g_sum = 0usize;
+            let mut b_sum = 0usize;
+            for dy in 0..8 {
+                for dx in 0..8 {
+                    let cy = by * 8 + dy;
+                    let cx = bx * 8 + dx;
+                    let idx = (cy * CANVAS_SIZE + cx) * 3;
+                    r_sum += target_hwc[idx] as usize;
+                    g_sum += target_hwc[idx + 1] as usize;
+                    b_sum += target_hwc[idx + 2] as usize;
+                }
+            }
+            let r = (r_sum / 64) as u8;
+            let g = (g_sum / 64) as u8;
+            let b = (b_sum / 64) as u8;
+            let c = rgb_to_palette(r, g, b);
+            tokens.push((COLOR_START_ID + c as usize) as u32);
+        }
+    }
+    tokens
+}
+
+/// Convert a 64x64x3 RGB image into 256 Pass 2 palette color tokens (16x16 patches, 4x4 pixels each).
+pub fn image_to_pass2_tokens(target_hwc: &[u8]) -> Vec<u32> {
+    assert_eq!(target_hwc.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
+    let mut tokens = Vec::with_capacity(256);
+    for py in 0..16 {
+        for px in 0..16 {
+            let mut r_sum = 0usize;
+            let mut g_sum = 0usize;
+            let mut b_sum = 0usize;
+            for dy in 0..4 {
+                for dx in 0..4 {
+                    let cy = py * 4 + dy;
+                    let cx = px * 4 + dx;
+                    let idx = (cy * CANVAS_SIZE + cx) * 3;
+                    r_sum += target_hwc[idx] as usize;
+                    g_sum += target_hwc[idx + 1] as usize;
+                    b_sum += target_hwc[idx + 2] as usize;
+                }
+            }
+            let r = (r_sum / 16) as u8;
+            let g = (g_sum / 16) as u8;
+            let b = (b_sum / 16) as u8;
+            let c = rgb_to_palette(r, g, b);
+            tokens.push((COLOR_START_ID + c as usize) as u32);
+        }
+    }
+    tokens
+}
+
+/// Convert a 64x64x3 RGB image into 4096 Pass 3 palette color tokens (1 pixel per token).
+pub fn image_to_pass3_tokens(target_hwc: &[u8]) -> Vec<u32> {
+    assert_eq!(target_hwc.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
+    let mut tokens = Vec::with_capacity(CANVAS_SIZE * CANVAS_SIZE);
+    for p in 0..(CANVAS_SIZE * CANVAS_SIZE) {
+        let idx = p * 3;
+        let c = rgb_to_palette(target_hwc[idx], target_hwc[idx + 1], target_hwc[idx + 2]);
+        tokens.push((COLOR_START_ID + c as usize) as u32);
+    }
+    tokens
+}
+
+/// Reconstruct a 64x64x3 RGB image from 64 Pass 1 palette color tokens.
+pub fn pass1_tokens_to_image(tokens: &[u32]) -> Vec<u8> {
+    let mut canvas = vec![0u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
+    for (i, &tok) in tokens.iter().take(64).enumerate() {
+        let c = (tok as usize).saturating_sub(COLOR_START_ID).min(255) as u8;
+        let [r, g, b] = palette_to_rgb(c);
+        let by = i / 8;
+        let bx = i % 8;
+        for dy in 0..8 {
+            for dx in 0..8 {
+                let cy = by * 8 + dy;
+                let cx = bx * 8 + dx;
+                let idx = (cy * CANVAS_SIZE + cx) * 3;
+                canvas[idx] = r;
+                canvas[idx + 1] = g;
+                canvas[idx + 2] = b;
+            }
+        }
+    }
+    canvas
+}
+
+/// Reconstruct a 64x64x3 RGB image from 256 Pass 2 palette color tokens.
+pub fn pass2_tokens_to_image(tokens: &[u32]) -> Vec<u8> {
+    let mut canvas = vec![0u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
+    for (i, &tok) in tokens.iter().take(256).enumerate() {
+        let c = (tok as usize).saturating_sub(COLOR_START_ID).min(255) as u8;
+        let [r, g, b] = palette_to_rgb(c);
+        let py = i / 16;
+        let px = i % 16;
+        for dy in 0..4 {
+            for dx in 0..4 {
+                let cy = py * 4 + dy;
+                let cx = px * 4 + dx;
+                let idx = (cy * CANVAS_SIZE + cx) * 3;
+                canvas[idx] = r;
+                canvas[idx + 1] = g;
+                canvas[idx + 2] = b;
+            }
+        }
+    }
+    canvas
+}
+
+/// Reconstruct a 64x64x3 RGB image from 4096 Pass 3 palette color tokens.
+pub fn pass3_tokens_to_image(tokens: &[u32]) -> Vec<u8> {
+    let mut canvas = vec![0u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
+    for (i, &tok) in tokens.iter().take(CANVAS_SIZE * CANVAS_SIZE).enumerate() {
+        let c = (tok as usize).saturating_sub(COLOR_START_ID).min(255) as u8;
+        let [r, g, b] = palette_to_rgb(c);
+        let idx = i * 3;
+        canvas[idx] = r;
+        canvas[idx + 1] = g;
+        canvas[idx + 2] = b;
+    }
+    canvas
+}
+
+/// Generate cascaded autoregressive sequence samples for an image.
+/// Returns a list of `(pass: u8, tokens: Vec<u32>, target_start: usize)`.
+pub fn generate_cascaded_sequence_samples(
+    prompt_tokens: &[u32],
+    target_hwc: &[u8],
+) -> Vec<(u8, Vec<u32>, usize)> {
+    let pass1_colors = image_to_pass1_tokens(target_hwc);
+    let pass2_colors = image_to_pass2_tokens(target_hwc);
+    let pass3_colors = image_to_pass3_tokens(target_hwc);
+
+    let mut samples = Vec::with_capacity(3);
+
+    // Pass 1: [BOS, prompt..., PASS_1_ID, c_0..c_63, DONE_ID]
+    let mut p1_tokens = vec![1u32]; // BOS_TOKEN
+    p1_tokens.extend_from_slice(prompt_tokens);
+    p1_tokens.push(PASS_1_ID as u32);
+    let p1_target_start = p1_tokens.len();
+    p1_tokens.extend(&pass1_colors);
+    p1_tokens.push(DONE_ID as u32);
+    samples.push((1, p1_tokens, p1_target_start));
+
+    // Pass 2: [BOS, prompt..., PASS_1_ID, c_0..c_63, PASS_2_ID, s_0..s_255, DONE_ID]
+    let mut p2_tokens = vec![1u32]; // BOS_TOKEN
+    p2_tokens.extend_from_slice(prompt_tokens);
+    p2_tokens.push(PASS_1_ID as u32);
+    p2_tokens.extend(&pass1_colors);
+    p2_tokens.push(PASS_2_ID as u32);
+    let p2_target_start = p2_tokens.len();
+    p2_tokens.extend(&pass2_colors);
+    p2_tokens.push(DONE_ID as u32);
+    samples.push((2, p2_tokens, p2_target_start));
+
+    // Pass 3: [BOS, prompt..., PASS_2_ID, s_0..s_255, PASS_3_ID, p_0..p_4095, DONE_ID]
+    let mut p3_tokens = vec![1u32]; // BOS_TOKEN
+    p3_tokens.extend_from_slice(prompt_tokens);
+    p3_tokens.push(PASS_2_ID as u32);
+    p3_tokens.extend(&pass2_colors);
+    p3_tokens.push(PASS_3_ID as u32);
+    let p3_target_start = p3_tokens.len();
+    p3_tokens.extend(&pass3_colors);
+    p3_tokens.push(DONE_ID as u32);
+    samples.push((3, p3_tokens, p3_target_start));
+
+    samples
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -676,4 +851,33 @@ mod tests {
         let flat_val = edges[16 * CANVAS_SIZE + 10];
         assert!(flat_val < 0.01, "expected flat region to have 0 gradient, got {}", flat_val);
     }
+
+    #[test]
+    fn test_cascaded_sequence_token_roundtrip() {
+        let dummy = vec![128u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
+        let p1 = image_to_pass1_tokens(&dummy);
+        assert_eq!(p1.len(), 64);
+        let img1 = pass1_tokens_to_image(&p1);
+        assert_eq!(img1.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
+
+        let p2 = image_to_pass2_tokens(&dummy);
+        assert_eq!(p2.len(), 256);
+        let img2 = pass2_tokens_to_image(&p2);
+        assert_eq!(img2.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
+
+        let p3 = image_to_pass3_tokens(&dummy);
+        assert_eq!(p3.len(), 4096);
+        let img3 = pass3_tokens_to_image(&p3);
+        assert_eq!(img3.len(), CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS);
+
+        let samples = generate_cascaded_sequence_samples(&[10, 20, 30], &dummy);
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples[0].0, 1);
+        assert_eq!(samples[0].1.len(), 1 + 3 + 1 + 64 + 1);
+        assert_eq!(samples[1].0, 2);
+        assert_eq!(samples[1].1.len(), 1 + 3 + 1 + 64 + 1 + 256 + 1);
+        assert_eq!(samples[2].0, 3);
+        assert_eq!(samples[2].1.len(), 1 + 3 + 1 + 256 + 1 + 4096 + 1);
+    }
+
 }

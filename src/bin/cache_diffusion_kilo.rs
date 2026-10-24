@@ -19,13 +19,12 @@ use {
         yumon_talk::TranslationContext,
     },
     yumon_pet::vision::paint_action::{
-        ART_VOCAB_SIZE, CANVAS_SIZE, generate_multiscale_samples,
-        PASS_1_ID, PASS_2_ID, PASS_3_ID,
+        ART_VOCAB_SIZE, CANVAS_SIZE, generate_cascaded_sequence_samples,
     },
 };
 
 pub const ART_CACHE_MAGIC: &[u8; 8] = b"YUMONART";
-pub const ART_CACHE_VERSION: u32 = 2;
+pub const ART_CACHE_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ArtCacheMetadata {
@@ -40,11 +39,9 @@ pub struct ArtCacheMetadata {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ArtSample {
     pub prompt_text: String,
-    pub prompt_tokens: Vec<u32>,
-    pub canvas_hwc: Vec<u8>,
-    pub action_tokens: Vec<u32>,
-    pub is_done: bool,
-    pub target_edge: f32,
+    pub pass: u8,
+    pub tokens: Vec<u32>,
+    pub target_start: usize,
 }
 
 #[derive(Deserialize, Debug)]
@@ -150,15 +147,11 @@ fn main() -> Result<()> {
     println!("Total images to process: {}", items.len());
     ensure!(!items.is_empty(), "No valid image files found in manifest");
 
-    let target_pass_tag = match args.pass {
-        Some(1) => Some(PASS_1_ID),
-        Some(2) => Some(PASS_2_ID),
-        Some(3) => Some(PASS_3_ID),
-        Some(p) => anyhow::bail!("Invalid pass {p}; must be 1, 2, or 3"),
-        None => None,
-    };
+    if let Some(p) = args.pass {
+        anyhow::ensure!(p >= 1 && p <= 3, "Invalid pass {p}; must be 1, 2, or 3");
+    }
 
-    // 4. Process images and generate multiscale painting samples
+    // 4. Process images and generate cascaded sequence training samples
     let pb = ProgressBar::new(items.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -191,25 +184,22 @@ fn main() -> Result<()> {
                 Err(_) => return Vec::new(),
             };
 
-            // Generate coarse-to-fine multiscale training samples
-            let multiscale_samples = generate_multiscale_samples(&raw_hwc);
+            // Generate cascaded sequence training samples
+            let seq_samples = generate_cascaded_sequence_samples(&prompt_toks, &raw_hwc);
 
-            let mut out = Vec::with_capacity(multiscale_samples.len());
-            for (canvas_hwc, tokens, is_done, target_edge) in multiscale_samples {
-                if let Some(target_tag) = target_pass_tag {
-                    if tokens.is_empty() || tokens[0] != target_tag {
+            let mut out = Vec::with_capacity(seq_samples.len());
+            for (pass, tokens, target_start) in seq_samples {
+                if let Some(target_p) = args.pass {
+                    if pass != target_p as u8 {
                         continue;
                     }
                 }
-                let action_tokens = tokens.into_iter().map(|t| t as u32).collect();
 
                 out.push(ArtSample {
                     prompt_text: prompt_text.clone(),
-                    prompt_tokens: prompt_toks.clone(),
-                    canvas_hwc,
-                    action_tokens,
-                    is_done,
-                    target_edge,
+                    pass,
+                    tokens,
+                    target_start,
                 });
             }
 
@@ -258,11 +248,11 @@ fn main() -> Result<()> {
     println!("\n--- Previews ({} samples) ---", args.previews.min(samples.len()));
     for (i, s) in samples.iter().take(args.previews).enumerate() {
         println!("Sample #{}", i + 1);
-        println!("  Prompt : {}", s.prompt_text);
-        println!("  Tokens : {:?}", s.prompt_tokens);
-        println!("  Pixel tokens count: {}", s.action_tokens.len());
-        println!("  Target edge: {:.4}", s.target_edge);
-        println!("  Done   : {}", s.is_done);
+        println!("  Pass         : Pass {}", s.pass);
+        println!("  Prompt       : {}", s.prompt_text);
+        println!("  Total tokens : {}", s.tokens.len());
+        println!("  Target start : {}", s.target_start);
+        println!("  Target count : {}", s.tokens.len() - s.target_start);
     }
 
     Ok(())

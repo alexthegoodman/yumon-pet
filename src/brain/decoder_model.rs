@@ -164,20 +164,20 @@ pub(super) type KvSlot<B> = Option<(Tensor<B, 4>, Tensor<B, 4>)>;
 
 /// Keys and values of every token decoded so far, per layer. Generation feeds
 /// the prompt once, then one token per step, instead of rerunning the prefix.
-pub(crate) struct KvCache<B: Backend> {
+pub struct KvCache<B: Backend> {
     layers: Vec<KvSlot<B>>,
     len: usize,
     rope: RopeTables<B>,
 }
 impl<B: Backend> KvCache<B> {
-    pub(crate) fn new(layers: usize, max_seq_len: usize, head_dim: usize, device: &B::Device) -> Self {
+    pub fn new(layers: usize, max_seq_len: usize, head_dim: usize, device: &B::Device) -> Self {
         Self { layers: (0..layers).map(|_| None).collect(), len: 0, rope: RopeTables::new(max_seq_len, head_dim, device) }
     }
     /// RoPE for the next `len` positions.
     pub(super) fn next_rope(&self, len: usize) -> RopeTables<B> { self.rope.slice(self.len, len) }
     pub(super) fn layer(&mut self, layer: usize) -> &mut KvSlot<B> { &mut self.layers[layer] }
     pub(super) fn advance(&mut self, len: usize) { self.len += len; }
-    pub(crate) fn len(&self) -> usize { self.len }
+    pub fn len(&self) -> usize { self.len }
 }
 
 /// Grouped-query attention: each KV head serves `groups` consecutive query heads,

@@ -883,11 +883,21 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         }).collect();
         tokens.iter().map(|&t| if tokens[0] > 0.0 { t / tokens[0] } else { 0.0 }).collect()
     }
+    /// Create a new key-value cache for autoregressive generation.
+    pub fn new_kv_cache(&self, device: &B::Device) -> KvCache<B> {
+        KvCache::new(
+            self.blocks.len(),
+            self.config.max_seq_len,
+            self.config.embed_dim / self.config.attn_heads,
+            device,
+        )
+    }
+
     /// Logits [1, t, vocab] for `t` new tokens after those already in `cache`;
     /// matches `forward` over the whole sequence. Exit gates decide per position
     /// as in training: exited rows skip deeper attention and experts but still
     /// add their frozen keys/values to every deeper layer's cache.
-    pub(crate) fn forward_cached(&self, tokens: Tensor<B, 2, Int>, cache: &mut KvCache<B>) -> Tensor<B, 3> {
+    pub fn forward_cached(&self, tokens: Tensor<B, 2, Int>, cache: &mut KvCache<B>) -> Tensor<B, 3> {
         let [batch, t] = tokens.dims();
         assert!(batch == 1 && t > 0 && cache.len() + t <= self.config.max_seq_len);
         let device = tokens.device();

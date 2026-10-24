@@ -1,7 +1,10 @@
 //! Interactive Studio: Watch Yumon create art on a 64x64 canvas.
 //!
-//! Yumon views the canvas, decides which pixels/strokes to paint,
-//! updates the canvas, and loops until satisfied.
+//! Uses cascaded autoregressive causal Transformers with Flash Attention
+//! and KV-caching across 3 coarse-to-fine stages:
+//! - Pass 1: Global composition (64 8x8 block color tokens)
+//! - Pass 2: Shapes & Silhouettes (256 4x4 patch color tokens)
+//! - Pass 3: Fine pixel art details (4,096 1x1 pixel color tokens)
 
 #[cfg(not(target_arch = "wasm32"))]
 use {
@@ -20,10 +23,10 @@ use {
         yumon_talk::TranslationContext,
     },
     yumon_pet::vision::paint_action::{
-        ART_VOCAB_SIZE, CANVAS_CHANNELS, CANVAS_SIZE, CANVAS_START_ID,
+        ART_VOCAB_SIZE, CANVAS_SIZE, CANVAS_CHANNELS,
         PASS_1_ID, PASS_2_ID, PASS_3_ID,
-        ROW_START_ID, COL_START_ID, COLOR_START_ID, PALETTE_SIZE,
-        hwc_to_chw_floats, palette_to_rgb,
+        COLOR_START_ID, PALETTE_SIZE,
+        pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image,
     },
 };
 
@@ -64,10 +67,6 @@ struct Args {
     /// Number of multiscale passes to execute (1 = Composition, 2 = Shapes, 3 = Fine Details).
     #[arg(long, default_value_t = 3)]
     passes: usize,
-
-    /// How often Yumon re-glances at the visual canvas during Pass 3 (every N pixels).
-    #[arg(long, default_value_t = 32)]
-    glance_interval: usize,
 
     /// Output artwork PNG file path.
     #[arg(long, default_value = "yumon_artwork.png")]
@@ -127,7 +126,6 @@ fn sample_token(logits: &[f32], temperature: f32) -> usize {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn print_terminal_canvas(canvas: &[u8]) {
-    // Print a compact 32x16 ANSI-colored terminal preview
     println!("\n  ┌────────────────────────────────┐");
     for y in (0..CANVAS_SIZE).step_by(4) {
         print!("  │");
@@ -136,7 +134,6 @@ fn print_terminal_canvas(canvas: &[u8]) {
             let r = canvas[idx];
             let g = canvas[idx + 1];
             let b = canvas[idx + 2];
-            // 24-bit ANSI truecolor block
             print!("\x1b[38;2;{};{};{}m█\x1b[0m", r, g, b);
         }
         println!("│");
@@ -149,7 +146,7 @@ fn load_or_init_pass_brain(
     pass_name: &str,
     pass_ckpt: Option<&PathBuf>,
     fallback_ckpt: Option<&PathBuf>,
-    is_multimodal_default: bool,
+    max_seq_len: usize,
     device: &<BackendType as Backend>::Device,
 ) -> Result<YumonMoeBrain<BackendType>> {
     let target = pass_ckpt.or(fallback_ckpt);
@@ -165,10 +162,10 @@ fn load_or_init_pass_brain(
             .with_n_layers(4)
             .with_attn_heads(4)
             .with_ff_dim(256)
-            .with_max_seq_len(512)
+            .with_max_seq_len(max_seq_len)
             .with_num_experts(4)
             .with_top_k(1)
-            .with_is_multimodal(is_multimodal_default);
+            .with_is_multimodal(false);
         Ok(cfg.init(device))
     }
 }
@@ -179,7 +176,7 @@ fn main() -> Result<()> {
     let device: <BackendType as Backend>::Device = Default::default();
 
     println!("╔═══════════════════════════════════════════════════════╗");
-    println!("║       🎨 Yumon Art Studio: Cascaded Vision MoE        ║");
+    println!("║   🎨 Yumon Art Studio: Autoregressive Image LM        ║");
     println!("╚═══════════════════════════════════════════════════════╝");
     println!("Prompt: \"{}\"\n", args.prompt);
 
@@ -192,12 +189,12 @@ fn main() -> Result<()> {
     let prompt_tokens = vocab.encode(&args.prompt, &mut ctx)?;
     println!("Kilo Talk tokens ({}): {:?}", prompt_tokens.len(), prompt_tokens);
 
-    // 3. Initialize / Load Multimodal MoE Brains for Cascaded Passes
+    // 3. Initialize / Load Causal MoE Brains for Cascaded Passes
     let brain_p1 = load_or_init_pass_brain(
         "Pass 1",
         args.checkpoint_pass1.as_ref(),
         args.checkpoint.as_ref(),
-        false, // default Pass 1 to pure text-to-image (not multimodal)
+        128,
         &device,
     )?;
 
@@ -206,7 +203,7 @@ fn main() -> Result<()> {
             "Pass 2",
             args.checkpoint_pass2.as_ref(),
             args.checkpoint.as_ref(),
-            true, // Pass 2 is multimodal
+            512,
             &device,
         )?)
     } else {
@@ -218,263 +215,172 @@ fn main() -> Result<()> {
             "Pass 3",
             args.checkpoint_pass3.as_ref(),
             args.checkpoint.as_ref(),
-            true, // Pass 3 is multimodal
+            4608,
             &device,
         )?)
     } else {
         None
     };
 
-    // 4. Initialize Canvas
+    // 4. Initialize Blank Canvas
     let mut canvas_hwc = vec![240u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
     println!("\n🖼  Initial Canvas State (Blank):");
     print_terminal_canvas(&canvas_hwc);
 
-    // 5. The Cascaded Art Creation Loop
-    println!("\n🎨 Yumon is picking up the stylus to paint the 64x64 canvas across {} passes...\n", args.passes);
+    // 5. The Cascaded Art Generation Loop
+    println!("\n🎨 Yumon is generating the artwork across {} cascaded passes...\n", args.passes);
 
-    let mut canvas_tensor = Tensor::<BackendType, 4>::from_floats(
-        TensorData::new(hwc_to_chw_floats(&canvas_hwc), [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
-        &device,
-    );
-
-    let mut prefix_tokens = vec![BOS_TOKEN as i32];
-    for &tok in &prompt_tokens {
-        prefix_tokens.push(tok as i32);
-    }
-    prefix_tokens.push(CANVAS_START_ID as i32);
-
-    // PASS 1: Broad Composition (8x8 Blocks, 64 queries)
+    // PASS 1: Broad Composition (8x8 Blocks, 64 color tokens)
     println!("\n═══════════════════════════════════════════════════════");
-    println!("  🎨 Pass 1 / {}: Broad Composition (8x8 Blocks)", args.passes);
+    println!("  🎨 Pass 1 / {}: Broad Composition (64 Blocks)", args.passes);
     println!("═══════════════════════════════════════════════════════");
     let t_pass1 = Instant::now();
-    let p1_multimodal = brain_p1.config.is_multimodal;
-    let p1_vis_offset = if p1_multimodal { 256 } else { 0 };
 
-    for by in 0..8 {
-        for bx in 0..8 {
-            let x = (bx * 8 + 4) as u8;
-            let y = (by * 8 + 4) as u8;
-
-            let mut query_tokens = prefix_tokens.clone();
-            query_tokens.push(PASS_1_ID as i32);
-            query_tokens.push((ROW_START_ID + y as usize) as i32);
-            query_tokens.push((COL_START_ID + x as usize) as i32);
-
-            let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-                TensorData::new(query_tokens.clone(), [1, query_tokens.len()]),
-                &device,
-            );
-
-            let canvas_arg = if p1_multimodal {
-                Some(canvas_tensor.clone())
-            } else {
-                None
-            };
-            let (logits, edge_preds) = brain_p1.forward_multimodal_predict(token_tensor, canvas_arg);
-            let last_pos = p1_vis_offset + query_tokens.len() - 1;
-            let logit_vec: Vec<f32> = logits
-                .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
-                .into_data()
-                .convert::<f32>()
-                .to_vec()
-                .unwrap();
-            let pred_edge: f32 = edge_preds
-                .slice([0..1, last_pos..last_pos + 1, 0..1])
-                .into_data()
-                .convert::<f32>()
-                .to_vec()
-                .map(|v| v.get(0).copied().unwrap_or(0.0))
-                .unwrap_or(0.0);
-
-            let color_logits = &logit_vec[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-            let effective_temp = if pred_edge > 0.3 {
-                args.temperature * (1.0 - 0.5 * pred_edge.min(1.0))
-            } else {
-                args.temperature
-            };
-            let best_color = sample_token(color_logits, effective_temp) as u8;
-            let [r, g, b] = palette_to_rgb(best_color);
-
-            for py in 0..8 {
-                for px in 0..8 {
-                    let cy = by * 8 + py;
-                    let cx = bx * 8 + px;
-                    let idx = (cy * CANVAS_SIZE + cx) * 3;
-                    canvas_hwc[idx] = r;
-                    canvas_hwc[idx + 1] = g;
-                    canvas_hwc[idx + 2] = b;
-                }
-            }
-        }
+    let mut p1_prefix = vec![BOS_TOKEN as i32];
+    for &tok in &prompt_tokens {
+        p1_prefix.push(tok as i32);
     }
+    p1_prefix.push(PASS_1_ID as i32);
 
-    canvas_tensor = Tensor::<BackendType, 4>::from_floats(
-        TensorData::new(hwc_to_chw_floats(&canvas_hwc), [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
+    let mut cache_p1 = brain_p1.new_kv_cache(&device);
+    let prefill_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+        TensorData::new(p1_prefix.clone(), [1, p1_prefix.len()]),
         &device,
     );
+    let logits = brain_p1.forward_cached(prefill_tensor, &mut cache_p1);
+    let mut last_logit: Vec<f32> = logits
+        .slice([0..1, p1_prefix.len() - 1..p1_prefix.len(), 0..ART_VOCAB_SIZE])
+        .into_data()
+        .convert::<f32>()
+        .to_vec()
+        .unwrap();
+
+    let mut pass1_colors = Vec::with_capacity(64);
+    for _ in 0..64 {
+        let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
+        let best_palette_idx = sample_token(color_logits, args.temperature) as u8;
+        let next_token = (COLOR_START_ID + best_palette_idx as usize) as u32;
+        pass1_colors.push(next_token);
+
+        let step_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+            TensorData::new(vec![next_token as i32], [1, 1]),
+            &device,
+        );
+        let step_logits = brain_p1.forward_cached(step_tensor, &mut cache_p1);
+        last_logit = step_logits.reshape([ART_VOCAB_SIZE]).into_data().convert::<f32>().to_vec().unwrap();
+    }
+
+    canvas_hwc = pass1_tokens_to_image(&pass1_colors);
     println!("  ✓ Pass 1 Complete ({:.2?}): Global composition established.", t_pass1.elapsed());
     print_terminal_canvas(&canvas_hwc);
 
-    // PASS 2: Shapes & Silhouettes (16x16 Patches, 256 queries)
-    if let Some(brain_p2) = brain_p2 {
+    // PASS 2: Shapes & Silhouettes (16x16 Patches, 256 color tokens)
+    let mut pass2_colors = Vec::with_capacity(256);
+    if let Some(brain_p2) = &brain_p2 {
         println!("\n═══════════════════════════════════════════════════════");
-        println!("  🎨 Pass 2 / {}: Shapes & Silhouettes (16x16 Patches)", args.passes);
+        println!("  🎨 Pass 2 / {}: Shapes & Silhouettes (256 Patches)", args.passes);
         println!("═══════════════════════════════════════════════════════");
         let t_pass2 = Instant::now();
-        let p2_multimodal = brain_p2.config.is_multimodal;
-        let p2_vis_offset = if p2_multimodal { 256 } else { 0 };
 
-        for py in 0..16 {
-            for px in 0..16 {
-                let x = (px * 4 + 2) as u8;
-                let y = (py * 4 + 2) as u8;
+        let mut p2_prefix = vec![BOS_TOKEN as i32];
+        for &tok in &prompt_tokens {
+            p2_prefix.push(tok as i32);
+        }
+        p2_prefix.push(PASS_1_ID as i32);
+        for &tok in &pass1_colors {
+            p2_prefix.push(tok as i32);
+        }
+        p2_prefix.push(PASS_2_ID as i32);
 
-                let mut query_tokens = prefix_tokens.clone();
-                query_tokens.push(PASS_2_ID as i32);
-                query_tokens.push((ROW_START_ID + y as usize) as i32);
-                query_tokens.push((COL_START_ID + x as usize) as i32);
+        let mut cache_p2 = brain_p2.new_kv_cache(&device);
+        let prefill_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+            TensorData::new(p2_prefix.clone(), [1, p2_prefix.len()]),
+            &device,
+        );
+        let logits = brain_p2.forward_cached(prefill_tensor, &mut cache_p2);
+        let mut last_logit: Vec<f32> = logits
+            .slice([0..1, p2_prefix.len() - 1..p2_prefix.len(), 0..ART_VOCAB_SIZE])
+            .into_data()
+            .convert::<f32>()
+            .to_vec()
+            .unwrap();
 
-                let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-                    TensorData::new(query_tokens.clone(), [1, query_tokens.len()]),
-                    &device,
-                );
+        for i in 0..256 {
+            let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
+            let best_palette_idx = sample_token(color_logits, args.temperature) as u8;
+            let next_token = (COLOR_START_ID + best_palette_idx as usize) as u32;
+            pass2_colors.push(next_token);
 
-                let canvas_arg = if p2_multimodal {
-                    Some(canvas_tensor.clone())
-                } else {
-                    None
-                };
-                let (logits, edge_preds) = brain_p2.forward_multimodal_predict(token_tensor, canvas_arg);
-                let last_pos = p2_vis_offset + query_tokens.len() - 1;
-                let logit_vec: Vec<f32> = logits
-                    .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
-                    .into_data()
-                    .convert::<f32>()
-                    .to_vec()
-                    .unwrap();
-                let pred_edge: f32 = edge_preds
-                    .slice([0..1, last_pos..last_pos + 1, 0..1])
-                    .into_data()
-                    .convert::<f32>()
-                    .to_vec()
-                    .map(|v| v.get(0).copied().unwrap_or(0.0))
-                    .unwrap_or(0.0);
+            let step_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+                TensorData::new(vec![next_token as i32], [1, 1]),
+                &device,
+            );
+            let step_logits = brain_p2.forward_cached(step_tensor, &mut cache_p2);
+            last_logit = step_logits.reshape([ART_VOCAB_SIZE]).into_data().convert::<f32>().to_vec().unwrap();
 
-                let color_logits = &logit_vec[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-                let effective_temp = if pred_edge > 0.3 {
-                    args.temperature * (1.0 - 0.5 * pred_edge.min(1.0))
-                } else {
-                    args.temperature
-                };
-                let best_color = sample_token(color_logits, effective_temp) as u8;
-                let [r, g, b] = palette_to_rgb(best_color);
-
-                for dy in 0..4 {
-                    for dx in 0..4 {
-                        let cy = py * 4 + dy;
-                        let cx = px * 4 + dx;
-                        let idx = (cy * CANVAS_SIZE + cx) * 3;
-                        canvas_hwc[idx] = r;
-                        canvas_hwc[idx + 1] = g;
-                        canvas_hwc[idx + 2] = b;
-                    }
-                }
-            }
-
-            if (py + 1) % 4 == 0 {
-                canvas_tensor = Tensor::<BackendType, 4>::from_floats(
-                    TensorData::new(hwc_to_chw_floats(&canvas_hwc), [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
-                    &device,
-                );
-                println!("  [Pass 2 Progress] Row {:>2}/16 refined...", py + 1);
+            if (i + 1) % 64 == 0 {
+                println!("  [Pass 2 Progress] Patch {:>3}/256 refined...", i + 1);
             }
         }
 
-        canvas_tensor = Tensor::<BackendType, 4>::from_floats(
-            TensorData::new(hwc_to_chw_floats(&canvas_hwc), [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
-            &device,
-        );
+        canvas_hwc = pass2_tokens_to_image(&pass2_colors);
         println!("  ✓ Pass 2 Complete ({:.2?}): Subject shapes and silhouettes refined.", t_pass2.elapsed());
         print_terminal_canvas(&canvas_hwc);
     }
 
-    // PASS 3: Fine Pixel Art Details (64x64 Pixels, 4,096 queries)
-    if let Some(brain_p3) = brain_p3 {
+    // PASS 3: Fine Pixel Art Details (64x64 Pixels, 4,096 color tokens)
+    if let Some(brain_p3) = &brain_p3 {
         println!("\n═══════════════════════════════════════════════════════");
-        println!("  🎨 Pass 3 / {}: Fine Pixel Art Details (64x64 Pixels)", args.passes);
+        println!("  🎨 Pass 3 / {}: Fine Pixel Art Details (4,096 Pixels)", args.passes);
         println!("═══════════════════════════════════════════════════════");
         let t_pass3 = Instant::now();
-        let total_pixels = CANVAS_SIZE * CANVAS_SIZE;
-        let glance_interval = args.glance_interval.max(1);
-        let p3_multimodal = brain_p3.config.is_multimodal;
-        let p3_vis_offset = if p3_multimodal { 256 } else { 0 };
 
-        for p in 0..total_pixels {
-            let x = (p % CANVAS_SIZE) as u8;
-            let y = (p / CANVAS_SIZE) as u8;
+        let mut p3_prefix = vec![BOS_TOKEN as i32];
+        for &tok in &prompt_tokens {
+            p3_prefix.push(tok as i32);
+        }
+        p3_prefix.push(PASS_2_ID as i32);
+        for &tok in &pass2_colors {
+            p3_prefix.push(tok as i32);
+        }
+        p3_prefix.push(PASS_3_ID as i32);
 
-            if p > 0 && p % glance_interval == 0 {
-                let chw = hwc_to_chw_floats(&canvas_hwc);
-                canvas_tensor = Tensor::<BackendType, 4>::from_floats(
-                    TensorData::new(chw, [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
-                    &device,
-                );
-            }
+        let mut cache_p3 = brain_p3.new_kv_cache(&device);
+        let prefill_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+            TensorData::new(p3_prefix.clone(), [1, p3_prefix.len()]),
+            &device,
+        );
+        let logits = brain_p3.forward_cached(prefill_tensor, &mut cache_p3);
+        let mut last_logit: Vec<f32> = logits
+            .slice([0..1, p3_prefix.len() - 1..p3_prefix.len(), 0..ART_VOCAB_SIZE])
+            .into_data()
+            .convert::<f32>()
+            .to_vec()
+            .unwrap();
 
-            let mut query_tokens = prefix_tokens.clone();
-            query_tokens.push(PASS_3_ID as i32);
-            query_tokens.push((ROW_START_ID + y as usize) as i32);
-            query_tokens.push((COL_START_ID + x as usize) as i32);
+        let mut pass3_colors = Vec::with_capacity(4096);
+        for i in 0..4096 {
+            let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
+            let best_palette_idx = sample_token(color_logits, args.temperature) as u8;
+            let next_token = (COLOR_START_ID + best_palette_idx as usize) as u32;
+            pass3_colors.push(next_token);
 
-            let token_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-                TensorData::new(query_tokens.clone(), [1, query_tokens.len()]),
+            let step_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+                TensorData::new(vec![next_token as i32], [1, 1]),
                 &device,
             );
+            let step_logits = brain_p3.forward_cached(step_tensor, &mut cache_p3);
+            last_logit = step_logits.reshape([ART_VOCAB_SIZE]).into_data().convert::<f32>().to_vec().unwrap();
 
-            let canvas_arg = if p3_multimodal {
-                Some(canvas_tensor.clone())
-            } else {
-                None
-            };
-            let (logits, edge_preds) = brain_p3.forward_multimodal_predict(token_tensor, canvas_arg);
-            let last_pos = p3_vis_offset + query_tokens.len() - 1;
-            let logit_vec: Vec<f32> = logits
-                .slice([0..1, last_pos..last_pos + 1, 0..ART_VOCAB_SIZE])
-                .into_data()
-                .convert::<f32>()
-                .to_vec()
-                .unwrap();
-            let pred_edge: f32 = edge_preds
-                .slice([0..1, last_pos..last_pos + 1, 0..1])
-                .into_data()
-                .convert::<f32>()
-                .to_vec()
-                .map(|v| v.get(0).copied().unwrap_or(0.0))
-                .unwrap_or(0.0);
-
-            let color_logits = &logit_vec[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-            let effective_temp = if pred_edge > 0.3 {
-                args.temperature * (1.0 - 0.5 * pred_edge.min(1.0))
-            } else {
-                args.temperature
-            };
-            let best_color = sample_token(color_logits, effective_temp) as u8;
-            let [r, g, b] = palette_to_rgb(best_color);
-
-            let idx = (y as usize * CANVAS_SIZE + x as usize) * 3;
-            canvas_hwc[idx] = r;
-            canvas_hwc[idx + 1] = g;
-            canvas_hwc[idx + 2] = b;
-
-            if x == (CANVAS_SIZE - 1) as u8 && ((y + 1) % 8 == 0 || y == (CANVAS_SIZE - 1) as u8) {
-                println!("  [Pass 3 Progress] Row {:>2}/64 rendered...", y + 1);
-                print_terminal_canvas(&canvas_hwc);
+            if (i + 1) % 512 == 0 || i == 4095 {
+                let y = (i + 1) / CANVAS_SIZE;
+                println!("  [Pass 3 Progress] Pixel {:>4}/4096 (Row {:>2}/64 rendered)...", i + 1, y);
             }
         }
 
+        canvas_hwc = pass3_tokens_to_image(&pass3_colors);
         println!("  ✓ Pass 3 Complete ({:.2?}): Full pixel-level shading & highlights applied.", t_pass3.elapsed());
+        print_terminal_canvas(&canvas_hwc);
     }
 
     println!("\n  ✨ Yumon steps back, smiles, and says: \"Done! Artwork complete.\"");

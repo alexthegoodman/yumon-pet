@@ -1,4 +1,4 @@
-//! Multimodal MoE Training on Canvas Progression & Kilo Talk Trajectories.
+//! Autoregressive Causal LM Training on Multi-Scale Image Token Sequences.
 
 #[cfg(not(target_arch = "wasm32"))]
 use {
@@ -25,12 +25,7 @@ use {
     yumon_pet::brain::{
         moe_model::{MoeMetadata, YumonMoeBrain, YumonMoeBrainConfig},
         samples::TrainingStage,
-        tokenizer::{BOS_TOKEN, PAD_TOKEN},
-    },
-    yumon_pet::vision::paint_action::{
-        CANVAS_SIZE, CANVAS_START_ID,
-        PASS_1_ID, PASS_2_ID, PASS_3_ID,
-        hwc_to_chw_floats,
+        tokenizer::PAD_TOKEN,
     },
 };
 
@@ -42,21 +37,9 @@ pub type TrainBackend = Autodiff<
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ArtSample {
     pub prompt_text: String,
-    pub prompt_tokens: Vec<u32>,
-    pub canvas_hwc: Vec<u8>,
-    pub action_tokens: Vec<u32>,
-    pub is_done: bool,
-    #[serde(default)]
-    pub target_edge: f32,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct LegacyArtSampleV1 {
-    pub prompt_text: String,
-    pub prompt_tokens: Vec<u32>,
-    pub canvas_hwc: Vec<u8>,
-    pub action_tokens: Vec<u32>,
-    pub is_done: bool,
+    pub pass: u8,
+    pub tokens: Vec<u32>,
+    pub target_start: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -91,13 +74,11 @@ pub struct ArtConfig {
     pub out_dir: String,
     #[serde(default)]
     pub pass: Option<usize>,
-    #[serde(default)]
-    pub is_multimodal: Option<bool>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser, Debug)]
-#[command(about = "Train the Multimodal Vision MoE on Canvas Progression")]
+#[command(about = "Train Causal MoE Transformer on Cascaded Image Sequences")]
 struct Args {
     /// Configuration JSON path.
     #[arg(long, default_value = "configs/yumon-art-moe.json")]
@@ -122,10 +103,6 @@ struct Args {
     /// Override target pass (1, 2, or 3).
     #[arg(long)]
     pass: Option<usize>,
-
-    /// Override is_multimodal.
-    #[arg(long)]
-    is_multimodal: Option<bool>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -145,32 +122,21 @@ fn load_samples_from_cache(path: &Path) -> Result<Vec<ArtSample>> {
     reader.read_exact(&mut meta_bytes)?;
     let meta: ArtCacheMetadata = bincode::deserialize(&meta_bytes)?;
 
+    ensure!(
+        meta.version >= 3,
+        "Cache version {} is outdated. Please regenerate cache using `cargo run --release --bin cache_diffusion_kilo`.",
+        meta.version
+    );
+
     let mut samples = Vec::new();
     let mut len_buf = [0u8; 4];
 
-    if meta.version >= 2 {
-        while reader.read_exact(&mut len_buf).is_ok() {
-            let sample_len = u32::from_le_bytes(len_buf) as usize;
-            let mut sample_bytes = vec![0u8; sample_len];
-            reader.read_exact(&mut sample_bytes)?;
-            let sample: ArtSample = bincode::deserialize(&sample_bytes)?;
-            samples.push(sample);
-        }
-    } else {
-        while reader.read_exact(&mut len_buf).is_ok() {
-            let sample_len = u32::from_le_bytes(len_buf) as usize;
-            let mut sample_bytes = vec![0u8; sample_len];
-            reader.read_exact(&mut sample_bytes)?;
-            let v1: LegacyArtSampleV1 = bincode::deserialize(&sample_bytes)?;
-            samples.push(ArtSample {
-                prompt_text: v1.prompt_text,
-                prompt_tokens: v1.prompt_tokens,
-                canvas_hwc: v1.canvas_hwc,
-                action_tokens: v1.action_tokens,
-                is_done: v1.is_done,
-                target_edge: 0.0,
-            });
-        }
+    while reader.read_exact(&mut len_buf).is_ok() {
+        let sample_len = u32::from_le_bytes(len_buf) as usize;
+        let mut sample_bytes = vec![0u8; sample_len];
+        reader.read_exact(&mut sample_bytes)?;
+        let sample: ArtSample = bincode::deserialize(&sample_bytes)?;
+        samples.push(sample);
     }
 
     Ok(samples)
@@ -181,7 +147,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let device: <TrainBackend as Backend>::Device = Default::default();
 
-    println!("=== Yumon Multimodal MoE Art Trainer ===");
+    println!("=== Yumon Causal MoE Art Sequence Trainer ===");
     println!("Config file: {}", args.config.display());
 
     let config_str = std::fs::read_to_string(&args.config)?;
@@ -192,7 +158,6 @@ fn main() -> Result<()> {
     let batch_size = args.batch_size.unwrap_or(cfg.batch_size);
     let out_dir = args.out_dir.unwrap_or_else(|| PathBuf::from(&cfg.out_dir));
     let target_pass = args.pass.or(cfg.pass);
-    let is_multimodal = args.is_multimodal.or(cfg.is_multimodal).unwrap_or(true);
 
     println!("Cache binary   : {}", cache_path.display());
     println!("Output dir     : {}", out_dir.display());
@@ -201,9 +166,9 @@ fn main() -> Result<()> {
     } else {
         println!("Target pass    : All passes");
     }
-    println!("Multimodal mode: {}", is_multimodal);
     println!("Batch size     : {}", batch_size);
     println!("Epochs         : {}", epochs);
+    println!("Max seq len    : {}", cfg.max_seq_len);
     println!("Embed dim      : {}", cfg.embed_dim);
     println!("Layers         : {}", cfg.n_layers);
     println!("Experts        : {} (top-{})", cfg.num_experts, cfg.top_k);
@@ -216,13 +181,8 @@ fn main() -> Result<()> {
 
     // Filter by pass if specified
     if let Some(p) = target_pass {
-        let tag = match p {
-            1 => PASS_1_ID as u32,
-            2 => PASS_2_ID as u32,
-            3 => PASS_3_ID as u32,
-            other => anyhow::bail!("Invalid pass {other}; must be 1, 2, or 3"),
-        };
-        all_samples.retain(|s| !s.action_tokens.is_empty() && s.action_tokens[0] == tag);
+        anyhow::ensure!(p >= 1 && p <= 3, "Invalid pass {p}; must be 1, 2, or 3");
+        all_samples.retain(|s| s.pass == p as u8);
         println!("Filtered to Pass {} samples: {}", p, all_samples.len());
         ensure!(!all_samples.is_empty(), "No samples found for Pass {}", p);
     }
@@ -238,7 +198,7 @@ fn main() -> Result<()> {
 
     println!("Split: {} train / {} validation", train_samples.len(), val_samples.len());
 
-    // 2. Initialize Model
+    // 2. Initialize Model (Pure Causal Language Model with Flash Attention)
     let brain_config = YumonMoeBrainConfig::new(cfg.vocab_size, TrainingStage::Language)
         .with_embed_dim(cfg.embed_dim)
         .with_hidden_units(cfg.embed_dim)
@@ -248,7 +208,7 @@ fn main() -> Result<()> {
         .with_max_seq_len(cfg.max_seq_len)
         .with_num_experts(cfg.num_experts)
         .with_top_k(cfg.top_k)
-        .with_is_multimodal(is_multimodal);
+        .with_is_multimodal(false);
 
     let mut model: YumonMoeBrain<TrainBackend> = brain_config.init(&device);
     let mut optimizer = AdamWConfig::new()
@@ -261,7 +221,6 @@ fn main() -> Result<()> {
     println!("\nStarting training ({} batches/epoch)...", num_batches);
 
     let mut best_val_loss = f32::INFINITY;
-    let vis_offset = if is_multimodal { 256 } else { 0 };
 
     for epoch in 1..=epochs {
         let t0 = Instant::now();
@@ -282,105 +241,58 @@ fn main() -> Result<()> {
                 continue;
             }
 
-            // A. Pack Canvas Tensors [bs, 3, 64, 64] if multimodal
-            let canvas_tensor = if is_multimodal {
-                let mut flat_canvas = Vec::with_capacity(bs * 3 * CANVAS_SIZE * CANVAS_SIZE);
-                for s in chunk {
-                    let chw = hwc_to_chw_floats(&s.canvas_hwc);
-                    flat_canvas.extend(chw);
-                }
-                Some(Tensor::<TrainBackend, 4>::from_floats(
-                    TensorData::new(flat_canvas, [bs, 3, CANVAS_SIZE, CANVAS_SIZE]),
-                    &device,
-                ))
-            } else {
-                None
-            };
+            let max_len = chunk.iter().map(|s| s.tokens.len()).max().unwrap().min(cfg.max_seq_len);
+            if max_len < 2 {
+                continue;
+            }
+            let seq_len = max_len - 1;
 
-            // B. Pack Tokens & Target Edges
-            let mut batch_token_rows = Vec::with_capacity(bs);
-            let mut targets = Vec::with_capacity(bs);
-            let mut batch_edges = Vec::with_capacity(bs);
-            let mut edge_weights_vec = Vec::with_capacity(bs);
-            let mut max_len = 0;
+            let mut flat_inputs = Vec::with_capacity(bs * seq_len);
+            let mut flat_targets = Vec::with_capacity(bs * seq_len);
+            let mut flat_mask = Vec::with_capacity(bs * seq_len);
 
             for s in chunk {
-                let mut row = vec![BOS_TOKEN as i32];
-                for &tok in &s.prompt_tokens {
-                    row.push(tok as i32);
+                let t_len = s.tokens.len().min(max_len);
+                for i in 0..seq_len {
+                    if i + 1 < t_len {
+                        flat_inputs.push(s.tokens[i] as i32);
+                        let tgt = s.tokens[i + 1] as i32;
+                        flat_targets.push(tgt);
+                        // Compute loss on target color tokens (starting at target_start)
+                        if i + 1 >= s.target_start && tgt != PAD_TOKEN as i32 {
+                            flat_mask.push(1.0f32);
+                        } else {
+                            flat_mask.push(0.0f32);
+                        }
+                    } else {
+                        flat_inputs.push(PAD_TOKEN as i32);
+                        flat_targets.push(PAD_TOKEN as i32);
+                        flat_mask.push(0.0f32);
+                    }
                 }
-                row.push(CANVAS_START_ID as i32);
-                row.push(s.action_tokens[0] as i32); // PASS_TAG
-                row.push(s.action_tokens[1] as i32); // ROW_y
-                row.push(s.action_tokens[2] as i32); // COL_x
-                targets.push(s.action_tokens[3] as i32); // COLOR_c
-                batch_edges.push(s.target_edge);
-                edge_weights_vec.push(1.0 + 2.0 * s.target_edge);
-
-                if row.len() > max_len {
-                    max_len = row.len();
-                }
-                batch_token_rows.push(row);
             }
 
-            // Cap at max_seq_len - vis_offset
-            let max_text_limit = cfg.max_seq_len.saturating_sub(vis_offset);
-            let max_text = max_len.min(max_text_limit);
-            let mut flat_tokens = Vec::with_capacity(bs * max_text);
-
-            for mut row in batch_token_rows {
-                row.truncate(max_text);
-                while row.len() < max_text {
-                    row.push(PAD_TOKEN as i32);
-                }
-                flat_tokens.extend_from_slice(&row);
-            }
-
-            let token_tensor = Tensor::<TrainBackend, 2, Int>::from_ints(
-                TensorData::new(flat_tokens, [bs, max_text]),
+            let input_tensor = Tensor::<TrainBackend, 2, Int>::from_ints(
+                TensorData::new(flat_inputs, [bs, seq_len]),
                 &device,
             );
-            let target_labels = Tensor::<TrainBackend, 1, Int>::from_ints(
-                TensorData::new(targets, [bs]),
+            let target_tensor = Tensor::<TrainBackend, 2, Int>::from_ints(
+                TensorData::new(flat_targets, [bs, seq_len]),
                 &device,
             );
-            let target_edges = Tensor::<TrainBackend, 2>::from_floats(
-                TensorData::new(batch_edges, [bs, 1]),
-                &device,
-            );
-            let edge_weights = Tensor::<TrainBackend, 1>::from_floats(
-                TensorData::new(edge_weights_vec, [bs]),
+            let mask_tensor = Tensor::<TrainBackend, 2>::from_floats(
+                TensorData::new(flat_mask, [bs, seq_len]),
                 &device,
             );
 
-            // C. Forward pass
-            let (logits, edge_preds, aux_loss, _, _) = model.forward_multimodal_with_edges(
-                token_tensor,
-                canvas_tensor,
-            );
+            // Causal Flash Attention forward pass
+            let (logits, aux_loss, _) = model.forward_with_aux(input_tensor);
 
-            // Extract the active logit vector and edge prediction at the (x, y) query coordinate for each sample
-            let mut logit_slices = Vec::with_capacity(bs);
-            let mut edge_slices = Vec::with_capacity(bs);
-            for (b, s) in chunk.iter().enumerate() {
-                let pos = vis_offset + 4 + s.prompt_tokens.len();
-                logit_slices.push(logits.clone().slice([b..b + 1, pos..pos + 1, 0..cfg.vocab_size]));
-                edge_slices.push(edge_preds.clone().slice([b..b + 1, pos..pos + 1, 0..1]));
-            }
-            let active_logits = Tensor::cat(logit_slices, 0).reshape([bs, cfg.vocab_size]);
-            let active_edges = Tensor::cat(edge_slices, 0).reshape([bs, 1]);
-
-            // Loss: CE (+ auxiliary edge detection if multimodal)
-            let log_probs = burn::tensor::activation::log_softmax(active_logits, 1);
-            let nll = log_probs.gather(1, target_labels.reshape([bs, 1])).reshape([bs]).neg();
-
-            let loss = if is_multimodal {
-                let weighted_ce = (nll * edge_weights).mean();
-                let edge_mse = (active_edges - target_edges).powf_scalar(2.0).mean();
-                weighted_ce + edge_mse * 0.5 + aux_loss
-            } else {
-                nll.mean() + aux_loss
-            };
+            // Cross Entropy Loss masked on target colors
+            let log_probs = burn::tensor::activation::log_softmax(logits, 2);
+            let nll = log_probs.gather(2, target_tensor.reshape([bs, seq_len, 1])).reshape([bs, seq_len]).neg();
+            let active_count = mask_tensor.clone().sum().clamp_min(1.0);
+            let loss = (nll * mask_tensor).sum() / active_count + aux_loss;
 
             let loss_val: f32 = loss.clone().into_data().convert::<f32>().to_vec().unwrap()[0];
             total_loss += loss_val;
@@ -400,116 +312,75 @@ fn main() -> Result<()> {
 
         // 4. Validation
         let mut val_loss_sum = 0.0f32;
-        let mut val_edge_sum = 0.0f32;
         let mut val_correct = 0usize;
         let mut val_total = 0usize;
         let mut val_steps = 0usize;
 
         for chunk in val_samples.chunks(batch_size) {
             let bs = chunk.len();
-            let canvas_tensor = if is_multimodal {
-                let mut flat_canvas = Vec::with_capacity(bs * 3 * CANVAS_SIZE * CANVAS_SIZE);
-                for s in chunk {
-                    flat_canvas.extend(hwc_to_chw_floats(&s.canvas_hwc));
-                }
-                Some(Tensor::<TrainBackend, 4>::from_floats(
-                    TensorData::new(flat_canvas, [bs, 3, CANVAS_SIZE, CANVAS_SIZE]),
-                    &device,
-                ))
-            } else {
-                None
-            };
+            if bs == 0 {
+                continue;
+            }
 
-            let mut batch_token_rows = Vec::with_capacity(bs);
-            let mut targets = Vec::with_capacity(bs);
-            let mut batch_edges = Vec::with_capacity(bs);
-            let mut edge_weights_vec = Vec::with_capacity(bs);
-            let mut max_len = 0;
+            let max_len = chunk.iter().map(|s| s.tokens.len()).max().unwrap().min(cfg.max_seq_len);
+            if max_len < 2 {
+                continue;
+            }
+            let seq_len = max_len - 1;
+
+            let mut flat_inputs = Vec::with_capacity(bs * seq_len);
+            let mut flat_targets = Vec::with_capacity(bs * seq_len);
+            let mut flat_mask = Vec::with_capacity(bs * seq_len);
+
             for s in chunk {
-                let mut row = vec![BOS_TOKEN as i32];
-                for &tok in &s.prompt_tokens {
-                    row.push(tok as i32);
+                let t_len = s.tokens.len().min(max_len);
+                for i in 0..seq_len {
+                    if i + 1 < t_len {
+                        flat_inputs.push(s.tokens[i] as i32);
+                        let tgt = s.tokens[i + 1] as i32;
+                        flat_targets.push(tgt);
+                        if i + 1 >= s.target_start && tgt != PAD_TOKEN as i32 {
+                            flat_mask.push(1.0f32);
+                        } else {
+                            flat_mask.push(0.0f32);
+                        }
+                    } else {
+                        flat_inputs.push(PAD_TOKEN as i32);
+                        flat_targets.push(PAD_TOKEN as i32);
+                        flat_mask.push(0.0f32);
+                    }
                 }
-                row.push(CANVAS_START_ID as i32);
-                row.push(s.action_tokens[0] as i32); // PASS_TAG
-                row.push(s.action_tokens[1] as i32); // ROW_y
-                row.push(s.action_tokens[2] as i32); // COL_x
-                targets.push(s.action_tokens[3] as i32); // COLOR_c
-                batch_edges.push(s.target_edge);
-                edge_weights_vec.push(1.0 + 2.0 * s.target_edge);
-
-                if row.len() > max_len {
-                    max_len = row.len();
-                }
-                batch_token_rows.push(row);
-            }
-            let max_text_limit = cfg.max_seq_len.saturating_sub(vis_offset);
-            let max_text = max_len.min(max_text_limit);
-            let mut flat_tokens = Vec::with_capacity(bs * max_text);
-
-            for mut row in batch_token_rows {
-                row.truncate(max_text);
-                while row.len() < max_text {
-                    row.push(PAD_TOKEN as i32);
-                }
-                flat_tokens.extend_from_slice(&row);
             }
 
-            let token_tensor = Tensor::<TrainBackend, 2, Int>::from_ints(
-                TensorData::new(flat_tokens, [bs, max_text]),
+            let input_tensor = Tensor::<TrainBackend, 2, Int>::from_ints(
+                TensorData::new(flat_inputs, [bs, seq_len]),
                 &device,
             );
-            let target_labels = Tensor::<TrainBackend, 1, Int>::from_ints(
-                TensorData::new(targets.clone(), [bs]),
+            let target_tensor = Tensor::<TrainBackend, 2, Int>::from_ints(
+                TensorData::new(flat_targets.clone(), [bs, seq_len]),
                 &device,
             );
-            let target_edges = Tensor::<TrainBackend, 2>::from_floats(
-                TensorData::new(batch_edges, [bs, 1]),
-                &device,
-            );
-            let edge_weights = Tensor::<TrainBackend, 1>::from_floats(
-                TensorData::new(edge_weights_vec, [bs]),
+            let mask_tensor = Tensor::<TrainBackend, 2>::from_floats(
+                TensorData::new(flat_mask.clone(), [bs, seq_len]),
                 &device,
             );
 
-            let (logits, edge_preds, _, _, _) = model.forward_multimodal_with_edges(
-                token_tensor,
-                canvas_tensor,
-            );
+            let logits = model.forward(input_tensor);
 
-            let mut logit_slices = Vec::with_capacity(bs);
-            let mut edge_slices = Vec::with_capacity(bs);
-            for (b, s) in chunk.iter().enumerate() {
-                let pos = vis_offset + 4 + s.prompt_tokens.len();
-                logit_slices.push(logits.clone().slice([b..b + 1, pos..pos + 1, 0..cfg.vocab_size]));
-                edge_slices.push(edge_preds.clone().slice([b..b + 1, pos..pos + 1, 0..1]));
-            }
-            let active_logits = Tensor::cat(logit_slices, 0).reshape([bs, cfg.vocab_size]);
-            let active_edges = Tensor::cat(edge_slices, 0).reshape([bs, 1]);
+            let log_probs = burn::tensor::activation::log_softmax(logits.clone(), 2);
+            let nll = log_probs.gather(2, target_tensor.reshape([bs, seq_len, 1])).reshape([bs, seq_len]).neg();
+            let active_count = mask_tensor.clone().sum().clamp_min(1.0);
+            let loss = (nll * mask_tensor).sum() / active_count;
 
-            let log_probs = burn::tensor::activation::log_softmax(active_logits.clone(), 1);
-            let nll = log_probs.gather(1, target_labels.reshape([bs, 1])).reshape([bs]).neg();
-            let loss = if is_multimodal {
-                (nll * edge_weights).mean()
-            } else {
-                nll.mean()
-            };
-
-            let edge_mse = if is_multimodal {
-                (active_edges - target_edges).powf_scalar(2.0).mean()
-            } else {
-                Tensor::zeros([1], &device)
-            };
-            let e_mse_val: f32 = edge_mse.into_data().convert::<f32>().to_vec().unwrap()[0];
-            val_edge_sum += e_mse_val;
-
-            let preds = active_logits.argmax(1).reshape([bs]);
+            let preds = logits.argmax(2).reshape([bs * seq_len]);
             let pred_vec: Vec<i32> = preds.into_data().convert::<i32>().to_vec().unwrap();
-            for (pred, target) in pred_vec.iter().zip(targets.iter()) {
-                if *pred == *target {
-                    val_correct += 1;
+            for i in 0..(bs * seq_len) {
+                if flat_mask[i] > 0.0 {
+                    if pred_vec[i] == flat_targets[i] {
+                        val_correct += 1;
+                    }
+                    val_total += 1;
                 }
-                val_total += 1;
             }
 
             let l: f32 = loss.into_data().convert::<f32>().to_vec().unwrap()[0];
@@ -518,7 +389,6 @@ fn main() -> Result<()> {
         }
 
         let avg_val_loss = val_loss_sum / val_steps.max(1) as f32;
-        let avg_val_edge_mse = val_edge_sum / val_steps.max(1) as f32;
         let val_acc = if val_total > 0 {
             (val_correct as f32 / val_total as f32) * 100.0
         } else {
@@ -527,8 +397,8 @@ fn main() -> Result<()> {
         let elapsed = t0.elapsed();
 
         println!(
-            "Epoch {:>2}/{} | Train Loss: {:.4} | Val Loss: {:.4} (Val Color Acc: {:.1}% | Edge MSE: {:.4}) | Elapsed: {:.1}s",
-            epoch, epochs, avg_train_loss, avg_val_loss, val_acc, avg_val_edge_mse, elapsed.as_secs_f32()
+            "Epoch {:>2}/{} | Train Loss: {:.4} | Val Loss: {:.4} (Val Token Acc: {:.1}%) | Elapsed: {:.1}s",
+            epoch, epochs, avg_train_loss, avg_val_loss, val_acc, elapsed.as_secs_f32()
         );
 
         // Save best checkpoint
@@ -557,8 +427,8 @@ fn main() -> Result<()> {
                 max_seq_len: cfg.max_seq_len,
                 adaptive_depth: None,
                 kv_heads: None,
-                is_multimodal,
-                has_edge_head: is_multimodal,
+                is_multimodal: false,
+                has_edge_head: false,
             };
 
             let meta_json = serde_json::to_string_pretty(&meta)?;

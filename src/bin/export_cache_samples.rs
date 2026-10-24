@@ -12,7 +12,7 @@ use std::{
     path::PathBuf,
 };
 use yumon_pet::vision::paint_action::{
-    CANVAS_SIZE, PaintAction, palette_to_rgb,
+    CANVAS_SIZE, pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image,
 };
 
 #[derive(Deserialize, Debug)]
@@ -28,12 +28,9 @@ pub struct ArtCacheMetadata {
 #[derive(Deserialize, Clone, Debug)]
 pub struct ArtSample {
     pub prompt_text: String,
-    pub prompt_tokens: Vec<u32>,
-    pub canvas_hwc: Vec<u8>,
-    pub action_tokens: Vec<u32>,
-    pub is_done: bool,
-    #[serde(default)]
-    pub target_edge: f32,
+    pub pass: u8,
+    pub tokens: Vec<u32>,
+    pub target_start: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -139,53 +136,22 @@ fn main() -> Result<()> {
         let img_path = args.output_dir.join(&img_filename);
         let raw_path = args.output_dir.join(&raw_filename);
 
-        // Apply target paint action to canvas preview so the visual shows what is being painted
-        let mut preview_canvas = sample.canvas_hwc.clone();
-        if sample.action_tokens.len() >= 4 {
-            let pass_tag = sample.action_tokens[0] as usize;
-            let y = (sample.action_tokens[1] as usize).saturating_sub(yumon_pet::vision::paint_action::ROW_START_ID);
-            let x = (sample.action_tokens[2] as usize).saturating_sub(yumon_pet::vision::paint_action::COL_START_ID);
-            let c = ((sample.action_tokens[3] as usize).saturating_sub(yumon_pet::vision::paint_action::COLOR_START_ID)) as u8;
-            let [r, g, b] = palette_to_rgb(c);
-            match pass_tag {
-                yumon_pet::vision::paint_action::PASS_1_ID => {
-                    let by = y / 8;
-                    let bx = x / 8;
-                    for dy in 0..8 {
-                        for dx in 0..8 {
-                            let cy = (by * 8 + dy).min(CANVAS_SIZE - 1);
-                            let cx = (bx * 8 + dx).min(CANVAS_SIZE - 1);
-                            let idx = (cy * CANVAS_SIZE + cx) * 3;
-                            preview_canvas[idx] = r;
-                            preview_canvas[idx + 1] = g;
-                            preview_canvas[idx + 2] = b;
-                        }
-                    }
-                }
-                yumon_pet::vision::paint_action::PASS_2_ID => {
-                    let py = y / 4;
-                    let px = x / 4;
-                    for dy in 0..4 {
-                        for dx in 0..4 {
-                            let cy = (py * 4 + dy).min(CANVAS_SIZE - 1);
-                            let cx = (px * 4 + dx).min(CANVAS_SIZE - 1);
-                            let idx = (cy * CANVAS_SIZE + cx) * 3;
-                            preview_canvas[idx] = r;
-                            preview_canvas[idx + 1] = g;
-                            preview_canvas[idx + 2] = b;
-                        }
-                    }
-                }
-                _ => {
-                    let cy = y.min(CANVAS_SIZE - 1);
-                    let cx = x.min(CANVAS_SIZE - 1);
-                    let idx = (cy * CANVAS_SIZE + cx) * 3;
-                    preview_canvas[idx] = r;
-                    preview_canvas[idx + 1] = g;
-                    preview_canvas[idx + 2] = b;
-                }
-            }
-        }
+        let target_colors = if sample.target_start < sample.tokens.len() {
+            let end = if sample.tokens.last() == Some(&4099) {
+                sample.tokens.len() - 1
+            } else {
+                sample.tokens.len()
+            };
+            &sample.tokens[sample.target_start..end]
+        } else {
+            &[]
+        };
+
+        let preview_canvas = match sample.pass {
+            1 => pass1_tokens_to_image(target_colors),
+            2 => pass2_tokens_to_image(target_colors),
+            _ => pass3_tokens_to_image(target_colors),
+        };
 
         // Save raw 64x64 PNG
         let raw_img = image::RgbImage::from_raw(
@@ -204,58 +170,13 @@ fn main() -> Result<()> {
         ).context("creating upscaled ImageBuffer")?;
         upscaled_img.save(&img_path)?;
 
-        // Format action description
-        let (action_desc, swatch_html) = if sample.action_tokens.len() >= 4 {
-            let pass_tag = sample.action_tokens[0] as usize;
-            let y = (sample.action_tokens[1] as usize).saturating_sub(yumon_pet::vision::paint_action::ROW_START_ID);
-            let x = (sample.action_tokens[2] as usize).saturating_sub(yumon_pet::vision::paint_action::COL_START_ID);
-            let c = ((sample.action_tokens[3] as usize).saturating_sub(yumon_pet::vision::paint_action::COLOR_START_ID)) as u8;
-            let [r, g, b] = palette_to_rgb(c);
-            let pass_name = match pass_tag {
-                yumon_pet::vision::paint_action::PASS_1_ID => "Pass 1 (8x8 Composition)",
-                yumon_pet::vision::paint_action::PASS_2_ID => "Pass 2 (16x16 Shapes)",
-                _ => "Pass 3 (64x64 Details)",
-            };
-            (
-                format!("{} • ({}, {})", pass_name, x, y),
-                format!(
-                    "<span class=\"swatch\" style=\"background: rgb({}, {}, {});\"></span> Color #{} RGB({}, {}, {})",
-                    r, g, b, c, r, g, b
-                ),
-            )
-        } else if sample.action_tokens.len() >= 3 {
-            let x = (sample.action_tokens[0] as usize).saturating_sub(yumon_pet::vision::paint_action::COORD_START_ID);
-            let y = (sample.action_tokens[1] as usize).saturating_sub(yumon_pet::vision::paint_action::COORD_START_ID);
-            let c = ((sample.action_tokens[2] as usize).saturating_sub(yumon_pet::vision::paint_action::COLOR_START_ID)) as u8;
-            let [r, g, b] = palette_to_rgb(c);
-            (
-                format!("Legacy • ({}, {})", x, y),
-                format!(
-                    "<span class=\"swatch\" style=\"background: rgb({}, {}, {});\"></span> Color #{} RGB({}, {}, {})",
-                    r, g, b, c, r, g, b
-                ),
-            )
-        } else {
-            let tok_usize: Vec<usize> = sample.action_tokens.iter().map(|&t| t as usize).collect();
-            let action = PaintAction::from_tokens(&tok_usize);
-            match action {
-                Some(PaintAction::Paint { x, y, color, radius }) => {
-                    let [r, g, b] = palette_to_rgb(color);
-                    (
-                        format!("Paint dab at ({}, {}) | Color #{} | Radius {}", x, y, color, radius),
-                        format!(
-                            "<span class=\"swatch\" style=\"background: rgb({}, {}, {});\"></span> RGB({}, {}, {})",
-                            r, g, b, r, g, b
-                        ),
-                    )
-                }
-                Some(PaintAction::Done) => (
-                    "Done (Artwork Complete)".to_string(),
-                    "<span class=\"done-badge\">DONE</span>".to_string(),
-                ),
-                None => ("Pixel Stream Sample".to_string(), "".to_string()),
-            }
+        let pass_name = match sample.pass {
+            1 => "Pass 1 (8x8 Composition)",
+            2 => "Pass 2 (16x16 Shapes)",
+            _ => "Pass 3 (64x64 Pixel Art)",
         };
+        let action_desc = format!("{} • {} tokens", pass_name, target_colors.len());
+        let swatch_html = format!("<span class=\"action-tag\">{}</span>", pass_name);
 
         // Add to text manifest
         manifest_lines.push(format!(
