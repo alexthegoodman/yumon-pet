@@ -8,7 +8,7 @@ use clap::Parser;
 use serde::Deserialize;
 use std::{
     fs::{self, File},
-    io::{BufReader, Read},
+    io::{BufReader, Read, Seek, SeekFrom},
     path::PathBuf,
 };
 use yumon_pet::vision::paint_action::{
@@ -47,6 +47,10 @@ struct Args {
     /// Number of samples to export.
     #[arg(long, default_value_t = 100)]
     count: usize,
+
+    /// Number of samples to skip from the beginning of the cache.
+    #[arg(long, default_value_t = 0)]
+    offset: usize,
 
     /// Upscale factor for exported PNGs (default 4 -> 256x256 crisp pixel art).
     #[arg(long, default_value_t = 4)]
@@ -87,7 +91,7 @@ fn main() -> Result<()> {
     println!("=== Yumon Art Cache Diagnostic Exporter ===");
     println!("Reading cache: {}", args.cache.display());
     println!("Target output directory: {}", args.output_dir.display());
-    println!("Exporting {} samples (upscale {}x)...", args.count, args.scale);
+    println!("Exporting {} samples starting at offset {} (upscale {}x)...", args.count, args.offset, args.scale);
 
     fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("creating directory {}", args.output_dir.display()))?;
@@ -108,21 +112,44 @@ fn main() -> Result<()> {
 
     println!("Cache info: {} total samples across {} images", meta.total_samples, meta.images_processed);
 
-    let export_count = args.count.min(meta.total_samples);
+    if args.offset >= meta.total_samples {
+        println!("Offset {} is beyond total samples in cache ({}). Nothing to export.", args.offset, meta.total_samples);
+        return Ok(());
+    }
+
+    // 2. Skip offset samples if requested
+    if args.offset > 0 {
+        println!("Skipping first {} samples...", args.offset);
+        for i in 0..args.offset {
+            let mut sample_len_bytes = [0u8; 4];
+            if reader.read_exact(&mut sample_len_bytes).is_err() {
+                println!("Reached end of file while seeking at sample {}", i);
+                return Ok(());
+            }
+            let sample_len = u32::from_le_bytes(sample_len_bytes) as i64;
+            reader.seek(SeekFrom::Current(sample_len))
+                .with_context(|| format!("seeking past sample {}", i))?;
+        }
+        println!("Successfully skipped {} samples.", args.offset);
+    }
+
+    let export_count = args.count.min(meta.total_samples.saturating_sub(args.offset));
 
     let mut html_cards = String::new();
     let mut manifest_lines = Vec::new();
 
     manifest_lines.push(format!(
-        "# Yumon Art Cache Export: {} samples from {}\n",
+        "# Yumon Art Cache Export: {} samples (offset {}) from {}\n",
         export_count,
+        args.offset,
         args.cache.display()
     ));
 
     for idx in 0..export_count {
+        let global_idx = args.offset + idx;
         let mut sample_len_bytes = [0u8; 4];
         if reader.read_exact(&mut sample_len_bytes).is_err() {
-            println!("Reached end of file at sample {}", idx);
+            println!("Reached end of file at sample {}", global_idx);
             break;
         }
         let sample_len = u32::from_le_bytes(sample_len_bytes) as usize;
@@ -131,8 +158,8 @@ fn main() -> Result<()> {
         let sample: ArtSample = bincode::deserialize(&sample_bytes)?;
 
         // File names
-        let img_filename = format!("sample_{:03}.png", idx);
-        let raw_filename = format!("sample_{:03}_64.png", idx);
+        let img_filename = format!("sample_{:05}.png", global_idx);
+        let raw_filename = format!("sample_{:05}_64.png", global_idx);
         let img_path = args.output_dir.join(&img_filename);
         let raw_path = args.output_dir.join(&raw_filename);
 
@@ -184,8 +211,8 @@ fn main() -> Result<()> {
 
         // Add to text manifest
         manifest_lines.push(format!(
-            "Sample #{:03}\n  Image  : {}\n  Action : {}\n  Prompt : {}\n",
-            idx, img_filename, action_desc, sample.prompt_text
+            "Sample #{:05}\n  Image  : {}\n  Action : {}\n  Prompt : {}\n",
+            global_idx, img_filename, action_desc, sample.prompt_text
         ));
 
         // Add to HTML card
@@ -193,12 +220,12 @@ fn main() -> Result<()> {
         html_cards.push_str(&format!(
             r#"    <div class="card">
       <div class="card-header">
-        <span class="sample-id">#{:03}</span>
+        <span class="sample-id">#{:05}</span>
         <span class="action-tag">{}</span>
       </div>
       <div class="img-wrapper">
         <a href="{}" target="_blank">
-          <img src="{}" alt="Sample {:03}" />
+          <img src="{}" alt="Sample {:05}" />
         </a>
       </div>
       <div class="details">
@@ -207,7 +234,7 @@ fn main() -> Result<()> {
       </div>
     </div>
 "#,
-            idx, action_desc, img_filename, img_filename, idx, swatch_html, escaped_prompt
+            global_idx, action_desc, img_filename, img_filename, global_idx, swatch_html, escaped_prompt
         ));
     }
 
@@ -335,7 +362,7 @@ fn main() -> Result<()> {
 <body>
   <header>
     <h1>🎨 Yumon Art Multimodal Cache: Sample Inspection</h1>
-    <p class="subtitle">Inspecting {} progressive canvas states and corresponding prompts from <code>{}</code></p>
+    <p class="subtitle">Inspecting {} progressive canvas states (offset {}, samples {}..{}) and corresponding prompts from <code>{}</code></p>
   </header>
   <div class="grid">
 {}
@@ -344,6 +371,9 @@ fn main() -> Result<()> {
 </html>
 "#,
         export_count,
+        args.offset,
+        args.offset,
+        args.offset + export_count.saturating_sub(1),
         args.cache.display(),
         html_cards
     );
