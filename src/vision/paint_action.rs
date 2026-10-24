@@ -853,6 +853,151 @@ pub fn generate_cascaded_sequence_samples(
     samples
 }
 
+/// Extract multimodal 3D coordinates (t, y, x) for a sequence of token IDs.
+/// Continuous canvas space is normalized to [0.0 .. 64.0] for spatial tokens.
+/// Non-spatial tokens (BOS, prompt words, pass markers, PAD) receive (t, 0.0, 0.0).
+pub fn extract_sequence_coords(tokens: &[i32]) -> Vec<(f32, f32, f32)> {
+    let mut coords = Vec::with_capacity(tokens.len());
+    let mut current_pass: Option<u8> = None;
+    let mut pass_color_idx: usize = 0;
+    let mut pending_y: Option<f32> = None;
+    let mut pending_x: Option<f32> = None;
+
+    for (pos, &tok_i32) in tokens.iter().enumerate() {
+        let t = pos as f32;
+        let tok = tok_i32 as usize;
+
+        if tok == PASS_1_ID {
+            current_pass = Some(1);
+            pass_color_idx = 0;
+            coords.push((t, 0.0, 0.0));
+        } else if tok == PASS_2_ID {
+            current_pass = Some(2);
+            pass_color_idx = 0;
+            coords.push((t, 0.0, 0.0));
+        } else if tok == PASS_3_ID {
+            current_pass = Some(3);
+            pass_color_idx = 0;
+            coords.push((t, 0.0, 0.0));
+        } else if tok == PASS_4_ID {
+            current_pass = Some(4);
+            pass_color_idx = 0;
+            coords.push((t, 0.0, 0.0));
+        } else if tok == DONE_ID || tok == 0 /* PAD_TOKEN */ {
+            current_pass = None;
+            coords.push((t, 0.0, 0.0));
+        } else if let Some(pass) = current_pass {
+            if tok >= COLOR_START_ID && tok < COLOR_START_ID + PALETTE_SIZE {
+                let k = pass_color_idx;
+                pass_color_idx += 1;
+                let (y, x) = match pass {
+                    1 => {
+                        let row = (k / 8).min(7);
+                        let col = (k % 8).min(7);
+                        ((row as f32 + 0.5) * 8.0, (col as f32 + 0.5) * 8.0)
+                    }
+                    2 => {
+                        let row = (k / 16).min(15);
+                        let col = (k % 16).min(15);
+                        ((row as f32 + 0.5) * 4.0, (col as f32 + 0.5) * 4.0)
+                    }
+                    3 => {
+                        let row = (k / 32).min(31);
+                        let col = (k % 32).min(31);
+                        ((row as f32 + 0.5) * 2.0, (col as f32 + 0.5) * 2.0)
+                    }
+                    4 => {
+                        let row = (k / 64).min(63);
+                        let col = (k % 64).min(63);
+                        ((row as f32 + 0.5) * 1.0, (col as f32 + 0.5) * 1.0)
+                    }
+                    _ => (0.0, 0.0),
+                };
+                coords.push((t, y, x));
+            } else {
+                coords.push((t, 0.0, 0.0));
+            }
+        } else if tok >= ROW_START_ID && tok < COL_START_ID {
+            let y = (tok - ROW_START_ID) as f32 + 0.5;
+            pending_y = Some(y);
+            coords.push((t, y, pending_x.unwrap_or(0.0)));
+        } else if tok >= COL_START_ID && tok < COLOR_START_ID {
+            let x = (tok - COL_START_ID) as f32 + 0.5;
+            pending_x = Some(x);
+            coords.push((t, pending_y.unwrap_or(0.0), x));
+        } else if tok >= COLOR_START_ID && tok < COLOR_START_ID + PALETTE_SIZE {
+            let y = pending_y.unwrap_or(0.0);
+            let x = pending_x.unwrap_or(0.0);
+            coords.push((t, y, x));
+        } else {
+            coords.push((t, 0.0, 0.0));
+        }
+    }
+
+    coords
+}
+
+/// Extract multimodal 3D coordinates (t, y, x) for a batch of sequences.
+/// Result is shaped [batch][seq] with (t, y, x) triples.
+pub fn extract_batch_sequence_coords(
+    tokens: &[i32],
+    batch: usize,
+    seq: usize,
+) -> Vec<Vec<(f32, f32, f32)>> {
+    assert_eq!(tokens.len(), batch * seq, "tokens length must match batch * seq");
+    let mut batch_coords = Vec::with_capacity(batch);
+    for b in 0..batch {
+        let row = &tokens[b * seq..(b + 1) * seq];
+        batch_coords.push(extract_sequence_coords(row));
+    }
+    batch_coords
+}
+
+/// Build the complete (t, y, x) coordinate trajectory for cascaded generation with KV cache.
+/// `prefix`: tokens already present in the prompt (e.g. [BOS, prompt..., PASS_1_ID, ...])
+/// `pass`: target pass being generated (1, 2, 3, or 4)
+/// `gen_count`: number of color tokens to be generated (e.g. 64, 256, 1024, or 4096)
+pub fn build_cascaded_inference_coords(
+    prefix: &[i32],
+    pass: u8,
+    gen_count: usize,
+) -> Vec<(f32, f32, f32)> {
+    let mut coords = extract_sequence_coords(prefix);
+    let start_t = prefix.len();
+    for k in 0..gen_count {
+        let t = (start_t + k) as f32;
+        let (y, x) = match pass {
+            1 => {
+                let row = (k / 8).min(7);
+                let col = (k % 8).min(7);
+                ((row as f32 + 0.5) * 8.0, (col as f32 + 0.5) * 8.0)
+            }
+            2 => {
+                let row = (k / 16).min(15);
+                let col = (k % 16).min(15);
+                ((row as f32 + 0.5) * 4.0, (col as f32 + 0.5) * 4.0)
+            }
+            3 => {
+                let row = (k / 32).min(31);
+                let col = (k % 32).min(31);
+                ((row as f32 + 0.5) * 2.0, (col as f32 + 0.5) * 2.0)
+            }
+            4 => {
+                let row = (k / 64).min(63);
+                let col = (k % 64).min(63);
+                ((row as f32 + 0.5) * 1.0, (col as f32 + 0.5) * 1.0)
+            }
+            _ => (0.0, 0.0),
+        };
+        coords.push((t, y, x));
+    }
+    // Add extra padding positions for safety
+    for extra in 0..16 {
+        coords.push(((start_t + gen_count + extra) as f32, 0.0, 0.0));
+    }
+    coords
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -951,4 +1096,56 @@ mod tests {
         assert_eq!(samples[3].1.len(), 1 + 3 + 1 + 1024 + 1 + 4096 + 1);
     }
 
+    #[test]
+    fn test_mrope_sequence_coordinates() {
+        // Build a Pass 2 sequence: [BOS, prompt (2), PASS_1_ID, 64 colors, PASS_2_ID, 256 colors, DONE_ID]
+        let mut seq: Vec<i32> = vec![1, 50, 51, PASS_1_ID as i32];
+        for _ in 0..64 {
+            seq.push((COLOR_START_ID + 5) as i32);
+        }
+        seq.push(PASS_2_ID as i32);
+        for _ in 0..256 {
+            seq.push((COLOR_START_ID + 10) as i32);
+        }
+        seq.push(DONE_ID as i32);
+
+        let coords = extract_sequence_coords(&seq);
+        assert_eq!(coords.len(), seq.len());
+
+        // Text prompt & pass markers have (t, 0.0, 0.0)
+        assert_eq!(coords[0], (0.0, 0.0, 0.0));
+        assert_eq!(coords[1], (1.0, 0.0, 0.0));
+        assert_eq!(coords[2], (2.0, 0.0, 0.0));
+        assert_eq!(coords[3], (3.0, 0.0, 0.0)); // PASS_1_ID
+
+        // First Pass 1 block (row 0, col 0): center is (4.0, 4.0)
+        assert_eq!(coords[4], (4.0, 4.0, 4.0));
+        // Second Pass 1 block (row 0, col 1): center is (4.0, 12.0)
+        assert_eq!(coords[5], (5.0, 4.0, 12.0));
+        // Last Pass 1 block (row 7, col 7): center is (60.0, 60.0)
+        assert_eq!(coords[4 + 63], (67.0, 60.0, 60.0));
+
+        // PASS_2_ID marker
+        let p2_marker_idx = 4 + 64;
+        assert_eq!(coords[p2_marker_idx], (p2_marker_idx as f32, 0.0, 0.0));
+
+        // First Pass 2 patch (row 0, col 0): center is (2.0, 2.0)
+        let p2_first = p2_marker_idx + 1;
+        assert_eq!(coords[p2_first], (p2_first as f32, 2.0, 2.0));
+        // Second Pass 2 patch (row 0, col 1): center is (2.0, 6.0)
+        assert_eq!(coords[p2_first + 1], ((p2_first + 1) as f32, 2.0, 6.0));
+        // Last Pass 2 patch (row 15, col 15): center is (62.0, 62.0)
+        assert_eq!(coords[p2_first + 255], ((p2_first + 255) as f32, 62.0, 62.0));
+
+        // DONE_ID marker
+        let done_idx = p2_first + 256;
+        assert_eq!(coords[done_idx], (done_idx as f32, 0.0, 0.0));
+
+        // Test inference trajectory building
+        let prefix = vec![1, 50, PASS_1_ID as i32];
+        let inf_coords = build_cascaded_inference_coords(&prefix, 1, 64);
+        assert_eq!(inf_coords.len(), prefix.len() + 64 + 16);
+        assert_eq!(inf_coords[3], (3.0, 4.0, 4.0)); // first gen token
+        assert_eq!(inf_coords[3 + 63], (66.0, 60.0, 60.0)); // last gen token
+    }
 }

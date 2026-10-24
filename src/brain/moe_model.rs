@@ -356,6 +356,9 @@ pub struct YumonMoeBrainConfig {
     /// Whether this model includes a vision patch encoder for multimodal input.
     #[config(default = false)]
     pub is_multimodal: bool,
+    /// Whether to apply Multimodal Rotary Position Embedding (M-RoPE) on 2D visual sequences.
+    #[config(default = true)]
+    pub use_mrope: bool,
 }
 impl YumonMoeBrainConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> YumonMoeBrain<B> {
@@ -483,7 +486,19 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             row[first_pad..].iter().all(|&id| id == PAD_TOKEN as i32)
         });
         let pad = (!right_padded).then(|| tokens.clone().equal_elem(PAD_TOKEN as i32));
-        let rope = RopeTables::new(seq, self.config.embed_dim / self.config.attn_heads, &device);
+        let head_dim = self.config.embed_dim / self.config.attn_heads;
+        let rope = if self.config.use_mrope {
+            use crate::vision::paint_action::extract_batch_sequence_coords;
+            let coords = extract_batch_sequence_coords(&ids, batch, seq);
+            let has_spatial = coords.iter().any(|row| row.iter().any(|&(_, y, x)| y != 0.0 || x != 0.0));
+            if has_spatial {
+                RopeTables::new_mrope(&coords, head_dim, &device)
+            } else {
+                RopeTables::new(seq, head_dim, &device)
+            }
+        } else {
+            RopeTables::new(seq, head_dim, &device)
+        };
         let mut x = self.dropout.forward(self.embedding.forward(tokens));
         let mut auxiliary = Tensor::<B, 1>::zeros([1], &device).cast(FloatDType::F32);
         let mut counts = Vec::new();
@@ -893,6 +908,16 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         )
     }
 
+    /// Create a new key-value cache configured with M-RoPE coordinates for multimodal/cascaded art generation.
+    pub fn new_kv_cache_mrope(&self, coords: &[Vec<(f32, f32, f32)>], device: &B::Device) -> KvCache<B> {
+        KvCache::new_mrope(
+            self.blocks.len(),
+            coords,
+            self.config.embed_dim / self.config.attn_heads,
+            device,
+        )
+    }
+
     /// Logits [1, t, vocab] for `t` new tokens after those already in `cache`;
     /// matches `forward` over the whole sequence. Exit gates decide per position
     /// as in training: exited rows skip deeper attention and experts but still
@@ -1053,6 +1078,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             adaptive_depth: metadata.adaptive_depth,
             kv_heads: metadata.kv_heads,
             is_multimodal: metadata.is_multimodal,
+            use_mrope: metadata.use_mrope,
         };
 
         let model = config.init::<B>(device).load_record(record);
@@ -1133,6 +1159,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             adaptive_depth: metadata.adaptive_depth,
             kv_heads: metadata.kv_heads,
             is_multimodal: metadata.is_multimodal,
+            use_mrope: metadata.use_mrope,
         };
 
         let model = config.init::<B>(device).load_record(record);
@@ -1177,6 +1204,13 @@ pub struct MoeMetadata {
     /// Whether this model includes an auxiliary edge head for edge detection.
     #[serde(default)]
     pub has_edge_head: bool,
+    /// Whether this model uses M-RoPE for 2D visual sequences.
+    #[serde(default = "default_true")]
+    pub use_mrope: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -1512,6 +1546,7 @@ mod tests {
             val_loss: None,
             is_multimodal: false,
             has_edge_head: false,
+            use_mrope: false,
             batch_size: 1,
             training_stage: config.training_stage,
             embed_dim: config.embed_dim,
@@ -1654,7 +1689,7 @@ mod tests {
                 final_loss: 1.0, val_loss: None, batch_size: 1, training_stage: config.training_stage,
                 embed_dim: config.embed_dim, hidden_units: config.hidden_units, n_layers: config.n_layers,
                 attn_heads: config.attn_heads, ff_dim: config.ff_dim, max_seq_len: config.max_seq_len,
-                adaptive_depth: config.adaptive_depth.clone(), kv_heads: config.kv_heads, is_multimodal: false, has_edge_head: false };
+                adaptive_depth: config.adaptive_depth.clone(), kv_heads: config.kv_heads, is_multimodal: false, has_edge_head: false, use_mrope: false };
             model.save(path.to_str().unwrap(), &tokenizer, &meta).unwrap();
             if !depth {
                 // Rewrite the weights in the pre-adaptive-depth record layout.
@@ -1876,5 +1911,49 @@ mod tests {
         let grads = GradientsParams::from_grads(loss.backward(), &model);
 
         assert!(grads.get::<Wgpu, 2>(model.subpixel_embeds[0].weight.id).is_some(), "subpixel_embeds should receive gradients");
+    }
+
+    #[test]
+    fn test_clean_cascaded_mrope_forward_and_kv_cache() {
+        use crate::vision::paint_action::{PASS_1_ID, COLOR_START_ID, build_cascaded_inference_coords};
+        let device = Default::default();
+        let config = tiny_config()
+            .with_max_seq_len(32)
+            .with_is_multimodal(false); // Clean setup!
+        let model: YumonMoeBrain<Wgpu> = config.init(&device);
+
+        // Sequence: BOS (1), prompt token (5), PASS_1_ID (4100), then 4 color tokens
+        let prefix = vec![1, 5, PASS_1_ID as i32];
+        let color_tokens = vec![
+            (COLOR_START_ID + 10) as i32,
+            (COLOR_START_ID + 11) as i32,
+            (COLOR_START_ID + 12) as i32,
+            (COLOR_START_ID + 13) as i32,
+        ];
+        let mut full_seq = prefix.clone();
+        full_seq.extend(&color_tokens);
+
+        let tensor = |ids: &[i32]| Tensor::<Wgpu, 2, Int>::from_ints(
+            TensorData::new(ids.to_vec(), [1, ids.len()]),
+            &device,
+        );
+
+        // 1. Full sequence forward pass (calculates M-RoPE dynamically from tokens)
+        let full_logits = values(model.forward(tensor(&full_seq)));
+
+        // 2. Step-by-step cached generation using M-RoPE KvCache
+        let coords = build_cascaded_inference_coords(&prefix, 1, color_tokens.len());
+        let mut cache = model.new_kv_cache_mrope(&[coords], &device);
+
+        let mut cached_logits = Vec::new();
+        // Prefill prefix
+        cached_logits.extend(values(model.forward_cached(tensor(&prefix), &mut cache)));
+
+        // Decode 1 token per step
+        for &tok in &color_tokens {
+            cached_logits.extend(values(model.forward_cached(tensor(&[tok]), &mut cache)));
+        }
+
+        assert_close(cached_logits, full_logits, 1e-4);
     }
 }

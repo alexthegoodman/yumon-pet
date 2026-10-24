@@ -1053,6 +1053,7 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             max_seq_len:     p.run_cfg.max_seq_len,
             adaptive_depth:  self.config.adaptive_depth.clone(),
             kv_heads:        self.config.kv_heads,
+            use_mrope:       self.config.use_mrope,
         };
         self.save(dir, tokenizer, &meta)
     }

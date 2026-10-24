@@ -26,6 +26,7 @@ use {
         ART_VOCAB_SIZE, CANVAS_SIZE, CANVAS_CHANNELS,
         PASS_1_ID, PASS_2_ID, PASS_3_ID, PASS_4_ID,
         COLOR_START_ID, PALETTE_SIZE,
+        build_cascaded_inference_coords,
         pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
     },
 };
@@ -335,7 +336,8 @@ fn main() -> Result<()> {
     }
     p1_prefix.push(PASS_1_ID as i32);
 
-    let mut cache_p1 = brain_p1.new_kv_cache(&device);
+    let p1_coords = build_cascaded_inference_coords(&p1_prefix, 1, 64);
+    let mut cache_p1 = brain_p1.new_kv_cache_mrope(&[p1_coords], &device);
     let prefill_tensor = Tensor::<BackendType, 2, Int>::from_ints(
         TensorData::new(p1_prefix.clone(), [1, p1_prefix.len()]),
         &device,
@@ -401,7 +403,8 @@ fn main() -> Result<()> {
         }
         p2_prefix.push(PASS_2_ID as i32);
 
-        let mut cache_p2 = brain_p2.new_kv_cache(&device);
+        let p2_coords = build_cascaded_inference_coords(&p2_prefix, 2, 256);
+        let mut cache_p2 = brain_p2.new_kv_cache_mrope(&[p2_coords], &device);
         let prefill_tensor = Tensor::<BackendType, 2, Int>::from_ints(
             TensorData::new(p2_prefix.clone(), [1, p2_prefix.len()]),
             &device,
@@ -471,7 +474,8 @@ fn main() -> Result<()> {
         }
         p3_prefix.push(PASS_3_ID as i32);
 
-        let mut cache_p3 = brain_p3.new_kv_cache(&device);
+        let p3_coords = build_cascaded_inference_coords(&p3_prefix, 3, 1024);
+        let mut cache_p3 = brain_p3.new_kv_cache_mrope(&[p3_coords], &device);
         let prefill_tensor = Tensor::<BackendType, 2, Int>::from_ints(
             TensorData::new(p3_prefix.clone(), [1, p3_prefix.len()]),
             &device,
@@ -556,7 +560,8 @@ fn main() -> Result<()> {
         }
         p4_prefix.push(PASS_4_ID as i32);
 
-        let mut cache_p4 = brain_p4.new_kv_cache(&device);
+        let p4_coords = build_cascaded_inference_coords(&p4_prefix, 4, 4096);
+        let mut cache_p4 = brain_p4.new_kv_cache_mrope(&[p4_coords], &device);
         let prefill_tensor = Tensor::<BackendType, 2, Int>::from_ints(
             TensorData::new(p4_prefix.clone(), [1, p4_prefix.len()]),
             &device,

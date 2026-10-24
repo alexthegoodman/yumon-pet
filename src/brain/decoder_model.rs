@@ -70,7 +70,7 @@ impl<B: Backend> RopeTables<B> {
 
     /// Multimodal Rotary Position Embedding (M-RoPE) for (t, y, x) 3D coordinate trajectories.
     /// coords: [batch][seq] of (t, y, x) coordinates.
-    pub(super) fn new_mrope(
+    pub fn new_mrope(
         coords: &[Vec<(f32, f32, f32)>],
         dim: usize,
         device: &B::Device,
@@ -172,6 +172,9 @@ pub struct KvCache<B: Backend> {
 impl<B: Backend> KvCache<B> {
     pub fn new(layers: usize, max_seq_len: usize, head_dim: usize, device: &B::Device) -> Self {
         Self { layers: (0..layers).map(|_| None).collect(), len: 0, rope: RopeTables::new(max_seq_len, head_dim, device) }
+    }
+    pub fn new_mrope(layers: usize, coords: &[Vec<(f32, f32, f32)>], head_dim: usize, device: &B::Device) -> Self {
+        Self { layers: (0..layers).map(|_| None).collect(), len: 0, rope: RopeTables::new_mrope(coords, head_dim, device) }
     }
     /// RoPE for the next `len` positions.
     pub(super) fn next_rope(&self, len: usize) -> RopeTables<B> { self.rope.slice(self.len, len) }
@@ -352,6 +355,16 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         }
         cache.advance(t);
         self.token_head.forward(self.norm.forward(x))
+    }
+
+    pub fn new_kv_cache(&self, device: &B::Device) -> KvCache<B> {
+        KvCache::new(self.blocks.len(), self.config.max_seq_len,
+            self.config.embed_dim / self.config.attn_heads, device)
+    }
+
+    pub fn new_kv_cache_mrope(&self, coords: &[Vec<(f32, f32, f32)>], device: &B::Device) -> KvCache<B> {
+        KvCache::new_mrope(self.blocks.len(), coords,
+            self.config.embed_dim / self.config.attn_heads, device)
     }
 
     pub fn generate_unmasked_parsed(

@@ -172,6 +172,7 @@ fn main() -> Result<()> {
     println!("Embed dim      : {}", cfg.embed_dim);
     println!("Layers         : {}", cfg.n_layers);
     println!("Experts        : {} (top-{})", cfg.num_experts, cfg.top_k);
+    println!("Position Emb   : M-RoPE 3D (t, y, x) continuous coordinates");
 
     // 1. Load dataset
     println!("\nLoading training samples...");
@@ -430,6 +431,7 @@ fn main() -> Result<()> {
                 kv_heads: None,
                 is_multimodal: false,
                 has_edge_head: false,
+                use_mrope: true,
             };
 
             let meta_json = serde_json::to_string_pretty(&meta)?;
