@@ -251,3 +251,9 @@ You can process all images or pass --limit (e.g. --limit 10000 or omit --limit f
    --output training-cache/diffusion_kilo_samples.bin
 
 (You can also pass repeated flags if you prefer: --images-dir data/animals_images/images-64 --images-dir data/DiffusionDb/images-64).
+
+### Paint Inference
+
+Definitely adjust the settings to your liking.
+
+`cargo run --release --bin yumon_paint -- --checkpoint-pass1 checkpoints/yumon-art-pass1-db --checkpoint-pass2 checkpoints/yumon-art-pass2-db --checkpoint-pass3 checkpoints/yumon-art-pass3-db --passes 3 --prompt "a dog flying in the sky" --temperature 1.2 --top-p 0.85 --top-k 32`
