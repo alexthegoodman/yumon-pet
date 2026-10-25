@@ -12,7 +12,7 @@ use burn::{
         PaddingConfig2d,
     },
     prelude::*,
-    tensor::{activation::relu, Tensor},
+    tensor::{activation::{relu, leaky_relu}, Tensor},
 };
 
 /// Residual block with two 3x3 convolutions and 0.2 residual scaling.
@@ -175,5 +175,74 @@ impl<B: Backend> UpscalerModel<B> {
         }
 
         burn::tensor::activation::tanh(self.out_conv.forward(f))
+    }
+}
+
+/// Configuration for the PatchGAN Discriminator for 256x256 images.
+#[derive(Config, Debug)]
+pub struct UpscalerDiscriminatorConfig {
+    #[config(default = 32)]
+    pub base_channels: usize,
+}
+
+impl UpscalerDiscriminatorConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> UpscalerDiscriminator<B> {
+        let c = self.base_channels;
+        let conv1 = Conv2dConfig::new([3, c], [4, 4])
+            .with_stride([2, 2])
+            .with_padding(PaddingConfig2d::Explicit(1, 1))
+            .init(device);
+        let conv2 = Conv2dConfig::new([c, c * 2], [4, 4])
+            .with_stride([2, 2])
+            .with_padding(PaddingConfig2d::Explicit(1, 1))
+            .init(device);
+        let conv3 = Conv2dConfig::new([c * 2, c * 4], [4, 4])
+            .with_stride([2, 2])
+            .with_padding(PaddingConfig2d::Explicit(1, 1))
+            .init(device);
+        let conv4 = Conv2dConfig::new([c * 4, c * 8], [4, 4])
+            .with_stride([2, 2])
+            .with_padding(PaddingConfig2d::Explicit(1, 1))
+            .init(device);
+        let out_conv = Conv2dConfig::new([c * 8, 1], [3, 3])
+            .with_padding(PaddingConfig2d::Same)
+            .init(device);
+
+        UpscalerDiscriminator {
+            conv1,
+            conv2,
+            conv3,
+            conv4,
+            out_conv,
+        }
+    }
+}
+
+/// PatchGAN Discriminator for 256x256 images.
+/// Evaluates overlapping local patches and outputs a spatial grid of logits [batch, 1, 16, 16].
+#[derive(Module, Debug)]
+pub struct UpscalerDiscriminator<B: Backend> {
+    conv1: Conv2d<B>,
+    conv2: Conv2d<B>,
+    conv3: Conv2d<B>,
+    conv4: Conv2d<B>,
+    out_conv: Conv2d<B>,
+}
+
+impl<B: Backend> UpscalerDiscriminator<B> {
+    pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+        let (logits, _) = self.forward_with_features(x);
+        logits
+    }
+
+    /// Forward pass returning patch logits and intermediate feature maps for feature-matching loss.
+    pub fn forward_with_features(&self, x: Tensor<B, 4>) -> (Tensor<B, 4>, Vec<Tensor<B, 4>>) {
+        let f1 = leaky_relu(self.conv1.forward(x), 0.2);
+        let f2 = leaky_relu(self.conv2.forward(f1.clone()), 0.2);
+        let f3 = leaky_relu(self.conv3.forward(f2.clone()), 0.2);
+        let f4 = leaky_relu(self.conv4.forward(f3.clone()), 0.2);
+        let logits = self.out_conv.forward(f4.clone());
+
+        (logits, vec![f1, f2, f3, f4])
     }
 }

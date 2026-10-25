@@ -27,7 +27,9 @@ use std::{
     time::Instant,
 };
 
-use yumon_pet::vision::upscaler::{UpscalerModel, UpscalerModelConfig};
+use yumon_pet::vision::upscaler::{
+    UpscalerDiscriminator, UpscalerDiscriminatorConfig, UpscalerModel, UpscalerModelConfig,
+};
 
 pub type TrainBackend = Autodiff<
     burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>,
@@ -79,6 +81,26 @@ struct Args {
     /// Fraction of samples used for validation.
     #[arg(long, default_value_t = 0.02)]
     val_fraction: f64,
+
+    /// Enable GAN (PatchGAN discriminator + adversarial loss for sharp textures).
+    #[arg(long, default_value_t = false)]
+    gan: bool,
+
+    /// Weight of adversarial loss for Generator.
+    #[arg(long, default_value_t = 0.005)]
+    adv_weight: f64,
+
+    /// Weight of feature matching loss for Generator.
+    #[arg(long, default_value_t = 0.01)]
+    feat_weight: f64,
+
+    /// Initial learning rate for Discriminator.
+    #[arg(long, default_value_t = 1e-4)]
+    d_lr: f64,
+
+    /// Base channels for PatchGAN Discriminator.
+    #[arg(long, default_value_t = 32)]
+    d_channels: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -99,6 +121,16 @@ struct UpscalerConfigFile {
     channels: usize,
     #[serde(default = "default_val_fraction")]
     val_fraction: f64,
+    #[serde(default)]
+    gan: bool,
+    #[serde(default = "default_adv_weight")]
+    adv_weight: f64,
+    #[serde(default = "default_feat_weight")]
+    feat_weight: f64,
+    #[serde(default = "default_d_lr")]
+    d_lr: f64,
+    #[serde(default = "default_d_channels")]
+    d_channels: usize,
 }
 
 fn default_cache() -> String { "training-cache/upscaler_256_samples.bin".into() }
@@ -109,6 +141,10 @@ fn default_lr() -> f64 { 3e-4 }
 fn default_min_lr() -> f64 { 3e-5 }
 fn default_channels() -> usize { 32 }
 fn default_val_fraction() -> f64 { 0.02 }
+fn default_adv_weight() -> f64 { 0.005 }
+fn default_feat_weight() -> f64 { 0.01 }
+fn default_d_lr() -> f64 { 1e-4 }
+fn default_d_channels() -> usize { 32 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct UpscalerMetadata {
@@ -116,7 +152,12 @@ struct UpscalerMetadata {
     epochs: usize,
     train_loss: f32,
     val_loss: f32,
+    #[serde(default)]
+    d_loss: Option<f32>,
+    #[serde(default)]
+    adv_loss: Option<f32>,
     channels: usize,
+    gan: bool,
     timestamp: String,
 }
 
@@ -292,6 +333,11 @@ fn main() -> Result<()> {
         args.min_lr = cfg.min_lr;
         args.channels = cfg.channels;
         args.val_fraction = cfg.val_fraction;
+        args.gan = cfg.gan;
+        args.adv_weight = cfg.adv_weight;
+        args.feat_weight = cfg.feat_weight;
+        args.d_lr = cfg.d_lr;
+        args.d_channels = cfg.d_channels;
     }
 
     let device: <TrainBackend as Backend>::Device = Default::default();
@@ -305,6 +351,15 @@ fn main() -> Result<()> {
     println!("  Batch size      : {}", args.batch_size);
     println!("  Channels        : {}", args.channels);
     println!("  Learning rate   : {:.2e} -> {:.2e}", args.lr, args.min_lr);
+    if args.gan {
+        println!("  GAN Training    : ENABLED (PatchGAN LSGAN + Feature-Matching)");
+        println!("  D base channels : {}", args.d_channels);
+        println!("  D learning rate : {:.2e}", args.d_lr);
+        println!("  Adversarial wt  : {:.4}", args.adv_weight);
+        println!("  Feature match wt: {:.4}", args.feat_weight);
+    } else {
+        println!("  GAN Training    : DISABLED (pure regression)");
+    }
 
     fs::create_dir_all(&args.out_dir)?;
 
@@ -326,7 +381,7 @@ fn main() -> Result<()> {
     println!("  Train samples   : {}", train_indices.len());
     println!("  Val samples     : {}", val_indices.len());
 
-    // 2. Initialize Model and Loss
+    // 2. Initialize Model, Discriminator, and Loss
     let config = UpscalerModelConfig::new()
         .with_channels(args.channels);
 
@@ -337,6 +392,19 @@ fn main() -> Result<()> {
         .with_epsilon(1e-8)
         .with_weight_decay(1e-4)
         .init();
+
+    let (mut discriminator, mut optimizer_d) = if args.gan {
+        let d_config = UpscalerDiscriminatorConfig::new()
+            .with_base_channels(args.d_channels);
+        let disc: UpscalerDiscriminator<TrainBackend> = d_config.init(&device);
+        let opt_d = AdamWConfig::new()
+            .with_epsilon(1e-8)
+            .with_weight_decay(1e-4)
+            .init();
+        (Some(disc), Some(opt_d))
+    } else {
+        (None, None)
+    };
 
     let num_batches = train_indices.len() / args.batch_size;
     let t_train_start = Instant::now();
@@ -350,18 +418,30 @@ fn main() -> Result<()> {
         // Cosine learning rate decay
         let progress = (epoch - 1) as f64 / args.epochs.max(1) as f64;
         let lr = args.min_lr + 0.5 * (args.lr - args.min_lr) * (1.0 + (progress * std::f64::consts::PI).cos());
+        let d_lr = args.d_lr * (0.5 * (1.0 + (progress * std::f64::consts::PI).cos())).max(0.1);
 
         let pb = ProgressBar::new(num_batches as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [Epoch {msg}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) loss: {prefix}")
-                .unwrap()
-                .progress_chars("#>-"),
-        );
+        if args.gan {
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Epoch {msg}] [{bar:25.cyan/blue}] {pos}/{len} ({eta}) {prefix}")
+                    .unwrap()
+                    .progress_chars("#>-"),
+            );
+        } else {
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Epoch {msg}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) loss: {prefix}")
+                    .unwrap()
+                    .progress_chars("#>-"),
+            );
+        }
         pb.set_message(format!("{}/{}", epoch, args.epochs));
 
         let mut batch_count = 0;
         let mut last_loss_val = 0.0f32;
+        let mut last_d_loss_val = 0.0f32;
+        let mut last_adv_loss_val = 0.0f32;
 
         for chunk in epoch_indices.chunks(args.batch_size) {
             if chunk.len() < args.batch_size {
@@ -371,29 +451,101 @@ fn main() -> Result<()> {
             // High-speed RAM batch slicing (Zero Disk I/O, Zero CPU pixel loops)
             let (input_tensor, target_tensor) = dataset.make_batch_tensors(chunk, &device);
 
-            // Forward pass
+            // Forward pass: Generator produces 256x256 image
             let pred = model.forward(input_tensor);
 
-            let pixel_loss = loss_fn.forward(
-                pred.clone(),
-                target_tensor.clone(),
-                Reduction::Mean,
-            );
+            let (loss, d_loss_item, adv_loss_item) = if discriminator.is_some() {
+                let mut disc = discriminator.take().unwrap();
+                let opt_d = optimizer_d.as_mut().unwrap();
 
-            // Gradient / edge reconstruction loss
-            let edge_loss = gradient_loss(
-                pred,
-                target_tensor,
-            );
+                // 1. Train PatchGAN Discriminator (LSGAN objective)
+                // Real target
+                let (d_real, d_real_feats) = disc.forward_with_features(target_tensor.clone());
+                let err_real = d_real - 1.0;
+                let loss_d_real = (err_real.clone() * err_real).mean();
 
-            // Combined loss
-            let loss = pixel_loss + edge_loss * 0.1;
+                // Fake prediction (detached from Generator autograd graph)
+                let pred_detached = pred.clone().detach();
+                let (d_fake_detached, _) = disc.forward_with_features(pred_detached);
+                let loss_d_fake = (d_fake_detached.clone() * d_fake_detached).mean();
+
+                let loss_d = (loss_d_real + loss_d_fake) * 0.5;
+
+                let d_val = if batch_count % 25 == 0 {
+                    loss_d.clone().into_data().convert::<f32>().to_vec().unwrap()[0]
+                } else {
+                    0.0
+                };
+
+                let grads_d = loss_d.backward();
+                let grads_d = GradientsParams::from_grads(grads_d, &disc);
+                disc = opt_d.step(d_lr, disc, grads_d);
+
+                // 2. Train Generator
+                let pixel_loss = loss_fn.forward(
+                    pred.clone(),
+                    target_tensor.clone(),
+                    Reduction::Mean,
+                );
+                let edge_loss = gradient_loss(
+                    pred.clone(),
+                    target_tensor.clone(),
+                );
+
+                // Adversarial loss: fool the updated discriminator (D(fake) -> 1.0)
+                let (d_fake_for_g, d_fake_feats) = disc.forward_with_features(pred);
+                let err_fake_g = d_fake_for_g - 1.0;
+                let adv_loss = (err_fake_g.clone() * err_fake_g).mean();
+
+                // Discriminator Feature-Matching loss (organic perceptual loss)
+                let num_feat_layers = d_real_feats.len().min(d_fake_feats.len());
+                let mut feat_loss_sum: Option<Tensor<TrainBackend, 1>> = None;
+                for i in 0..num_feat_layers {
+                    let diff = (d_fake_feats[i].clone() - d_real_feats[i].clone().detach()).abs().mean();
+                    feat_loss_sum = match feat_loss_sum {
+                        Some(sum) => Some(sum + diff),
+                        None => Some(diff),
+                    };
+                }
+                let feat_loss = feat_loss_sum.unwrap() / (num_feat_layers as f32).max(1.0);
+
+                let adv_val = if batch_count % 25 == 0 {
+                    adv_loss.clone().into_data().convert::<f32>().to_vec().unwrap()[0]
+                } else {
+                    0.0
+                };
+
+                let g_loss = pixel_loss + edge_loss * 0.1
+                    + adv_loss * (args.adv_weight as f32)
+                    + feat_loss * (args.feat_weight as f32);
+
+                discriminator = Some(disc);
+
+                (g_loss, d_val, adv_val)
+            } else {
+                let pixel_loss = loss_fn.forward(
+                    pred.clone(),
+                    target_tensor.clone(),
+                    Reduction::Mean,
+                );
+                let edge_loss = gradient_loss(
+                    pred,
+                    target_tensor,
+                );
+                (pixel_loss + edge_loss * 0.1, 0.0, 0.0)
+            };
 
             // Periodically inspect loss (every 25 batches) to avoid halting GPU pipeline on every step
             if batch_count % 25 == 0 {
                 let loss_val: f32 = loss.clone().into_data().convert::<f32>().to_vec().unwrap()[0];
                 last_loss_val = loss_val;
-                pb.set_prefix(format!("{:.4}", loss_val));
+                if args.gan {
+                    last_d_loss_val = d_loss_item;
+                    last_adv_loss_val = adv_loss_item;
+                    pb.set_prefix(format!("G:{:.4} D:{:.4} Adv:{:.4}", loss_val, d_loss_item, adv_loss_item));
+                } else {
+                    pb.set_prefix(format!("{:.4}", loss_val));
+                }
             }
             batch_count += 1;
 
@@ -405,7 +557,14 @@ fn main() -> Result<()> {
             pb.inc(1);
         }
 
-        pb.finish_with_message(format!("{}/{} [Loss: {:.4}]", epoch, args.epochs, last_loss_val));
+        if args.gan {
+            pb.finish_with_message(format!(
+                "{}/{} [G: {:.4} | D: {:.4} | Adv: {:.4}]",
+                epoch, args.epochs, last_loss_val, last_d_loss_val, last_adv_loss_val
+            ));
+        } else {
+            pb.finish_with_message(format!("{}/{} [Loss: {:.4}]", epoch, args.epochs, last_loss_val));
+        }
 
         // 4. Fast Validation Loop
         let eval_count = val_indices.len().min(128);
@@ -447,12 +606,20 @@ fn main() -> Result<()> {
         let model_path = args.out_dir.join("model");
         model.clone().save_file(&model_path, &recorder)?;
 
+        if let Some(disc) = &discriminator {
+            let disc_path = args.out_dir.join("discriminator");
+            disc.clone().save_file(&disc_path, &recorder)?;
+        }
+
         let meta = UpscalerMetadata {
             epoch,
             epochs: args.epochs,
             train_loss: last_loss_val,
             val_loss: avg_val_loss,
+            d_loss: if args.gan { Some(last_d_loss_val) } else { None },
+            adv_loss: if args.gan { Some(last_adv_loss_val) } else { None },
             channels: args.channels,
+            gan: args.gan,
             timestamp: chrono::Local::now().to_rfc3339(),
         };
         let meta_json = serde_json::to_string_pretty(&meta)?;
