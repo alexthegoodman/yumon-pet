@@ -7,10 +7,7 @@
 
 use anyhow::{Context, Result, ensure};
 use burn::{
-    backend::{
-        autodiff::checkpoint::strategy::BalancedCheckpointing,
-        Autodiff,
-    },
+    backend::Autodiff,
     module::Module,
     optim::{AdamWConfig, GradientsParams, Optimizer},
     prelude::*,
@@ -33,7 +30,6 @@ use yumon_pet::vision::upscaler::{UpscalerModel, UpscalerModelConfig};
 
 pub type TrainBackend = Autodiff<
     burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>,
-    BalancedCheckpointing,
 >;
 
 pub const UPSCALER_CACHE_MAGIC: &[u8; 8] = b"YUMON_UP";
@@ -75,12 +71,8 @@ struct Args {
     #[arg(long, default_value_t = 3e-5)]
     min_lr: f64,
 
-    /// Number of residual blocks in the backbone.
-    #[arg(long, default_value_t = 6)]
-    res_blocks: usize,
-
     /// Feature channels in the residual backbone.
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = 32)]
     channels: usize,
 
     /// Fraction of samples used for validation.
@@ -102,8 +94,6 @@ struct UpscalerConfigFile {
     lr: f64,
     #[serde(default = "default_min_lr")]
     min_lr: f64,
-    #[serde(default = "default_res_blocks")]
-    res_blocks: usize,
     #[serde(default = "default_channels")]
     channels: usize,
     #[serde(default = "default_val_fraction")]
@@ -116,8 +106,7 @@ fn default_epochs() -> usize { 10 }
 fn default_batch_size() -> usize { 8 }
 fn default_lr() -> f64 { 3e-4 }
 fn default_min_lr() -> f64 { 3e-5 }
-fn default_res_blocks() -> usize { 6 }
-fn default_channels() -> usize { 64 }
+fn default_channels() -> usize { 32 }
 fn default_val_fraction() -> f64 { 0.02 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -127,7 +116,6 @@ struct UpscalerMetadata {
     train_loss: f32,
     val_loss: f32,
     channels: usize,
-    num_res_blocks: usize,
     timestamp: String,
 }
 
@@ -301,7 +289,6 @@ fn main() -> Result<()> {
         args.batch_size = cfg.batch_size;
         args.lr = cfg.lr;
         args.min_lr = cfg.min_lr;
-        args.res_blocks = cfg.res_blocks;
         args.channels = cfg.channels;
         args.val_fraction = cfg.val_fraction;
     }
@@ -315,7 +302,7 @@ fn main() -> Result<()> {
     println!("  Output directory: {}", args.out_dir.display());
     println!("  Epochs          : {}", args.epochs);
     println!("  Batch size      : {}", args.batch_size);
-    println!("  Backbone        : {} ResBlocks ({} channels)", args.res_blocks, args.channels);
+    println!("  Channels        : {}", args.channels);
     println!("  Learning rate   : {:.2e} -> {:.2e}", args.lr, args.min_lr);
 
     fs::create_dir_all(&args.out_dir)?;
@@ -340,8 +327,7 @@ fn main() -> Result<()> {
 
     // 2. Initialize Model
     let config = UpscalerModelConfig::new()
-        .with_channels(args.channels)
-        .with_num_res_blocks(args.res_blocks);
+        .with_channels(args.channels);
 
     let mut model: UpscalerModel<TrainBackend> = config.init(&device);
 
@@ -395,11 +381,14 @@ fn main() -> Result<()> {
             }
             batch_count += 1;
 
+            println!("hi");
             // Backward pass & optimizer step
             let grads = loss.backward();
+            println!("hi2");
             let grads = GradientsParams::from_grads(grads, &model);
+            println!("hi3");
             model = optimizer.step(lr, model, grads);
-
+            println!("hi4");
             pb.inc(1);
         }
 
@@ -451,7 +440,6 @@ fn main() -> Result<()> {
             train_loss: last_loss_val,
             val_loss: avg_val_loss,
             channels: args.channels,
-            num_res_blocks: args.res_blocks,
             timestamp: chrono::Local::now().to_rfc3339(),
         };
         let meta_json = serde_json::to_string_pretty(&meta)?;

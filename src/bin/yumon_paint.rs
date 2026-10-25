@@ -319,8 +319,7 @@ fn main() -> Result<()> {
         if model_path.exists() || ckpt_dir.join("model.bin").exists() || ckpt_dir.join("model.mpk").exists() {
             println!("Loading Pass 4 Neural Upscaler from {}...", ckpt_dir.display());
             let config = UpscalerModelConfig::new()
-                .with_channels(64)
-                .with_num_res_blocks(6);
+                .with_channels(32);
             let model: UpscalerModel<BackendType> = config.init(&device);
             let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
             match model.load_file(&model_path, &recorder, &device) {
