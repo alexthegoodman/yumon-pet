@@ -123,10 +123,4 @@ impl<B: Backend> UpscalerModel<B> {
 
         burn::tensor::activation::tanh(self.out_conv.forward(f))
     }
-
-    /// Pure, clean L1 loss (Mean Absolute Error).
-    /// Does not over-penalize large deviations like MSE, preserving sharp edges without blur.
-    pub fn loss(&self, pred: Tensor<B, 4>, target: Tensor<B, 4>) -> Tensor<B, 1> {
-        (pred - target).abs().mean()
-    }
 }

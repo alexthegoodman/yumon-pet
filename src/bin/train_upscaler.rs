@@ -9,6 +9,7 @@ use anyhow::{Context, Result, ensure};
 use burn::{
     backend::Autodiff,
     module::Module,
+    nn::loss::{HuberLossConfig, Reduction},
     optim::{AdamWConfig, GradientsParams, Optimizer},
     prelude::*,
     record::{BinFileRecorder, FullPrecisionSettings},
@@ -325,11 +326,12 @@ fn main() -> Result<()> {
     println!("  Train samples   : {}", train_indices.len());
     println!("  Val samples     : {}", val_indices.len());
 
-    // 2. Initialize Model
+    // 2. Initialize Model and Loss
     let config = UpscalerModelConfig::new()
         .with_channels(args.channels);
 
     let mut model: UpscalerModel<TrainBackend> = config.init(&device);
+    let loss_fn = HuberLossConfig::new(1.0).init();
 
     let mut optimizer = AdamWConfig::new()
         .with_epsilon(1e-8)
@@ -371,7 +373,7 @@ fn main() -> Result<()> {
 
             // Forward pass
             let pred = model.forward(input_tensor);
-            let loss = model.loss(pred, target_tensor);
+            let loss = loss_fn.forward(pred, target_tensor, Reduction::Mean);
 
             // Periodically inspect loss (every 25 batches) to avoid halting GPU pipeline on every step
             if batch_count % 25 == 0 {
@@ -381,14 +383,11 @@ fn main() -> Result<()> {
             }
             batch_count += 1;
 
-            println!("hi");
             // Backward pass & optimizer step
             let grads = loss.backward();
-            println!("hi2");
             let grads = GradientsParams::from_grads(grads, &model);
-            println!("hi3");
             model = optimizer.step(lr, model, grads);
-            println!("hi4");
+
             pb.inc(1);
         }
 
@@ -402,7 +401,7 @@ fn main() -> Result<()> {
         for chunk in val_indices[..eval_count].chunks(args.batch_size) {
             let (input_tensor, target_tensor) = dataset.make_batch_tensors(chunk, &device);
             let pred = model.forward(input_tensor);
-            let loss = model.loss(pred, target_tensor);
+            let loss = loss_fn.forward(pred, target_tensor, Reduction::Mean);
             let loss_val: f32 = loss.into_data().convert::<f32>().to_vec().unwrap()[0];
             val_loss_sum += loss_val;
             val_batches += 1;
