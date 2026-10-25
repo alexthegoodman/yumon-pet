@@ -65,6 +65,18 @@ path = "src/bin/export_cache_samples.rs"
 name = "build_diffusion_vocab"
 path = "src/bin/build_diffusion_vocab.rs"
 
+[[bin]]
+name = "resize_dataset"
+path = "src/bin/resize_dataset.rs"
+
+[[bin]]
+name = "cache_upscaler"
+path = "src/bin/cache_upscaler.rs"
+
+[[bin]]
+name = "train_upscaler"
+path = "src/bin/train_upscaler.rs"
+
 
 
 [features]

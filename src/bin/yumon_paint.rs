@@ -11,6 +11,7 @@ use {
     anyhow::{Context, Result},
     burn::{
         prelude::*,
+        record::{BinFileRecorder, FullPrecisionSettings},
         tensor::{Int, TensorData},
     },
     clap::Parser,
@@ -22,12 +23,16 @@ use {
         tokenizer::BOS_TOKEN,
         yumon_talk::TranslationContext,
     },
-    yumon_pet::vision::paint_action::{
-        ART_VOCAB_SIZE, CANVAS_SIZE, CANVAS_CHANNELS,
-        PASS_1_ID, PASS_2_ID, PASS_3_ID, PASS_4_ID,
-        COLOR_START_ID, PALETTE_SIZE,
-        build_cascaded_inference_coords,
-        pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
+    yumon_pet::vision::{
+        paint_action::{
+            ART_VOCAB_SIZE, CANVAS_SIZE, CANVAS_CHANNELS,
+            PASS_1_ID, PASS_2_ID, PASS_3_ID,
+            COLOR_START_ID, PALETTE_SIZE,
+            build_cascaded_inference_coords,
+            palette_to_rgb,
+            pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image,
+        },
+        upscaler::{UpscalerModel, UpscalerModelConfig},
     },
 };
 
@@ -60,7 +65,11 @@ struct Args {
     #[arg(long)]
     checkpoint_pass3: Option<PathBuf>,
 
-    /// Pass 4 checkpoint directory (Fine Pixel Art Details, e.g. checkpoints/yumon-art-pass4).
+    /// Pass 4 Neural Upscaler checkpoint directory (e.g. checkpoints/yumon-upscaler-256).
+    #[arg(long, default_value = "checkpoints/yumon-upscaler-256")]
+    upscaler_checkpoint: PathBuf,
+
+    /// Optional legacy Pass 4 checkpoint directory.
     #[arg(long)]
     checkpoint_pass4: Option<PathBuf>,
 
@@ -304,14 +313,26 @@ fn main() -> Result<()> {
         None
     };
 
-    let brain_p4 = if args.passes >= 4 {
-        Some(load_or_init_pass_brain(
-            "Pass 4",
-            args.checkpoint_pass4.as_ref(),
-            args.checkpoint.as_ref(),
-            5500,
-            &device,
-        )?)
+    let upscaler = if args.passes >= 4 {
+        let ckpt_dir = args.checkpoint_pass4.as_ref().unwrap_or(&args.upscaler_checkpoint);
+        let model_path = ckpt_dir.join("model");
+        if model_path.exists() || ckpt_dir.join("model.bin").exists() || ckpt_dir.join("model.mpk").exists() {
+            println!("Loading Pass 4 Neural Upscaler from {}...", ckpt_dir.display());
+            let config = UpscalerModelConfig::new()
+                .with_channels(64)
+                .with_num_res_blocks(6);
+            let model: UpscalerModel<BackendType> = config.init(&device);
+            let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+            match model.load_file(&model_path, &recorder, &device) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    eprintln!("Warning: Failed to load upscaler weights: {}. Will fallback to nearest-neighbor.", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -543,118 +564,50 @@ fn main() -> Result<()> {
         print_terminal_canvas(&canvas_hwc);
     }
 
-    // PASS 4: Fine Pixel Art Details (64x64 Pixels, 4,096 color tokens)
-    if let Some(brain_p4) = &brain_p4 {
+    // PASS 4: Deep Neural Super-Resolution (32x32 -> 256x256)
+    let mut final_neural_256: Option<Vec<u8>> = None;
+    if args.passes >= 4 {
         println!("\n═══════════════════════════════════════════════════════");
-        println!("  🎨 Pass 4 / {}: Fine Pixel Art Details (4,096 Pixels)", args.passes);
+        println!("  🎨 Pass 4 / {}: Neural Super-Resolution (32x32 -> 256x256)", args.passes);
         println!("═══════════════════════════════════════════════════════");
         let t_pass4 = Instant::now();
 
-        let mut p4_prefix = vec![BOS_TOKEN as i32];
-        for &tok in &prompt_tokens {
-            p4_prefix.push(tok as i32);
-        }
-        p4_prefix.push(PASS_3_ID as i32);
-        for &tok in &pass3_colors {
-            p4_prefix.push(tok as i32);
-        }
-        p4_prefix.push(PASS_4_ID as i32);
-
-        let p4_coords = build_cascaded_inference_coords(&p4_prefix, 4, 4096);
-        let mut cache_p4 = brain_p4.new_kv_cache_mrope(&[p4_coords], &device);
-        let prefill_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-            TensorData::new(p4_prefix.clone(), [1, p4_prefix.len()]),
-            &device,
-        );
-        let logits = brain_p4.forward_cached(prefill_tensor, &mut cache_p4);
-        let mut last_logit: Vec<f32> = logits
-            .slice([0..1, p4_prefix.len() - 1..p4_prefix.len(), 0..ART_VOCAB_SIZE])
-            .into_data()
-            .convert::<f32>()
-            .to_vec()
-            .unwrap();
-
-        let mut pass4_colors = Vec::with_capacity(4096);
-        let mut p4_last_color = None;
-        let mut p4_consecutive = 0;
-        for i in 0..4096 {
-            let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-            let y = i / CANVAS_SIZE;
-            let x = i % CANVAS_SIZE;
-            let sub_patch_idx = (y / 2) * 32 + (x / 2);
-
-            let mut working_logits = color_logits.to_vec();
-            if args.shape_guidance > 0.0 && sub_patch_idx < pass3_colors.len() {
-                let shape_token = pass3_colors[sub_patch_idx];
-                let shape_color = (shape_token as usize).saturating_sub(COLOR_START_ID);
-                if shape_color < PALETTE_SIZE {
-                    working_logits[shape_color] += args.shape_guidance;
-                }
+        if let Some(upscaler) = &upscaler {
+            let plane = 32 * 32;
+            let mut flat = vec![0.0f32; 3 * plane];
+            for (i, &tok) in pass3_colors.iter().take(1024).enumerate() {
+                let c = (tok as usize).saturating_sub(COLOR_START_ID).min(255) as u8;
+                let [r, g, b] = palette_to_rgb(c);
+                flat[0 * plane + i] = (r as f32 / 255.0) * 2.0 - 1.0;
+                flat[1 * plane + i] = (g as f32 / 255.0) * 2.0 - 1.0;
+                flat[2 * plane + i] = (b as f32 / 255.0) * 2.0 - 1.0;
             }
-
-            let best_palette_idx = sample_color_token(
-                &working_logits,
-                args.temperature,
-                args.top_k,
-                args.top_p,
-                p4_last_color,
-                p4_consecutive,
-                args.repeat_penalty,
-            ) as u8;
-
-            if Some(best_palette_idx as usize) == p4_last_color {
-                p4_consecutive += 1;
-            } else {
-                p4_last_color = Some(best_palette_idx as usize);
-                p4_consecutive = 1;
-            }
-
-            let next_token = (COLOR_START_ID + best_palette_idx as usize) as u32;
-            pass4_colors.push(next_token);
-
-            let step_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-                TensorData::new(vec![next_token as i32], [1, 1]),
+            let input_tensor = Tensor::<BackendType, 4>::from_floats(
+                TensorData::new(flat, [1, 3, 32, 32]),
                 &device,
             );
-            let step_logits = brain_p4.forward_cached(step_tensor, &mut cache_p4);
-            last_logit = step_logits.reshape([ART_VOCAB_SIZE]).into_data().convert::<f32>().to_vec().unwrap();
-
-            if (i + 1) % 512 == 0 || i == 4095 {
-                let y = (i + 1) / CANVAS_SIZE;
-                println!("  [Pass 4 Progress] Pixel {:>4}/4096 (Row {:>2}/64 rendered)...", i + 1, y);
+            let out_tensor = upscaler.forward(input_tensor);
+            let out_data: Vec<f32> = out_tensor.into_data().convert::<f32>().to_vec().unwrap();
+            let out_plane = 256 * 256;
+            let mut rgb_256 = vec![0u8; 256 * 256 * 3];
+            for y in 0..256 {
+                for x in 0..256 {
+                    let idx = y * 256 + x;
+                    let r = (((out_data[0 * out_plane + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    let g = (((out_data[1 * out_plane + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    let b = (((out_data[2 * out_plane + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    let out_idx = (y * 256 + x) * 3;
+                    rgb_256[out_idx] = r;
+                    rgb_256[out_idx + 1] = g;
+                    rgb_256[out_idx + 2] = b;
+                }
             }
+            final_neural_256 = Some(rgb_256);
+            println!("  ✓ Pass 4 Complete ({:.2?}): Neural super-resolution synthesized 256x256 high-res art.", t_pass4.elapsed());
+        } else {
+            println!("  Pass 4 upscaler checkpoint not loaded; saving artwork using Pass 3 resolution.");
         }
-
-        canvas_hwc = pass4_tokens_to_image(&pass4_colors);
-        println!("  ✓ Pass 4 Complete ({:.2?}): Full pixel-level shading & highlights applied.", t_pass4.elapsed());
-        print_terminal_canvas(&canvas_hwc);
     }
-
-    // println!("\n  ✨ Yumon steps back, smiles, and says: \"Done! Artwork complete.\"");
-
-    // // Save final raw 64x64 PNG
-    // let raw_output = if let Some(ext) = args.output.extension() {
-    //     let stem = args.output.file_stem().unwrap().to_string_lossy();
-    //     args.output.with_file_name(format!("{}_64.{}", stem, ext.to_string_lossy()))
-    // } else {
-    //     PathBuf::from("yumon_artwork_64.png")
-    // };
-
-    // let raw_buf = image::RgbImage::from_raw(
-    //     CANVAS_SIZE as u32,
-    //     CANVAS_SIZE as u32,
-    //     canvas_hwc.clone(),
-    // ).context("creating raw 64x64 ImageBuffer")?;
-    // raw_buf.save(&raw_output)?;
-
-    // // Save upscaled PNG (e.g. 256x256)
-    // let upscaled_bytes = upscale_nn(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE, args.scale);
-    // let upscaled_buf = image::RgbImage::from_raw(
-    //     (CANVAS_SIZE * args.scale) as u32,
-    //     (CANVAS_SIZE * args.scale) as u32,
-    //     upscaled_bytes,
-    // ).context("creating upscaled ImageBuffer")?;
-    // upscaled_buf.save(&args.output)?;
 
     println!("\n  ✨ Yumon steps back, smiles, and says: \"Done! Artwork complete.\"");
 
@@ -673,7 +626,6 @@ fn main() -> Result<()> {
     fs::create_dir_all(&cache_dir)
         .context("creating inference-cache directory")?;
 
-    // Use the requested output filename as the base.
     let stem = args.output
         .file_stem()
         .unwrap_or_default()
@@ -694,31 +646,36 @@ fn main() -> Result<()> {
 
     raw_buf.save(&raw_output)?;
 
-    // Save upscaled PNG.
+    // Save 256x256 (Neural Super-Resolution or Nearest Neighbor fallback)
     let upscaled_output = cache_dir.join(format!(
         "{}_{}.png",
         stem, timestamp
     ));
 
-    let upscaled_bytes = upscale_nn(
-        &canvas_hwc,
-        CANVAS_SIZE,
-        CANVAS_SIZE,
-        args.scale,
-    );
+    let (out_w, out_h, upscaled_bytes) = if let Some(neural_bytes) = final_neural_256 {
+        (256, 256, neural_bytes)
+    } else {
+        (
+            CANVAS_SIZE * args.scale,
+            CANVAS_SIZE * args.scale,
+            upscale_nn(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE, args.scale),
+        )
+    };
 
     let upscaled_buf = image::RgbImage::from_raw(
-        (CANVAS_SIZE * args.scale) as u32,
-        (CANVAS_SIZE * args.scale) as u32,
+        out_w as u32,
+        out_h as u32,
         upscaled_bytes,
     )
     .context("creating upscaled ImageBuffer")?;
 
     upscaled_buf.save(&upscaled_output)?;
+    upscaled_buf.save(&args.output)?;
 
     println!("\n🎨 Artwork saved successfully:");
-    println!("   - Upscaled ({}x{}): {}", CANVAS_SIZE * args.scale, CANVAS_SIZE * args.scale, args.output.display());
-    println!("   - Raw      (64x64):   {}", raw_output.display());
+    println!("   - Final ({}x{}):  {}", out_w, out_h, args.output.display());
+    println!("   - Cached:          {}", upscaled_output.display());
+    println!("   - Raw    (64x64):  {}", raw_output.display());
 
     Ok(())
 }

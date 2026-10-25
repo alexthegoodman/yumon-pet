@@ -3,6 +3,7 @@
 ///   - emote_head          : 7-class FER2013 emotion detection
 ///   - patch_encoder       : 2D coordinate-aware 64x64 canvas patch encoder for MoE
 ///   - paint_action        : Discrete paint commands & canvas progression
+///   - upscaler            : Pass 4 deep residual super-resolution (32x32 -> 256x256)
 
 pub mod model;
 pub mod loader;
@@ -11,9 +12,11 @@ pub mod fer;
 pub mod train;
 pub mod paint_action;
 pub mod patch_encoder;
+pub mod upscaler;
 
 pub use paint_action::{PaintAction, CANVAS_SIZE, PATCH_SIZE, GRID_SIZE, NUM_PATCHES, ART_VOCAB_SIZE};
 pub use patch_encoder::{VisionPatchEncoder, VisionPatchEncoderConfig};
+pub use upscaler::{UpscalerModel, UpscalerModelConfig};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
