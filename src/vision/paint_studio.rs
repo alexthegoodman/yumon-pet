@@ -655,6 +655,7 @@ impl<B: FlashAttention> PaintStudio<B> {
         let mut final_canvas_hwc = current_canvas_hwc.clone();
         let mut out_w = CANVAS_SIZE as u32;
         let mut out_h = CANVAS_SIZE as u32;
+        let mut cached_final_data_url: Option<String> = None;
 
         if total_passes >= 4 {
             let t_p4 = Instant::now();
@@ -705,9 +706,10 @@ impl<B: FlashAttention> PaintStudio<B> {
                 description: "Deep neural 256x256 super-resolution synthesized".into(),
                 width: out_w,
                 height: out_h,
-                data_url: p4_url,
+                data_url: p4_url.clone(),
                 elapsed_secs: t_p4.elapsed().as_secs_f32(),
             });
+            cached_final_data_url = Some(p4_url);
         }
 
         // ── Save Artwork & JSON Metadata to inference-cache ──
@@ -771,7 +773,10 @@ impl<B: FlashAttention> PaintStudio<B> {
         });
         fs::write(&meta_path, serde_json::to_string_pretty(&metadata)?)?;
 
-        let final_data_url = rgb_to_data_url(&final_canvas_hwc, out_w, out_h)?;
+        let final_data_url = match cached_final_data_url {
+            Some(url) => url,
+            None => rgb_to_data_url(&final_canvas_hwc, out_w, out_h)?,
+        };
         let thumbnail_url = rgb_to_thumbnail_data_url(&final_canvas_hwc, out_w, out_h, 80)?;
 
         Ok(PaintResult {

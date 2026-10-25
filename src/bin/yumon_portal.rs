@@ -114,8 +114,6 @@ mod desktop {
         next_check: Option<DateTime<Utc>>,
         paint_status: String,
         paint_busy: bool,
-        gallery: Vec<GalleryItem>,
-        active_artwork: Option<GalleryItem>,
     }
 
     #[derive(Clone, Serialize)]
@@ -409,8 +407,6 @@ mod desktop {
                 next_check,
                 paint_status: "Ready".into(),
                 paint_busy: false,
-                gallery: Vec::new(),
-                active_artwork: None,
             };
             let responder: Responder = Box::new(|text, kind, history| {
                 assert!(matches!(kind, PromptKind::Chat));
@@ -1023,9 +1019,8 @@ mod desktop {
             next_check: None,
             paint_status: "Ready".into(),
             paint_busy: false,
-            gallery: Vec::new(),
-            active_artwork: None,
         };
+        let mut gallery: Vec<GalleryItem> = Vec::new();
         let event_loop = EventLoopBuilder::<RssEvent>::with_user_event().build();
         let proxy = event_loop.create_proxy();
         let mut builder = WindowBuilder::new()
@@ -1143,6 +1138,7 @@ mod desktop {
         let mut ready = false;
         event_loop.run(move |event, _, control_flow| {
             *control_flow = ControlFlow::Wait;
+            let mut state_changed = false;
             match event {
                 Event::WindowEvent {
                     event: WindowEvent::CloseRequested,
@@ -1154,11 +1150,15 @@ mod desktop {
                 }
                 Event::UserEvent(RssEvent::Ui(Ipc::Ready)) => {
                     ready = true;
-                    if let Ok(json) = serde_json::to_string(&state.gallery) {
+                    if let Ok(json) = serde_json::to_string(&gallery) {
                         let _ = webview.evaluate_script(&format!("window.__yumon_gallery_loaded({json})"));
                     }
+                    state_changed = true;
                 }
-                Event::UserEvent(RssEvent::State(update)) => state = update,
+                Event::UserEvent(RssEvent::State(update)) => {
+                    state = update;
+                    state_changed = true;
+                }
                 Event::UserEvent(RssEvent::PaintProgress(progress)) => {
                     state.paint_status = format!("{}: {}", progress.stage_name, progress.description);
                     if ready {
@@ -1166,12 +1166,12 @@ mod desktop {
                             let _ = webview.evaluate_script(&format!("window.__yumon_paint_progress({json})"));
                         }
                     }
+                    return;
                 }
                 Event::UserEvent(RssEvent::PaintComplete { item, final_data_url }) => {
                     state.paint_busy = false;
                     state.paint_status = "Artwork complete!".into();
-                    state.gallery.insert(0, item.clone());
-                    state.active_artwork = Some(item.clone());
+                    gallery.insert(0, item.clone());
                     if ready {
                         let payload = serde_json::json!({
                             "item": item,
@@ -1181,6 +1181,7 @@ mod desktop {
                             let _ = webview.evaluate_script(&format!("window.__yumon_paint_complete({json})"));
                         }
                     }
+                    state_changed = true;
                 }
                 Event::UserEvent(RssEvent::PaintError(err)) => {
                     state.paint_busy = false;
@@ -1189,14 +1190,16 @@ mod desktop {
                         let escaped = serde_json::to_string(&err).unwrap_or_default();
                         let _ = webview.evaluate_script(&format!("window.__yumon_paint_error({escaped})"));
                     }
+                    state_changed = true;
                 }
                 Event::UserEvent(RssEvent::GalleryLoaded(items)) => {
-                    state.gallery = items;
+                    gallery = items;
                     if ready {
-                        if let Ok(json) = serde_json::to_string(&state.gallery) {
+                        if let Ok(json) = serde_json::to_string(&gallery) {
                             let _ = webview.evaluate_script(&format!("window.__yumon_gallery_loaded({json})"));
                         }
                     }
+                    return;
                 }
                 Event::UserEvent(RssEvent::FullImageLoaded { path, data_url }) => {
                     if ready {
@@ -1205,6 +1208,7 @@ mod desktop {
                             let _ = webview.evaluate_script(&format!("window.__yumon_full_image_loaded({json})"));
                         }
                     }
+                    return;
                 }
                 Event::UserEvent(RssEvent::Ui(Ipc::Paint { prompt, passes, temperature })) => {
                     let prompt = prompt.trim();
@@ -1218,18 +1222,22 @@ mod desktop {
                             ..Default::default()
                         };
                         let _ = paint_tx.send(PaintJob::Generate(config));
+                        state_changed = true;
                     }
                 }
                 Event::UserEvent(RssEvent::Ui(Ipc::LoadGallery)) => {
                     let _ = paint_tx.send(PaintJob::RefreshGallery);
+                    return;
                 }
                 Event::UserEvent(RssEvent::Ui(Ipc::GetFullImage { path })) => {
                     let _ = paint_tx.send(PaintJob::GetFullImage { path });
+                    return;
                 }
                 Event::UserEvent(RssEvent::Ui(Ipc::OpenArtFile { path })) => {
                     if let Err(e) = open_art_file(&path) {
                         eprintln!("[Yumon Portal] Could not open artwork file {path}: {e:#}");
                     }
+                    return;
                 }
                 Event::UserEvent(RssEvent::Ui(Ipc::Refresh))
                     if state.can_refresh && !state.busy && !state.chat_busy =>
@@ -1237,6 +1245,7 @@ mod desktop {
                     if tx.send(WorkerRequest::Refresh).is_ok() {
                         state.busy = true;
                         state.status = "Refreshing Product Hunt...".into();
+                        state_changed = true;
                     }
                 }
                 Event::UserEvent(RssEvent::Ui(Ipc::Chat { message }))
@@ -1247,6 +1256,7 @@ mod desktop {
                         if tx.send(WorkerRequest::Chat(message.to_owned())).is_ok() {
                             state.chat_busy = true;
                             state.chat_status = "Yumon is thinking...".into();
+                            state_changed = true;
                         }
                     }
                 }
@@ -1254,6 +1264,7 @@ mod desktop {
                     state.chat.clear();
                     state.chat_status = "Say hello or share an idea.".into();
                     let _ = tx.send(WorkerRequest::ClearChat);
+                    state_changed = true;
                 }
                 Event::UserEvent(RssEvent::Ui(Ipc::Drag)) => {
                     let _ = window.drag_window();
@@ -1263,12 +1274,13 @@ mod desktop {
                     if state.entries.iter().any(|e| e.article.link == link) {
                         if let Err(error) = open_article(&link) {
                             state.status = format!("{error:#}");
+                            state_changed = true;
                         }
                     }
                 }
                 _ => return,
             }
-            if ready {
+            if ready && state_changed {
                 if let Ok(json) = serde_json::to_string(&state) {
                     let _ = webview.evaluate_script(&format!("window.__yumon_portal({json})"));
                 }

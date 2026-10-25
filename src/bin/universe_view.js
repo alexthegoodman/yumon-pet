@@ -311,6 +311,8 @@
       this.world = generateNeighborhood(this.seed);
       this.aquascapePlaces = generateAquascapeFeatures();
       this.paused = false;
+      this.isPainting = false;
+      this.lastRenderTime = 0;
       this.selectedCitizen = 0;
 
       this.landmarks = [];
@@ -2054,9 +2056,27 @@
       }
     }
 
+    setPainting(isPainting) {
+      this.isPainting = isPainting;
+      if (this.renderer?.shadowMap) {
+        this.renderer.shadowMap.autoUpdate = !isPainting;
+        if (!isPainting) {
+          this.renderer.shadowMap.needsUpdate = true;
+        }
+      }
+    }
+
     animate() {
       this.animId = requestAnimationFrame(this.animate);
       const now = performance.now();
+      const targetFps = this.isPainting ? 10 : 30;
+      const minInterval = 1000 / targetFps;
+      const elapsed = now - (this.lastRenderTime || 0);
+      if (elapsed < minInterval) {
+        return;
+      }
+      this.lastRenderTime = now - (elapsed % minInterval);
+
       const dt = Math.min(0.1, (now - (this.lastTime || now)) / 1000.0);
       this.lastTime = now;
 

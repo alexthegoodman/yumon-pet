@@ -996,6 +996,7 @@
     const prompt = paintPromptInput.value.trim();
     if (!prompt || isPainting) return;
     isPainting = true;
+    window.__yumon_universe_app?.setPainting(true);
     paintStartBtn.disabled = true;
     paintStartBtn.textContent = 'Painting...';
     resetStepper();
@@ -1026,6 +1027,7 @@
 
   window.__yumon_paint_progress = progress => {
     isPainting = true;
+    window.__yumon_universe_app?.setPainting(true);
     paintLiveIndicator.style.display = 'flex';
     if (progress.data_url) {
       paintCanvasImg.src = progress.data_url;
@@ -1039,6 +1041,7 @@
 
   window.__yumon_paint_complete = payload => {
     isPainting = false;
+    window.__yumon_universe_app?.setPainting(false);
     paintStartBtn.disabled = false;
     paintStartBtn.textContent = 'Paint 🎨';
     paintLiveIndicator.style.display = 'none';
@@ -1068,6 +1071,7 @@
 
   window.__yumon_paint_error = err => {
     isPainting = false;
+    window.__yumon_universe_app?.setPainting(false);
     paintStartBtn.disabled = false;
     paintStartBtn.textContent = 'Paint 🎨';
     paintLiveIndicator.style.display = 'none';
