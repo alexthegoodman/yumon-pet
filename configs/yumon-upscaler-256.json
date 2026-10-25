@@ -8,5 +8,5 @@
   "lr": 0.0003,
   "min_lr": 0.00003,
   "val_fraction": 0.02,
-  "out_dir": "checkpoints/yumon-upscaler-gan-1"
+  "out_dir": "checkpoints/yumon-upscaler-gan-3"
 }

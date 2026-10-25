@@ -77,6 +77,10 @@ path = "src/bin/cache_upscaler.rs"
 name = "train_upscaler"
 path = "src/bin/train_upscaler.rs"
 
+[[bin]]
+name = "eval_upscaler"
+path = "src/bin/eval_upscaler.rs"
+
 
 
 [features]

@@ -22,13 +22,20 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
-    io::Read,
+    io::{stdout, IsTerminal, Read},
     path::PathBuf,
     time::Instant,
 };
+use ratatui::{
+    backend::CrosstermBackend,
+    Terminal, TerminalOptions, Viewport,
+};
 
-use yumon_pet::vision::upscaler::{
-    UpscalerDiscriminator, UpscalerDiscriminatorConfig, UpscalerModel, UpscalerModelConfig,
+use yumon_pet::vision::{
+    chart::{render as render_upscaler_chart, UpscalerTrainingState},
+    upscaler::{
+        UpscalerDiscriminator, UpscalerDiscriminatorConfig, UpscalerModel, UpscalerModelConfig,
+    },
 };
 
 pub type TrainBackend = Autodiff<
@@ -87,20 +94,30 @@ struct Args {
     gan: bool,
 
     /// Weight of adversarial loss for Generator.
-    #[arg(long, default_value_t = 0.005)]
+    // #[arg(long, default_value_t = 0.005)]
+    #[arg(long, default_value_t = 0.02)]
     adv_weight: f64,
 
     /// Weight of feature matching loss for Generator.
-    #[arg(long, default_value_t = 0.01)]
+    // #[arg(long, default_value_t = 0.01)]
+    #[arg(long, default_value_t = 0.05)]
     feat_weight: f64,
 
     /// Initial learning rate for Discriminator.
-    #[arg(long, default_value_t = 1e-4)]
+    #[arg(long, default_value_t = 3e-5)]
     d_lr: f64,
 
     /// Base channels for PatchGAN Discriminator.
     #[arg(long, default_value_t = 32)]
     d_channels: usize,
+
+    /// Disable interactive Ratatui TUI dashboard.
+    #[arg(long, default_value_t = false)]
+    no_tui: bool,
+
+    /// Target label for real images in Discriminator (one-sided label smoothing, e.g. 0.9).
+    #[arg(long, default_value_t = 0.9)]
+    real_label: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -131,6 +148,10 @@ struct UpscalerConfigFile {
     d_lr: f64,
     #[serde(default = "default_d_channels")]
     d_channels: usize,
+    #[serde(default)]
+    no_tui: bool,
+    #[serde(default = "default_real_label")]
+    real_label: f32,
 }
 
 fn default_cache() -> String { "training-cache/upscaler_256_samples.bin".into() }
@@ -145,6 +166,7 @@ fn default_adv_weight() -> f64 { 0.005 }
 fn default_feat_weight() -> f64 { 0.01 }
 fn default_d_lr() -> f64 { 1e-4 }
 fn default_d_channels() -> usize { 32 }
+fn default_real_label() -> f32 { 0.9 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct UpscalerMetadata {
@@ -266,54 +288,90 @@ impl InMemDataset {
     }
 }
 
-/// Save visual comparison image: [Input 32x32 Upscaled | Model Predicted 256 | Ground Truth 256]
-fn save_preview_image(
-    input_slice: &[f32],
+/// Save 16-sample visual comparison grid: 4 rows x 4 columns of [Input 32 | Model Predicted 256 | Ground Truth 256]
+fn save_preview_grid(
+    dataset: &InMemDataset,
+    indices: &[usize],
     pred_tensor: Tensor<TrainBackend, 4>,
-    target_slice: &[f32],
     out_path: &PathBuf,
 ) -> Result<()> {
-    let mut preview = image::RgbImage::new((TARGET_SIZE * 3) as u32, TARGET_SIZE as u32);
+    let b = indices.len();
+    let cols = 4u32;
+    let rows = ((b as u32) + cols - 1) / cols;
+
+    let triplet_w = (TARGET_SIZE * 3 + 2) as u32; // 770 px
+    let triplet_h = TARGET_SIZE as u32; // 256 px
+    let cell_margin = 8u32;
+    let bg_color = image::Rgb([18, 18, 26]);
+
+    let img_w = cell_margin + cols * (triplet_w + cell_margin);
+    let img_h = cell_margin + rows * (triplet_h + cell_margin);
+
+    let mut grid_img = image::RgbImage::from_pixel(img_w, img_h, bg_color);
+    let pred_data: Vec<f32> = pred_tensor.into_data().convert::<f32>().to_vec().unwrap();
+
     let plane_32 = INPUT_GRID_SIZE * INPUT_GRID_SIZE;
     let plane_256 = TARGET_SIZE * TARGET_SIZE;
 
-    // 1. Input 32x32 upscaled nearest-neighbor to 256x256
-    for y in 0..TARGET_SIZE {
-        let src_y = y / 8;
-        for x in 0..TARGET_SIZE {
-            let src_x = x / 8;
-            let idx_32 = src_y * INPUT_GRID_SIZE + src_x;
-            let r = (((input_slice[0 * plane_32 + idx_32] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-            let g = (((input_slice[1 * plane_32 + idx_32] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-            let b = (((input_slice[2 * plane_32 + idx_32] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-            preview.put_pixel(x as u32, y as u32, image::Rgb([r, g, b]));
+    for (i, &idx) in indices.iter().enumerate() {
+        let r = (i as u32) / cols;
+        let c = (i as u32) % cols;
+        let x_offset = cell_margin + c * (triplet_w + cell_margin);
+        let y_offset = cell_margin + r * (triplet_h + cell_margin);
+
+        let in_slice = &dataset.inputs[idx * INPUT_CHW_LEN..(idx + 1) * INPUT_CHW_LEN];
+        let target_slice = &dataset.targets[idx * TARGET_CHW_LEN..(idx + 1) * TARGET_CHW_LEN];
+        let pred_slice = &pred_data[i * TARGET_CHW_LEN..(i + 1) * TARGET_CHW_LEN];
+
+        // 1. Input 32x32 upscaled nearest-neighbor to 256x256
+        for y in 0..TARGET_SIZE {
+            let src_y = y / 8;
+            for x in 0..TARGET_SIZE {
+                let src_x = x / 8;
+                let idx_32 = src_y * INPUT_GRID_SIZE + src_x;
+                let red = (((in_slice[0 * plane_32 + idx_32] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                let grn = (((in_slice[1 * plane_32 + idx_32] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                let blu = (((in_slice[2 * plane_32 + idx_32] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                grid_img.put_pixel(x_offset + x as u32, y_offset + y as u32, image::Rgb([red, grn, blu]));
+            }
+        }
+
+        // Separator 1
+        for y in 0..TARGET_SIZE {
+            grid_img.put_pixel(x_offset + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
+        }
+
+        // 2. Model Predicted 256x256
+        let x_pred_base = x_offset + TARGET_SIZE as u32 + 1;
+        for y in 0..TARGET_SIZE {
+            for x in 0..TARGET_SIZE {
+                let p_idx = y * TARGET_SIZE + x;
+                let red = (((pred_slice[0 * plane_256 + p_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                let grn = (((pred_slice[1 * plane_256 + p_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                let blu = (((pred_slice[2 * plane_256 + p_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                grid_img.put_pixel(x_pred_base + x as u32, y_offset + y as u32, image::Rgb([red, grn, blu]));
+            }
+        }
+
+        // Separator 2
+        for y in 0..TARGET_SIZE {
+            grid_img.put_pixel(x_pred_base + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
+        }
+
+        // 3. Ground Truth 256x256
+        let x_target_base = x_pred_base + TARGET_SIZE as u32 + 1;
+        for y in 0..TARGET_SIZE {
+            for x in 0..TARGET_SIZE {
+                let t_idx = y * TARGET_SIZE + x;
+                let red = (((target_slice[0 * plane_256 + t_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                let grn = (((target_slice[1 * plane_256 + t_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                let blu = (((target_slice[2 * plane_256 + t_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                grid_img.put_pixel(x_target_base + x as u32, y_offset + y as u32, image::Rgb([red, grn, blu]));
+            }
         }
     }
 
-    // 2. Model Predicted 256x256
-    let pred_data: Vec<f32> = pred_tensor.into_data().convert::<f32>().to_vec().unwrap();
-    for y in 0..TARGET_SIZE {
-        for x in 0..TARGET_SIZE {
-            let idx = y * TARGET_SIZE + x;
-            let r = (((pred_data[0 * plane_256 + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-            let g = (((pred_data[1 * plane_256 + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-            let b = (((pred_data[2 * plane_256 + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-            preview.put_pixel((TARGET_SIZE + x) as u32, y as u32, image::Rgb([r, g, b]));
-        }
-    }
-
-    // 3. Ground Truth 256x256
-    for y in 0..TARGET_SIZE {
-        for x in 0..TARGET_SIZE {
-            let idx = y * TARGET_SIZE + x;
-            let r = (((target_slice[0 * plane_256 + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-            let g = (((target_slice[1 * plane_256 + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-            let b = (((target_slice[2 * plane_256 + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-            preview.put_pixel((TARGET_SIZE * 2 + x) as u32, y as u32, image::Rgb([r, g, b]));
-        }
-    }
-
-    preview.save(out_path)?;
+    grid_img.save(out_path)?;
     Ok(())
 }
 
@@ -338,6 +396,8 @@ fn main() -> Result<()> {
         args.feat_weight = cfg.feat_weight;
         args.d_lr = cfg.d_lr;
         args.d_channels = cfg.d_channels;
+        args.no_tui = cfg.no_tui;
+        args.real_label = cfg.real_label;
     }
 
     let device: <TrainBackend as Backend>::Device = Default::default();
@@ -409,6 +469,26 @@ fn main() -> Result<()> {
     let num_batches = train_indices.len() / args.batch_size;
     let t_train_start = Instant::now();
 
+    let mut tui_state = UpscalerTrainingState::new(args.epochs, num_batches, args.gan);
+
+    let mut terminal = if !args.no_tui && stdout().is_terminal() {
+        let backend = CrosstermBackend::new(stdout());
+        match Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(24),
+            },
+        ) {
+            Ok(term) => Some(term),
+            Err(e) => {
+                eprintln!("Warning: Failed to initialize inline TUI terminal: {e}. Falling back to standard output.");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // 3. Training Loop
     for epoch in 1..=args.epochs {
         let t_epoch = Instant::now();
@@ -420,23 +500,28 @@ fn main() -> Result<()> {
         let lr = args.min_lr + 0.5 * (args.lr - args.min_lr) * (1.0 + (progress * std::f64::consts::PI).cos());
         let d_lr = args.d_lr * (0.5 * (1.0 + (progress * std::f64::consts::PI).cos())).max(0.1);
 
-        let pb = ProgressBar::new(num_batches as u64);
-        if args.gan {
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Epoch {msg}] [{bar:25.cyan/blue}] {pos}/{len} ({eta}) {prefix}")
-                    .unwrap()
-                    .progress_chars("#>-"),
-            );
+        let pb = if terminal.is_none() {
+            let bar = ProgressBar::new(num_batches as u64);
+            if args.gan {
+                bar.set_style(
+                    ProgressStyle::default_bar()
+                        .template("{spinner:.green} [Epoch {msg}] [{bar:25.cyan/blue}] {pos}/{len} ({eta}) {prefix}")
+                        .unwrap()
+                        .progress_chars("#>-"),
+                );
+            } else {
+                bar.set_style(
+                    ProgressStyle::default_bar()
+                        .template("{spinner:.green} [Epoch {msg}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) loss: {prefix}")
+                        .unwrap()
+                        .progress_chars("#>-"),
+                );
+            }
+            bar.set_message(format!("{}/{}", epoch, args.epochs));
+            Some(bar)
         } else {
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} [Epoch {msg}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) loss: {prefix}")
-                    .unwrap()
-                    .progress_chars("#>-"),
-            );
-        }
-        pb.set_message(format!("{}/{}", epoch, args.epochs));
+            None
+        };
 
         let mut batch_count = 0;
         let mut last_loss_val = 0.0f32;
@@ -448,6 +533,8 @@ fn main() -> Result<()> {
                 continue;
             }
 
+            let should_inspect = (batch_count + 1) % 10 == 0 || (batch_count + 1) == num_batches;
+
             // High-speed RAM batch slicing (Zero Disk I/O, Zero CPU pixel loops)
             let (input_tensor, target_tensor) = dataset.make_batch_tensors(chunk, &device);
 
@@ -458,10 +545,10 @@ fn main() -> Result<()> {
                 let mut disc = discriminator.take().unwrap();
                 let opt_d = optimizer_d.as_mut().unwrap();
 
-                // 1. Train PatchGAN Discriminator (LSGAN objective)
+                // 1. Train PatchGAN Discriminator (LSGAN objective with one-sided label smoothing)
                 // Real target
                 let (d_real, d_real_feats) = disc.forward_with_features(target_tensor.clone());
-                let err_real = d_real - 1.0;
+                let err_real = d_real - args.real_label;
                 let loss_d_real = (err_real.clone() * err_real).mean();
 
                 // Fake prediction (detached from Generator autograd graph)
@@ -471,7 +558,7 @@ fn main() -> Result<()> {
 
                 let loss_d = (loss_d_real + loss_d_fake) * 0.5;
 
-                let d_val = if batch_count % 25 == 0 {
+                let d_val = if should_inspect {
                     loss_d.clone().into_data().convert::<f32>().to_vec().unwrap()[0]
                 } else {
                     0.0
@@ -509,7 +596,7 @@ fn main() -> Result<()> {
                 }
                 let feat_loss = feat_loss_sum.unwrap() / (num_feat_layers as f32).max(1.0);
 
-                let adv_val = if batch_count % 25 == 0 {
+                let adv_val = if should_inspect {
                     adv_loss.clone().into_data().convert::<f32>().to_vec().unwrap()[0]
                 } else {
                     0.0
@@ -535,35 +622,63 @@ fn main() -> Result<()> {
                 (pixel_loss + edge_loss * 0.1, 0.0, 0.0)
             };
 
-            // Periodically inspect loss (every 25 batches) to avoid halting GPU pipeline on every step
-            if batch_count % 25 == 0 {
+            batch_count += 1;
+
+            // Periodically inspect loss and update TUI / progress bar
+            if should_inspect {
                 let loss_val: f32 = loss.clone().into_data().convert::<f32>().to_vec().unwrap()[0];
                 last_loss_val = loss_val;
                 if args.gan {
                     last_d_loss_val = d_loss_item;
                     last_adv_loss_val = adv_loss_item;
-                    pb.set_prefix(format!("G:{:.4} D:{:.4} Adv:{:.4}", loss_val, d_loss_item, adv_loss_item));
-                } else {
-                    pb.set_prefix(format!("{:.4}", loss_val));
+                }
+
+                let global_step = (epoch - 1) * num_batches + batch_count;
+                tui_state.epoch = epoch;
+                tui_state.batch = batch_count;
+                tui_state.global_step = global_step;
+                tui_state.current_lr = lr;
+                tui_state.current_g_loss = loss_val;
+                tui_state.current_d_loss = d_loss_item;
+                tui_state.current_adv_loss = adv_loss_item;
+
+                tui_state.g_loss_history.push((global_step as f64, loss_val as f64));
+                tui_state.lr_history.push((global_step as f64, lr));
+                if args.gan {
+                    tui_state.d_loss_history.push((global_step as f64, d_loss_item as f64));
+                    tui_state.adv_loss_history.push((global_step as f64, adv_loss_item as f64));
+                }
+
+                if let Some(term) = terminal.as_mut() {
+                    let _ = term.draw(|f| render_upscaler_chart(f, &tui_state));
+                } else if let Some(ref p) = pb {
+                    if args.gan {
+                        p.set_prefix(format!("G:{:.4} D:{:.4} Adv:{:.4}", loss_val, d_loss_item, adv_loss_item));
+                    } else {
+                        p.set_prefix(format!("{:.4}", loss_val));
+                    }
                 }
             }
-            batch_count += 1;
 
             // Backward pass & optimizer step
             let grads = loss.backward();
             let grads = GradientsParams::from_grads(grads, &model);
             model = optimizer.step(lr, model, grads);
 
-            pb.inc(1);
+            if let Some(ref p) = pb {
+                p.inc(1);
+            }
         }
 
-        if args.gan {
-            pb.finish_with_message(format!(
-                "{}/{} [G: {:.4} | D: {:.4} | Adv: {:.4}]",
-                epoch, args.epochs, last_loss_val, last_d_loss_val, last_adv_loss_val
-            ));
-        } else {
-            pb.finish_with_message(format!("{}/{} [Loss: {:.4}]", epoch, args.epochs, last_loss_val));
+        if let Some(p) = pb {
+            if args.gan {
+                p.finish_with_message(format!(
+                    "{}/{} [G: {:.4} | D: {:.4} | Adv: {:.4}]",
+                    epoch, args.epochs, last_loss_val, last_d_loss_val, last_adv_loss_val
+                ));
+            } else {
+                p.finish_with_message(format!("{}/{} [Loss: {:.4}]", epoch, args.epochs, last_loss_val));
+            }
         }
 
         // 4. Fast Validation Loop
@@ -581,24 +696,36 @@ fn main() -> Result<()> {
         }
 
         let avg_val_loss = if val_batches > 0 { val_loss_sum / val_batches as f32 } else { 0.0 };
-        println!(
-            "  Epoch {:>2}/{} ({:.1?}): Val Loss = {:.4} | LR = {:.2e}",
-            epoch, args.epochs, t_epoch.elapsed(), avg_val_loss, lr
-        );
 
-        // 5. Save visual preview sample
-        let preview_idx = val_indices[0];
-        let (preview_in, _) = dataset.make_batch_tensors(&[preview_idx], &device);
+        let global_step = epoch * num_batches;
+        tui_state.current_val_loss = Some(avg_val_loss);
+        tui_state.val_loss_history.push((global_step as f64, avg_val_loss as f64));
+        let _ = tui_state.save_csv(&args.out_dir.join("loss_history.csv"));
+
+        if let Some(term) = terminal.as_mut() {
+            let _ = term.draw(|f| render_upscaler_chart(f, &tui_state));
+        } else {
+            println!(
+                "  Epoch {:>2}/{} ({:.1?}): Val Loss = {:.4} | LR = {:.2e}",
+                epoch, args.epochs, t_epoch.elapsed(), avg_val_loss, lr
+            );
+        }
+
+        // 5. Save visual preview sample grid (16 validation samples)
+        let preview_count = 16.min(val_indices.len());
+        let preview_indices = &val_indices[..preview_count];
+        let (preview_in, _) = dataset.make_batch_tensors(preview_indices, &device);
         let preview_pred = model.forward(preview_in);
 
         let preview_path = args.out_dir.join(format!("preview_epoch_{:02}.png", epoch));
-        let in_slice = &dataset.inputs[preview_idx * INPUT_CHW_LEN..(preview_idx + 1) * INPUT_CHW_LEN];
-        let target_slice = &dataset.targets[preview_idx * TARGET_CHW_LEN..(preview_idx + 1) * TARGET_CHW_LEN];
 
-        if let Err(e) = save_preview_image(in_slice, preview_pred, target_slice, &preview_path) {
-            eprintln!("Warning: Failed to save preview image: {}", e);
+        if let Err(e) = save_preview_grid(&dataset, preview_indices, preview_pred, &preview_path) {
+            eprintln!("Warning: Failed to save preview image grid: {}", e);
         } else {
-            println!("  [Preview] Saved comparison to {}", preview_path.display());
+            tui_state.last_preview_path = Some(preview_path.to_string_lossy().to_string());
+            if terminal.is_none() {
+                println!("  [Preview] Saved 16-sample comparison grid to {}", preview_path.display());
+            }
         }
 
         // 6. Save checkpoint
