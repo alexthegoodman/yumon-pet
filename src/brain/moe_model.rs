@@ -1097,50 +1097,72 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load_from_bytes(tokenizer_bytes)?);
 
         let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
-        let record = match recorder.load(model_bytes.to_vec(), device) {
-            Ok(record) => record,
-            Err(_) => {
-                if let Ok(v3) = recorder.load::<LegacyMoeBrainV3Record<B>>(model_bytes.to_vec(), device) {
-                    YumonMoeBrainRecord {
-                        config: v3.config, embedding: v3.embedding, rope: v3.rope,
-                        blocks: v3.blocks, norm: v3.norm, dropout: v3.dropout,
-                        token_head: v3.token_head, exit_gates: v3.exit_gates,
-                        vision_encoders: v3.vision_encoders,
-                        edge_heads: v3.edge_heads,
-                        subpixel_embeds: Vec::new(),
-                    }
-                } else if let Ok(v2) = recorder.load::<LegacyMoeBrainV2Record<B>>(model_bytes.to_vec(), device) {
-                    YumonMoeBrainRecord {
-                        config: v2.config, embedding: v2.embedding, rope: v2.rope,
-                        blocks: v2.blocks, norm: v2.norm, dropout: v2.dropout,
-                        token_head: v2.token_head, exit_gates: v2.exit_gates,
-                        vision_encoders: v2.vision_encoders,
-                        edge_heads: Vec::new(),
-                        subpixel_embeds: Vec::new(),
-                    }
-                } else if let Ok(v1) = recorder.load::<LegacyMoeBrainV1Record<B>>(model_bytes.to_vec(), device) {
-                    YumonMoeBrainRecord {
-                        config: v1.config, embedding: v1.embedding, rope: v1.rope,
-                        blocks: v1.blocks, norm: v1.norm, dropout: v1.dropout,
-                        token_head: v1.token_head, exit_gates: v1.exit_gates,
-                        vision_encoders: Vec::new(),
-                        edge_heads: Vec::new(),
-                        subpixel_embeds: Vec::new(),
-                    }
-                } else if let Ok(legacy) = recorder.load::<LegacyMoeBrainRecord<B>>(model_bytes.to_vec(), device) {
-                    YumonMoeBrainRecord {
-                        config: legacy.config, embedding: legacy.embedding, rope: legacy.rope,
-                        blocks: legacy.blocks, norm: legacy.norm, dropout: legacy.dropout,
-                        token_head: legacy.token_head, exit_gates: Vec::new(),
-                        vision_encoders: Vec::new(),
-                        edge_heads: Vec::new(),
-                        subpixel_embeds: Vec::new(),
-                    }
-                } else {
-                    anyhow::bail!("failed to load checkpoint from bytes");
-                }
-            }
-        };
+        let record = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            recorder.load::<YumonMoeBrainRecord<B>>(model_bytes.to_vec(), device).ok()
+        }))
+        .ok()
+        .flatten()
+        .or_else(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                recorder.load::<LegacyMoeBrainV3Record<B>>(model_bytes.to_vec(), device).ok()
+            }))
+            .ok()
+            .flatten()
+            .map(|v3| YumonMoeBrainRecord {
+                config: v3.config, embedding: v3.embedding, rope: v3.rope,
+                blocks: v3.blocks, norm: v3.norm, dropout: v3.dropout,
+                token_head: v3.token_head, exit_gates: v3.exit_gates,
+                vision_encoders: v3.vision_encoders,
+                edge_heads: v3.edge_heads,
+                subpixel_embeds: Vec::new(),
+            })
+        })
+        .or_else(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                recorder.load::<LegacyMoeBrainV2Record<B>>(model_bytes.to_vec(), device).ok()
+            }))
+            .ok()
+            .flatten()
+            .map(|v2| YumonMoeBrainRecord {
+                config: v2.config, embedding: v2.embedding, rope: v2.rope,
+                blocks: v2.blocks, norm: v2.norm, dropout: v2.dropout,
+                token_head: v2.token_head, exit_gates: v2.exit_gates,
+                vision_encoders: v2.vision_encoders,
+                edge_heads: Vec::new(),
+                subpixel_embeds: Vec::new(),
+            })
+        })
+        .or_else(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                recorder.load::<LegacyMoeBrainV1Record<B>>(model_bytes.to_vec(), device).ok()
+            }))
+            .ok()
+            .flatten()
+            .map(|v1| YumonMoeBrainRecord {
+                config: v1.config, embedding: v1.embedding, rope: v1.rope,
+                blocks: v1.blocks, norm: v1.norm, dropout: v1.dropout,
+                token_head: v1.token_head, exit_gates: v1.exit_gates,
+                vision_encoders: Vec::new(),
+                edge_heads: Vec::new(),
+                subpixel_embeds: Vec::new(),
+            })
+        })
+        .or_else(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                recorder.load::<LegacyMoeBrainRecord<B>>(model_bytes.to_vec(), device).ok()
+            }))
+            .ok()
+            .flatten()
+            .map(|legacy| YumonMoeBrainRecord {
+                config: legacy.config, embedding: legacy.embedding, rope: legacy.rope,
+                blocks: legacy.blocks, norm: legacy.norm, dropout: legacy.dropout,
+                token_head: legacy.token_head, exit_gates: Vec::new(),
+                vision_encoders: Vec::new(),
+                edge_heads: Vec::new(),
+                subpixel_embeds: Vec::new(),
+            })
+        })
+        .ok_or_else(|| anyhow::anyhow!("failed to load checkpoint from bytes"))?;
 
         let config = YumonMoeBrainConfig {
             vocab_size: metadata.vocab_size,

@@ -111,6 +111,7 @@ burn = { version = "0.20", features = ["autodiff", "wgpu", "cuda"] }
 burn-cubecl = { version = "0.20", default-features = false }
 regex = "1"
 rand = "0.8.5"
+base64 = "0.22"
 console_error_panic_hook = "0.1.7"
 console_log = "1.0.0"
 log = "0.4.29"

@@ -36,6 +36,12 @@ mod desktop {
         xlstm_model::YumonXLstmBrain,
         yumon_talk,
     };
+    use yumon_pet::vision::{
+        paint_studio::{GalleryItem, PaintConfig, PaintPaths, PassProgress},
+        PaintStudio,
+    };
+
+    type BackendType = burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>;
 
     #[derive(Clone, Copy, ValueEnum)]
     enum Architecture {
@@ -79,6 +85,21 @@ mod desktop {
         /// Disable decompressor and output raw Yumon Talk tokens.
         #[arg(long)]
         no_decompressor: bool,
+        /// Pass 1 checkpoint for art studio
+        #[arg(long)]
+        paint_pass1: Option<PathBuf>,
+        /// Pass 2 checkpoint for art studio
+        #[arg(long)]
+        paint_pass2: Option<PathBuf>,
+        /// Pass 3 checkpoint for art studio
+        #[arg(long)]
+        paint_pass3: Option<PathBuf>,
+        /// Pass 4 Neural Upscaler checkpoint for art studio
+        #[arg(long)]
+        paint_upscaler: Option<PathBuf>,
+        /// Vocabulary JSON for art studio
+        #[arg(long)]
+        paint_vocab: Option<PathBuf>,
     }
 
     #[derive(Clone, Serialize)]
@@ -91,6 +112,10 @@ mod desktop {
         busy: bool,
         can_refresh: bool,
         next_check: Option<DateTime<Utc>>,
+        paint_status: String,
+        paint_busy: bool,
+        gallery: Vec<GalleryItem>,
+        active_artwork: Option<GalleryItem>,
     }
 
     #[derive(Clone, Serialize)]
@@ -115,11 +140,36 @@ mod desktop {
         Open { link: String },
         Chat { message: String },
         ClearChat,
+        Paint {
+            prompt: String,
+            passes: Option<usize>,
+            temperature: Option<f32>,
+        },
+        LoadGallery,
+        GetFullImage { path: String },
+        OpenArtFile { path: String },
     }
 
     enum RssEvent {
         State(ViewState),
         Ui(Ipc),
+        PaintProgress(PassProgress),
+        PaintComplete {
+            item: GalleryItem,
+            final_data_url: String,
+        },
+        PaintError(String),
+        GalleryLoaded(Vec<GalleryItem>),
+        FullImageLoaded {
+            path: String,
+            data_url: String,
+        },
+    }
+
+    enum PaintJob {
+        Generate(PaintConfig),
+        RefreshGallery,
+        GetFullImage { path: String },
     }
 
     enum PromptKind {
@@ -357,6 +407,10 @@ mod desktop {
                 busy: false,
                 can_refresh: true,
                 next_check,
+                paint_status: "Ready".into(),
+                paint_busy: false,
+                gallery: Vec::new(),
+                active_artwork: None,
             };
             let responder: Responder = Box::new(|text, kind, history| {
                 assert!(matches!(kind, PromptKind::Chat));
@@ -416,6 +470,11 @@ mod desktop {
                 yumon_talk_vocab: None,
                 decompressor: Some(PathBuf::from("training-cache/ngram_decompressor.bin")),
                 no_decompressor: false,
+                paint_pass1: None,
+                paint_pass2: None,
+                paint_pass3: None,
+                paint_upscaler: None,
+                paint_vocab: None,
             };
             let responder = load_responder(&args).expect("load_responder with embedded model should succeed");
             let reply = responder("Hello", PromptKind::Chat, &[]).expect("inference with embedded model should succeed");
@@ -812,6 +871,110 @@ mod desktop {
         Ok(())
     }
 
+    fn open_art_file(path_str: &str) -> Result<()> {
+        let path = PathBuf::from(path_str);
+        anyhow::ensure!(path.exists(), "Artwork file not found: {path_str}");
+        #[cfg(target_os = "windows")]
+        {
+            let mut command = std::process::Command::new("explorer.exe");
+            command.arg(format!("/select,\"{}\"", path.display()));
+            command.spawn().context("Opening Explorer")?;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut command = std::process::Command::new("open");
+            command.arg("-R").arg(&path);
+            command.spawn().context("Opening Finder")?;
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            let mut command = std::process::Command::new("xdg-open");
+            command.arg(path.parent().unwrap_or(&path));
+            command.spawn().context("Opening File Manager")?;
+        }
+        Ok(())
+    }
+
+    fn paint_worker(
+        paths: PaintPaths,
+        rx: mpsc::Receiver<PaintJob>,
+        proxy: EventLoopProxy<RssEvent>,
+    ) {
+        let initial_items = yumon_pet::vision::paint_studio::scan_gallery(std::path::Path::new("inference-cache"), 60);
+        let _ = proxy.send_event(RssEvent::GalleryLoaded(initial_items));
+
+        let device: <BackendType as burn::prelude::Backend>::Device = Default::default();
+        let mut studio: Option<PaintStudio<BackendType>> = None;
+
+        while let Ok(job) = rx.recv() {
+            match job {
+                PaintJob::RefreshGallery => {
+                    let items = yumon_pet::vision::paint_studio::scan_gallery(std::path::Path::new("inference-cache"), 60);
+                    let _ = proxy.send_event(RssEvent::GalleryLoaded(items));
+                }
+                PaintJob::GetFullImage { path } => {
+                    let p = PathBuf::from(&path);
+                    if p.exists() {
+                        if let Ok(bytes) = std::fs::read(&p) {
+                            use base64::Engine;
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            let url = format!("data:image/png;base64,{b64}");
+                            let _ = proxy.send_event(RssEvent::FullImageLoaded { path, data_url: url });
+                        }
+                    }
+                }
+                PaintJob::Generate(config) => {
+                    if studio.is_none() {
+                        let _ = proxy.send_event(RssEvent::PaintProgress(PassProgress {
+                            pass: 0,
+                            total_passes: config.passes,
+                            stage_name: "Waking Yumon Paint".into(),
+                            description: "Loading neural weights into GPU...".into(),
+                            width: 256,
+                            height: 256,
+                            data_url: String::new(),
+                            elapsed_secs: 0.0,
+                        }));
+                        match PaintStudio::<BackendType>::load(&paths, &device) {
+                            Ok(s) => studio = Some(s),
+                            Err(e) => {
+                                let _ = proxy.send_event(RssEvent::PaintError(format!("Failed to load paint models: {e:#}")));
+                                continue;
+                            }
+                        }
+                    }
+
+                    if let Some(s) = &studio {
+                        let proxy_clone = proxy.clone();
+                        match s.generate(&config, move |progress| {
+                            let _ = proxy_clone.send_event(RssEvent::PaintProgress(progress));
+                        }) {
+                            Ok(res) => {
+                                let item = GalleryItem {
+                                    id: res.final_path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "artwork".into()),
+                                    path: res.final_path.to_string_lossy().to_string(),
+                                    raw_path: Some(res.raw_path.to_string_lossy().to_string()),
+                                    prompt: res.prompt,
+                                    timestamp: chrono::Local::now().to_rfc3339(),
+                                    width: res.width,
+                                    height: res.height,
+                                    thumbnail_url: res.thumbnail_url,
+                                };
+                                let _ = proxy.send_event(RssEvent::PaintComplete {
+                                    item,
+                                    final_data_url: res.final_data_url,
+                                });
+                            }
+                            Err(e) => {
+                                let _ = proxy.send_event(RssEvent::PaintError(format!("Generation failed: {e:#}")));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn run() -> Result<()> {
         let args = Args::parse();
         let history_path = args.history.clone().unwrap_or_else(|| {
@@ -858,16 +1021,20 @@ mod desktop {
             busy: true,
             can_refresh: false,
             next_check: None,
+            paint_status: "Ready".into(),
+            paint_busy: false,
+            gallery: Vec::new(),
+            active_artwork: None,
         };
         let event_loop = EventLoopBuilder::<RssEvent>::with_user_event().build();
         let proxy = event_loop.create_proxy();
         let mut builder = WindowBuilder::new()
             .with_title("Yumon Portal")
-            .with_inner_size(LogicalSize::new(880, 520))
+            .with_inner_size(LogicalSize::new(960, 580))
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top(true)
-            .with_resizable(false);
+            .with_resizable(true);
         if let Some(monitor) = event_loop
             .primary_monitor()
             .or_else(|| event_loop.available_monitors().next())
@@ -877,7 +1044,7 @@ mod desktop {
             let size = monitor.size();
             builder = builder.with_position(PhysicalPosition::new(
                 origin.x + (16.0 * scale) as i32,
-                origin.y + (size.height as i32 - (584.0 * scale) as i32).max(0),
+                origin.y + (size.height as i32 - (640.0 * scale) as i32).max(0),
             ));
         }
         #[cfg(target_os = "windows")]
@@ -910,17 +1077,69 @@ mod desktop {
         };
         let (tx, rx) = mpsc::channel();
         let worker_state = state.clone();
+        let worker_args = Args {
+            checkpoint: args.checkpoint.clone(),
+            architecture: args.architecture,
+            history: args.history.clone(),
+            cache: args.cache.clone(),
+            check_feeds: args.check_feeds,
+            yumon_talk: args.yumon_talk,
+            yumon_talk_vocab: args.yumon_talk_vocab.clone(),
+            decompressor: args.decompressor.clone(),
+            no_decompressor: args.no_decompressor,
+            paint_pass1: args.paint_pass1.clone(),
+            paint_pass2: args.paint_pass2.clone(),
+            paint_pass3: args.paint_pass3.clone(),
+            paint_upscaler: args.paint_upscaler.clone(),
+            paint_vocab: args.paint_vocab.clone(),
+        };
+        let worker_proxy = proxy.clone();
         thread::spawn(move || {
             worker(
-                args,
+                worker_args,
                 history_path,
                 cache_path,
                 cache,
                 worker_state,
                 rx,
-                proxy,
+                worker_proxy,
             )
         });
+
+        // Initialize Paint Background Worker
+        let (paint_tx, paint_rx) = mpsc::channel();
+        let paint_proxy = proxy.clone();
+        let paint_paths = PaintPaths {
+            vocab_path: args.paint_vocab.clone().unwrap_or_else(|| PathBuf::from("training-cache/diffusion_talk_vocab.json")),
+            checkpoint_pass1: args.paint_pass1.clone().or_else(|| {
+                ["checkpoints/yumon-art-pass1-db", "checkpoints/yumon-art-pass1"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|p| p.exists())
+            }),
+            checkpoint_pass2: args.paint_pass2.clone().or_else(|| {
+                ["checkpoints/yumon-art-pass2-db", "checkpoints/yumon-art-pass2"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|p| p.exists())
+            }),
+            checkpoint_pass3: args.paint_pass3.clone().or_else(|| {
+                ["checkpoints/yumon-art-pass3-db", "checkpoints/yumon-art-pass3"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|p| p.exists())
+            }),
+            upscaler_checkpoint: args.paint_upscaler.clone().or_else(|| {
+                ["checkpoints/yumon-upscaler-256", "checkpoints/yumon-upscaler-64c"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|p| p.exists())
+            }),
+        };
+        thread::spawn(move || {
+            paint_worker(paint_paths, paint_rx, paint_proxy);
+        });
+
         let mut ready = false;
         event_loop.run(move |event, _, control_flow| {
             *control_flow = ControlFlow::Wait;
@@ -933,8 +1152,85 @@ mod desktop {
                     *control_flow = ControlFlow::Exit;
                     return;
                 }
-                Event::UserEvent(RssEvent::Ui(Ipc::Ready)) => ready = true,
+                Event::UserEvent(RssEvent::Ui(Ipc::Ready)) => {
+                    ready = true;
+                    if let Ok(json) = serde_json::to_string(&state.gallery) {
+                        let _ = webview.evaluate_script(&format!("window.__yumon_gallery_loaded({json})"));
+                    }
+                }
                 Event::UserEvent(RssEvent::State(update)) => state = update,
+                Event::UserEvent(RssEvent::PaintProgress(progress)) => {
+                    state.paint_status = format!("{}: {}", progress.stage_name, progress.description);
+                    if ready {
+                        if let Ok(json) = serde_json::to_string(&progress) {
+                            let _ = webview.evaluate_script(&format!("window.__yumon_paint_progress({json})"));
+                        }
+                    }
+                }
+                Event::UserEvent(RssEvent::PaintComplete { item, final_data_url }) => {
+                    state.paint_busy = false;
+                    state.paint_status = "Artwork complete!".into();
+                    state.gallery.insert(0, item.clone());
+                    state.active_artwork = Some(item.clone());
+                    if ready {
+                        let payload = serde_json::json!({
+                            "item": item,
+                            "final_data_url": final_data_url,
+                        });
+                        if let Ok(json) = serde_json::to_string(&payload) {
+                            let _ = webview.evaluate_script(&format!("window.__yumon_paint_complete({json})"));
+                        }
+                    }
+                }
+                Event::UserEvent(RssEvent::PaintError(err)) => {
+                    state.paint_busy = false;
+                    state.paint_status = format!("Paint error: {err}");
+                    if ready {
+                        let escaped = serde_json::to_string(&err).unwrap_or_default();
+                        let _ = webview.evaluate_script(&format!("window.__yumon_paint_error({escaped})"));
+                    }
+                }
+                Event::UserEvent(RssEvent::GalleryLoaded(items)) => {
+                    state.gallery = items;
+                    if ready {
+                        if let Ok(json) = serde_json::to_string(&state.gallery) {
+                            let _ = webview.evaluate_script(&format!("window.__yumon_gallery_loaded({json})"));
+                        }
+                    }
+                }
+                Event::UserEvent(RssEvent::FullImageLoaded { path, data_url }) => {
+                    if ready {
+                        let payload = serde_json::json!({ "path": path, "data_url": data_url });
+                        if let Ok(json) = serde_json::to_string(&payload) {
+                            let _ = webview.evaluate_script(&format!("window.__yumon_full_image_loaded({json})"));
+                        }
+                    }
+                }
+                Event::UserEvent(RssEvent::Ui(Ipc::Paint { prompt, passes, temperature })) => {
+                    let prompt = prompt.trim();
+                    if !prompt.is_empty() && !state.paint_busy {
+                        state.paint_busy = true;
+                        state.paint_status = "Composing initial blocks...".into();
+                        let config = PaintConfig {
+                            prompt: prompt.to_string(),
+                            passes: passes.unwrap_or(4),
+                            temperature: temperature.unwrap_or(1.1),
+                            ..Default::default()
+                        };
+                        let _ = paint_tx.send(PaintJob::Generate(config));
+                    }
+                }
+                Event::UserEvent(RssEvent::Ui(Ipc::LoadGallery)) => {
+                    let _ = paint_tx.send(PaintJob::RefreshGallery);
+                }
+                Event::UserEvent(RssEvent::Ui(Ipc::GetFullImage { path })) => {
+                    let _ = paint_tx.send(PaintJob::GetFullImage { path });
+                }
+                Event::UserEvent(RssEvent::Ui(Ipc::OpenArtFile { path })) => {
+                    if let Err(e) = open_art_file(&path) {
+                        eprintln!("[Yumon Portal] Could not open artwork file {path}: {e:#}");
+                    }
+                }
                 Event::UserEvent(RssEvent::Ui(Ipc::Refresh))
                     if state.can_refresh && !state.busy && !state.chat_busy =>
                 {

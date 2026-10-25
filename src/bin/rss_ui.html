@@ -244,6 +244,406 @@
   #chat-input:focus { outline: 2px solid #9dd8b3; outline-offset: 1px; }
   #chat-send { padding: 8px 10px; border-color: rgba(157, 216, 179, .24); font-size: 12px; }
   #chat-status { margin: 5px 0 0; color: #92aa9a; font-size: 10px; line-height: 1.4; }
+
+  /* ── Paint Studio Styling ── */
+  #paint-panel {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    padding: 0 14px 14px;
+    scrollbar-width: thin;
+    scrollbar-color: #465f50 transparent;
+    gap: 12px;
+  }
+  .paint-composer {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .paint-input-row {
+    display: flex;
+    gap: 6px;
+  }
+  #paint-prompt-input {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid rgba(157, 216, 179, .28);
+    border-radius: 8px;
+    padding: 8px 10px;
+    color: #e2eee7;
+    background: rgba(0, 0, 0, .25);
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.4;
+    transition: border-color .15s ease, box-shadow .15s ease;
+  }
+  #paint-prompt-input:focus {
+    outline: none;
+    border-color: #9dd8b3;
+    box-shadow: 0 0 8px rgba(157, 216, 179, .25);
+  }
+  #paint-start-btn {
+    padding: 8px 14px;
+    border-radius: 8px;
+    background: rgba(157, 216, 179, .18);
+    border: 1px solid rgba(157, 216, 179, .4);
+    color: #c5efd3;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all .15s ease;
+  }
+  #paint-start-btn:hover:not(:disabled) {
+    background: rgba(157, 216, 179, .32);
+    color: #ffffff;
+    box-shadow: 0 0 10px rgba(157, 216, 179, .3);
+  }
+  #paint-start-btn:disabled {
+    opacity: .4;
+    cursor: not-allowed;
+  }
+  .paint-chips {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .paint-chip {
+    padding: 3px 8px;
+    border-radius: 12px;
+    background: rgba(157, 216, 179, .08);
+    border: 1px solid rgba(157, 216, 179, .2);
+    color: #a7bfb0;
+    font-size: 10px;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .paint-chip:hover {
+    background: rgba(157, 216, 179, .18);
+    color: #e2eee7;
+    border-color: rgba(157, 216, 179, .4);
+  }
+  .paint-chip.dice {
+    font-size: 12px;
+    padding: 2px 7px;
+  }
+
+  /* Stage & Canvas */
+  .paint-stage {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    background: rgba(0, 0, 0, .2);
+    border: 1px solid rgba(157, 216, 179, .15);
+    border-radius: 12px;
+    padding: 12px 10px 10px;
+  }
+  .paint-canvas-frame {
+    position: relative;
+    width: 240px;
+    height: 240px;
+    background: #0d1613;
+    border: 1px solid rgba(160, 220, 187, .25);
+    border-radius: 10px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, .4);
+  }
+  #paint-canvas-img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+  }
+  .paint-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 16px;
+    color: #8da596;
+  }
+  .paint-icon {
+    font-size: 32px;
+    margin-bottom: 6px;
+    filter: drop-shadow(0 0 8px rgba(157, 216, 179, .3));
+  }
+  .paint-placeholder-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #c5efd3;
+    margin-bottom: 4px;
+  }
+  .paint-placeholder p {
+    font-size: 10px;
+    line-height: 1.4;
+    margin: 0;
+    max-width: 180px;
+  }
+  .paint-live-tag {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    padding: 3px 7px;
+    border-radius: 10px;
+    background: rgba(14, 23, 20, .85);
+    border: 1px solid #ff4757;
+    color: #ff6b81;
+    font-size: 9px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    letter-spacing: .5px;
+    backdrop-filter: blur(4px);
+  }
+  .live-pulse {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #ff4757;
+    box-shadow: 0 0 6px #ff4757;
+    animation: live-blink 1s infinite alternate;
+  }
+  @keyframes live-blink {
+    from { opacity: .4; }
+    to { opacity: 1; }
+  }
+
+  /* Multi-Pass Stepper */
+  .paint-pass-tracker {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .pass-stepper {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 0 4px;
+  }
+  .pass-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    cursor: default;
+  }
+  .step-num {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: rgba(157, 216, 179, .1);
+    border: 1px solid rgba(157, 216, 179, .25);
+    color: #8fa597;
+    font-size: 10px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all .2s ease;
+  }
+  .step-label {
+    font-size: 9px;
+    color: #829a8b;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: color .2s ease;
+  }
+  .pass-line {
+    flex: 1;
+    height: 2px;
+    background: rgba(157, 216, 179, .15);
+    margin: 0 4px 12px;
+    transition: background .3s ease;
+  }
+  .pass-line.active {
+    background: #9dd8b3;
+    box-shadow: 0 0 6px rgba(157, 216, 179, .5);
+  }
+  .pass-step.running .step-num {
+    background: rgba(255, 209, 102, .2);
+    border-color: #ffd166;
+    color: #ffd166;
+    box-shadow: 0 0 10px rgba(255, 209, 102, .5);
+    animation: step-pulse 1s infinite alternate;
+  }
+  .pass-step.running .step-label {
+    color: #ffd166;
+    font-weight: 600;
+  }
+  .pass-step.done .step-num {
+    background: rgba(157, 216, 179, .25);
+    border-color: #9dd8b3;
+    color: #9dd8b3;
+    box-shadow: 0 0 8px rgba(157, 216, 179, .4);
+  }
+  .pass-step.done .step-label {
+    color: #c5efd3;
+  }
+  @keyframes step-pulse {
+    from { transform: scale(1); }
+    to { transform: scale(1.12); }
+  }
+
+  .paint-status-banner {
+    font-size: 10px;
+    color: #9db4a5;
+    text-align: center;
+    min-height: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: 0 4px;
+  }
+
+  /* Artwork Info Bar */
+  .paint-artwork-info {
+    width: 100%;
+    padding: 7px 10px;
+    background: rgba(14, 23, 20, .7);
+    border: 1px solid rgba(157, 216, 179, .2);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .artwork-prompt {
+    font-size: 11px;
+    font-weight: 550;
+    color: #e2eee7;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .artwork-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .artwork-meta {
+    font-size: 9px;
+    color: #8da596;
+  }
+  .artwork-btn {
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: rgba(157, 216, 179, .12);
+    border: 1px solid rgba(157, 216, 179, .25);
+    color: #c5efd3;
+    font-size: 10px;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .artwork-btn:hover {
+    background: rgba(157, 216, 179, .25);
+    color: #ffffff;
+  }
+
+  /* Previous Generations Gallery */
+  .paint-gallery-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .gallery-header {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 0 2px;
+  }
+  .gallery-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #c5efd3;
+  }
+  .gallery-count {
+    font-size: 10px;
+    color: #8fa597;
+  }
+  .gallery-refresh-btn {
+    margin-left: auto;
+    width: 22px;
+    height: 22px;
+    border-radius: 5px;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #8fa597;
+    padding: 0;
+  }
+  .gallery-refresh-btn:hover {
+    color: #ffffff;
+    background: rgba(157, 216, 179, .15);
+  }
+  .gallery-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(68px, 1fr));
+    gap: 8px;
+    max-height: 220px;
+    overflow-y: auto;
+    padding: 2px 2px 8px;
+    scrollbar-width: thin;
+    scrollbar-color: #465f50 transparent;
+  }
+  .gallery-card {
+    aspect-ratio: 1;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid rgba(160, 220, 187, .2);
+    background: rgba(0, 0, 0, .3);
+    cursor: pointer;
+    position: relative;
+    transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
+  }
+  .gallery-card:hover {
+    transform: scale(1.06);
+    border-color: #9dd8b3;
+    box-shadow: 0 0 10px rgba(157, 216, 179, .3);
+    z-index: 2;
+  }
+  .gallery-card.selected {
+    border-color: #9dd8b3;
+    box-shadow: 0 0 0 2px #9dd8b3;
+  }
+  .gallery-thumb {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .gallery-badge {
+    position: absolute;
+    bottom: 2px;
+    right: 2px;
+    background: rgba(0, 0, 0, .75);
+    color: #9dd8b3;
+    font-size: 8px;
+    font-weight: 600;
+    padding: 1px 3px;
+    border-radius: 3px;
+    backdrop-filter: blur(2px);
+  }
+  .gallery-empty {
+    grid-column: 1 / -1;
+    padding: 24px 12px;
+    text-align: center;
+    font-size: 11px;
+    color: #8da596;
+    border: 1px dashed rgba(157, 216, 179, .2);
+    border-radius: 8px;
+  }
 </style>
 </head>
 <body>
@@ -260,6 +660,7 @@
     <nav class="tabs" role="tablist" aria-label="Yumon views">
       <button class="tab" id="products-tab" role="tab" aria-selected="true" aria-controls="history">Products</button>
       <button class="tab" id="chat-tab" role="tab" aria-selected="false" aria-controls="chat-panel" tabindex="-1">Chat</button>
+      <button class="tab" id="paint-tab" role="tab" aria-selected="false" aria-controls="paint-panel" tabindex="-1">🎨 Paint</button>
     </nav>
     <main id="history" role="tabpanel" aria-labelledby="products-tab"><div id="empty"><strong>What will they build next?</strong><p>Yumon will read today's Product Hunt ideas and share a thought every five minutes.</p></div></main>
     <section id="chat-panel" role="tabpanel" aria-labelledby="chat-tab" hidden>
@@ -269,6 +670,83 @@
         <div class="composer"><textarea id="chat-input" rows="2" maxlength="4096" placeholder="Say something to Yumon..." aria-label="Message to Yumon"></textarea><button id="chat-send" type="submit" disabled>Send</button></div>
         <p id="chat-status" role="status">Waking Yumon up...</p>
       </form>
+    </section>
+    <section id="paint-panel" role="tabpanel" aria-labelledby="paint-tab" hidden>
+      <!-- Prompt Composer -->
+      <div class="paint-composer">
+        <div class="paint-input-row">
+          <input type="text" id="paint-prompt-input" placeholder="What should Yumon paint? (e.g. mystical flying dragon)" maxlength="240" />
+          <button id="paint-start-btn" type="button">Paint 🎨</button>
+        </div>
+        <div class="paint-chips">
+          <button class="paint-chip" type="button" data-prompt="a cute friendly dragon in an enchanted forest, vibrant colors, oil painting">🐉 Dragon</button>
+          <button class="paint-chip" type="button" data-prompt="cyberpunk neon ramen shop in rainy tokyo, retro synthwave art">🍜 Cyberpunk</button>
+          <button class="paint-chip" type="button" data-prompt="cozy mountain cottage under starry northern lights, warm glow">🏔️ Cottage</button>
+          <button class="paint-chip" type="button" data-prompt="golden retriever puppy floating in an astronaut suit, cosmic nebula">🚀 Space Dog</button>
+          <button class="paint-chip dice" id="paint-dice-btn" type="button" title="Random prompt">🎲</button>
+        </div>
+      </div>
+
+      <!-- Stage & Multi-Pass Progress -->
+      <div class="paint-stage">
+        <div class="paint-canvas-frame" id="paint-canvas-frame">
+          <img id="paint-canvas-img" src="" alt="Yumon Artwork" style="display: none;" />
+          <div id="paint-canvas-placeholder" class="paint-placeholder">
+            <div class="paint-icon">🎨</div>
+            <div class="paint-placeholder-title">Yumon Art Studio</div>
+            <p>Watch Yumon paint multi-pass generative art with 256x256 neural upscaling.</p>
+          </div>
+          <div id="paint-live-indicator" class="paint-live-tag" style="display: none;">
+            <span class="live-pulse"></span> LIVE
+          </div>
+        </div>
+
+        <div class="paint-pass-tracker" id="paint-pass-tracker">
+          <div class="pass-stepper">
+            <div class="pass-step" id="pass-step-1" title="Pass 1: Broad Composition (64 8x8 blocks)">
+              <div class="step-num">1</div>
+              <div class="step-label">Composition</div>
+            </div>
+            <div class="pass-line" id="pass-line-1"></div>
+            <div class="pass-step" id="pass-step-2" title="Pass 2: Shapes & Silhouettes (256 4x4 patches)">
+              <div class="step-num">2</div>
+              <div class="step-label">Shapes</div>
+            </div>
+            <div class="pass-line" id="pass-line-2"></div>
+            <div class="pass-step" id="pass-step-3" title="Pass 3: Fine Pixels & Contours (1,024 pixels)">
+              <div class="step-num">3</div>
+              <div class="step-label">Features</div>
+            </div>
+            <div class="pass-line" id="pass-line-3"></div>
+            <div class="pass-step" id="pass-step-4" title="Pass 4: Deep Neural Super-Resolution (256x256)">
+              <div class="step-num">4</div>
+              <div class="step-label">Neural 256</div>
+            </div>
+          </div>
+          <div class="paint-status-banner" id="paint-status-banner">
+            Ready. Enter a prompt above or browse your gallery below.
+          </div>
+          <div class="paint-artwork-info" id="paint-artwork-info" style="display: none;">
+            <div class="artwork-prompt" id="artwork-info-prompt"></div>
+            <div class="artwork-actions">
+              <span class="artwork-meta" id="artwork-info-meta"></span>
+              <button class="artwork-btn" id="artwork-open-btn" type="button" title="Reveal in File Explorer">📂 Open File</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Previous Generations Gallery -->
+      <div class="paint-gallery-section">
+        <div class="gallery-header">
+          <span class="gallery-title">Previous Generations</span>
+          <span class="gallery-count" id="gallery-count">0 artworks</span>
+          <button class="gallery-refresh-btn" id="gallery-refresh-btn" type="button" title="Reload creations">↻</button>
+        </div>
+        <div class="gallery-grid" id="gallery-grid">
+          <!-- Populated dynamically -->
+        </div>
+      </div>
     </section>
     <footer><p id="status" role="status">Waking Yumon up...</p><small id="next">Product Hunt · Daily products</small></footer>
   </section>
@@ -307,9 +785,16 @@
     }
     history.hidden = tab.id !== 'products-tab';
     chatPanel.hidden = tab.id !== 'chat-tab';
+    const paintPanel = document.getElementById('paint-panel');
+    if (paintPanel) paintPanel.hidden = tab.id !== 'paint-tab';
+
     if (!chatPanel.hidden) {
       chatMessages.scrollTop = chatMessages.scrollHeight;
       chatInput.focus();
+    }
+    if (paintPanel && !paintPanel.hidden) {
+      const input = document.getElementById('paint-prompt-input');
+      input?.focus();
     }
   };
   for (const tab of tabs) {
@@ -430,6 +915,248 @@
 
     // Sync state with 3D Universe
     window.__onUniverseRssSync?.(state);
+  };
+
+  // ── Paint Studio Controller ──
+  const paintPromptInput = document.getElementById('paint-prompt-input');
+  const paintStartBtn = document.getElementById('paint-start-btn');
+  const paintCanvasImg = document.getElementById('paint-canvas-img');
+  const paintCanvasPlaceholder = document.getElementById('paint-canvas-placeholder');
+  const paintLiveIndicator = document.getElementById('paint-live-indicator');
+  const paintStatusBanner = document.getElementById('paint-status-banner');
+  const paintArtworkInfo = document.getElementById('paint-artwork-info');
+  const artworkInfoPrompt = document.getElementById('artwork-info-prompt');
+  const artworkInfoMeta = document.getElementById('artwork-info-meta');
+  const artworkOpenBtn = document.getElementById('artwork-open-btn');
+  const galleryGrid = document.getElementById('gallery-grid');
+  const galleryCount = document.getElementById('gallery-count');
+  const galleryRefreshBtn = document.getElementById('gallery-refresh-btn');
+  const paintDiceBtn = document.getElementById('paint-dice-btn');
+
+  let currentArtworkPath = '';
+  let isPainting = false;
+  let galleryItems = [];
+
+  const SAMPLE_PROMPTS = [
+    "a cute friendly dragon in an enchanted forest, vibrant colors, oil painting",
+    "cyberpunk neon ramen shop in rainy tokyo, retro synthwave art",
+    "cozy mountain cottage under starry northern lights, warm glow",
+    "golden retriever puppy floating in an astronaut suit, cosmic nebula",
+    "ancient mossy stone temple hidden behind a misty waterfall, digital art",
+    "steampunk airship docking at a floating cloud city, sunset lighting",
+    "fluffy red panda sipping boba tea in a bamboo grove, anime style",
+    "bioluminescent underwater coral reef with glowing jellyfish at night",
+    "whimsical wizard tower on a floating asteroid surrounded by stardust"
+  ];
+
+  paintDiceBtn?.addEventListener('click', () => {
+    const random = SAMPLE_PROMPTS[Math.floor(Math.random() * SAMPLE_PROMPTS.length)];
+    paintPromptInput.value = random;
+    paintPromptInput.focus();
+  });
+
+  document.querySelectorAll('.paint-chip[data-prompt]').forEach(chip => {
+    chip.addEventListener('click', () => {
+      paintPromptInput.value = chip.dataset.prompt;
+      paintPromptInput.focus();
+    });
+  });
+
+  const resetStepper = () => {
+    for (let p = 1; p <= 4; p++) {
+      const step = document.getElementById(`pass-step-${p}`);
+      const line = document.getElementById(`pass-line-${p}`);
+      if (step) {
+        step.className = 'pass-step';
+        const numEl = step.querySelector('.step-num');
+        if (numEl) numEl.textContent = String(p);
+      }
+      if (line) line.className = 'pass-line';
+    }
+  };
+
+  const setStepperProgress = (currentPass, isComplete = false) => {
+    for (let p = 1; p <= 4; p++) {
+      const step = document.getElementById(`pass-step-${p}`);
+      const line = document.getElementById(`pass-line-${p}`);
+      if (!step) continue;
+      const numEl = step.querySelector('.step-num');
+
+      if (p < currentPass || (p === currentPass && isComplete)) {
+        step.className = 'pass-step done';
+        if (numEl) numEl.textContent = '✓';
+        if (line) line.className = 'pass-line active';
+      } else if (p === currentPass) {
+        step.className = 'pass-step running';
+        if (numEl) numEl.textContent = String(p);
+      } else {
+        step.className = 'pass-step';
+        if (numEl) numEl.textContent = String(p);
+      }
+    }
+  };
+
+  const startPainting = () => {
+    const prompt = paintPromptInput.value.trim();
+    if (!prompt || isPainting) return;
+    isPainting = true;
+    paintStartBtn.disabled = true;
+    paintStartBtn.textContent = 'Painting...';
+    resetStepper();
+    setStepperProgress(1);
+    paintLiveIndicator.style.display = 'flex';
+    paintArtworkInfo.style.display = 'none';
+    paintStatusBanner.textContent = 'Pass 1/4: Composing broad color layout (64 blocks)...';
+    send('paint', { prompt, passes: 4 });
+  };
+
+  paintStartBtn?.addEventListener('click', startPainting);
+  paintPromptInput?.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !isPainting) {
+      event.preventDefault();
+      startPainting();
+    }
+  });
+
+  galleryRefreshBtn?.addEventListener('click', () => {
+    send('load_gallery');
+  });
+
+  artworkOpenBtn?.addEventListener('click', () => {
+    if (currentArtworkPath) {
+      send('open_art_file', { path: currentArtworkPath });
+    }
+  });
+
+  window.__yumon_paint_progress = progress => {
+    isPainting = true;
+    paintLiveIndicator.style.display = 'flex';
+    if (progress.data_url) {
+      paintCanvasImg.src = progress.data_url;
+      paintCanvasImg.style.display = 'block';
+      paintCanvasPlaceholder.style.display = 'none';
+      paintCanvasImg.style.imageRendering = progress.pass >= 4 ? 'auto' : 'pixelated';
+    }
+    setStepperProgress(progress.pass);
+    paintStatusBanner.textContent = `${progress.stage_name} (${progress.elapsed_secs.toFixed(1)}s): ${progress.description}`;
+  };
+
+  window.__yumon_paint_complete = payload => {
+    isPainting = false;
+    paintStartBtn.disabled = false;
+    paintStartBtn.textContent = 'Paint 🎨';
+    paintLiveIndicator.style.display = 'none';
+
+    setStepperProgress(4, true);
+    if (payload.final_data_url) {
+      paintCanvasImg.src = payload.final_data_url;
+      paintCanvasImg.style.display = 'block';
+      paintCanvasPlaceholder.style.display = 'none';
+      paintCanvasImg.style.imageRendering = 'auto';
+    }
+
+    const item = payload.item;
+    if (item) {
+      currentArtworkPath = item.path;
+      artworkInfoPrompt.textContent = item.prompt || 'Artwork';
+      artworkInfoMeta.textContent = `${item.width || 256}×${item.height || 256} · Pass 4 Neural Upscaled · Just now`;
+      paintArtworkInfo.style.display = 'flex';
+      paintStatusBanner.textContent = '✨ Complete! Artwork saved to inference-cache.';
+
+      // Prepend to gallery
+      galleryItems.unshift(item);
+      renderGallery();
+      selectGalleryCard(item.id);
+    }
+  };
+
+  window.__yumon_paint_error = err => {
+    isPainting = false;
+    paintStartBtn.disabled = false;
+    paintStartBtn.textContent = 'Paint 🎨';
+    paintLiveIndicator.style.display = 'none';
+    paintStatusBanner.textContent = `❌ ${err}`;
+  };
+
+  const selectGalleryCard = id => {
+    document.querySelectorAll('.gallery-card').forEach(card => {
+      card.classList.toggle('selected', card.dataset.id === id);
+    });
+  };
+
+  const renderGallery = () => {
+    if (galleryCount) {
+      galleryCount.textContent = `${galleryItems.length} artwork${galleryItems.length === 1 ? '' : 's'}`;
+    }
+    if (!galleryItems.length) {
+      galleryGrid.replaceChildren(element('div', 'gallery-empty', 'No artworks created yet. Type a prompt above and watch Yumon paint!'));
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    for (const item of galleryItems) {
+      const card = document.createElement('div');
+      card.className = 'gallery-card';
+      card.dataset.id = item.id;
+      card.title = `${item.prompt || 'Artwork'}\n${item.width}×${item.height}`;
+
+      const img = document.createElement('img');
+      img.className = 'gallery-thumb';
+      img.src = item.thumbnail_url;
+      img.alt = item.prompt || 'Artwork thumbnail';
+      img.loading = 'lazy';
+
+      const badge = document.createElement('span');
+      badge.className = 'gallery-badge';
+      badge.textContent = `${item.width || 256}`;
+
+      card.append(img, badge);
+
+      card.addEventListener('click', () => {
+        selectGalleryCard(item.id);
+        currentArtworkPath = item.path;
+        paintCanvasImg.src = item.thumbnail_url;
+        paintCanvasImg.style.display = 'block';
+        paintCanvasPlaceholder.style.display = 'none';
+        paintCanvasImg.style.imageRendering = item.width > 64 ? 'auto' : 'pixelated';
+        paintLiveIndicator.style.display = 'none';
+
+        artworkInfoPrompt.textContent = item.prompt || 'Artwork';
+        const dateStr = item.timestamp ? new Date(item.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+        artworkInfoMeta.textContent = `${item.width}×${item.height}${dateStr ? ' · ' + dateStr : ''}`;
+        paintArtworkInfo.style.display = 'flex';
+        paintStatusBanner.textContent = 'Viewing saved creation from gallery.';
+
+        send('get_full_image', { path: item.path });
+      });
+
+      fragment.append(card);
+    }
+    galleryGrid.replaceChildren(fragment);
+  };
+
+  window.__yumon_gallery_loaded = items => {
+    galleryItems = items || [];
+    renderGallery();
+    if (!isPainting && galleryItems.length && paintCanvasPlaceholder.style.display !== 'none') {
+      const first = galleryItems[0];
+      currentArtworkPath = first.path;
+      paintCanvasImg.src = first.thumbnail_url;
+      paintCanvasImg.style.display = 'block';
+      paintCanvasPlaceholder.style.display = 'none';
+      paintCanvasImg.style.imageRendering = first.width > 64 ? 'auto' : 'pixelated';
+      artworkInfoPrompt.textContent = first.prompt || 'Artwork';
+      const dateStr = first.timestamp ? new Date(first.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+      artworkInfoMeta.textContent = `${first.width}×${first.height}${dateStr ? ' · ' + dateStr : ''}`;
+      paintArtworkInfo.style.display = 'flex';
+      selectGalleryCard(first.id);
+      send('get_full_image', { path: first.path });
+    }
+  };
+
+  window.__yumon_full_image_loaded = data => {
+    if (data.path === currentArtworkPath && data.data_url) {
+      paintCanvasImg.src = data.data_url;
+    }
   };
   setInterval(updateNext, 15000);
   send('ready');
