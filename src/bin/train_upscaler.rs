@@ -373,7 +373,21 @@ fn main() -> Result<()> {
 
             // Forward pass
             let pred = model.forward(input_tensor);
-            let loss = loss_fn.forward(pred, target_tensor, Reduction::Mean);
+
+            let pixel_loss = loss_fn.forward(
+                pred.clone(),
+                target_tensor.clone(),
+                Reduction::Mean,
+            );
+
+            // Gradient / edge reconstruction loss
+            let edge_loss = gradient_loss(
+                pred,
+                target_tensor,
+            );
+
+            // Combined loss
+            let loss = pixel_loss + edge_loss * 0.1;
 
             // Periodically inspect loss (every 25 batches) to avoid halting GPU pipeline on every step
             if batch_count % 25 == 0 {
@@ -447,4 +461,54 @@ fn main() -> Result<()> {
 
     println!("\nTraining completed in {:.2?}. Model saved to {}", t_train_start.elapsed(), args.out_dir.display());
     Ok(())
+}
+
+fn gradient_loss<B: Backend>(
+    pred: Tensor<B, 4>,
+    target: Tensor<B, 4>,
+) -> Tensor<B, 1> {
+    let d = pred.dims();
+    let td = target.dims();
+
+    assert_eq!(d, td, "Prediction and target shapes must match");
+    assert!(d[2] > 1 && d[3] > 1, "Image dimensions must exceed 1");
+
+    // Horizontal differences: width dimension
+    let pred_dx =
+        pred.clone().slice([
+            0..d[0], 0..d[1], 0..d[2], 1..d[3],
+        ])
+        - pred.clone().slice([
+            0..d[0], 0..d[1], 0..d[2], 0..(d[3] - 1),
+        ]);
+
+    let target_dx =
+        target.clone().slice([
+            0..d[0], 0..d[1], 0..d[2], 1..d[3],
+        ])
+        - target.clone().slice([
+            0..d[0], 0..d[1], 0..d[2], 0..(d[3] - 1),
+        ]);
+
+    // Vertical differences: height dimension
+    let pred_dy =
+        pred.clone().slice([
+            0..d[0], 0..d[1], 1..d[2], 0..d[3],
+        ])
+        - pred.clone().slice([
+            0..d[0], 0..d[1], 0..(d[2] - 1), 0..d[3],
+        ]);
+
+    let target_dy =
+        target.clone().slice([
+            0..d[0], 0..d[1], 1..d[2], 0..d[3],
+        ])
+        - target.clone().slice([
+            0..d[0], 0..d[1], 0..(d[2] - 1), 0..d[3],
+        ]);
+
+    let loss_x = (pred_dx - target_dx).abs().mean();
+    let loss_y = (pred_dy - target_dy).abs().mean();
+
+    loss_x + loss_y
 }

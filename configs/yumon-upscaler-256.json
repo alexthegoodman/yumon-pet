@@ -1,11 +1,11 @@
 {
   "model_type": "residual_upscaler",
-  "channels": 64,
+  "channels": 32,
   "cache": "training-cache/upscaler_256_samples.bin",
   "batch_size": 1,
   "epochs": 10,
   "lr": 0.0003,
   "min_lr": 0.00003,
   "val_fraction": 0.02,
-  "out_dir": "checkpoints/yumon-upscaler-64c"
+  "out_dir": "checkpoints/yumon-upscaler-5"
 }
