@@ -95,23 +95,23 @@ struct Args {
     vocab: PathBuf,
 
     /// Sampling temperature (0.0 = greedy argmax, >0.0 = stochastic sampling).
-    #[arg(long, default_value_t = 0.7)]
+    #[arg(long, default_value_t = 1.8)]
     temperature: f32,
 
     /// Top-K sampling filter (0 to disable, e.g. 12).
-    #[arg(long, default_value_t = 12)]
+    #[arg(long, default_value_t = 24)]
     top_k: usize,
 
     /// Top-P (nucleus) sampling filter (1.0 to disable, e.g. 0.90).
-    #[arg(long, default_value_t = 0.90)]
+    #[arg(long, default_value_t = 0.80)]
     top_p: f32,
 
     /// Repetition penalty applied to runs of identical consecutive colors (0.0 to disable).
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = 0.25)]
     repeat_penalty: f32,
 
     /// Optional shape guidance weight from prior silhouette pass for Passes 2 & 3 (0.0 to disable).
-    #[arg(long, default_value_t = 0.5)]
+    #[arg(long, default_value_t = 1.2)]
     shape_guidance: f32,
 
     /// Shape guidance weight for Pass 4 fine details anchored to Pass 3 (default 3.5; 0.0 to disable).
@@ -119,7 +119,7 @@ struct Args {
     shape_guidance_pass4: f32,
 
     /// Sampling temperature for Pass 4 fine details (default 0.35 for high spatial precision).
-    #[arg(long, default_value_t = 0.35)]
+    #[arg(long, default_value_t = 0.9)]
     temperature_pass4: f32,
 
     /// Output artwork PNG file path.
@@ -476,7 +476,7 @@ fn main() -> Result<()> {
             p1_last_color,
             p1_consecutive,
             args.repeat_penalty,
-            4,
+            2,
         ) as u8;
         if Some(best_palette_idx as usize) == p1_last_color {
             p1_consecutive += 1;
@@ -543,7 +543,7 @@ fn main() -> Result<()> {
                 p2_last_color,
                 p2_consecutive,
                 args.repeat_penalty,
-                8,
+                4,
             ) as u8;
             if Some(best_palette_idx as usize) == p2_last_color {
                 p2_consecutive += 1;
@@ -628,7 +628,7 @@ fn main() -> Result<()> {
                 p3_last_color,
                 p3_consecutive,
                 args.repeat_penalty,
-                16,
+                8,
             ) as u8;
 
             if Some(best_palette_idx as usize) == p3_last_color {
@@ -716,7 +716,7 @@ fn main() -> Result<()> {
                 p4_last_color,
                 p4_consecutive,
                 args.repeat_penalty,
-                32,
+                16,
             ) as u8;
 
             if Some(best_palette_idx as usize) == p4_last_color {
