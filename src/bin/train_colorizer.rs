@@ -224,10 +224,11 @@ impl InMemDataset {
         let mut raw_l_bytes = vec![0u8; total_samples * INPUT_LEN];
         let mut targets = vec![0i32; total_samples * TARGET_LEN];
 
-        // Lookup table: byte [0..255] -> f32 [-1.0, 1.0]
+        // Lookup table: byte [0..255] maps L* [0..100] to normalized range [-0.5, 0.5] from Zhang et al.
         let mut lut = [0.0f32; 256];
         for i in 0..256 {
-            lut[i] = (i as f32 / 255.0) * 2.0 - 1.0;
+            let l_star = (i as f32 / 255.0) * 100.0;
+            lut[i] = (l_star - 50.0) / 100.0;
         }
 
         inputs_f32

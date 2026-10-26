@@ -878,7 +878,8 @@ impl<B: FlashAttention> PaintStudio<B> {
                 for i in 0..256 * 256 {
                     let val = final_canvas_hwc[i * 3]; // R = G = B from grayscale
                     raw_l[i] = val;
-                    flat_in[i] = (val as f32 / 255.0) * 2.0 - 1.0;
+                    let l_star = (val as f32 / 255.0) * 100.0;
+                    flat_in[i] = (l_star - 50.0) / 100.0;
                 }
 
                 let in_tensor = Tensor::<B, 4>::from_floats(

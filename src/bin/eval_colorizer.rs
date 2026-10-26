@@ -22,7 +22,7 @@ use std::{
 };
 
 use yumon_pet::vision::colorizer::{
-    colorize_fused_rgb, ColorizerModel, ColorizerModelConfig, COLOR_BINS_AB,
+    colorize_fused_rgb, srgb_to_lab, ColorizerModel, ColorizerModelConfig, COLOR_BINS_AB,
     DEFAULT_TEMPERATURE, DEFAULT_CHROMA_BOOST, INPUT_SIZE, NUM_COLOR_BINS, TARGET_GRID,
 };
 
@@ -111,9 +111,10 @@ fn main() -> Result<()> {
         let mut flat_in = Vec::with_capacity(INPUT_SIZE * INPUT_SIZE);
 
         for p in img_256.pixels() {
-            let lum = ((0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32).round().clamp(0.0, 255.0)) as u8;
-            raw_l.push(lum);
-            flat_in.push((lum as f32 / 255.0) * 2.0 - 1.0);
+            let (l, _, _) = srgb_to_lab(p[0], p[1], p[2]);
+            let l_byte = ((l / 100.0) * 255.0).round().clamp(0.0, 255.0) as u8;
+            raw_l.push(l_byte);
+            flat_in.push((l - 50.0) / 100.0);
         }
 
         let in_tensor = Tensor::from_floats(
@@ -180,7 +181,10 @@ fn main() -> Result<()> {
             }
 
             // 2. Predicted Colorized
-            let flat_in: Vec<f32> = l_slice.iter().map(|&b| (b as f32 / 255.0) * 2.0 - 1.0).collect();
+            let flat_in: Vec<f32> = l_slice.iter().map(|&b| {
+                let l_star = (b as f32 / 255.0) * 100.0;
+                (l_star - 50.0) / 100.0
+            }).collect();
             let in_tensor = Tensor::from_floats(
                 TensorData::new(flat_in, [1, 1, INPUT_SIZE, INPUT_SIZE]),
                 &device,

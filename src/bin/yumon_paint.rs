@@ -790,7 +790,10 @@ fn main() -> Result<()> {
                 l
             };
 
-            let flat_in: Vec<f32> = l_bytes.iter().map(|&b| (b as f32 / 255.0) * 2.0 - 1.0).collect();
+            let flat_in: Vec<f32> = l_bytes.iter().map(|&b| {
+                let l_star = (b as f32 / 255.0) * 100.0;
+                (l_star - 50.0) / 100.0
+            }).collect();
             let in_tensor = Tensor::<BackendType, 4>::from_floats(
                 TensorData::new(flat_in, [1, 1, 256, 256]),
                 &device,

@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use yumon_pet::vision::colorizer::{
-    ColorizerLut, NUM_COLOR_BINS, srgb_to_lab,
+    ColorizerLut, NUM_COLOR_BINS, srgb_to_lab, official_class_weights,
 };
 
 pub const COLORIZER_CACHE_MAGIC: &[u8; 8] = b"YUMON_CL";
@@ -125,11 +125,12 @@ fn main() -> Result<()> {
                 image::imageops::resize(&img, INPUT_SIZE as u32, INPUT_SIZE as u32, FilterType::Triangle)
             };
 
-            // Input L: 256x256 grayscale Rec. 601
+            // Input L: 256x256 true CIE Lab L* channel in [0..100] stored as byte [0..255]
             let mut input_l = Vec::with_capacity(INPUT_LEN);
             for p in img_256.pixels() {
-                let lum = ((0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32).round().clamp(0.0, 255.0)) as u8;
-                input_l.push(lum);
+                let (l, _, _) = srgb_to_lab(p[0], p[1], p[2]);
+                let l_byte = ((l / 100.0) * 255.0).round().clamp(0.0, 255.0) as u8;
+                input_l.push(l_byte);
             }
 
             // Target bins: downsampled 64x64
@@ -152,35 +153,9 @@ fn main() -> Result<()> {
     let total_samples = records.len();
     println!("  Successfully processed {} samples in {:.2?}", total_samples, t_start.elapsed());
 
-    // 3. Compute empirical prior p(q) and class rebalancing weights w(q)
-    println!("\n[3/3] Calculating Zhang et al. class rebalancing weights w(q)...");
-    let mut counts = [0u64; NUM_COLOR_BINS];
-    let mut total_pixels = 0u64;
-    for i in 0..NUM_COLOR_BINS {
-        let c = bin_counters[i].load(Ordering::Relaxed);
-        counts[i] = c;
-        total_pixels += c;
-    }
-
-    let lambda = args.lambda;
-    let q_f64 = NUM_COLOR_BINS as f64;
-    let mut raw_weights = [0.0f64; NUM_COLOR_BINS];
-    let mut expected_w = 0.0f64;
-
-    for i in 0..NUM_COLOR_BINS {
-        let p_q = (counts[i] as f64) / (total_pixels.max(1) as f64);
-        let smoothed = (1.0 - lambda) * p_q + (lambda / q_f64);
-        let w = 1.0 / smoothed;
-        raw_weights[i] = w;
-        expected_w += p_q * w;
-    }
-
-    // Normalize weights so E[w] = 1.0
-    let norm_factor = 1.0 / expected_w.max(1e-8);
-    let mut final_weights = [0.0f32; NUM_COLOR_BINS];
-    for i in 0..NUM_COLOR_BINS {
-        final_weights[i] = (raw_weights[i] * norm_factor) as f32;
-    }
+    // 3. Official Zhang et al. (2016) class rebalancing weights w(q) from 1.3M ImageNet prior
+    println!("\n[3/3] Applying official Zhang et al. class rebalancing weights w(q)...");
+    let final_weights = official_class_weights(args.lambda as f32);
 
     let min_w = final_weights.iter().cloned().fold(f32::INFINITY, f32::min);
     let max_w = final_weights.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
