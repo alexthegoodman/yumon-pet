@@ -1,9 +1,8 @@
-//! Train Pass 4 Generative Upscaler (64x64/32x32 -> 256x256) using Burn WGPU Backend.
+//! Train Pass 4/5 Upscaler (64x64/32x32 -> 256x256 Grayscale to Grayscale) using Burn WGPU Backend.
 //!
 //! Features:
-//! - Multi-scale support (64x64 or 32x32 input).
-//! - Joint colorization & super-resolution (1-channel grayscale input -> 3-channel RGB output).
-//! - Prompt text conditioning via Cross-Attention at the feature bottleneck.
+//! - Pure 1-channel grayscale input -> 1-channel grayscale super-resolved output.
+//! - Multi-scale support (64x64 default, supports 32x32).
 //! - Dual-objective training: regression loss (Huber + Edge gradients) + optional PatchGAN adversarial loss.
 //! - Non-blocking GPU execution with interactive Ratatui dashboard.
 
@@ -15,7 +14,7 @@ use burn::{
     optim::{AdamWConfig, GradientsParams, Optimizer},
     prelude::*,
     record::{BinFileRecorder, FullPrecisionSettings},
-    tensor::{Int, Tensor, TensorData},
+    tensor::{Tensor, TensorData},
 };
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -46,21 +45,21 @@ pub type TrainBackend = Autodiff<
 
 pub const UPSCALER_CACHE_MAGIC: &[u8; 8] = b"YUMON_UP";
 pub const TARGET_SIZE: usize = 256;
-pub const TARGET_CHW_LEN: usize = 3 * TARGET_SIZE * TARGET_SIZE; // 196,608 bytes
+pub const TARGET_LEN: usize = TARGET_SIZE * TARGET_SIZE; // 65,536 bytes
 
 #[derive(Parser, Debug)]
-#[command(about = "Train Pass 4 Deep Residual Upscaler with Prompt Conditioning & Colorization")]
+#[command(about = "Train Pass 4/5 Deep Residual Upscaler (Grayscale to Grayscale)")]
 struct Args {
     /// Optional path to JSON config file.
     #[arg(long)]
     config: Option<PathBuf>,
 
     /// Path to binary cache file.
-    #[arg(long, default_value = "training-cache/upscaler_guided_256.bin")]
+    #[arg(long, default_value = "training-cache/upscaler_64_gray.bin")]
     cache: PathBuf,
 
     /// Output checkpoint directory.
-    #[arg(long, default_value = "checkpoints/yumon-upscaler-guided")]
+    #[arg(long, default_value = "checkpoints/yumon-upscaler-64")]
     out_dir: PathBuf,
 
     /// Number of training epochs.
@@ -86,22 +85,6 @@ struct Args {
     /// Input resolution (auto-detected from cache if omitted).
     #[arg(long)]
     scales_from: Option<usize>,
-
-    /// Whether input is grayscale to be colorized (auto-detected from cache if omitted).
-    #[arg(long)]
-    colorizes: Option<bool>,
-
-    /// Enable prompt guidance via Cross-Attention.
-    #[arg(long, default_value_t = true)]
-    text_guidance: bool,
-
-    /// Tokenizer vocabulary size.
-    #[arg(long, default_value_t = 16384)]
-    vocab_size: usize,
-
-    /// Text embedding dimension.
-    #[arg(long, default_value_t = 64)]
-    text_dim: usize,
 
     /// Fraction of samples used for validation.
     #[arg(long, default_value_t = 0.02)]
@@ -154,14 +137,6 @@ struct UpscalerConfigFile {
     channels: usize,
     #[serde(default)]
     scales_from: Option<usize>,
-    #[serde(default)]
-    colorizes: Option<bool>,
-    #[serde(default = "default_true")]
-    text_guidance: bool,
-    #[serde(default = "default_vocab")]
-    vocab_size: usize,
-    #[serde(default = "default_text_dim")]
-    text_dim: usize,
     #[serde(default = "default_val_fraction")]
     val_fraction: f64,
     #[serde(default)]
@@ -180,16 +155,13 @@ struct UpscalerConfigFile {
     real_label: f32,
 }
 
-fn default_cache() -> String { "training-cache/upscaler_guided_256.bin".into() }
-fn default_out_dir() -> String { "checkpoints/yumon-upscaler-guided".into() }
+fn default_cache() -> String { "training-cache/upscaler_64_gray.bin".into() }
+fn default_out_dir() -> String { "checkpoints/yumon-upscaler-64".into() }
 fn default_epochs() -> usize { 10 }
 fn default_batch_size() -> usize { 8 }
 fn default_lr() -> f64 { 3e-4 }
 fn default_min_lr() -> f64 { 3e-5 }
 fn default_channels() -> usize { 32 }
-fn default_true() -> bool { true }
-fn default_vocab() -> usize { 16384 }
-fn default_text_dim() -> usize { 64 }
 fn default_val_fraction() -> f64 { 0.02 }
 fn default_adv_weight() -> f64 { 0.02 }
 fn default_feat_weight() -> f64 { 0.05 }
@@ -209,27 +181,17 @@ struct UpscalerMetadata {
     adv_loss: Option<f32>,
     channels: usize,
     scales_from: usize,
-    colorizes: bool,
-    use_text_conditioning: bool,
-    vocab_size: usize,
-    text_dim: usize,
     gan: bool,
     timestamp: String,
 }
 
-/// Precomputed in-memory dataset of normalized planar f32 tensors and prompt token IDs.
+/// Precomputed in-memory dataset of normalized planar f32 grayscale tensors.
 struct InMemDataset {
     total_samples: usize,
     input_grid_size: usize,
-    input_channels: usize,
-    max_text_len: usize,
-    colorizes: bool,
-    input_chw_len: usize,
-    _text_bytes_len: usize,
-    target_chw_len: usize,
-    _record_size: usize,
+    input_len: usize,
+    target_len: usize,
     inputs: Vec<f32>,
-    prompt_tokens: Vec<i32>,
     targets: Vec<f32>,
 }
 
@@ -247,43 +209,30 @@ impl InMemDataset {
         file.read_exact(&mut ver_bytes)?;
         let version = u32::from_le_bytes(ver_bytes);
 
-        let (total_samples, record_size, input_grid_size, target_size, input_channels, max_text_len, colorizes) =
-            if version == 3 {
-                let mut rest = [0u8; 52];
-                file.read_exact(&mut rest)?;
-                let total_samples = u32::from_le_bytes(rest[0..4].try_into().unwrap()) as usize;
-                let record_size = u32::from_le_bytes(rest[4..8].try_into().unwrap()) as usize;
-                let input_grid_size = u32::from_le_bytes(rest[8..12].try_into().unwrap()) as usize;
-                let target_size = u32::from_le_bytes(rest[12..16].try_into().unwrap()) as usize;
-                let input_channels = u32::from_le_bytes(rest[16..20].try_into().unwrap()) as usize;
-                let max_text_len = u32::from_le_bytes(rest[20..24].try_into().unwrap()) as usize;
-                let colorizes = u32::from_le_bytes(rest[24..28].try_into().unwrap()) == 1;
-                (total_samples, record_size, input_grid_size, target_size, input_channels, max_text_len, colorizes)
-            } else if version == 2 {
-                let mut rest = [0u8; 20];
-                file.read_exact(&mut rest)?;
-                let total_samples = u32::from_le_bytes(rest[0..4].try_into().unwrap()) as usize;
-                let record_size = u32::from_le_bytes(rest[4..8].try_into().unwrap()) as usize;
-                let input_grid_size = u32::from_le_bytes(rest[8..12].try_into().unwrap()) as usize;
-                let target_size = u32::from_le_bytes(rest[12..16].try_into().unwrap()) as usize;
-                (total_samples, record_size, input_grid_size, target_size, 3, 0, false)
-            } else {
-                anyhow::bail!("Unsupported cache version: {}", version);
-            };
+        let (total_samples, record_size, input_grid_size, target_size) = if version == 4 {
+            let mut rest = [0u8; 20];
+            file.read_exact(&mut rest)?;
+            let total_samples = u32::from_le_bytes(rest[0..4].try_into().unwrap()) as usize;
+            let record_size = u32::from_le_bytes(rest[4..8].try_into().unwrap()) as usize;
+            let input_grid_size = u32::from_le_bytes(rest[8..12].try_into().unwrap()) as usize;
+            let target_size = u32::from_le_bytes(rest[12..16].try_into().unwrap()) as usize;
+            (total_samples, record_size, input_grid_size, target_size)
+        } else {
+            anyhow::bail!("Unsupported cache version: {}. Expected version 4 (grayscale). Please regenerate with cache_upscaler.", version);
+        };
 
-        let input_chw_len = input_channels * input_grid_size * input_grid_size;
-        let text_bytes_len = max_text_len * 2;
-        let target_chw_len = 3 * target_size * target_size;
+        let input_len = input_grid_size * input_grid_size;
+        let target_len = target_size * target_size;
         ensure!(
-            record_size == input_chw_len + text_bytes_len + target_chw_len,
-            "Record size mismatch: header says {} vs computed {}",
+            record_size == input_len + target_len,
+            "Record size mismatch: header says {} vs expected {}",
             record_size,
-            input_chw_len + text_bytes_len + target_chw_len
+            input_len + target_len
         );
 
         println!(
-            "  Cache metadata: {} samples, {}x{} input ({} ch), {} text tokens, {}x{} target (colorizes={})",
-            total_samples, input_grid_size, input_grid_size, input_channels, max_text_len, target_size, target_size, colorizes
+            "  Cache metadata: {} samples, 1x{}x{} input -> 1x{}x{} target (Grayscale)",
+            total_samples, input_grid_size, input_grid_size, target_size, target_size
         );
         println!("  Loading {} records ({:.2} MB) from disk into RAM...", total_samples, (total_samples * record_size) as f64 / 1e6);
 
@@ -291,9 +240,8 @@ impl InMemDataset {
         file.read_exact(&mut raw_bytes)?;
 
         println!("  Precomputing planar f32 tensors in parallel across CPU cores...");
-        let mut inputs = vec![0.0f32; total_samples * input_chw_len];
-        let mut prompt_tokens = vec![0i32; total_samples * max_text_len.max(1)];
-        let mut targets = vec![0.0f32; total_samples * target_chw_len];
+        let mut inputs = vec![0.0f32; total_samples * input_len];
+        let mut targets = vec![0.0f32; total_samples * target_len];
 
         // Lookup table: byte [0..255] -> f32 [-1.0, 1.0]
         let mut lut = [0.0f32; 256];
@@ -301,49 +249,30 @@ impl InMemDataset {
             lut[i] = (i as f32 / 255.0) * 2.0 - 1.0;
         }
 
-        let eff_text_len = max_text_len.max(1);
         inputs
-            .par_chunks_exact_mut(input_chw_len)
-            .zip(prompt_tokens.par_chunks_exact_mut(eff_text_len))
-            .zip(targets.par_chunks_exact_mut(target_chw_len))
+            .par_chunks_exact_mut(input_len)
+            .zip(targets.par_chunks_exact_mut(target_len))
             .enumerate()
-            .for_each(|(idx, ((in_slice, tok_slice), target_slice))| {
+            .for_each(|(idx, (in_slice, target_slice))| {
                 let rec_offset = idx * record_size;
-                let in_bytes = &raw_bytes[rec_offset..rec_offset + input_chw_len];
-                let text_bytes = &raw_bytes[rec_offset + input_chw_len..rec_offset + input_chw_len + text_bytes_len];
-                let target_bytes = &raw_bytes[rec_offset + input_chw_len + text_bytes_len..rec_offset + record_size];
+                let in_bytes = &raw_bytes[rec_offset..rec_offset + input_len];
+                let target_bytes = &raw_bytes[rec_offset + input_len..rec_offset + record_size];
 
-                for i in 0..input_chw_len {
+                for i in 0..input_len {
                     in_slice[i] = lut[in_bytes[i] as usize];
                 }
-
-                if max_text_len > 0 {
-                    for t in 0..max_text_len {
-                        let tid = u16::from_le_bytes([text_bytes[t * 2], text_bytes[t * 2 + 1]]);
-                        tok_slice[t] = tid as i32;
-                    }
-                } else {
-                    tok_slice[0] = 0;
-                }
-
-                for i in 0..target_chw_len {
+                for i in 0..target_len {
                     target_slice[i] = lut[target_bytes[i] as usize];
                 }
             });
 
-        println!("  ✓ Dataset ready in RAM in {:.2?} (Zero disk I/O during training!)", t_load.elapsed());
+        println!("  ✓ Grayscale dataset ready in RAM in {:.2?} (Zero disk I/O during training!)", t_load.elapsed());
         Ok(Self {
             total_samples,
             input_grid_size,
-            input_channels,
-            max_text_len,
-            colorizes,
-            input_chw_len,
-            _text_bytes_len: text_bytes_len,
-            target_chw_len,
-            _record_size: record_size,
+            input_len,
+            target_len,
             inputs,
-            prompt_tokens,
             targets,
         })
     }
@@ -352,38 +281,29 @@ impl InMemDataset {
         &self,
         indices: &[usize],
         device: &B::Device,
-    ) -> (Tensor<B, 4>, Tensor<B, 2, Int>, Tensor<B, 4>) {
+    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
         let b = indices.len();
-        let mut flat_in = Vec::with_capacity(b * self.input_chw_len);
-        let eff_text = self.max_text_len.max(1);
-        let mut flat_tok = Vec::with_capacity(b * eff_text);
-        let mut flat_target = Vec::with_capacity(b * self.target_chw_len);
+        let mut flat_in = Vec::with_capacity(b * self.input_len);
+        let mut flat_target = Vec::with_capacity(b * self.target_len);
 
         for &idx in indices {
-            let in_start = idx * self.input_chw_len;
-            flat_in.extend_from_slice(&self.inputs[in_start..in_start + self.input_chw_len]);
+            let in_start = idx * self.input_len;
+            flat_in.extend_from_slice(&self.inputs[in_start..in_start + self.input_len]);
 
-            let tok_start = idx * eff_text;
-            flat_tok.extend_from_slice(&self.prompt_tokens[tok_start..tok_start + eff_text]);
-
-            let target_start = idx * self.target_chw_len;
-            flat_target.extend_from_slice(&self.targets[target_start..target_start + self.target_chw_len]);
+            let target_start = idx * self.target_len;
+            flat_target.extend_from_slice(&self.targets[target_start..target_start + self.target_len]);
         }
 
         let in_tensor = Tensor::from_floats(
-            TensorData::new(flat_in, [b, self.input_channels, self.input_grid_size, self.input_grid_size]),
-            device,
-        );
-        let tok_tensor = Tensor::from_data(
-            TensorData::new(flat_tok, [b, eff_text]),
+            TensorData::new(flat_in, [b, 1, self.input_grid_size, self.input_grid_size]),
             device,
         );
         let target_tensor = Tensor::from_floats(
-            TensorData::new(flat_target, [b, 3, TARGET_SIZE, TARGET_SIZE]),
+            TensorData::new(flat_target, [b, 1, TARGET_SIZE, TARGET_SIZE]),
             device,
         );
 
-        (in_tensor, tok_tensor, target_tensor)
+        (in_tensor, target_tensor)
     }
 }
 
@@ -410,11 +330,9 @@ fn save_preview_grid(
     let pred_data: Vec<f32> = pred_tensor.into_data().convert::<f32>().to_vec().unwrap();
 
     let in_grid = dataset.input_grid_size;
-    let in_channels = dataset.input_channels;
-    let in_chw_len = dataset.input_chw_len;
+    let in_len = dataset.input_len;
     let scale = (TARGET_SIZE / in_grid).max(1);
-    let plane_256 = TARGET_SIZE * TARGET_SIZE;
-    let target_chw_len = dataset.target_chw_len;
+    let target_len = dataset.target_len;
 
     for (i, &idx) in indices.iter().enumerate() {
         let r = (i as u32) / cols;
@@ -422,9 +340,9 @@ fn save_preview_grid(
         let x_offset = cell_margin + c * (triplet_w + cell_margin);
         let y_offset = cell_margin + r * (triplet_h + cell_margin);
 
-        let in_slice = &dataset.inputs[idx * in_chw_len..(idx + 1) * in_chw_len];
-        let target_slice = &dataset.targets[idx * target_chw_len..(idx + 1) * target_chw_len];
-        let pred_slice = &pred_data[i * target_chw_len..(i + 1) * target_chw_len];
+        let in_slice = &dataset.inputs[idx * in_len..(idx + 1) * in_len];
+        let target_slice = &dataset.targets[idx * target_len..(idx + 1) * target_len];
+        let pred_slice = &pred_data[i * target_len..(i + 1) * target_len];
 
         // 1. Input upscaled nearest-neighbor to 256x256
         for y in 0..TARGET_SIZE {
@@ -432,19 +350,8 @@ fn save_preview_grid(
             for x in 0..TARGET_SIZE {
                 let src_x = (x / scale).min(in_grid - 1);
                 let p_in = src_y * in_grid + src_x;
-
-                let (red, grn, blu) = if in_channels == 1 {
-                    let val = (((in_slice[p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                    (val, val, val)
-                } else {
-                    let plane_in = in_grid * in_grid;
-                    let red = (((in_slice[0 * plane_in + p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                    let grn = (((in_slice[1 * plane_in + p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                    let blu = (((in_slice[2 * plane_in + p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                    (red, grn, blu)
-                };
-
-                grid_img.put_pixel(x_offset + x as u32, y_offset + y as u32, image::Rgb([red, grn, blu]));
+                let val = (((in_slice[p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                grid_img.put_pixel(x_offset + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
             }
         }
 
@@ -453,15 +360,13 @@ fn save_preview_grid(
             grid_img.put_pixel(x_offset + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
         }
 
-        // 2. Model Predicted 256x256
+        // 2. Model Predicted 256x256 Grayscale
         let x_pred_base = x_offset + TARGET_SIZE as u32 + 1;
         for y in 0..TARGET_SIZE {
             for x in 0..TARGET_SIZE {
                 let p_idx = y * TARGET_SIZE + x;
-                let red = (((pred_slice[0 * plane_256 + p_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                let grn = (((pred_slice[1 * plane_256 + p_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                let blu = (((pred_slice[2 * plane_256 + p_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                grid_img.put_pixel(x_pred_base + x as u32, y_offset + y as u32, image::Rgb([red, grn, blu]));
+                let val = (((pred_slice[p_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                grid_img.put_pixel(x_pred_base + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
             }
         }
 
@@ -470,15 +375,13 @@ fn save_preview_grid(
             grid_img.put_pixel(x_pred_base + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
         }
 
-        // 3. Ground Truth 256x256
+        // 3. Ground Truth 256x256 Grayscale
         let x_target_base = x_pred_base + TARGET_SIZE as u32 + 1;
         for y in 0..TARGET_SIZE {
             for x in 0..TARGET_SIZE {
                 let t_idx = y * TARGET_SIZE + x;
-                let red = (((target_slice[0 * plane_256 + t_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                let grn = (((target_slice[1 * plane_256 + t_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                let blu = (((target_slice[2 * plane_256 + t_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                grid_img.put_pixel(x_target_base + x as u32, y_offset + y as u32, image::Rgb([red, grn, blu]));
+                let val = (((target_slice[t_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                grid_img.put_pixel(x_target_base + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
             }
         }
     }
@@ -503,10 +406,6 @@ fn main() -> Result<()> {
         args.min_lr = cfg.min_lr;
         args.channels = cfg.channels;
         args.scales_from = cfg.scales_from;
-        args.colorizes = cfg.colorizes;
-        args.text_guidance = cfg.text_guidance;
-        args.vocab_size = cfg.vocab_size;
-        args.text_dim = cfg.text_dim;
         args.val_fraction = cfg.val_fraction;
         args.gan = cfg.gan;
         args.adv_weight = cfg.adv_weight;
@@ -520,14 +419,13 @@ fn main() -> Result<()> {
     let device: <TrainBackend as Backend>::Device = Default::default();
 
     println!("==================================================");
-    println!("  Yumon Pass 4 Guided Colorizing Upscaler Trainer");
+    println!("     Yumon Pass 4/5 Grayscale Upscaler Trainer");
     println!("==================================================");
     println!("  Cache binary    : {}", args.cache.display());
     println!("  Output directory: {}", args.out_dir.display());
     println!("  Epochs          : {}", args.epochs);
     println!("  Batch size      : {}", args.batch_size);
     println!("  Channels        : {}", args.channels);
-    println!("  Text guidance   : {}", args.text_guidance);
     println!("  Learning rate   : {:.2e} -> {:.2e}", args.lr, args.min_lr);
     if args.gan {
         println!("  GAN Training    : ENABLED (PatchGAN LSGAN + Feature-Matching)");
@@ -547,7 +445,6 @@ fn main() -> Result<()> {
     println!("  Total cache samples: {}", total_samples);
 
     let scales_from = args.scales_from.unwrap_or(dataset.input_grid_size);
-    let colorizes = args.colorizes.unwrap_or(dataset.colorizes);
 
     let val_count = ((total_samples as f64) * args.val_fraction).max(10.0) as usize;
     let train_count = total_samples.saturating_sub(val_count);
@@ -561,17 +458,12 @@ fn main() -> Result<()> {
 
     println!("  Train samples   : {}", train_indices.len());
     println!("  Val samples     : {}", val_indices.len());
-    println!("  Model resolution: {}x{} -> 256x256 (colorizes: {})", scales_from, scales_from, colorizes);
+    println!("  Model resolution: 1x{}x{} -> 1x256x256 (Grayscale)", scales_from, scales_from);
 
     // 2. Initialize Model, Discriminator, and Loss
-    let use_text = args.text_guidance && dataset.max_text_len > 0;
     let config = UpscalerModelConfig::new()
         .with_scales_from(scales_from)
-        .with_colorizes(colorizes)
-        .with_channels(args.channels)
-        .with_use_text_conditioning(use_text)
-        .with_vocab_size(args.vocab_size)
-        .with_text_dim(args.text_dim);
+        .with_channels(args.channels);
 
     let mut model: UpscalerModel<TrainBackend> = config.init(&device);
     let loss_fn = HuberLossConfig::new(1.0).init();
@@ -664,10 +556,10 @@ fn main() -> Result<()> {
             let should_inspect = (batch_count + 1) % 10 == 0 || (batch_count + 1) == num_batches;
 
             // High-speed RAM batch slicing (Zero Disk I/O)
-            let (input_tensor, prompt_tensor, target_tensor) = dataset.make_batch_tensors(chunk, &device);
+            let (input_tensor, target_tensor) = dataset.make_batch_tensors(chunk, &device);
 
-            // Forward pass: Generator produces 256x256 image with prompt conditioning
-            let pred = model.forward_with_text(input_tensor, Some(prompt_tensor));
+            // Forward pass: Generator produces 1x256x256 grayscale image
+            let pred = model.forward(input_tensor);
 
             let (loss, d_loss_item, adv_loss_item) = if discriminator.is_some() {
                 let mut disc = discriminator.take().unwrap();
@@ -808,8 +700,8 @@ fn main() -> Result<()> {
         let mut val_batches = 0;
 
         for chunk in val_indices[..eval_count].chunks(args.batch_size) {
-            let (input_tensor, prompt_tensor, target_tensor) = dataset.make_batch_tensors(chunk, &device);
-            let pred = model.forward_with_text(input_tensor, Some(prompt_tensor));
+            let (input_tensor, target_tensor) = dataset.make_batch_tensors(chunk, &device);
+            let pred = model.forward(input_tensor);
             let loss = loss_fn.forward(pred, target_tensor, Reduction::Mean);
             let loss_val: f32 = loss.into_data().convert::<f32>().to_vec().unwrap()[0];
             val_loss_sum += loss_val;
@@ -835,8 +727,8 @@ fn main() -> Result<()> {
         // 5. Save visual preview sample grid (16 validation samples)
         let preview_count = 16.min(val_indices.len());
         let preview_indices = &val_indices[..preview_count];
-        let (preview_in, preview_prompt, _) = dataset.make_batch_tensors(preview_indices, &device);
-        let preview_pred = model.forward_with_text(preview_in, Some(preview_prompt));
+        let (preview_in, _) = dataset.make_batch_tensors(preview_indices, &device);
+        let preview_pred = model.forward(preview_in);
 
         let preview_path = args.out_dir.join(format!("preview_epoch_{:02}.png", epoch));
 
@@ -868,10 +760,6 @@ fn main() -> Result<()> {
             adv_loss: if args.gan { Some(last_adv_loss_val) } else { None },
             channels: args.channels,
             scales_from,
-            colorizes,
-            use_text_conditioning: use_text,
-            vocab_size: args.vocab_size,
-            text_dim: args.text_dim,
             gan: args.gan,
             timestamp: chrono::Local::now().to_rfc3339(),
         };
@@ -900,7 +788,7 @@ fn gradient_loss<B: Backend>(
         - target.clone().slice([0..td[0], 0..td[1], 0..td[2], 0..(td[3] - 1)]);
 
     let pred_dy = pred.clone().slice([0..d[0], 0..d[1], 1..d[2], 0..d[3]])
-        - pred.clone().slice([0..d[0], 0..d[1], 0..(d[2] - 1), 0..d[3]]);
+        - pred.clone().slice([0..d[0], 0..d[1], 0..d[2], 0..d[3]]);
 
     let target_dy = target.clone().slice([0..td[0], 0..td[1], 1..td[2], 0..td[3]])
         - target.clone().slice([0..td[0], 0..td[1], 0..(td[2] - 1), 0..td[3]]);

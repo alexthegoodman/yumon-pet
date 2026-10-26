@@ -94,7 +94,10 @@ mod desktop {
         /// Pass 3 checkpoint for art studio
         #[arg(long)]
         paint_pass3: Option<PathBuf>,
-        /// Pass 4 Neural Upscaler checkpoint for art studio
+        /// Pass 4 checkpoint for art studio (64x64 details)
+        #[arg(long)]
+        paint_pass4: Option<PathBuf>,
+        /// Pass 5 Neural Upscaler checkpoint for art studio
         #[arg(long)]
         paint_upscaler: Option<PathBuf>,
         /// Vocabulary JSON for art studio
@@ -469,6 +472,7 @@ mod desktop {
                 paint_pass1: None,
                 paint_pass2: None,
                 paint_pass3: None,
+                paint_pass4: None,
                 paint_upscaler: None,
                 paint_vocab: None,
             };
@@ -1085,6 +1089,7 @@ mod desktop {
             paint_pass1: args.paint_pass1.clone(),
             paint_pass2: args.paint_pass2.clone(),
             paint_pass3: args.paint_pass3.clone(),
+            paint_pass4: args.paint_pass4.clone(),
             paint_upscaler: args.paint_upscaler.clone(),
             paint_vocab: args.paint_vocab.clone(),
         };
@@ -1124,8 +1129,14 @@ mod desktop {
                     .map(PathBuf::from)
                     .find(|p| p.exists())
             }),
+            checkpoint_pass4: args.paint_pass4.clone().or_else(|| {
+                ["checkpoints/yumon-art-pass4-db", "checkpoints/yumon-art-pass4"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|p| p.exists())
+            }),
             upscaler_checkpoint: args.paint_upscaler.clone().or_else(|| {
-                ["checkpoints/yumon-upscaler-256", "checkpoints/yumon-upscaler-64c"]
+                ["checkpoints/yumon-upscaler-64", "checkpoints/yumon-upscaler-256", "checkpoints/yumon-upscaler-64c"]
                     .iter()
                     .map(PathBuf::from)
                     .find(|p| p.exists())

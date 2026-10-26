@@ -30,26 +30,17 @@ pub const ART_VOCAB_SIZE: usize  = 4512;
 /// Backward compatibility alias
 pub const COORD_START_ID: usize  = 4110;
 
-/// Map standard 24-bit RGB [0..255] into an 8-bit palette (3 bits R, 3 bits G, 2 bits B).
+/// Map standard 24-bit RGB [0..255] into an 8-bit grayscale luminance palette [0..255].
 #[inline]
 pub fn rgb_to_palette(r: u8, g: u8, b: u8) -> u8 {
-    let r_bin = ((r as usize * 7 + 127) / 255).min(7) as u8;
-    let g_bin = ((g as usize * 7 + 127) / 255).min(7) as u8;
-    let b_bin = ((b as usize * 3 + 127) / 255).min(3) as u8;
-    (r_bin * 32 + g_bin * 4 + b_bin) as u8
+    // Standard perceptual grayscale luminance (Rec. 601: 0.299 R + 0.587 G + 0.114 B)
+    ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114 + 500) / 1000).min(255) as u8
 }
 
-/// Expand an 8-bit palette index back into RGB bytes.
+/// Expand an 8-bit grayscale palette index back into RGB bytes (R=G=B).
 #[inline]
 pub fn palette_to_rgb(idx: u8) -> [u8; 3] {
-    let i = idx as usize;
-    let r_bin = (i >> 5) & 0x07;
-    let g_bin = (i >> 2) & 0x07;
-    let b_bin = i & 0x03;
-    let r = ((r_bin * 255) / 7) as u8;
-    let g = ((g_bin * 255) / 7) as u8;
-    let b = ((b_bin * 255) / 3) as u8;
-    [r, g, b]
+    [idx, idx, idx]
 }
 
 /// Discrete paint command issued by Yumon's MoE.
