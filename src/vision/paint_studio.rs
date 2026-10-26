@@ -774,8 +774,9 @@ impl<B: FlashAttention> PaintStudio<B> {
                 let mut flat = vec![0.0f32; plane];
                 if !pass4_colors.is_empty() {
                     for (i, &tok) in pass4_colors.iter().take(plane).enumerate() {
-                        let c = (tok as usize).saturating_sub(COLOR_START_ID).min(255) as u8;
-                        flat[i] = (c as f32 / 255.0) * 2.0 - 1.0;
+                        let c = (tok as usize).saturating_sub(COLOR_START_ID).min(PALETTE_SIZE - 1) as u8;
+                        let lum = palette_to_rgb(c)[0];
+                        flat[i] = (lum as f32 / 255.0) * 2.0 - 1.0;
                     }
                 } else {
                     for y in 0..CANVAS_SIZE {
