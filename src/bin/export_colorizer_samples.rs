@@ -92,8 +92,13 @@ fn main() -> Result<()> {
         anyhow::bail!("Start index {} is beyond total samples ({})", args.start, total_samples);
     }
 
-    // Scan source directory if provided
-    let image_files: Vec<PathBuf> = if let Some(ref sdir) = args.source_dir {
+    // Load image paths: check for manifest first, otherwise scan source directory
+    let manifest_path = args.cache.with_file_name("colorizer_files.txt");
+    let image_files: Vec<PathBuf> = if manifest_path.exists() {
+        println!("  Source manifest : {}", manifest_path.display());
+        let content = fs::read_to_string(&manifest_path)?;
+        content.lines().map(PathBuf::from).collect()
+    } else if let Some(ref sdir) = args.source_dir {
         if sdir.exists() {
             println!("  Source images   : {}", sdir.display());
             let mut files: Vec<PathBuf> = fs::read_dir(sdir)?

@@ -16,7 +16,7 @@ use image::imageops::FilterType;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::fs::{self, File};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -49,12 +49,21 @@ struct Args {
     #[arg(long, default_value_t = 4096)]
     limit: usize,
 
+    /// Minimum average chroma (sqrt(a^2 + b^2)) across pixels required to accept an image.
+    #[arg(long, default_value_t = 8.0)]
+    min_chroma: f32,
+
+    /// Maximum fraction of pixels in neutral bin 120 (a=0, b=0) before image is rejected as monochromatic.
+    #[arg(long, default_value_t = 0.35)]
+    max_neutral_fraction: f32,
+
     /// Class rebalancing smoothing parameter lambda (default 0.5 from Zhang et al.).
     #[arg(long, default_value_t = 0.5)]
     lambda: f64,
 }
 
 struct SampleRecord {
+    path: PathBuf,
     input_l: Vec<u8>,
     target_bins: Vec<u16>,
 }
@@ -70,6 +79,8 @@ fn main() -> Result<()> {
     println!("  Input resolution : {}x{} Grayscale (L)", INPUT_SIZE, INPUT_SIZE);
     println!("  Target resolution: {}x{} (313-class bins)", TARGET_GRID, TARGET_GRID);
     println!("  Record size      : {} bytes", RECORD_SIZE);
+    println!("  Min mean chroma  : {:.1}", args.min_chroma);
+    println!("  Max neutral frac : {:.0}%", args.max_neutral_fraction * 100.0);
 
     if !args.images_dir.exists() {
         anyhow::bail!("Images directory not found: {}", args.images_dir.display());
@@ -96,15 +107,13 @@ fn main() -> Result<()> {
         .collect();
 
     image_files.sort();
-    if args.limit > 0 && image_files.len() > args.limit {
-        image_files.truncate(args.limit);
-    }
-    println!("  Found {} images to process", image_files.len());
+    println!("  Found {} source images in directory", image_files.len());
 
     // 2. Build fast O(1) LUT
-    println!("\n[2/3] Initializing O(1) Colorizer LUT & processing images in parallel...");
+    println!("\n[2/3] Filtering monochromatic images & quantizing in parallel...");
     let lut = ColorizerLut::new();
     let bin_counters: Vec<AtomicU64> = (0..NUM_COLOR_BINS).map(|_| AtomicU64::new(0)).collect();
+    let rejected_counter = AtomicU64::new(0);
 
     let pb = ProgressBar::new(image_files.len() as u64);
     pb.set_style(
@@ -115,7 +124,7 @@ fn main() -> Result<()> {
     );
 
     let t_start = Instant::now();
-    let records: Vec<SampleRecord> = image_files
+    let mut records: Vec<SampleRecord> = image_files
         .par_iter()
         .filter_map(|path| {
             let img = image::open(path).ok()?.to_rgb8();
@@ -136,22 +145,54 @@ fn main() -> Result<()> {
             // Target bins: downsampled 64x64
             let img_64 = image::imageops::resize(&img_256, TARGET_GRID as u32, TARGET_GRID as u32, FilterType::Triangle);
             let mut target_bins = Vec::with_capacity(TARGET_LEN);
+            let mut total_chroma = 0.0f32;
+            let mut neutral_count = 0usize;
 
             for p in img_64.pixels() {
                 let (_, a, b) = srgb_to_lab(p[0], p[1], p[2]);
+                let chroma = (a * a + b * b).sqrt();
+                total_chroma += chroma;
                 let q = lut.lookup(a, b);
+                if q == 120 {
+                    neutral_count += 1;
+                }
                 target_bins.push(q as u16);
-                bin_counters[q].fetch_add(1, Ordering::Relaxed);
+            }
+
+            let mean_chroma = total_chroma / (TARGET_LEN as f32);
+            let neutral_fraction = (neutral_count as f32) / (TARGET_LEN as f32);
+
+            // Filter out monochromatic or desaturated images
+            if mean_chroma < args.min_chroma || neutral_fraction > args.max_neutral_fraction {
+                rejected_counter.fetch_add(1, Ordering::Relaxed);
+                pb.inc(1);
+                return None;
+            }
+
+            for &q in &target_bins {
+                bin_counters[q as usize].fetch_add(1, Ordering::Relaxed);
             }
 
             pb.inc(1);
-            Some(SampleRecord { input_l, target_bins })
+            Some(SampleRecord { path: path.clone(), input_l, target_bins })
         })
         .collect();
 
     pb.finish_with_message("Images processed");
+    let total_scanned = image_files.len();
+    let total_rejected = rejected_counter.load(Ordering::Relaxed);
+    let total_accepted = records.len();
+    println!(
+        "  Scanned {} images: {} vibrant accepted, {} rejected as monochromatic/low-chroma ({:.1}% rejection)",
+        total_scanned, total_accepted, total_rejected, (total_rejected as f64 / total_scanned as f64) * 100.0
+    );
+
+    if args.limit > 0 && records.len() > args.limit {
+        records.truncate(args.limit);
+        println!("  Truncated dataset to limit of {} samples", args.limit);
+    }
     let total_samples = records.len();
-    println!("  Successfully processed {} samples in {:.2?}", total_samples, t_start.elapsed());
+    println!("  Final dataset size: {} samples in {:.2?}", total_samples, t_start.elapsed());
 
     // 3. Official Zhang et al. (2016) class rebalancing weights w(q) from 1.3M ImageNet prior
     println!("\n[3/3] Applying official Zhang et al. class rebalancing weights w(q)...");
@@ -167,10 +208,21 @@ fn main() -> Result<()> {
     fs::write(&weights_json_path, json_content)?;
     println!("  Saved class weights to {}", weights_json_path.display());
 
+    // Save manifest of filenames
+    let manifest_path = args.out_file.with_file_name("colorizer_files.txt");
+    let manifest_content: String = records
+        .iter()
+        .map(|r| r.path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&manifest_path, manifest_content)?;
+    println!("  Saved sample manifest to {}", manifest_path.display());
+
     // 4. Write binary cache
     println!("  Writing binary cache to {}...", args.out_file.display());
-    let mut file = File::create(&args.out_file)
+    let file = File::create(&args.out_file)
         .with_context(|| format!("Failed to create cache file: {}", args.out_file.display()))?;
+    let mut writer = BufWriter::with_capacity(1024 * 1024 * 8, file);
 
     // Header:
     // [0..8]   : Magic "YUMON_CL"
@@ -194,17 +246,18 @@ fn main() -> Result<()> {
         header[offset..offset + 4].copy_from_slice(&w.to_le_bytes());
     }
 
-    file.write_all(&header)?;
+    writer.write_all(&header)?;
 
     // Write all records sequentially
     for rec in &records {
-        file.write_all(&rec.input_l)?;
+        writer.write_all(&rec.input_l)?;
         for &bin_id in &rec.target_bins {
-            file.write_all(&bin_id.to_le_bytes())?;
+            writer.write_all(&bin_id.to_le_bytes())?;
         }
     }
 
-    file.flush()?;
+    writer.flush()?;
+    let mut file = writer.into_inner()?;
     let total_bytes = file.seek(SeekFrom::Current(0))?;
     println!(
         "\n✓ Cache successfully generated: {:.2} MB for {} records in {:.2?}",
