@@ -51,7 +51,19 @@ pub struct PaintConfig {
     pub top_p: f32,
     pub repeat_penalty: f32,
     pub shape_guidance: f32,
+    #[serde(default = "default_guidance_pass4")]
+    pub shape_guidance_pass4: f32,
+    #[serde(default = "default_temperature_pass4")]
+    pub temperature_pass4: f32,
     pub passes: usize,
+}
+
+fn default_guidance_pass4() -> f32 {
+    3.5
+}
+
+fn default_temperature_pass4() -> f32 {
+    0.35
 }
 
 impl Default for PaintConfig {
@@ -63,6 +75,8 @@ impl Default for PaintConfig {
             top_p: 0.88,
             repeat_penalty: 1.0,
             shape_guidance: 0.5,
+            shape_guidance_pass4: 3.5,
+            temperature_pass4: 0.35,
             passes: 5,
         }
     }
@@ -246,12 +260,13 @@ pub fn sample_color_token(
     last_color: Option<usize>,
     consecutive_repeats: usize,
     repeat_penalty: f32,
+    min_repeat_threshold: usize,
 ) -> usize {
     let mut working_logits = logits.to_vec();
 
     if let Some(c) = last_color {
-        if consecutive_repeats >= 4 && c < working_logits.len() && repeat_penalty > 0.0 {
-            let penalty = (consecutive_repeats as f32 - 3.0) * repeat_penalty;
+        if consecutive_repeats >= min_repeat_threshold && c < working_logits.len() && repeat_penalty > 0.0 {
+            let penalty = (consecutive_repeats as f32 - (min_repeat_threshold as f32 - 1.0)) * repeat_penalty;
             working_logits[c] -= penalty;
         }
     }
@@ -526,6 +541,7 @@ impl<B: FlashAttention> PaintStudio<B> {
                 p1_last_color,
                 p1_consecutive,
                 config.repeat_penalty,
+                4,
             ) as u8;
             if Some(best_palette_idx as usize) == p1_last_color {
                 p1_consecutive += 1;
@@ -598,6 +614,7 @@ impl<B: FlashAttention> PaintStudio<B> {
                         p2_last_color,
                         p2_consecutive,
                         config.repeat_penalty,
+                        8,
                     ) as u8;
                     if Some(best_palette_idx as usize) == p2_last_color {
                         p2_consecutive += 1;
@@ -685,6 +702,7 @@ impl<B: FlashAttention> PaintStudio<B> {
                         p3_last_color,
                         p3_consecutive,
                         config.repeat_penalty,
+                        16,
                     ) as u8;
 
                     if Some(best_palette_idx as usize) == p3_last_color {
@@ -758,22 +776,23 @@ impl<B: FlashAttention> PaintStudio<B> {
                     let sub_idx = (py / 2) * 32 + (px / 2);
 
                     let mut working_logits = color_logits.to_vec();
-                    if config.shape_guidance > 0.0 && sub_idx < pass3_colors.len() {
+                    if config.shape_guidance_pass4 > 0.0 && sub_idx < pass3_colors.len() {
                         let sub_token = pass3_colors[sub_idx];
                         let sub_color = (sub_token as usize).saturating_sub(COLOR_START_ID);
                         if sub_color < PALETTE_SIZE {
-                            working_logits[sub_color] += config.shape_guidance;
+                            working_logits[sub_color] += config.shape_guidance_pass4;
                         }
                     }
 
                     let best_palette_idx = sample_color_token(
                         &working_logits,
-                        config.temperature,
+                        config.temperature_pass4,
                         config.top_k,
                         config.top_p,
                         p4_last_color,
                         p4_consecutive,
                         config.repeat_penalty,
+                        32,
                     ) as u8;
 
                     if Some(best_palette_idx as usize) == p4_last_color {

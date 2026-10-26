@@ -288,13 +288,14 @@ fn sample_color_token(
     last_color: Option<usize>,
     consecutive_repeats: usize,
     repeat_penalty: f32,
+    min_repeat_threshold: usize,
     rng: &mut impl Rng,
 ) -> usize {
     let mut working_logits = logits.to_vec();
 
     if let Some(c) = last_color {
-        if consecutive_repeats >= 4 && c < working_logits.len() && repeat_penalty > 0.0 {
-            let penalty = (consecutive_repeats as f32 - 3.0) * repeat_penalty;
+        if consecutive_repeats >= min_repeat_threshold && c < working_logits.len() && repeat_penalty > 0.0 {
+            let penalty = (consecutive_repeats as f32 - (min_repeat_threshold as f32 - 1.0)) * repeat_penalty;
             working_logits[c] -= penalty;
         }
     }
@@ -388,6 +389,24 @@ fn generate_tokens_for_prefix(
         .to_vec()
         .unwrap();
 
+    let min_repeats = match pass {
+        1 => 4,
+        2 => 8,
+        3 => 16,
+        4 => 32,
+        _ => 4,
+    };
+    let effective_guidance = if pass == 4 && (shape_guidance - 0.5).abs() < 1e-4 {
+        3.5
+    } else {
+        shape_guidance
+    };
+    let effective_temp = if pass == 4 && (temperature - 0.7).abs() < 1e-4 {
+        0.35
+    } else {
+        temperature
+    };
+
     let mut pred_colors = Vec::with_capacity(gen_count);
     let mut last_color = None;
     let mut consecutive_repeats = 0;
@@ -397,7 +416,7 @@ fn generate_tokens_for_prefix(
         let mut working_logits = color_logits.to_vec();
 
         // Apply shape guidance from prior pass if enabled
-        if shape_guidance > 0.0 && !prior_colors.is_empty() {
+        if effective_guidance > 0.0 && !prior_colors.is_empty() {
             let guide_color_opt = match pass {
                 3 => {
                     let py = step / 32;
@@ -424,19 +443,20 @@ fn generate_tokens_for_prefix(
 
             if let Some(gc) = guide_color_opt {
                 if gc < PALETTE_SIZE {
-                    working_logits[gc] += shape_guidance;
+                    working_logits[gc] += effective_guidance;
                 }
             }
         }
 
         let best_palette_idx = sample_color_token(
             &working_logits,
-            temperature,
+            effective_temp,
             top_k,
             top_p,
             last_color,
             consecutive_repeats,
             repeat_penalty,
+            min_repeats,
             rng,
         ) as u8;
 

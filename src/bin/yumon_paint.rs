@@ -110,9 +110,17 @@ struct Args {
     #[arg(long, default_value_t = 1.0)]
     repeat_penalty: f32,
 
-    /// Optional shape guidance weight from prior silhouette pass (0.0 to disable).
+    /// Optional shape guidance weight from prior silhouette pass for Passes 2 & 3 (0.0 to disable).
     #[arg(long, default_value_t = 0.5)]
     shape_guidance: f32,
+
+    /// Shape guidance weight for Pass 4 fine details anchored to Pass 3 (default 3.5; 0.0 to disable).
+    #[arg(long, default_value_t = 3.5)]
+    shape_guidance_pass4: f32,
+
+    /// Sampling temperature for Pass 4 fine details (default 0.35 for high spatial precision).
+    #[arg(long, default_value_t = 0.35)]
+    temperature_pass4: f32,
 
     /// Output artwork PNG file path.
     #[arg(long, default_value = "yumon_artwork.png")]
@@ -151,15 +159,16 @@ fn sample_color_token(
     last_color: Option<usize>,
     consecutive_repeats: usize,
     repeat_penalty: f32,
+    min_repeat_threshold: usize,
 ) -> usize {
     let mut working_logits = logits.to_vec();
 
     // Consecutive repetition penalty:
-    // If the exact same color has been emitted 4+ times consecutively in a raster row,
-    // apply a penalty to break out of runaway absorbing loops.
+    // If the exact same color has been emitted `min_repeat_threshold`+ times consecutively in a raster row,
+    // apply an escalating penalty to break out of runaway absorbing loops without truncating legitimate solid areas.
     if let Some(c) = last_color {
-        if consecutive_repeats >= 4 && c < working_logits.len() && repeat_penalty > 0.0 {
-            let penalty = (consecutive_repeats as f32 - 3.0) * repeat_penalty;
+        if consecutive_repeats >= min_repeat_threshold && c < working_logits.len() && repeat_penalty > 0.0 {
+            let penalty = (consecutive_repeats as f32 - (min_repeat_threshold as f32 - 1.0)) * repeat_penalty;
             working_logits[c] -= penalty;
         }
     }
@@ -467,6 +476,7 @@ fn main() -> Result<()> {
             p1_last_color,
             p1_consecutive,
             args.repeat_penalty,
+            4,
         ) as u8;
         if Some(best_palette_idx as usize) == p1_last_color {
             p1_consecutive += 1;
@@ -533,6 +543,7 @@ fn main() -> Result<()> {
                 p2_last_color,
                 p2_consecutive,
                 args.repeat_penalty,
+                8,
             ) as u8;
             if Some(best_palette_idx as usize) == p2_last_color {
                 p2_consecutive += 1;
@@ -617,6 +628,7 @@ fn main() -> Result<()> {
                 p3_last_color,
                 p3_consecutive,
                 args.repeat_penalty,
+                16,
             ) as u8;
 
             if Some(best_palette_idx as usize) == p3_last_color {
@@ -688,22 +700,23 @@ fn main() -> Result<()> {
             let sub_idx = (py / 2) * 32 + (px / 2);
 
             let mut working_logits = color_logits.to_vec();
-            if args.shape_guidance > 0.0 && sub_idx < pass3_colors.len() {
+            if args.shape_guidance_pass4 > 0.0 && sub_idx < pass3_colors.len() {
                 let sub_token = pass3_colors[sub_idx];
                 let sub_color = (sub_token as usize).saturating_sub(COLOR_START_ID);
                 if sub_color < PALETTE_SIZE {
-                    working_logits[sub_color] += args.shape_guidance;
+                    working_logits[sub_color] += args.shape_guidance_pass4;
                 }
             }
 
             let best_palette_idx = sample_color_token(
                 &working_logits,
-                args.temperature,
+                args.temperature_pass4,
                 args.top_k,
                 args.top_p,
                 p4_last_color,
                 p4_consecutive,
                 args.repeat_penalty,
+                32,
             ) as u8;
 
             if Some(best_palette_idx as usize) == p4_last_color {
