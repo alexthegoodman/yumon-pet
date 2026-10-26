@@ -94,33 +94,45 @@ struct Args {
     #[arg(long, default_value = "training-cache/diffusion_talk_vocab.json")]
     vocab: PathBuf,
 
-    /// Sampling temperature (0.0 = greedy argmax, >0.0 = stochastic sampling).
-    #[arg(long, default_value_t = 1.8)]
-    temperature: f32,
+    /// Sampling temperature (global fallback if per-pass temperature is not set).
+    #[arg(long)]
+    temperature: Option<f32>,
 
-    /// Top-K sampling filter (0 to disable, e.g. 12).
+    /// Pass 1 sampling temperature (broad composition: high temp for rich, vibrant palette choices).
+    #[arg(long, default_value_t = 1.8)]
+    temperature_pass1: f32,
+
+    /// Pass 2 sampling temperature (shapes and silhouettes).
+    #[arg(long, default_value_t = 0.95)]
+    temperature_pass2: f32,
+
+    /// Pass 3 sampling temperature (anatomy & features).
+    #[arg(long, default_value_t = 1.2)]
+    temperature_pass3: f32,
+
+    /// Pass 4 sampling temperature (fine pixel art details, high spatial precision).
+    #[arg(long, default_value_t = 1.1)]
+    temperature_pass4: f32,
+
+    /// Top-K sampling filter (0 to disable, e.g. 24).
     #[arg(long, default_value_t = 24)]
     top_k: usize,
 
-    /// Top-P (nucleus) sampling filter (1.0 to disable, e.g. 0.90).
-    #[arg(long, default_value_t = 0.80)]
+    /// Top-P (nucleus) sampling filter (1.0 to disable, e.g. 0.88).
+    #[arg(long, default_value_t = 0.84)]
     top_p: f32,
 
     /// Repetition penalty applied to runs of identical consecutive colors (0.0 to disable).
-    #[arg(long, default_value_t = 0.25)]
+    #[arg(long, default_value_t = 1.0)]
     repeat_penalty: f32,
 
-    /// Optional shape guidance weight from prior silhouette pass for Passes 2 & 3 (0.0 to disable).
-    #[arg(long, default_value_t = 1.2)]
+    /// Optional shape guidance weight from prior silhouette pass for Pass 3 (default 0.4; 0.0 to disable).
+    #[arg(long, default_value_t = 0.6)]
     shape_guidance: f32,
 
     /// Shape guidance weight for Pass 4 fine details anchored to Pass 3 (default 3.5; 0.0 to disable).
-    #[arg(long, default_value_t = 3.5)]
+    #[arg(long, default_value_t = 4.5)]
     shape_guidance_pass4: f32,
-
-    /// Sampling temperature for Pass 4 fine details (default 0.35 for high spatial precision).
-    #[arg(long, default_value_t = 0.9)]
-    temperature_pass4: f32,
 
     /// Output artwork PNG file path.
     #[arg(long, default_value = "yumon_artwork.png")]
@@ -148,6 +160,43 @@ fn upscale_nn(src: &[u8], width: usize, height: usize, scale: usize) -> Vec<u8> 
         }
     }
     out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn compute_canvas_stats(canvas: &[u8], width: usize, height: usize) -> (usize, f32, f32, f32) {
+    let mut colors = std::collections::HashSet::new();
+    let mut h_diffs = Vec::new();
+    let mut v_diffs = Vec::new();
+
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * width + x) * 3;
+            let r = canvas[idx];
+            let g = canvas[idx + 1];
+            let b = canvas[idx + 2];
+            colors.insert((r, g, b));
+
+            if x + 1 < width {
+                let idx2 = (y * width + (x + 1)) * 3;
+                let diff = (r as f32 - canvas[idx2] as f32).abs()
+                    + (g as f32 - canvas[idx2 + 1] as f32).abs()
+                    + (b as f32 - canvas[idx2 + 2] as f32).abs();
+                h_diffs.push(diff);
+            }
+            if y + 1 < height {
+                let idx2 = ((y + 1) * width + x) * 3;
+                let diff = (r as f32 - canvas[idx2] as f32).abs()
+                    + (g as f32 - canvas[idx2 + 1] as f32).abs()
+                    + (b as f32 - canvas[idx2 + 2] as f32).abs();
+                v_diffs.push(diff);
+            }
+        }
+    }
+
+    let avg_h = if h_diffs.is_empty() { 0.0 } else { h_diffs.iter().sum::<f32>() / h_diffs.len() as f32 };
+    let avg_v = if v_diffs.is_empty() { 0.0 } else { v_diffs.iter().sum::<f32>() / v_diffs.len() as f32 };
+    let ratio = avg_v / (avg_h + 1e-5);
+    (colors.len(), avg_h, avg_v, ratio)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -301,10 +350,19 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let device: <BackendType as Backend>::Device = Default::default();
 
+    let temp_p1 = args.temperature.unwrap_or(args.temperature_pass1);
+    let temp_p2 = args.temperature.unwrap_or(args.temperature_pass2);
+    let temp_p3 = args.temperature.unwrap_or(args.temperature_pass3);
+    let temp_p4 = args.temperature.unwrap_or(args.temperature_pass4);
+
     println!("╔═══════════════════════════════════════════════════════╗");
     println!("║   🎨 Yumon Art Studio: Autoregressive Image LM        ║");
     println!("╚═══════════════════════════════════════════════════════╝");
     println!("Prompt: \"{}\"\n", args.prompt);
+    println!("Generation Settings:");
+    println!("  - Temperatures: Pass 1: {:.2}, Pass 2: {:.2}, Pass 3: {:.2}, Pass 4: {:.2}", temp_p1, temp_p2, temp_p3, temp_p4);
+    println!("  - Shape Guidance: Pass 3: {:.2}, Pass 4: {:.2}", args.shape_guidance, args.shape_guidance_pass4);
+    println!("  - Sampling: Top-K: {}, Top-P: {:.2}, Repeat Penalty: {:.2}\n", args.top_k, args.top_p, args.repeat_penalty);
 
     // 1. Load Kilo Talk vocabulary
     let vocab = KiloVocab::load_from_json(&args.vocab)
@@ -431,6 +489,10 @@ fn main() -> Result<()> {
 
     // 4. Initialize Blank Canvas
     let mut canvas_hwc = vec![240u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
+    let pass1_canvas: Option<Vec<u8>>;
+    let mut pass2_canvas: Option<Vec<u8>> = None;
+    let mut pass3_canvas: Option<Vec<u8>> = None;
+    let mut pass4_canvas: Option<Vec<u8>> = None;
     println!("\n🖼  Initial Canvas State (Blank):");
     print_terminal_canvas(&canvas_hwc);
 
@@ -439,7 +501,7 @@ fn main() -> Result<()> {
 
     // PASS 1: Broad Composition (8x8 Blocks, 64 color tokens)
     println!("\n═══════════════════════════════════════════════════════");
-    println!("  🎨 Pass 1 / {}: Broad Composition (64 Blocks)", args.passes);
+    println!("  🎨 Pass 1 / {}: Broad Composition (64 Blocks, Temp: {:.2})", args.passes, temp_p1);
     println!("═══════════════════════════════════════════════════════");
     let t_pass1 = Instant::now();
 
@@ -466,17 +528,21 @@ fn main() -> Result<()> {
     let mut pass1_colors = Vec::with_capacity(64);
     let mut p1_last_color = None;
     let mut p1_consecutive = 0;
-    for _ in 0..64 {
+    for i in 0..64 {
+        if i % 8 == 0 {
+            p1_last_color = None;
+            p1_consecutive = 0;
+        }
         let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
         let best_palette_idx = sample_color_token(
             color_logits,
-            args.temperature,
+            temp_p1,
             args.top_k,
             args.top_p,
             p1_last_color,
             p1_consecutive,
             args.repeat_penalty,
-            2,
+            3,
         ) as u8;
         if Some(best_palette_idx as usize) == p1_last_color {
             p1_consecutive += 1;
@@ -496,14 +562,16 @@ fn main() -> Result<()> {
     }
 
     canvas_hwc = pass1_tokens_to_image(&pass1_colors);
-    println!("  ✓ Pass 1 Complete ({:.2?}): Global composition established.", t_pass1.elapsed());
+    pass1_canvas = Some(canvas_hwc.clone());
+    let stats1 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
+    println!("  ✓ Pass 1 Complete ({:.2?}): Global composition established ({} colors, V/H ratio: {:.2}).", t_pass1.elapsed(), stats1.0, stats1.3);
     print_terminal_canvas(&canvas_hwc);
 
     // PASS 2: Shapes & Silhouettes (16x16 Patches, 256 color tokens)
     let mut pass2_colors = Vec::with_capacity(256);
     if let Some(brain_p2) = &brain_p2 {
         println!("\n═══════════════════════════════════════════════════════");
-        println!("  🎨 Pass 2 / {}: Shapes & Silhouettes (256 Patches)", args.passes);
+        println!("  🎨 Pass 2 / {}: Shapes & Silhouettes (256 Patches, Temp: {:.2})", args.passes, temp_p2);
         println!("═══════════════════════════════════════════════════════");
         let t_pass2 = Instant::now();
 
@@ -534,10 +602,14 @@ fn main() -> Result<()> {
         let mut p2_last_color = None;
         let mut p2_consecutive = 0;
         for i in 0..256 {
+            if i % 16 == 0 {
+                p2_last_color = None;
+                p2_consecutive = 0;
+            }
             let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
             let best_palette_idx = sample_color_token(
                 color_logits,
-                args.temperature,
+                temp_p2,
                 args.top_k,
                 args.top_p,
                 p2_last_color,
@@ -567,7 +639,9 @@ fn main() -> Result<()> {
         }
 
         canvas_hwc = pass2_tokens_to_image(&pass2_colors);
-        println!("  ✓ Pass 2 Complete ({:.2?}): Subject shapes and silhouettes refined.", t_pass2.elapsed());
+        pass2_canvas = Some(canvas_hwc.clone());
+        let stats2 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
+        println!("  ✓ Pass 2 Complete ({:.2?}): Subject shapes and silhouettes refined ({} colors, V/H ratio: {:.2}).", t_pass2.elapsed(), stats2.0, stats2.3);
         print_terminal_canvas(&canvas_hwc);
     }
 
@@ -575,7 +649,7 @@ fn main() -> Result<()> {
     let mut pass3_colors = Vec::with_capacity(1024);
     if let Some(brain_p3) = &brain_p3 {
         println!("\n═══════════════════════════════════════════════════════");
-        println!("  🎨 Pass 3 / {}: Anatomy & Features (1,024 Sub-Patches)", args.passes);
+        println!("  🎨 Pass 3 / {}: Anatomy & Features (1,024 Sub-Patches, Temp: {:.2}, Guidance: {:.2})", args.passes, temp_p3, args.shape_guidance);
         println!("═══════════════════════════════════════════════════════");
         let t_pass3 = Instant::now();
 
@@ -606,9 +680,15 @@ fn main() -> Result<()> {
         let mut p3_last_color = None;
         let mut p3_consecutive = 0;
         for i in 0..1024 {
-            let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
             let py = i / 32;
             let px = i % 32;
+
+            if px == 0 {
+                p3_last_color = None;
+                p3_consecutive = 0;
+            }
+
+            let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
             let patch_idx = (py / 2) * 16 + (px / 2);
 
             let mut working_logits = color_logits.to_vec();
@@ -622,13 +702,13 @@ fn main() -> Result<()> {
 
             let best_palette_idx = sample_color_token(
                 &working_logits,
-                args.temperature,
+                temp_p3,
                 args.top_k,
                 args.top_p,
                 p3_last_color,
                 p3_consecutive,
                 args.repeat_penalty,
-                8,
+                6,
             ) as u8;
 
             if Some(best_palette_idx as usize) == p3_last_color {
@@ -655,7 +735,9 @@ fn main() -> Result<()> {
         }
 
         canvas_hwc = pass3_tokens_to_image(&pass3_colors);
-        println!("  ✓ Pass 3 Complete ({:.2?}): Subject anatomy, features, and contours established.", t_pass3.elapsed());
+        pass3_canvas = Some(canvas_hwc.clone());
+        let stats3 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
+        println!("  ✓ Pass 3 Complete ({:.2?}): Subject anatomy, features, and contours established ({} colors, V/H ratio: {:.2}).", t_pass3.elapsed(), stats3.0, stats3.3);
         print_terminal_canvas(&canvas_hwc);
     }
 
@@ -663,7 +745,7 @@ fn main() -> Result<()> {
     let mut pass4_colors = Vec::with_capacity(4096);
     if let Some(brain_p4) = &brain_p4 {
         println!("\n═══════════════════════════════════════════════════════");
-        println!("  🎨 Pass 4 / {}: Fine Color Details (4,096 Pixels)", args.passes);
+        println!("  🎨 Pass 4 / {}: Fine Color Details (4,096 Pixels, Temp: {:.2}, Guidance: {:.2})", args.passes, temp_p4, args.shape_guidance_pass4);
         println!("═══════════════════════════════════════════════════════");
         let t_pass4 = Instant::now();
 
@@ -694,9 +776,15 @@ fn main() -> Result<()> {
         let mut p4_last_color = None;
         let mut p4_consecutive = 0;
         for i in 0..4096 {
-            let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
             let py = i / 64;
             let px = i % 64;
+
+            if px == 0 {
+                p4_last_color = None;
+                p4_consecutive = 0;
+            }
+
+            let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
             let sub_idx = (py / 2) * 32 + (px / 2);
 
             let mut working_logits = color_logits.to_vec();
@@ -710,13 +798,13 @@ fn main() -> Result<()> {
 
             let best_palette_idx = sample_color_token(
                 &working_logits,
-                args.temperature_pass4,
+                temp_p4,
                 args.top_k,
                 args.top_p,
                 p4_last_color,
                 p4_consecutive,
                 args.repeat_penalty,
-                16,
+                2,
             ) as u8;
 
             if Some(best_palette_idx as usize) == p4_last_color {
@@ -743,7 +831,9 @@ fn main() -> Result<()> {
         }
 
         canvas_hwc = pass4_tokens_to_image(&pass4_colors);
-        println!("  ✓ Pass 4 Complete ({:.2?}): High-resolution 64x64 color details established.", t_pass4.elapsed());
+        pass4_canvas = Some(canvas_hwc.clone());
+        let stats4 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
+        println!("  ✓ Pass 4 Complete ({:.2?}): High-resolution 64x64 color details established ({} colors, V/H ratio: {:.2}).", t_pass4.elapsed(), stats4.0, stats4.3);
         print_terminal_canvas(&canvas_hwc);
     }
 
@@ -942,6 +1032,31 @@ fn main() -> Result<()> {
     .context("creating raw 64x64 ImageBuffer")?;
 
     raw_buf.save(&raw_output)?;
+
+    if let Some(ref p1) = pass1_canvas {
+        let p1_path = cache_dir.join(format!("{}_pass1_{}.png", stem, timestamp));
+        if let Some(buf) = image::RgbImage::from_raw(CANVAS_SIZE as u32, CANVAS_SIZE as u32, p1.clone()) {
+            let _ = buf.save(&p1_path);
+        }
+    }
+    if let Some(ref p2) = pass2_canvas {
+        let p2_path = cache_dir.join(format!("{}_pass2_{}.png", stem, timestamp));
+        if let Some(buf) = image::RgbImage::from_raw(CANVAS_SIZE as u32, CANVAS_SIZE as u32, p2.clone()) {
+            let _ = buf.save(&p2_path);
+        }
+    }
+    if let Some(ref p3) = pass3_canvas {
+        let p3_path = cache_dir.join(format!("{}_pass3_{}.png", stem, timestamp));
+        if let Some(buf) = image::RgbImage::from_raw(CANVAS_SIZE as u32, CANVAS_SIZE as u32, p3.clone()) {
+            let _ = buf.save(&p3_path);
+        }
+    }
+    if let Some(ref p4) = pass4_canvas {
+        let p4_path = cache_dir.join(format!("{}_pass4_{}.png", stem, timestamp));
+        if let Some(buf) = image::RgbImage::from_raw(CANVAS_SIZE as u32, CANVAS_SIZE as u32, p4.clone()) {
+            let _ = buf.save(&p4_path);
+        }
+    }
 
     // Save 256x256 (Neural Super-Resolution or Nearest Neighbor fallback)
     let upscaled_output = cache_dir.join(format!(

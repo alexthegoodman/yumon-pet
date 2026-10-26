@@ -74,7 +74,7 @@ impl Default for PaintConfig {
             top_k: 24,
             top_p: 0.88,
             repeat_penalty: 1.0,
-            shape_guidance: 0.5,
+            shape_guidance: 0.4,
             shape_guidance_pass4: 3.5,
             temperature_pass4: 0.35,
             passes: 5,
@@ -604,7 +604,11 @@ impl<B: FlashAttention> PaintStudio<B> {
 
                 let mut p2_last_color = None;
                 let mut p2_consecutive = 0;
-                for _ in 0..256 {
+                for i in 0..256 {
+                    if i % 16 == 0 {
+                        p2_last_color = None;
+                        p2_consecutive = 0;
+                    }
                     let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
                     let best_palette_idx = sample_color_token(
                         color_logits,
@@ -614,7 +618,7 @@ impl<B: FlashAttention> PaintStudio<B> {
                         p2_last_color,
                         p2_consecutive,
                         config.repeat_penalty,
-                        8,
+                        4,
                     ) as u8;
                     if Some(best_palette_idx as usize) == p2_last_color {
                         p2_consecutive += 1;
@@ -680,9 +684,15 @@ impl<B: FlashAttention> PaintStudio<B> {
                 let mut p3_last_color = None;
                 let mut p3_consecutive = 0;
                 for i in 0..1024 {
-                    let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
                     let py = i / 32;
                     let px = i % 32;
+
+                    if px == 0 {
+                        p3_last_color = None;
+                        p3_consecutive = 0;
+                    }
+
+                    let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
                     let patch_idx = (py / 2) * 16 + (px / 2);
 
                     let mut working_logits = color_logits.to_vec();
@@ -702,7 +712,7 @@ impl<B: FlashAttention> PaintStudio<B> {
                         p3_last_color,
                         p3_consecutive,
                         config.repeat_penalty,
-                        16,
+                        6,
                     ) as u8;
 
                     if Some(best_palette_idx as usize) == p3_last_color {
@@ -770,9 +780,15 @@ impl<B: FlashAttention> PaintStudio<B> {
                 let mut p4_last_color = None;
                 let mut p4_consecutive = 0;
                 for i in 0..4096 {
-                    let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
                     let py = i / 64;
                     let px = i % 64;
+
+                    if px == 0 {
+                        p4_last_color = None;
+                        p4_consecutive = 0;
+                    }
+
+                    let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
                     let sub_idx = (py / 2) * 32 + (px / 2);
 
                     let mut working_logits = color_logits.to_vec();
@@ -792,7 +808,7 @@ impl<B: FlashAttention> PaintStudio<B> {
                         p4_last_color,
                         p4_consecutive,
                         config.repeat_penalty,
-                        32,
+                        4,
                     ) as u8;
 
                     if Some(best_palette_idx as usize) == p4_last_color {
