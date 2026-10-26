@@ -1,6 +1,6 @@
 {
-  "model_type": "residual_grayscale_upscaler",
-  "cache": "training-cache/upscaler_64_gray.bin",
+  "model_type": "residual_upscaler",
+  "cache": "training-cache/upscaler_64_color.bin",
   "out_dir": "checkpoints/yumon-upscaler-64",
   "scales_from": 64,
   "channels": 32,
