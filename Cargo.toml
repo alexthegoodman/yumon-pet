@@ -81,6 +81,18 @@ path = "src/bin/train_upscaler.rs"
 name = "eval_upscaler"
 path = "src/bin/eval_upscaler.rs"
 
+[[bin]]
+name = "cache_colorizer"
+path = "src/bin/cache_colorizer.rs"
+
+[[bin]]
+name = "train_colorizer"
+path = "src/bin/train_colorizer.rs"
+
+[[bin]]
+name = "eval_colorizer"
+path = "src/bin/eval_colorizer.rs"
+
 
 
 [features]

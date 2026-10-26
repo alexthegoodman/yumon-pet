@@ -33,6 +33,7 @@ use {
             pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
         },
         upscaler::{UpscalerModel, UpscalerModelConfig},
+        colorizer::{colorize_fused_rgb, ColorizerModel, ColorizerModelConfig, DEFAULT_TEMPERATURE},
     },
 };
 
@@ -73,8 +74,16 @@ struct Args {
     #[arg(long, default_value = "checkpoints/yumon-upscaler-64")]
     upscaler_checkpoint: PathBuf,
 
-    /// Number of cascaded generation passes to execute (1 = 8x8, 2 = 16x16, 3 = 32x32, 4 = 64x64, 5 = 256x256).
-    #[arg(long, default_value_t = 5)]
+    /// Pass 6 Full Zhang 2016 Colorizer checkpoint directory (e.g. checkpoints/yumon-colorizer-256).
+    #[arg(long, default_value = "checkpoints/yumon-colorizer-256")]
+    colorizer_checkpoint: PathBuf,
+
+    /// Annealed-mean softmax temperature for Colorizer (default 0.38).
+    #[arg(long, default_value_t = DEFAULT_TEMPERATURE)]
+    colorizer_temperature: f32,
+
+    /// Number of cascaded generation passes to execute (1 = 8x8, 2 = 16x16, 3 = 32x32, 4 = 64x64, 5 = 256x256 gray, 6 = 256x256 Full Color).
+    #[arg(long, default_value_t = 6)]
     passes: usize,
 
     /// Path to Kilo Talk vocabulary.
@@ -217,11 +226,18 @@ fn sample_color_token(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn print_terminal_canvas(canvas: &[u8]) {
+    print_terminal_rgb(canvas, CANVAS_SIZE, CANVAS_SIZE);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn print_terminal_rgb(canvas: &[u8], width: usize, height: usize) {
     println!("\n  ┌────────────────────────────────┐");
-    for y in (0..CANVAS_SIZE).step_by(4) {
+    let step_y = (height / 16).max(1);
+    let step_x = (width / 32).max(1);
+    for y in (0..height).step_by(step_y) {
         print!("  │");
-        for x in (0..CANVAS_SIZE).step_by(2) {
-            let idx = (y * CANVAS_SIZE + x) * 3;
+        for x in (0..width).step_by(step_x) {
+            let idx = (y * width + x) * 3;
             let r = canvas[idx];
             let g = canvas[idx + 1];
             let b = canvas[idx + 2];
@@ -338,6 +354,37 @@ fn main() -> Result<()> {
                 Ok(m) => Some(m),
                 Err(e) => {
                     eprintln!("Warning: Failed to load upscaler weights: {}. Will fallback to nearest-neighbor.", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let colorizer = if args.passes >= 6 {
+        let ckpt_dir = &args.colorizer_checkpoint;
+        let model_path = ckpt_dir.join("model");
+        if model_path.exists() || ckpt_dir.join("model.bin").exists() || ckpt_dir.join("model.mpk").exists() {
+            println!("Loading Pass 6 Colorizer (Zhang 2016) from {}...", ckpt_dir.display());
+            let channels = if let Ok(meta_str) = fs::read_to_string(ckpt_dir.join("metadata.json")) {
+                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_str) {
+                    meta.get("channels").and_then(|c| c.as_u64()).unwrap_or(64) as usize
+                } else { 64 }
+            } else { 64 };
+
+            let config = ColorizerModelConfig::new()
+                .with_scales_from(256)
+                .with_channels(channels)
+                .with_num_res_blocks(5);
+            let model: ColorizerModel<BackendType> = config.init(&device);
+            let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+            match model.load_file(&model_path, &recorder, &device) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    eprintln!("Warning: Failed to load colorizer weights: {}. Will keep grayscale.", e);
                     None
                 }
             }
@@ -709,6 +756,53 @@ fn main() -> Result<()> {
             println!("  ✓ Pass 5 Complete ({:.2?}): Neural super-resolution synthesized 256x256 grayscale art.", t_pass5.elapsed());
         } else {
             println!("  Neural upscaler checkpoint not loaded; saving artwork using Pass 4 resolution.");
+        }
+    }
+
+    // PASS 6: Zhang 2016 Colorizer (256x256 Grayscale -> 256x256 Full Color RGB)
+    if args.passes >= 6 {
+        println!("\n═══════════════════════════════════════════════════════");
+        println!("  Pass 6: Deep Colorization (256x256 Full Color RGB)");
+        println!("═══════════════════════════════════════════════════════");
+        let t_pass6 = Instant::now();
+        if let Some(colorizer) = &colorizer {
+            let l_bytes = if let Some(ref neural_bytes) = final_neural_256 {
+                // Extract L from 256x256 (where R=G=B)
+                let mut l = vec![0u8; 256 * 256];
+                for i in 0..256 * 256 {
+                    l[i] = neural_bytes[i * 3];
+                }
+                l
+            } else {
+                // Fallback: upscale 64x64 to 256x256 nearest neighbor
+                let mut l = vec![0u8; 256 * 256];
+                for y in 0..256 {
+                    let src_y = y / 4;
+                    for x in 0..256 {
+                        let src_x = x / 4;
+                        l[y * 256 + x] = canvas_hwc[(src_y * CANVAS_SIZE + src_x) * 3];
+                    }
+                }
+                l
+            };
+
+            let flat_in: Vec<f32> = l_bytes.iter().map(|&b| (b as f32 / 255.0) * 2.0 - 1.0).collect();
+            let in_tensor = Tensor::<BackendType, 4>::from_floats(
+                TensorData::new(flat_in, [1, 1, 256, 256]),
+                &device,
+            );
+
+            let (pred_a, pred_b) = colorizer.predict_ab_annealed(in_tensor, args.colorizer_temperature);
+            let color_img = colorize_fused_rgb(&l_bytes, &pred_a, &pred_b, 256);
+            let color_rgb_256 = color_img.into_raw();
+
+            println!("  ✓ Pass 6 Complete ({:.2?}): Zhang et al. (2016) multinomial colorization synthesized vibrant TrueColor RGB.", t_pass6.elapsed());
+            println!("\n🎨 Final 256x256 TrueColor Terminal Canvas:");
+            print_terminal_rgb(&color_rgb_256, 256, 256);
+
+            final_neural_256 = Some(color_rgb_256);
+        } else {
+            println!("  Colorizer checkpoint not loaded; keeping grayscale output.");
         }
     }
 

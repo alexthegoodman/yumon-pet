@@ -13,13 +13,21 @@ pub mod train;
 pub mod paint_action;
 pub mod patch_encoder;
 pub mod upscaler;
+pub mod colorizer;
 pub mod paint_studio;
 pub mod chart;
 
 pub use paint_action::{PaintAction, CANVAS_SIZE, PATCH_SIZE, GRID_SIZE, NUM_PATCHES, ART_VOCAB_SIZE};
 pub use patch_encoder::{VisionPatchEncoder, VisionPatchEncoderConfig};
 pub use upscaler::{UpscalerModel, UpscalerModelConfig, UpscalerDiscriminator, UpscalerDiscriminatorConfig};
-pub use chart::{UpscalerTrainingState, render as render_upscaler_chart};
+pub use colorizer::{
+    ColorizerModel, ColorizerModelConfig, ColorizerLut, COLOR_BINS_AB, NUM_COLOR_BINS,
+    DEFAULT_TEMPERATURE, srgb_to_lab, lab_to_srgb, colorize_fused_rgb, rebalanced_cross_entropy,
+};
+pub use chart::{
+    UpscalerTrainingState, render as render_upscaler_chart,
+    ColorizerTrainingState, render_colorizer_chart,
+};
 pub use paint_studio::{GalleryItem, PaintConfig, PaintPaths, PaintResult, PaintStudio, PassProgress};
 
 // ─── Constants ────────────────────────────────────────────────────────────────

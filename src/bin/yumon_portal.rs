@@ -100,6 +100,9 @@ mod desktop {
         /// Pass 5 Neural Upscaler checkpoint for art studio
         #[arg(long)]
         paint_upscaler: Option<PathBuf>,
+        /// Pass 6 Colorizer checkpoint for art studio
+        #[arg(long)]
+        paint_colorizer: Option<PathBuf>,
         /// Vocabulary JSON for art studio
         #[arg(long)]
         paint_vocab: Option<PathBuf>,
@@ -474,6 +477,7 @@ mod desktop {
                 paint_pass3: None,
                 paint_pass4: None,
                 paint_upscaler: None,
+                paint_colorizer: None,
                 paint_vocab: None,
             };
             let responder = load_responder(&args).expect("load_responder with embedded model should succeed");
@@ -1091,6 +1095,7 @@ mod desktop {
             paint_pass3: args.paint_pass3.clone(),
             paint_pass4: args.paint_pass4.clone(),
             paint_upscaler: args.paint_upscaler.clone(),
+            paint_colorizer: args.paint_colorizer.clone(),
             paint_vocab: args.paint_vocab.clone(),
         };
         let worker_proxy = proxy.clone();
@@ -1137,6 +1142,12 @@ mod desktop {
             }),
             upscaler_checkpoint: args.paint_upscaler.clone().or_else(|| {
                 ["checkpoints/yumon-upscaler-64", "checkpoints/yumon-upscaler-256", "checkpoints/yumon-upscaler-64c"]
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|p| p.exists())
+            }),
+            colorizer_checkpoint: args.paint_colorizer.clone().or_else(|| {
+                ["checkpoints/yumon-colorizer-256"]
                     .iter()
                     .map(PathBuf::from)
                     .find(|p| p.exists())

@@ -17,3 +17,5 @@ checkpoints
 assets/*
 *.png
 inference-cache
+
+*.npy

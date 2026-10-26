@@ -1,0 +1,13 @@
+{
+  "model_type": "zhang_2016_colorizer",
+  "cache": "training-cache/colorizer_256.bin",
+  "out_dir": "checkpoints/yumon-colorizer-256",
+  "epochs": 10,
+  "batch_size": 4,
+  "lr": 0.0003,
+  "min_lr": 0.00003,
+  "channels": 64,
+  "num_res_blocks": 5,
+  "val_fraction": 0.02,
+  "temperature": 0.38
+}

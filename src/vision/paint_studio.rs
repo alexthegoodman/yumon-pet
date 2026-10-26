@@ -39,6 +39,7 @@ use super::{
         pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
     },
     upscaler::{UpscalerModel, UpscalerModelConfig},
+    colorizer::{colorize_fused_rgb, ColorizerModel, ColorizerModelConfig, DEFAULT_TEMPERATURE},
 };
 
 /// Configuration for an art generation run.
@@ -115,6 +116,7 @@ pub struct PaintPaths {
     pub checkpoint_pass3: Option<PathBuf>,
     pub checkpoint_pass4: Option<PathBuf>,
     pub upscaler_checkpoint: Option<PathBuf>,
+    pub colorizer_checkpoint: Option<PathBuf>,
 }
 
 impl Default for PaintPaths {
@@ -157,6 +159,13 @@ impl PaintPaths {
         .map(PathBuf::from)
         .find(|p| p.exists());
 
+        let colorizer = [
+            "checkpoints/yumon-colorizer-256",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists());
+
         Self {
             vocab_path: vocab,
             checkpoint_pass1: p1,
@@ -164,6 +173,7 @@ impl PaintPaths {
             checkpoint_pass3: p3,
             checkpoint_pass4: p4,
             upscaler_checkpoint: upscaler,
+            colorizer_checkpoint: colorizer,
         }
     }
 }
@@ -340,6 +350,7 @@ pub struct PaintStudio<B: FlashAttention> {
     pub brain_p3: Option<YumonMoeBrain<B>>,
     pub brain_p4: Option<YumonMoeBrain<B>>,
     pub upscaler: Option<UpscalerModel<B>>,
+    pub colorizer: Option<ColorizerModel<B>>,
     pub device: B::Device,
 }
 
@@ -416,6 +427,36 @@ impl<B: FlashAttention> PaintStudio<B> {
             None
         };
 
+        let colorizer = if let Some(ckpt_dir) = &paths.colorizer_checkpoint {
+            let model_path = ckpt_dir.join("model");
+            if model_path.exists() || ckpt_dir.join("model.bin").exists() || ckpt_dir.join("model.mpk").exists() {
+                println!("[PaintStudio] Loading Pass 6 Colorizer (Zhang 2016) from {}...", ckpt_dir.display());
+                let channels = if let Ok(meta_str) = fs::read_to_string(ckpt_dir.join("metadata.json")) {
+                    if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_str) {
+                        meta.get("channels").and_then(|c| c.as_u64()).unwrap_or(64) as usize
+                    } else { 64 }
+                } else { 64 };
+
+                let config = ColorizerModelConfig::new()
+                    .with_scales_from(256)
+                    .with_channels(channels)
+                    .with_num_res_blocks(5);
+                let model: ColorizerModel<B> = config.init(device);
+                let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+                match model.load_file(&model_path, &recorder, device) {
+                    Ok(m) => Some(m),
+                    Err(e) => {
+                        eprintln!("[PaintStudio] Warning: Failed to load colorizer weights: {e}. Will remain grayscale.");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             vocab,
             brain_p1,
@@ -423,6 +464,7 @@ impl<B: FlashAttention> PaintStudio<B> {
             brain_p3,
             brain_p4,
             upscaler,
+            colorizer,
             device: device.clone(),
         })
     }
@@ -825,6 +867,43 @@ impl<B: FlashAttention> PaintStudio<B> {
                 elapsed_secs: t_p5.elapsed().as_secs_f32(),
             });
             cached_final_data_url = Some(p5_url);
+        }
+
+        // ── PASS 6: Zhang 2016 Multinomial Colorization (256x256 Gray -> 256x256 RGB) ──
+        if total_passes >= 6 {
+            let t_p6 = Instant::now();
+            if let Some(colorizer) = &self.colorizer {
+                let mut raw_l = vec![0u8; 256 * 256];
+                let mut flat_in = vec![0.0f32; 256 * 256];
+                for i in 0..256 * 256 {
+                    let val = final_canvas_hwc[i * 3]; // R = G = B from grayscale
+                    raw_l[i] = val;
+                    flat_in[i] = (val as f32 / 255.0) * 2.0 - 1.0;
+                }
+
+                let in_tensor = Tensor::<B, 4>::from_floats(
+                    TensorData::new(flat_in, [1, 1, 256, 256]),
+                    &self.device,
+                );
+                let (pred_a, pred_b) = colorizer.predict_ab_annealed(in_tensor, DEFAULT_TEMPERATURE);
+                let color_img = colorize_fused_rgb(&raw_l, &pred_a, &pred_b, 256);
+                final_canvas_hwc = color_img.into_raw();
+                out_w = 256;
+                out_h = 256;
+            }
+
+            let p6_url = rgb_to_data_url(&final_canvas_hwc, out_w, out_h)?;
+            on_progress(PassProgress {
+                pass: 6,
+                total_passes,
+                stage_name: "Zhang Colorization".into(),
+                description: "Zhang et al. (2016) multinomial colorization synthesized vibrant RGB artwork".into(),
+                width: out_w,
+                height: out_h,
+                data_url: p6_url.clone(),
+                elapsed_secs: t_p6.elapsed().as_secs_f32(),
+            });
+            cached_final_data_url = Some(p6_url);
         }
 
         // ── Save Artwork & JSON Metadata to inference-cache ──
