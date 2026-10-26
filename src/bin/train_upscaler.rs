@@ -788,7 +788,7 @@ fn gradient_loss<B: Backend>(
         - target.clone().slice([0..td[0], 0..td[1], 0..td[2], 0..(td[3] - 1)]);
 
     let pred_dy = pred.clone().slice([0..d[0], 0..d[1], 1..d[2], 0..d[3]])
-        - pred.clone().slice([0..d[0], 0..d[1], 0..d[2], 0..d[3]]);
+        - pred.clone().slice([0..d[0], 0..d[1], 0..(d[2] - 1), 0..d[3]]);
 
     let target_dy = target.clone().slice([0..td[0], 0..td[1], 1..td[2], 0..td[3]])
         - target.clone().slice([0..td[0], 0..td[1], 0..(td[2] - 1), 0..td[3]]);
