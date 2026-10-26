@@ -4,9 +4,9 @@
   "channels": 32,
   "cache": "training-cache/upscaler_256_samples.bin",
   "batch_size": 1,
-  "epochs": 10,
+  "epochs": 50,
   "lr": 0.0003,
   "min_lr": 0.00003,
   "val_fraction": 0.02,
-  "out_dir": "checkpoints/yumon-upscaler-gan-3"
+  "out_dir": "checkpoints/yumon-upscaler-gan-tiny"
 }

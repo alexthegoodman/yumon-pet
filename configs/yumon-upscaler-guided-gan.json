@@ -1,0 +1,20 @@
+{
+  "model_type": "residual_colorizing_upscaler",
+  "cache": "training-cache/upscaler_guided_256.bin",
+  "out_dir": "checkpoints/yumon-upscaler-guided-gan",
+  "scales_from": 64,
+  "colorizes": true,
+  "text_guidance": true,
+  "channels": 32,
+  "batch_size": 1,
+  "epochs": 10,
+  "lr": 0.0003,
+  "min_lr": 0.00003,
+  "val_fraction": 0.02,
+  "gan": true,
+  "adv_weight": 0.02,
+  "feat_weight": 0.05,
+  "d_lr": 0.00003,
+  "d_channels": 32,
+  "real_label": 0.9
+}
