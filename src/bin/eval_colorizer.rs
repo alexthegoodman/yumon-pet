@@ -15,14 +15,15 @@ use burn::{
 };
 use clap::Parser;
 use std::{
-    fs::File,
+    fs::{self, File},
     io::Read,
     path::PathBuf,
     time::Instant,
 };
 
 use yumon_pet::vision::colorizer::{
-    colorize_fused_rgb, srgb_to_lab, ColorizerModel, ColorizerModelConfig, COLOR_BINS_AB,
+    colorize_fused_rgb, srgb_to_lab, Colorizer, ColorizerModel, ColorizerModelConfig,
+    TransformerColorizerModel, TransformerColorizerConfig, COLOR_BINS_AB,
     DEFAULT_TEMPERATURE, DEFAULT_CHROMA_BOOST, INPUT_SIZE, NUM_COLOR_BINS, TARGET_GRID,
 };
 
@@ -66,6 +67,22 @@ struct Args {
     /// Saturation chroma boost multiplier to counteract expectation contraction (default 1.8).
     #[arg(long, default_value_t = DEFAULT_CHROMA_BOOST)]
     chroma_boost: f32,
+
+    /// Model architecture type: "transformer" (default, non-autoregressive ViT) or "cnn".
+    #[arg(long, default_value = "transformer")]
+    model_type: String,
+
+    /// Transformer feature dimension d_model.
+    #[arg(long, default_value_t = 256)]
+    d_model: usize,
+
+    /// Transformer attention heads.
+    #[arg(long, default_value_t = 8)]
+    n_heads: usize,
+
+    /// Transformer layers.
+    #[arg(long, default_value_t = 6)]
+    num_layers: usize,
 }
 
 fn main() -> Result<()> {
@@ -79,21 +96,67 @@ fn main() -> Result<()> {
     println!("  Temperature (T) : {:.2}", args.temperature);
     println!("  Chroma boost    : {:.2}", args.chroma_boost);
 
-    // 1. Initialize and load model
-    let config = ColorizerModelConfig::new()
-        .with_scales_from(INPUT_SIZE)
-        .with_channels(args.channels)
-        .with_num_res_blocks(args.num_res_blocks);
+    // 1. Detect architecture from metadata.json or CLI flags
+    let meta_path = args.checkpoint.join("metadata.json");
+    let (model_type, d_model, n_heads, num_layers, channels, num_res_blocks) = if meta_path.exists() {
+        if let Ok(content) = fs::read_to_string(&meta_path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                let m_type = v.get("model_type").and_then(|x| x.as_str()).unwrap_or("transformer").to_string();
+                let dm = v.get("d_model").and_then(|x| x.as_u64()).unwrap_or(256) as usize;
+                let nh = v.get("n_heads").and_then(|x| x.as_u64()).unwrap_or(8) as usize;
+                let nl = v.get("num_layers").and_then(|x| x.as_u64()).unwrap_or(6) as usize;
+                let ch = v.get("channels").and_then(|x| x.as_u64()).unwrap_or(64) as usize;
+                let rb = v.get("num_res_blocks").and_then(|x| x.as_u64()).unwrap_or(5) as usize;
+                (m_type, dm, nh, nl, ch, rb)
+            } else {
+                (args.model_type.clone(), args.d_model, args.n_heads, args.num_layers, args.channels, args.num_res_blocks)
+            }
+        } else {
+            (args.model_type.clone(), args.d_model, args.n_heads, args.num_layers, args.channels, args.num_res_blocks)
+        }
+    } else {
+        (args.model_type.clone(), args.d_model, args.n_heads, args.num_layers, args.channels, args.num_res_blocks)
+    };
 
-    let model: ColorizerModel<EvalBackend> = config.init(&device);
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
     let model_path = args.checkpoint.join("model");
 
-    let model = model
-        .load_file(&model_path, &recorder, &device)
-        .with_context(|| format!("Failed to load model from {}", model_path.display()))?;
-    println!("  ✓ Loaded model checkpoint from {}", model_path.display());
+    let is_cnn = model_type.eq_ignore_ascii_case("cnn") || model_type.eq_ignore_ascii_case("zhang_2016_colorizer");
+    if is_cnn {
+        println!("  Model Architecture: Legacy CNN (Zhang 2016)");
+        let config = ColorizerModelConfig::new()
+            .with_scales_from(INPUT_SIZE)
+            .with_channels(channels)
+            .with_num_res_blocks(num_res_blocks);
+        let model: ColorizerModel<EvalBackend> = config.init(&device);
+        let model = model.load_file(&model_path, &recorder, &device)
+            .with_context(|| format!("Failed to load model from {}", model_path.display()))?;
+        println!("  ✓ Loaded model checkpoint from {}", model_path.display());
+        evaluate_model(&model, &args, &device)?;
+    } else {
+        println!(
+            "  Model Architecture: Non-Autoregressive ViT (d_model={}, heads={}, layers={})",
+            d_model, n_heads, num_layers
+        );
+        let config = TransformerColorizerConfig::new()
+            .with_d_model(d_model)
+            .with_n_heads(n_heads)
+            .with_num_layers(num_layers);
+        let model: TransformerColorizerModel<EvalBackend> = config.init(&device);
+        let model = model.load_file(&model_path, &recorder, &device)
+            .with_context(|| format!("Failed to load model from {}", model_path.display()))?;
+        println!("  ✓ Loaded model checkpoint from {}", model_path.display());
+        evaluate_model(&model, &args, &device)?;
+    }
 
+    Ok(())
+}
+
+fn evaluate_model(
+    model: &impl Colorizer<EvalBackend>,
+    args: &Args,
+    device: &<EvalBackend as Backend>::Device,
+) -> Result<()> {
     // Case A: Colorize single input image
     if let Some(ref in_path) = args.input {
         println!("\nColorizing input image: {}", in_path.display());
@@ -119,7 +182,7 @@ fn main() -> Result<()> {
 
         let in_tensor = Tensor::from_floats(
             TensorData::new(flat_in, [1, 1, INPUT_SIZE, INPUT_SIZE]),
-            &device,
+            device,
         );
 
         let t0 = Instant::now();
@@ -187,7 +250,7 @@ fn main() -> Result<()> {
             }).collect();
             let in_tensor = Tensor::from_floats(
                 TensorData::new(flat_in, [1, 1, INPUT_SIZE, INPUT_SIZE]),
-                &device,
+                device,
             );
             let (pred_a, pred_b) = model.predict_ab_annealed(in_tensor, args.temperature, args.chroma_boost);
             let pred_img = colorize_fused_rgb(l_slice, &pred_a, &pred_b, INPUT_SIZE);

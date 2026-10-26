@@ -9,7 +9,7 @@
 use anyhow::{Context, Result, ensure};
 use burn::{
     backend::Autodiff,
-    module::Module,
+    module::AutodiffModule,
     optim::{AdamWConfig, GradientsParams, Optimizer},
     prelude::*,
     record::{BinFileRecorder, FullPrecisionSettings},
@@ -34,7 +34,8 @@ use ratatui::{
 use yumon_pet::vision::{
     chart::{render_colorizer_chart, ColorizerTrainingState},
     colorizer::{
-        ColorizerModel, ColorizerModelConfig, COLOR_BINS_AB, NUM_COLOR_BINS,
+        Colorizer, ColorizerModel, ColorizerModelConfig, TransformerColorizerModel,
+        TransformerColorizerConfig, COLOR_BINS_AB, NUM_COLOR_BINS,
         DEFAULT_TEMPERATURE, DEFAULT_CHROMA_BOOST, rebalanced_cross_entropy,
     },
 };
@@ -104,6 +105,22 @@ struct Args {
     /// Disable interactive Ratatui TUI dashboard.
     #[arg(long, default_value_t = false)]
     no_tui: bool,
+
+    /// Model architecture type: "transformer" (default, non-autoregressive ViT) or "cnn" (legacy Zhang 2016).
+    #[arg(long, default_value = "transformer")]
+    model_type: String,
+
+    /// Transformer feature dimension d_model.
+    #[arg(long, default_value_t = 256)]
+    d_model: usize,
+
+    /// Transformer attention heads.
+    #[arg(long, default_value_t = 8)]
+    n_heads: usize,
+
+    /// Transformer layers.
+    #[arg(long, default_value_t = 6)]
+    num_layers: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -132,7 +149,20 @@ struct ColorizerConfigFile {
     chroma_boost: f32,
     #[serde(default)]
     no_tui: bool,
+    #[serde(default = "default_model_type")]
+    model_type: String,
+    #[serde(default = "default_d_model")]
+    d_model: usize,
+    #[serde(default = "default_n_heads")]
+    n_heads: usize,
+    #[serde(default = "default_num_layers")]
+    num_layers: usize,
 }
+
+fn default_model_type() -> String { "transformer".into() }
+fn default_d_model() -> usize { 256 }
+fn default_n_heads() -> usize { 8 }
+fn default_num_layers() -> usize { 6 }
 
 fn default_cache() -> String { "training-cache/colorizer_256.bin".into() }
 fn default_out_dir() -> String { "checkpoints/yumon-colorizer-256".into() }
@@ -150,6 +180,7 @@ fn default_chroma_boost() -> f32 { DEFAULT_CHROMA_BOOST }
 struct ColorizerMetadata {
     epoch: usize,
     epochs: usize,
+    model_type: String,
     train_loss: f32,
     val_loss: f32,
     train_acc: f32,
@@ -157,6 +188,9 @@ struct ColorizerMetadata {
     val_acc: f32,
     val_top5: f32,
     channels: usize,
+    d_model: usize,
+    n_heads: usize,
+    num_layers: usize,
     temperature: f32,
     chroma_boost: f32,
     timestamp: String,
@@ -300,7 +334,7 @@ impl InMemDataset {
 fn save_colorizer_preview_grid(
     dataset: &InMemDataset,
     indices: &[usize],
-    model: &ColorizerModel<TrainBackend>,
+    model: &impl Colorizer<TrainBackend>,
     device: &<TrainBackend as Backend>::Device,
     temperature: f32,
     chroma_boost: f32,
@@ -409,6 +443,10 @@ fn main() -> Result<()> {
         args.temperature = cfg.temperature;
         args.chroma_boost = cfg.chroma_boost;
         args.no_tui = cfg.no_tui;
+        args.model_type = cfg.model_type;
+        args.d_model = cfg.d_model;
+        args.n_heads = cfg.n_heads;
+        args.num_layers = cfg.num_layers;
     }
 
     let device: <TrainBackend as Backend>::Device = Default::default();
@@ -452,14 +490,46 @@ fn main() -> Result<()> {
         &device,
     );
 
-    // 3. Initialize Model and Optimizer
-    let config = ColorizerModelConfig::new()
-        .with_scales_from(INPUT_SIZE)
-        .with_channels(args.channels)
-        .with_num_res_blocks(args.num_res_blocks);
+    // 3. Initialize Model and Run Training
+    let is_cnn = args.model_type.eq_ignore_ascii_case("cnn")
+        || args.model_type.eq_ignore_ascii_case("zhang_2016_colorizer");
 
-    let mut model: ColorizerModel<TrainBackend> = config.init(&device);
+    if is_cnn {
+        println!("  Model Type      : Legacy CNN (Zhang 2016)");
+        let config = ColorizerModelConfig::new()
+            .with_scales_from(INPUT_SIZE)
+            .with_channels(args.channels)
+            .with_num_res_blocks(args.num_res_blocks);
+        let model: ColorizerModel<TrainBackend> = config.init(&device);
+        run_training_loop(model, &args, dataset, weights_tensor, train_indices, val_indices, device)?;
+    } else {
+        println!(
+            "  Model Type      : Non-Autoregressive ViT (d_model={}, heads={}, layers={})",
+            args.d_model, args.n_heads, args.num_layers
+        );
+        let config = TransformerColorizerConfig::new()
+            .with_d_model(args.d_model)
+            .with_n_heads(args.n_heads)
+            .with_num_layers(args.num_layers);
+        let model: TransformerColorizerModel<TrainBackend> = config.init(&device);
+        run_training_loop(model, &args, dataset, weights_tensor, train_indices, val_indices, device)?;
+    }
 
+    Ok(())
+}
+
+fn run_training_loop<M>(
+    mut model: M,
+    args: &Args,
+    dataset: InMemDataset,
+    weights_tensor: Tensor<TrainBackend, 1>,
+    train_indices: Vec<usize>,
+    val_indices: Vec<usize>,
+    device: <TrainBackend as Backend>::Device,
+) -> Result<()>
+where
+    M: AutodiffModule<TrainBackend> + Colorizer<TrainBackend> + Clone,
+{
     let mut optimizer = AdamWConfig::new()
         .with_epsilon(1e-8)
         .with_weight_decay(1e-4)
@@ -468,6 +538,7 @@ fn main() -> Result<()> {
     let num_batches = train_indices.len() / args.batch_size;
     let t_train_start = Instant::now();
 
+    let mut rng = thread_rng();
     let mut tui_state = ColorizerTrainingState::new(args.epochs, num_batches);
 
     let mut terminal = if !args.no_tui && stdout().is_terminal() {
@@ -781,6 +852,7 @@ fn main() -> Result<()> {
         let meta = ColorizerMetadata {
             epoch,
             epochs: args.epochs,
+            model_type: args.model_type.clone(),
             train_loss: last_loss_val,
             val_loss: avg_val_loss,
             train_acc: last_top1_val,
@@ -788,6 +860,9 @@ fn main() -> Result<()> {
             val_acc: avg_val_top1,
             val_top5: avg_val_top5,
             channels: args.channels,
+            d_model: args.d_model,
+            n_heads: args.n_heads,
+            num_layers: args.num_layers,
             temperature: args.temperature,
             chroma_boost: args.chroma_boost,
             timestamp: chrono::Local::now().to_rfc3339(),

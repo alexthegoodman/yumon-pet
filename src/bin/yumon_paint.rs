@@ -382,7 +382,7 @@ fn main() -> Result<()> {
             let config = ColorizerModelConfig::new()
                 .with_scales_from(256)
                 .with_channels(channels)
-                .with_num_res_blocks(5);
+                .with_num_res_blocks(3);
             let model: ColorizerModel<BackendType> = config.init(&device);
             let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
             match model.load_file(&model_path, &recorder, &device) {

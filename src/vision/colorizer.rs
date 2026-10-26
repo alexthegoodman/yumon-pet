@@ -11,15 +11,16 @@
 //! - Temperature-annealed softmax ($T = 0.38$) at inference for rich, smooth color fields.
 
 use burn::{
-    module::{Ignored, Module},
+    module::{Ignored, Module, Param},
     nn::{
-        conv::{Conv2d, Conv2dConfig},
+        conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig},
+        Initializer, Linear, LinearConfig,
         PaddingConfig2d,
     },
     prelude::*,
     tensor::{
         activation::{log_softmax, relu, softmax},
-        Tensor,
+        Tensor, TensorData,
     },
 };
 
@@ -977,37 +978,459 @@ impl<B: Backend> ColorizerModel<B> {
         temperature: f32,
         chroma_boost: f32,
     ) -> (Vec<f32>, Vec<f32>) {
-        let logits = self.forward(x);
-        let [b, q, h, w] = logits.dims();
-        assert_eq!(b, 1, "Inference annealed prediction currently supports single image");
-        assert_eq!(q, NUM_COLOR_BINS);
+        logits_to_ab_annealed(self.forward(x), temperature, chroma_boost)
+    }
+}
 
-        // Softmax with temperature scaling: Z / T
-        let scaled_logits = logits / temperature;
-        let probs = softmax(scaled_logits, 1);
-        let prob_data: Vec<f32> = probs.into_data().convert::<f32>().to_vec().unwrap();
+/// Convert raw 313-bin output logits [1, 313, 64, 64] to continuous (a, b) planes
+/// using temperature-annealed expectation.
+pub fn logits_to_ab_annealed<B: Backend>(
+    logits: Tensor<B, 4>,
+    temperature: f32,
+    chroma_boost: f32,
+) -> (Vec<f32>, Vec<f32>) {
+    let [b, q, h, w] = logits.dims();
+    assert_eq!(b, 1, "Inference annealed prediction currently supports single image");
+    assert_eq!(q, NUM_COLOR_BINS);
 
-        let spatial_pixels = h * w;
-        let mut out_a = vec![0.0f32; spatial_pixels];
-        let mut out_b = vec![0.0f32; spatial_pixels];
+    // Softmax with temperature scaling: Z / T
+    let scaled_logits = logits / temperature;
+    let probs = softmax(scaled_logits, 1);
+    let prob_data: Vec<f32> = probs.into_data().convert::<f32>().to_vec().unwrap();
 
-        let pts = &COLOR_BINS_AB;
+    let spatial_pixels = h * w;
+    let mut out_a = vec![0.0f32; spatial_pixels];
+    let mut out_b = vec![0.0f32; spatial_pixels];
 
-        for p_idx in 0..spatial_pixels {
-            let mut sum_a = 0.0f32;
-            let mut sum_b = 0.0f32;
+    let pts = &COLOR_BINS_AB;
 
-            for bin in 0..NUM_COLOR_BINS {
-                let prob = prob_data[bin * spatial_pixels + p_idx];
-                sum_a += prob * pts[bin][0];
-                sum_b += prob * pts[bin][1];
-            }
+    for p_idx in 0..spatial_pixels {
+        let mut sum_a = 0.0f32;
+        let mut sum_b = 0.0f32;
 
-            out_a[p_idx] = (sum_a * chroma_boost).clamp(-128.0, 127.0);
-            out_b[p_idx] = (sum_b * chroma_boost).clamp(-128.0, 127.0);
+        for bin in 0..NUM_COLOR_BINS {
+            let prob = prob_data[bin * spatial_pixels + p_idx];
+            sum_a += prob * pts[bin][0];
+            sum_b += prob * pts[bin][1];
         }
 
-        (out_a, out_b)
+        out_a[p_idx] = (sum_a * chroma_boost).clamp(-128.0, 127.0);
+        out_b[p_idx] = (sum_b * chroma_boost).clamp(-128.0, 127.0);
+    }
+
+    (out_a, out_b)
+}
+
+/// Common trait implemented by both CNN and Vision Transformer colorizer architectures.
+pub trait Colorizer<B: Backend> {
+    fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4>;
+    fn predict_ab_annealed(&self, x: Tensor<B, 4>, temperature: f32, chroma_boost: f32) -> (Vec<f32>, Vec<f32>);
+}
+
+impl<B: Backend> Colorizer<B> for ColorizerModel<B> {
+    fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+        self.forward(x)
+    }
+
+    fn predict_ab_annealed(&self, x: Tensor<B, 4>, temperature: f32, chroma_boost: f32) -> (Vec<f32>, Vec<f32>) {
+        self.predict_ab_annealed(x, temperature, chroma_boost)
+    }
+}
+
+// ─── Non-Autoregressive Vision Transformer (ViT) Architecture ─────────────
+
+#[inline]
+fn silu_act<B: Backend, const D: usize>(x: Tensor<B, D>) -> Tensor<B, D> {
+    x.clone() * burn::tensor::activation::sigmoid(x)
+}
+
+/// RMSNorm for Vision Transformer tokens.
+#[derive(Config, Debug)]
+pub struct ViTRMSNormConfig {
+    pub size: usize,
+    #[config(default = 1e-6)]
+    pub eps: f64,
+}
+
+impl ViTRMSNormConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> ViTRMSNorm<B> {
+        let weight = burn::module::Param::from_tensor(Tensor::ones([self.size], device));
+        ViTRMSNorm {
+            weight,
+            eps: self.eps,
+        }
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct ViTRMSNorm<B: Backend> {
+    weight: burn::module::Param<Tensor<B, 1>>,
+    eps: f64,
+}
+
+impl<B: Backend> ViTRMSNorm<B> {
+    pub fn forward<const D: usize>(&self, x: Tensor<B, D>) -> Tensor<B, D> {
+        let rms = (x.clone().powf_scalar(2.0).mean_dim(D - 1) + self.eps).sqrt();
+        (x / rms) * self.weight.val().unsqueeze()
+    }
+}
+
+/// SwiGLU Feed-Forward Network for Vision Transformer.
+#[derive(Config, Debug)]
+pub struct ViTMLPConfig {
+    pub d_model: usize,
+    pub d_hidden: usize,
+}
+
+impl ViTMLPConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> ViTMLP<B> {
+        ViTMLP {
+            w1: LinearConfig::new(self.d_model, self.d_hidden)
+                .with_initializer(Initializer::KaimingUniform {
+                    gain: 1.0 / f64::sqrt(3.0),
+                    fan_out_only: false,
+                })
+                .with_bias(false)
+                .init(device),
+            w2: LinearConfig::new(self.d_hidden, self.d_model)
+                .with_initializer(Initializer::KaimingUniform {
+                    gain: 1.0 / f64::sqrt(3.0),
+                    fan_out_only: false,
+                })
+                .with_bias(false)
+                .init(device),
+            w3: LinearConfig::new(self.d_model, self.d_hidden)
+                .with_initializer(Initializer::KaimingUniform {
+                    gain: 1.0 / f64::sqrt(3.0),
+                    fan_out_only: false,
+                })
+                .with_bias(false)
+                .init(device),
+        }
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct ViTMLP<B: Backend> {
+    w1: Linear<B>,
+    w2: Linear<B>,
+    w3: Linear<B>,
+}
+
+impl<B: Backend> ViTMLP<B> {
+    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        let x1 = self.w1.forward(x.clone());
+        let silu_x1 = silu_act(x1);
+        let x3 = self.w3.forward(x);
+        self.w2.forward(silu_x1 * x3)
+    }
+}
+
+/// Bidirectional Multi-Head Self-Attention for Vision Patches.
+#[derive(Config, Debug)]
+pub struct ViTSelfAttentionConfig {
+    pub d_model: usize,
+    pub n_heads: usize,
+}
+
+impl ViTSelfAttentionConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> ViTSelfAttention<B> {
+        assert_eq!(self.d_model % self.n_heads, 0, "d_model must be divisible by n_heads");
+        let head_dim = self.d_model / self.n_heads;
+        ViTSelfAttention {
+            q: LinearConfig::new(self.d_model, self.d_model)
+                .with_initializer(Initializer::XavierUniform { gain: 1.0 })
+                .with_bias(false)
+                .init(device),
+            k: LinearConfig::new(self.d_model, self.d_model)
+                .with_initializer(Initializer::XavierUniform { gain: 1.0 })
+                .with_bias(false)
+                .init(device),
+            v: LinearConfig::new(self.d_model, self.d_model)
+                .with_initializer(Initializer::XavierUniform { gain: 1.0 })
+                .with_bias(false)
+                .init(device),
+            o: LinearConfig::new(self.d_model, self.d_model)
+                .with_initializer(Initializer::XavierUniform { gain: 1.0 })
+                .with_bias(false)
+                .init(device),
+            n_heads: self.n_heads,
+            head_dim,
+        }
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct ViTSelfAttention<B: Backend> {
+    q: Linear<B>,
+    k: Linear<B>,
+    v: Linear<B>,
+    o: Linear<B>,
+    n_heads: usize,
+    head_dim: usize,
+}
+
+impl<B: Backend> ViTSelfAttention<B> {
+    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        let [batch, seq, _] = x.dims();
+        let scale = 1.0 / (self.head_dim as f64).sqrt();
+
+        let reshape = |t: Tensor<B, 3>| {
+            t.reshape([batch, seq, self.n_heads, self.head_dim])
+                .swap_dims(1, 2)
+        };
+
+        let q = reshape(self.q.forward(x.clone())) * scale;
+        let k = reshape(self.k.forward(x.clone()));
+        let v = reshape(self.v.forward(x));
+
+        let qk = q.matmul(k.transpose());
+        let w = burn::tensor::activation::softmax(qk, 3);
+        let out = w.matmul(v)
+            .swap_dims(1, 2)
+            .flatten(2, 3);
+
+        self.o.forward(out)
+    }
+}
+
+/// Vision Transformer Block with Pre-RMSNorm and Residuals.
+#[derive(Config, Debug)]
+pub struct ViTBlockConfig {
+    pub d_model: usize,
+    pub n_heads: usize,
+    pub d_hidden: usize,
+}
+
+impl ViTBlockConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> ViTBlock<B> {
+        ViTBlock {
+            attn_norm: ViTRMSNormConfig::new(self.d_model).init(device),
+            attn: ViTSelfAttentionConfig::new(self.d_model, self.n_heads).init(device),
+            mlp_norm: ViTRMSNormConfig::new(self.d_model).init(device),
+            mlp: ViTMLPConfig::new(self.d_model, self.d_hidden).init(device),
+        }
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct ViTBlock<B: Backend> {
+    attn_norm: ViTRMSNorm<B>,
+    attn: ViTSelfAttention<B>,
+    mlp_norm: ViTRMSNorm<B>,
+    mlp: ViTMLP<B>,
+}
+
+impl<B: Backend> ViTBlock<B> {
+    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        let norm_x = self.attn_norm.forward(x.clone());
+        let x = x + self.attn.forward(norm_x);
+
+        let norm_x = self.mlp_norm.forward(x.clone());
+        x + self.mlp.forward(norm_x)
+    }
+}
+
+/// Precomputed 2D Sine-Cosine Positional Embedding for a HxW grid.
+pub fn get_2d_sincos_pos_embed(grid_size: usize, d_model: usize) -> Vec<f32> {
+    assert_eq!(d_model % 2, 0, "d_model must be even for 2D sincos pos embed");
+    let d_feat = d_model / 2;
+    let num_tokens = grid_size * grid_size;
+    let mut embed = vec![0.0f32; num_tokens * d_model];
+
+    for y in 0..grid_size {
+        for x in 0..grid_size {
+            let token_idx = y * grid_size + x;
+            let offset = token_idx * d_model;
+
+            // 1D sincos for y
+            for i in 0..(d_feat / 2) {
+                let omega = 1.0 / (10000.0f64.powf((2 * i) as f64 / d_feat as f64) as f32);
+                let val_sin = (y as f32 * omega).sin();
+                let val_cos = (y as f32 * omega).cos();
+                embed[offset + 2 * i] = val_sin;
+                embed[offset + 2 * i + 1] = val_cos;
+            }
+
+            // 1D sincos for x
+            for i in 0..(d_feat / 2) {
+                let omega = 1.0 / (10000.0f64.powf((2 * i) as f64 / d_feat as f64) as f32);
+                let val_sin = (x as f32 * omega).sin();
+                let val_cos = (x as f32 * omega).cos();
+                embed[offset + d_feat + 2 * i] = val_sin;
+                embed[offset + d_feat + 2 * i + 1] = val_cos;
+            }
+        }
+    }
+    embed
+}
+
+/// Configuration for the Non-Autoregressive Vision Transformer (ViT) Colorizer.
+#[derive(Config, Debug)]
+pub struct TransformerColorizerConfig {
+    #[config(default = 256)]
+    pub d_model: usize,
+
+    #[config(default = 8)]
+    pub n_heads: usize,
+
+    #[config(default = 6)]
+    pub num_layers: usize,
+
+    #[config(default = 680)]
+    pub d_hidden: usize,
+
+    #[config(default = 64)]
+    pub stem_c1: usize,
+
+    #[config(default = 128)]
+    pub stem_c2: usize,
+}
+
+impl TransformerColorizerConfig {
+    pub fn init<B: Backend>(&self, device: &B::Device) -> TransformerColorizerModel<B> {
+        let c1 = self.stem_c1;
+        let c2 = self.stem_c2;
+        let d = self.d_model;
+
+        // Stage 1: 256x256 (1 ch) -> 128x128 (c1 ch)
+        let stem_conv1 = Conv2dConfig::new([1, c1], [4, 4])
+            .with_stride([2, 2])
+            .with_padding(PaddingConfig2d::Explicit(1, 1))
+            .init(device);
+
+        // Stage 2: 128x128 (c1 ch) -> 64x64 (c2 ch) -- provides high-resolution edge skip connection
+        let stem_conv2 = Conv2dConfig::new([c1, c2], [4, 4])
+            .with_stride([2, 2])
+            .with_padding(PaddingConfig2d::Explicit(1, 1))
+            .init(device);
+
+        // Stage 3: 64x64 (c2 ch) -> 32x32 (d_model ch)
+        let stem_conv3 = Conv2dConfig::new([c2, d], [4, 4])
+            .with_stride([2, 2])
+            .with_padding(PaddingConfig2d::Explicit(1, 1))
+            .init(device);
+
+        // 2D Positional Embeddings for 32x32 grid (1024 tokens)
+        let pos_vec = get_2d_sincos_pos_embed(32, d);
+        let pos_tensor = Tensor::from_floats(
+            TensorData::new(pos_vec, [1, 1024, d]),
+            device,
+        );
+        let pos_embed = Param::from_tensor(pos_tensor);
+
+        // Transformer blocks
+        let block_cfg = ViTBlockConfig::new(d, self.n_heads, self.d_hidden);
+        let blocks = (0..self.num_layers)
+            .map(|_| block_cfg.init(device))
+            .collect();
+
+        // Decoder: Upsample 32x32 (d_model) -> 64x64 (c2)
+        let up_conv = ConvTranspose2dConfig::new([d, c2], [4, 4])
+            .with_stride([2, 2])
+            .with_padding([1, 1])
+            .init(device);
+
+        // Refinement after high-res skip fusion: 64x64 (c2 -> c2)
+        let refine_conv = Conv2dConfig::new([c2, c2], [3, 3])
+            .with_padding(PaddingConfig2d::Same)
+            .init(device);
+
+        // Final output projection: 64x64 (c2 -> 313)
+        let out_conv = Conv2dConfig::new([c2, NUM_COLOR_BINS], [1, 1])
+            .init(device);
+
+        TransformerColorizerModel {
+            stem_conv1,
+            stem_conv2,
+            stem_conv3,
+            pos_embed,
+            blocks,
+            up_conv,
+            refine_conv,
+            out_conv,
+            config: Ignored(self.clone()),
+        }
+    }
+}
+
+/// The Non-Autoregressive Vision Transformer (ViT) Colorizer Model.
+///
+/// Combines a multi-scale convolutional stem with bidirectional self-attention
+/// across 1,024 spatial patches to provide complete, global semantic understanding,
+/// and fuses early high-resolution features to preserve razor-sharp luminance edges.
+#[derive(Module, Debug)]
+pub struct TransformerColorizerModel<B: Backend> {
+    stem_conv1: Conv2d<B>,
+    stem_conv2: Conv2d<B>,
+    stem_conv3: Conv2d<B>,
+    pos_embed: Param<Tensor<B, 3>>,
+    blocks: Vec<ViTBlock<B>>,
+    up_conv: ConvTranspose2d<B>,
+    refine_conv: Conv2d<B>,
+    out_conv: Conv2d<B>,
+    pub config: Ignored<TransformerColorizerConfig>,
+}
+
+impl<B: Backend> TransformerColorizerModel<B> {
+    pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+        let [b, _, _, _] = x.dims();
+
+        // 1. Multi-scale early conv stem
+        let h1 = silu_act(self.stem_conv1.forward(x));
+        let f64 = silu_act(self.stem_conv2.forward(h1));
+        let h3 = silu_act(self.stem_conv3.forward(f64.clone()));
+
+        // 2. Token sequence: [B, d, 32, 32] -> [B, 1024, d]
+        let [_, d, h, w] = h3.dims();
+        let seq_len = h * w;
+        let mut tokens = h3
+            .swap_dims(1, 2)
+            .swap_dims(2, 3)
+            .reshape([b, seq_len, d]);
+
+        // Add 2D Positional Embeddings
+        tokens = tokens + self.pos_embed.val();
+
+        // 3. Global bidirectional self-attention transformer blocks
+        for block in &self.blocks {
+            tokens = block.forward(tokens);
+        }
+
+        // 4. Reshape tokens back to spatial grid: [B, 1024, d] -> [B, d, 32, 32]
+        let tokens_2d = tokens
+            .reshape([b, h, w, d])
+            .swap_dims(2, 3)
+            .swap_dims(1, 2);
+
+        // 5. Decoder: Transposed conv upsampling to 64x64
+        let up = silu_act(self.up_conv.forward(tokens_2d));
+
+        // 6. High-resolution edge skip fusion: blend semantic tokens with crisp grayscale edges
+        let fused = up + f64;
+
+        // 7. Refinement & output projection
+        let refined = silu_act(self.refine_conv.forward(fused));
+        self.out_conv.forward(refined)
+    }
+
+    pub fn predict_ab_annealed(
+        &self,
+        x: Tensor<B, 4>,
+        temperature: f32,
+        chroma_boost: f32,
+    ) -> (Vec<f32>, Vec<f32>) {
+        logits_to_ab_annealed(self.forward(x), temperature, chroma_boost)
+    }
+}
+
+impl<B: Backend> Colorizer<B> for TransformerColorizerModel<B> {
+    fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+        self.forward(x)
+    }
+
+    fn predict_ab_annealed(&self, x: Tensor<B, 4>, temperature: f32, chroma_boost: f32) -> (Vec<f32>, Vec<f32>) {
+        self.predict_ab_annealed(x, temperature, chroma_boost)
     }
 }
 
@@ -1294,5 +1717,22 @@ mod tests {
         let gt_mean_b = gt_b.iter().map(|v| v.abs()).sum::<f32>() / gt_b.len() as f32;
 
         println!("Ground Truth -> max |a|: {gt_max_a:.2}, max |b|: {gt_max_b:.2}, mean |a|: {gt_mean_a:.2}, mean |b|: {gt_mean_b:.2}");
+    }
+
+    #[test]
+    fn test_transformer_colorizer_forward() {
+        let device = Default::default();
+        let config = TransformerColorizerConfig::new()
+            .with_d_model(128)
+            .with_n_heads(4)
+            .with_num_layers(2)
+            .with_d_hidden(256)
+            .with_stem_c1(32)
+            .with_stem_c2(64);
+
+        let model: TransformerColorizerModel<B> = config.init(&device);
+        let in_tensor = Tensor::<B, 4>::zeros([1, 1, 256, 256], &device);
+        let logits = model.forward(in_tensor);
+        assert_eq!(logits.dims(), [1, NUM_COLOR_BINS, 64, 64]);
     }
 }
