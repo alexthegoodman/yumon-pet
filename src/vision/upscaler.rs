@@ -1,24 +1,21 @@
-//! 2D Convolutional Neural Upscaler for Pass 4: 64x64/32x32 -> 256x256.
+//! 2D Convolutional Neural Upscaler: 64x64/32x32 -> 256x256 (Grayscale to Grayscale).
 //!
-//! Supports:
-//! - Multi-scale inputs (`scales_from`: 64 or 32, default 64).
-//! - Joint colorization & super-resolution (`colorizes`: bool, default true: 1-channel grayscale -> 3-channel RGB).
-//! - Cross-attention text conditioning (`use_text_conditioning`: bool, default true)
-//!   allowing BPE prompt embeddings to steer high-frequency texture and color synthesis.
-//! - Progressive transposed convolution pyramid with residual refinement.
-//! - Optimized for high-throughput GPU training on WGPU/CubeCL with Huber and LSGAN losses.
+//! Takes a 1-channel grayscale input at 64x64 (or 32x32) and produces a crisp
+//! 1-channel grayscale super-resolved output at 256x256.
+//!
+//! Lightweight, ultra-fast convolutional residual architecture optimized for
+//! high-frequency edge and texture synthesis on WGPU/CubeCL with Huber and LSGAN losses.
 
 use burn::{
     module::{Ignored, Module},
     nn::{
         conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig},
-        Embedding, EmbeddingConfig, Linear, LinearConfig,
         PaddingConfig2d,
     },
     prelude::*,
     tensor::{
-        activation::{leaky_relu, relu, softmax, tanh},
-        Int, Tensor,
+        activation::{leaky_relu, relu, tanh},
+        Tensor,
     },
 };
 
@@ -47,94 +44,11 @@ impl<B: Backend> ResBlock<B> {
     }
 }
 
-/// Multi-Head Cross-Attention module.
-/// Projects visual spatial tokens (queries) and text conditioning tokens (keys/values),
-/// computing scaled dot-product cross attention.
-#[derive(Config, Debug)]
-pub struct CrossAttentionConfig {
-    pub visual_dim: usize,
-    pub text_dim: usize,
-    #[config(default = 4)]
-    pub n_heads: usize,
-}
-
-impl CrossAttentionConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> CrossAttention<B> {
-        let n_heads = self.n_heads.min(self.visual_dim).max(1);
-        let n_heads = if self.visual_dim % n_heads == 0 {
-            n_heads
-        } else {
-            1
-        };
-        let head_dim = self.visual_dim / n_heads;
-
-        CrossAttention {
-            q: LinearConfig::new(self.visual_dim, self.visual_dim).with_bias(false).init(device),
-            k: LinearConfig::new(self.text_dim, self.visual_dim).with_bias(false).init(device),
-            v: LinearConfig::new(self.text_dim, self.visual_dim).with_bias(false).init(device),
-            o: LinearConfig::new(self.visual_dim, self.visual_dim).with_bias(false).init(device),
-            n_heads,
-            head_dim,
-        }
-    }
-}
-
-#[derive(Module, Debug)]
-pub struct CrossAttention<B: Backend> {
-    q: Linear<B>,
-    k: Linear<B>,
-    v: Linear<B>,
-    o: Linear<B>,
-    n_heads: usize,
-    head_dim: usize,
-}
-
-impl<B: Backend> CrossAttention<B> {
-    /// visual: `[batch, num_visual_tokens, visual_dim]`
-    /// text:   `[batch, num_text_tokens, text_dim]`
-    pub fn forward(&self, visual: Tensor<B, 3>, text: Tensor<B, 3>) -> Tensor<B, 3> {
-        let [batch, num_v, _] = visual.dims();
-        let [_, num_t, _] = text.dims();
-
-        let q = self
-            .q
-            .forward(visual)
-            .reshape([batch, num_v, self.n_heads, self.head_dim])
-            .swap_dims(1, 2); // [batch, heads, num_v, head_dim]
-
-        let k = self
-            .k
-            .forward(text.clone())
-            .reshape([batch, num_t, self.n_heads, self.head_dim])
-            .swap_dims(1, 2); // [batch, heads, num_t, head_dim]
-
-        let v = self
-            .v
-            .forward(text)
-            .reshape([batch, num_t, self.n_heads, self.head_dim])
-            .swap_dims(1, 2); // [batch, heads, num_t, head_dim]
-
-        let scale = (self.head_dim as f64).powf(-0.5);
-        let qk = q.matmul(k.swap_dims(2, 3)) * scale; // [batch, heads, num_v, num_t]
-
-        let weights = softmax(qk, 3);
-        let out = weights
-            .matmul(v) // [batch, heads, num_v, head_dim]
-            .swap_dims(1, 2) // [batch, num_v, heads, head_dim]
-            .reshape([batch, num_v, self.n_heads * self.head_dim]); // [batch, num_v, visual_dim]
-
-        self.o.forward(out)
-    }
-}
-
-/// Configuration for the Pass 4 Upscaler model.
+/// Configuration for the Pass 4/5 Upscaler model.
 #[derive(Config, Debug)]
 pub struct UpscalerModelConfig {
     #[config(default = 64)]
     pub scales_from: usize,
-
-    #[config(default = true)]
-    pub colorizes: bool,
 
     #[config(default = 32)]
     pub channels: usize,
@@ -144,24 +58,15 @@ pub struct UpscalerModelConfig {
 
     #[config(default = 0)]
     pub num_refine_blocks_per_layer: usize,
-
-    #[config(default = true)]
-    pub use_text_conditioning: bool,
-
-    #[config(default = 16384)]
-    pub vocab_size: usize,
-
-    #[config(default = 64)]
-    pub text_dim: usize,
 }
 
 impl UpscalerModelConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> UpscalerModel<B> {
         let c = self.channels;
         let c_half = (c / 2).max(16);
-        let in_channels = if self.colorizes { 1 } else { 3 };
 
-        let stem = Conv2dConfig::new([in_channels, c], [3, 3])
+        // 1-channel grayscale input
+        let stem = Conv2dConfig::new([1, c], [3, 3])
             .with_padding(PaddingConfig2d::Same)
             .init(device);
 
@@ -170,16 +75,6 @@ impl UpscalerModelConfig {
             c,
             device,
         );
-
-        let (text_embedding, cross_attn) = if self.use_text_conditioning {
-            let emb = EmbeddingConfig::new(self.vocab_size, self.text_dim).init(device);
-            let attn = CrossAttentionConfig::new(c, self.text_dim)
-                .with_n_heads(4)
-                .init(device);
-            (Some(emb), Some(attn))
-        } else {
-            (None, None)
-        };
 
         // If scales_from <= 32, we add an initial 2x upsampling stage (32 -> 64)
         let (up0, refine_blocks0) = if self.scales_from <= 32 {
@@ -207,16 +102,14 @@ impl UpscalerModelConfig {
             .init(device);
         let refine_blocks2 = make_res_blocks(self.num_refine_blocks_per_layer, c_half, device);
 
-        // Final output convolution to 3-channel RGB (always 3 channels)
-        let out_conv = Conv2dConfig::new([c_half, 3], [3, 3])
+        // Final output convolution to 1-channel grayscale
+        let out_conv = Conv2dConfig::new([c_half, 1], [3, 3])
             .with_padding(PaddingConfig2d::Same)
             .init(device);
 
         UpscalerModel {
             stem,
             res_blocks,
-            text_embedding,
-            cross_attn,
             up0,
             refine_blocks0,
             up1,
@@ -239,14 +132,11 @@ fn make_res_blocks<B: Backend>(
         .collect()
 }
 
-/// The Pass 4 Generative Upscaler (64x64/32x32 -> 256x256 RGB).
+/// The Generative Upscaler (64x64/32x32 -> 256x256 Grayscale).
 #[derive(Module, Debug)]
 pub struct UpscalerModel<B: Backend> {
     stem: Conv2d<B>,
     res_blocks: Vec<ResBlock<B>>,
-
-    text_embedding: Option<Embedding<B>>,
-    cross_attn: Option<CrossAttention<B>>,
 
     up0: Option<ConvTranspose2d<B>>,
     refine_blocks0: Vec<ResBlock<B>>,
@@ -263,48 +153,14 @@ pub struct UpscalerModel<B: Backend> {
 }
 
 impl<B: Backend> UpscalerModel<B> {
-    /// Unconditional forward pass (delegates to `forward_with_text` with `None`).
+    /// Forward pass:
+    /// Input:  `[batch, 1, H, W]` (Grayscale values in [-1.0, 1.0])
+    /// Output: `[batch, 1, 256, 256]` (Super-resolved Grayscale values in [-1.0, 1.0])
     pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
-        self.forward_with_text(x, None)
-    }
-
-    /// Forward pass with optional text token conditioning:
-    /// Input:  `[batch, in_channels, H, W]` (values in [-1.0, 1.0])
-    /// Text:   Optional `[batch, seq_len]` Int token IDs
-    /// Output: `[batch, 3, 256, 256]` (Super-resolved and colorized RGB values in [-1.0, 1.0])
-    pub fn forward_with_text(
-        &self,
-        x: Tensor<B, 4>,
-        text_tokens: Option<Tensor<B, 2, Int>>,
-    ) -> Tensor<B, 4> {
-        let [batch, _c, h, w] = x.dims();
         let mut f = relu(self.stem.forward(x));
 
         for block in &self.res_blocks {
             f = block.forward(f);
-        }
-
-        // Cross-attention text conditioning at bottleneck
-        if let (Some(embed), Some(attn)) = (&self.text_embedding, &self.cross_attn) {
-            let text_emb = match text_tokens {
-                Some(tokens) => embed.forward(tokens),
-                None => {
-                    // Default unconditional token: single PAD token (id 0) per sample
-                    let pad = Tensor::zeros([batch, 1], &f.device());
-                    embed.forward(pad)
-                }
-            };
-
-            // Flatten spatial dimensions [B, C, H, W] -> [B, H*W, C]
-            let num_spatial = h * w;
-            let c = f.dims()[1];
-            let visual_tokens = f.clone().reshape([batch, c, num_spatial]).swap_dims(1, 2);
-
-            let attn_out = attn.forward(visual_tokens, text_emb);
-
-            // Reshape back [B, H*W, C] -> [B, C, H, W] and residual add with 0.2 scale
-            let f_attn = attn_out.swap_dims(1, 2).reshape([batch, c, h, w]);
-            f = f + f_attn * 0.2;
         }
 
         // Optional 32 -> 64 upsampling
@@ -331,7 +187,7 @@ impl<B: Backend> UpscalerModel<B> {
     }
 }
 
-/// Configuration for the PatchGAN Discriminator for 256x256 images.
+/// Configuration for the PatchGAN Discriminator for 256x256 grayscale images.
 #[derive(Config, Debug)]
 pub struct UpscalerDiscriminatorConfig {
     #[config(default = 32)]
@@ -341,7 +197,8 @@ pub struct UpscalerDiscriminatorConfig {
 impl UpscalerDiscriminatorConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> UpscalerDiscriminator<B> {
         let c = self.base_channels;
-        let conv1 = Conv2dConfig::new([3, c], [4, 4])
+        // 1-channel grayscale input
+        let conv1 = Conv2dConfig::new([1, c], [4, 4])
             .with_stride([2, 2])
             .with_padding(PaddingConfig2d::Explicit(1, 1))
             .init(device);
@@ -371,7 +228,7 @@ impl UpscalerDiscriminatorConfig {
     }
 }
 
-/// PatchGAN Discriminator for 256x256 images.
+/// PatchGAN Discriminator for 256x256 grayscale images.
 /// Evaluates overlapping local patches and outputs a spatial grid of logits [batch, 1, 16, 16].
 #[derive(Module, Debug)]
 pub struct UpscalerDiscriminator<B: Backend> {
