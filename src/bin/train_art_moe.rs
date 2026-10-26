@@ -17,9 +17,13 @@ use {
     indicatif::{ProgressBar, ProgressStyle},
     rand::{seq::SliceRandom, thread_rng},
     serde::{Deserialize, Serialize},
+    ratatui::{
+        backend::CrosstermBackend,
+        Terminal, TerminalOptions, Viewport,
+    },
     std::{
         fs::File,
-        io::{BufReader, Read},
+        io::{stdout, BufReader, IsTerminal, Read},
         path::{Path, PathBuf},
         time::Instant,
     },
@@ -28,10 +32,13 @@ use {
         samples::TrainingStage,
         tokenizer::PAD_TOKEN,
     },
-    yumon_pet::vision::paint_action::{
-        CANVAS_CHANNELS, CANVAS_SIZE, COLOR_START_ID, DONE_ID, PALETTE_SIZE,
-        PASS_1_ID, PASS_2_ID, PASS_3_ID, PASS_4_ID,
-        pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
+    yumon_pet::vision::{
+        chart::{render_art_chart, ArtTrainingState},
+        paint_action::{
+            CANVAS_CHANNELS, CANVAS_SIZE, COLOR_START_ID, DONE_ID, PALETTE_SIZE,
+            PASS_1_ID, PASS_2_ID, PASS_3_ID, PASS_4_ID,
+            pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
+        },
     },
 };
 
@@ -110,6 +117,10 @@ struct Args {
     /// Override target pass (1, 2, 3, or 4).
     #[arg(long)]
     pass: Option<usize>,
+
+    /// Disable interactive Ratatui TUI dashboard.
+    #[arg(long, default_value_t = false)]
+    no_tui: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -440,6 +451,32 @@ fn main() -> Result<()> {
     let num_batches = (train_samples.len() + batch_size - 1) / batch_size;
     println!("\nStarting training ({} batches/epoch)...", num_batches);
 
+    let title = if let Some(p) = target_pass {
+        format!("Yumon Art MoE (Pass {})", p)
+    } else {
+        "Yumon Art MoE (All Passes)".to_string()
+    };
+    let mut tui_state = ArtTrainingState::new(epochs, num_batches, title);
+
+    let mut terminal = if !args.no_tui && stdout().is_terminal() {
+        let backend = CrosstermBackend::new(stdout());
+        match Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(24),
+            },
+        ) {
+            Ok(term) => Some(term),
+            Err(e) => {
+                eprintln!("Warning: Failed to initialize inline TUI terminal: {e}. Falling back to standard output.");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut global_step = 0usize;
     let mut best_val_loss = f32::INFINITY;
 
     for epoch in 1..=epochs {
@@ -447,15 +484,20 @@ fn main() -> Result<()> {
         let mut total_loss = 0.0f32;
         let mut total_steps = 0usize;
 
-        let pb = ProgressBar::new(num_batches as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [Epoch {pos_label}] [{bar:30.cyan/blue}] {pos}/{len} loss: {msg} ({elapsed})")
-                .unwrap(),
-        );
-        pb.set_message("starting...");
+        let pb = if terminal.is_none() {
+            let p = ProgressBar::new(num_batches as u64);
+            p.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Epoch {pos_label}] [{bar:30.cyan/blue}] {pos}/{len} loss: {msg} ({elapsed})")
+                    .unwrap(),
+            );
+            p.set_message("starting...");
+            Some(p)
+        } else {
+            None
+        };
 
-        for (_batch_idx, chunk) in train_samples.chunks(batch_size).enumerate() {
+        for (batch_idx, chunk) in train_samples.chunks(batch_size).enumerate() {
             let bs = chunk.len();
             if bs == 0 {
                 continue;
@@ -517,17 +559,32 @@ fn main() -> Result<()> {
             let loss_val: f32 = loss.clone().into_data().convert::<f32>().to_vec().unwrap()[0];
             total_loss += loss_val;
             total_steps += 1;
-
-            pb.set_message(format!("{:.4}", loss_val));
-            pb.inc(1);
+            global_step += 1;
 
             // Backward pass & optimizer step
             let grads = GradientsParams::from_grads(loss.backward(), &model);
             let lr = cfg.first_lr + (cfg.last_lr - cfg.first_lr) * (epoch as f64 / epochs as f64);
             model = optimizer.step(lr, model, grads);
+
+            tui_state.epoch = epoch;
+            tui_state.batch = batch_idx + 1;
+            tui_state.global_step = global_step;
+            tui_state.current_lr = lr;
+            tui_state.current_loss = loss_val;
+            tui_state.loss_history.push((global_step as f64, loss_val as f64));
+            tui_state.lr_history.push((global_step as f64, lr));
+
+            if let Some(term) = terminal.as_mut() {
+                let _ = term.draw(|f| render_art_chart(f, &tui_state));
+            } else if let Some(ref p) = pb {
+                p.set_message(format!("{:.4}", loss_val));
+                p.inc(1);
+            }
         }
 
-        pb.finish();
+        if let Some(ref p) = pb {
+            p.finish();
+        }
         let avg_train_loss = total_loss / total_steps.max(1) as f32;
 
         // 4. Validation (using model.valid() to prevent autodiff VRAM buildup)
@@ -617,10 +674,12 @@ fn main() -> Result<()> {
         };
         let elapsed = t0.elapsed();
 
-        println!(
-            "Epoch {:>2}/{} | Train Loss: {:.4} | Val Loss: {:.4} (Val Token Acc: {:.1}%) | Elapsed: {:.1}s",
-            epoch, epochs, avg_train_loss, avg_val_loss, val_acc, elapsed.as_secs_f32()
-        );
+        if terminal.is_none() {
+            println!(
+                "Epoch {:>2}/{} | Train Loss: {:.4} | Val Loss: {:.4} (Val Token Acc: {:.1}%) | Elapsed: {:.1}s",
+                epoch, epochs, avg_train_loss, avg_val_loss, val_acc, elapsed.as_secs_f32()
+            );
+        }
 
         // Save best checkpoint
         // if avg_val_loss < best_val_loss {
@@ -680,6 +739,27 @@ fn main() -> Result<()> {
         } else {
             println!("  [Preview] Saved 16-sample comparison grid to {}", preview_path.display());
             let _ = std::fs::copy(&preview_path, &latest_preview_path);
+        }
+
+        // 6. Save loss & validation accuracy curves chart (PNG + CSV)
+        tui_state.current_val_loss = Some(avg_val_loss);
+        tui_state.current_val_acc = Some(val_acc);
+        tui_state.val_loss_history.push((global_step as f64, avg_val_loss as f64));
+        tui_state.val_acc_history.push((global_step as f64, val_acc as f64));
+        tui_state.last_preview_path = Some(preview_path.to_string_lossy().to_string());
+
+        let chart_path = out_dir.join("chart.png");
+        let epoch_chart_path = out_dir.join(format!("chart_epoch_{:02}.png", epoch));
+        if let Err(e) = tui_state.save_chart_image(&chart_path) {
+            eprintln!("Warning: Failed to save chart image: {}", e);
+        } else {
+            let _ = std::fs::copy(&chart_path, &epoch_chart_path);
+            println!("  [Chart] Saved training curves chart to {}", chart_path.display());
+        }
+        let _ = tui_state.save_csv(&out_dir.join("loss_history.csv"));
+
+        if let Some(term) = terminal.as_mut() {
+            let _ = term.draw(|f| render_art_chart(f, &tui_state));
         }
     }
 

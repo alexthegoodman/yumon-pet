@@ -672,3 +672,301 @@ pub fn render_colorizer_chart(frame: &mut ratatui::Frame, state: &ColorizerTrain
         .label(gauge_label);
     frame.render_widget(gauge, chunks[2]);
 }
+
+// ─── Yumon Art MoE Training Dashboard ──────────────────────────────────────
+
+pub struct ArtTrainingState {
+    pub epoch: usize,
+    pub total_epochs: usize,
+    pub batch: usize,
+    pub total_batches: usize,
+    pub global_step: usize,
+
+    pub current_lr: f64,
+    pub current_loss: f32,
+    pub current_val_loss: Option<f32>,
+    pub current_val_acc: Option<f32>,
+
+    pub loss_history: Vec<(f64, f64)>,
+    pub val_loss_history: Vec<(f64, f64)>,
+    pub val_acc_history: Vec<(f64, f64)>,
+    pub lr_history: Vec<(f64, f64)>,
+
+    pub start_time: Instant,
+    pub last_preview_path: Option<String>,
+    pub title: String,
+}
+
+impl ArtTrainingState {
+    pub fn new(total_epochs: usize, total_batches: usize, title: String) -> Self {
+        Self {
+            epoch: 1,
+            total_epochs,
+            batch: 0,
+            total_batches,
+            global_step: 0,
+            current_lr: 0.0,
+            current_loss: 0.0,
+            current_val_loss: None,
+            current_val_acc: None,
+            loss_history: Vec::new(),
+            val_loss_history: Vec::new(),
+            val_acc_history: Vec::new(),
+            lr_history: Vec::new(),
+            start_time: Instant::now(),
+            last_preview_path: None,
+            title,
+        }
+    }
+
+    pub fn save_csv(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let file = std::fs::File::create(path)?;
+        let mut writer = std::io::BufWriter::new(file);
+
+        writeln!(writer, "step,loss,lr")?;
+        for (i, &(step, loss)) in self.loss_history.iter().enumerate() {
+            let lr = self.lr_history.get(i).map_or(0.0, |p| p.1);
+            writeln!(writer, "{},{},{}", step, loss, lr)?;
+        }
+
+        if !self.val_loss_history.is_empty() {
+            let val_path = path.with_extension("val.csv");
+            let val_file = std::fs::File::create(val_path)?;
+            let mut val_writer = std::io::BufWriter::new(val_file);
+            writeln!(val_writer, "step,val_loss,val_acc")?;
+            for (i, &(step, val_loss)) in self.val_loss_history.iter().enumerate() {
+                let val_acc = self.val_acc_history.get(i).map_or(0.0, |p| p.1);
+                writeln!(val_writer, "{},{},{}", step, val_loss, val_acc)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn save_chart_image(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        use crate::brain::chart::plot::{dim, text, Panel, Series, BACKGROUND};
+        use image::Rgb;
+
+        let (width, height) = (1200u32, 800u32);
+        let mut img = image::RgbImage::from_pixel(width, height, BACKGROUND);
+        let (left, panel_w) = (80, width as i32 - 80 - 24);
+
+        let title_str = format!("{} - Loss & Validation Accuracy", self.title);
+        text(&mut img, &title_str, left, 14, Rgb([255, 255, 255]));
+
+        let smooth = ema(&self.loss_history, EMA_ALPHA);
+        let cyan = Rgb([0, 255, 255]);
+        let val_color = Rgb([255, 80, 80]);
+        let mut loss_series: Vec<Series> = vec![
+            (&self.loss_history, dim(cyan, 0.35)),
+            (&smooth, cyan),
+        ];
+        if !self.val_loss_history.is_empty() {
+            loss_series.push((&self.val_loss_history, val_color));
+        }
+
+        let loss_panel = Panel::new(left, 40, panel_w, 420, false, false).fit(&loss_series, false);
+        loss_panel.draw(&mut img, &loss_series);
+        for &(x, y) in &self.val_loss_history {
+            if x.is_finite() && y.is_finite() {
+                let p = loss_panel.map(x, y);
+                crate::brain::chart::plot::draw_marker(&mut img, p.0, p.1, 4, val_color);
+            }
+        }
+
+        let lr_series: [Series; 1] = [(&self.lr_history, Rgb([0, 255, 0]))];
+        Panel::new(left, 490, panel_w, 120, false, false).fit(&lr_series, true).draw(&mut img, &lr_series);
+
+        let acc_color = Rgb([80, 180, 255]);
+        let acc_series: [Series; 1] = [(&self.val_acc_history, acc_color)];
+        let acc_panel = Panel::new(left, 640, panel_w, 120, false, false)
+            .fit(&acc_series, true)
+            .y_range(0.0, 100.0);
+        acc_panel.draw(&mut img, &acc_series);
+        for &(x, y) in &self.val_acc_history {
+            if x.is_finite() && y.is_finite() {
+                let p = acc_panel.map(x, y);
+                crate::brain::chart::plot::draw_marker(&mut img, p.0, p.1, 4, acc_color);
+            }
+        }
+
+        img.save(path)?;
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn render_art_chart(frame: &mut ratatui::Frame, state: &ArtTrainingState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Header stats
+            Constraint::Min(10),   // Charts
+            Constraint::Length(3), // Progress gauge
+        ])
+        .split(frame.area());
+
+    // 1. Header
+    let elapsed = state.start_time.elapsed();
+    let elapsed_str = format!("{:02}:{:02}", elapsed.as_secs() / 60, elapsed.as_secs() % 60);
+
+    let val_str = match (state.current_val_loss, state.current_val_acc) {
+        (Some(vl), Some(va)) => format!("{:.4} (Acc: {:.1}%)", vl, va),
+        (Some(vl), None) => format!("{:.4}", vl),
+        _ => "N/A".to_string(),
+    };
+
+    let stats_text = format!(
+        " Epoch {}/{} │ Batch {}/{} │ LR {:.2e} │ Loss: {:.4} │ Val: {} │ ⏱ {}",
+        state.epoch,
+        state.total_epochs,
+        state.batch,
+        state.total_batches,
+        state.current_lr,
+        state.current_loss,
+        val_str,
+        elapsed_str,
+    );
+
+    let header = Paragraph::new(stats_text)
+        .style(Style::default().fg(Color::White))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", state.title))
+                .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        );
+    frame.render_widget(header, chunks[0]);
+
+    // 2. Charts
+    let chart_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(60), // Loss
+            Constraint::Percentage(40), // Val Acc & LR
+        ])
+        .split(chunks[1]);
+
+    // Loss Chart
+    let loss_data = &state.loss_history;
+    let ema_data = ema(loss_data, EMA_ALPHA);
+    let val_data = &state.val_loss_history;
+
+    let max_loss = loss_data
+        .iter()
+        .chain(val_data.iter())
+        .map(|p| p.1)
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    let min_loss = loss_data
+        .iter()
+        .chain(val_data.iter())
+        .map(|p| p.1)
+        .fold(max_loss, f64::min)
+        .min(max_loss * 0.9);
+
+    let x_max = (state.global_step as f64).max(10.0);
+
+    let mut datasets = vec![
+        Dataset::default()
+            .name("Loss")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::DarkGray))
+            .data(loss_data),
+        Dataset::default()
+            .name("EMA")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Cyan))
+            .data(&ema_data),
+    ];
+
+    if !val_data.is_empty() {
+        datasets.push(
+            Dataset::default()
+                .name("Val")
+                .marker(symbols::Marker::Dot)
+                .graph_type(GraphType::Scatter)
+                .style(Style::default().fg(Color::Yellow))
+                .data(val_data),
+        );
+    }
+
+    let loss_chart = Chart::new(datasets)
+        .block(
+            Block::default()
+                .title(" Cross Entropy Loss (Cyan=EMA, Yellow=Val) ")
+                .borders(Borders::ALL),
+        )
+        .x_axis(
+            Axis::default()
+                .bounds([0.0, x_max])
+                .labels(vec!["0".to_string(), format!("{}", state.global_step)]),
+        )
+        .y_axis(
+            Axis::default()
+                .bounds([min_loss * 0.95, max_loss * 1.05])
+                .labels(vec![format!("{:.2}", min_loss), format!("{:.2}", max_loss)]),
+        );
+    frame.render_widget(loss_chart, chart_cols[0]);
+
+    // Acc & LR Chart
+    let acc_data = &state.val_acc_history;
+
+    let right_datasets = vec![
+        Dataset::default()
+            .name("Val Acc %")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::LightBlue))
+            .data(acc_data),
+    ];
+
+    let right_chart = Chart::new(right_datasets)
+        .block(
+            Block::default()
+                .title(format!(" Validation Token Accuracy (Current LR: {:.1e}) ", state.current_lr))
+                .borders(Borders::ALL),
+        )
+        .x_axis(
+            Axis::default()
+                .bounds([0.0, x_max])
+                .labels(vec!["0".to_string(), format!("{}", state.global_step)]),
+        )
+        .y_axis(
+            Axis::default()
+                .bounds([0.0, 100.0])
+                .labels(vec!["0%".to_string(), "50%".to_string(), "100%".to_string()]),
+        );
+    frame.render_widget(right_chart, chart_cols[1]);
+
+    // 3. Progress Gauge
+    let total_batches_all = state.total_epochs * state.total_batches;
+    let completed_batches =
+        (state.epoch.saturating_sub(1)) * state.total_batches + state.batch;
+    let progress_ratio = if total_batches_all > 0 {
+        (completed_batches as f64 / total_batches_all as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    let gauge_label = if let Some(ref path) = state.last_preview_path {
+        format!("{:.1}% │ Last preview: {}", progress_ratio * 100.0, path)
+    } else {
+        format!("{:.1}%", progress_ratio * 100.0)
+    };
+
+    let gauge = Gauge::default()
+        .block(Block::default().borders(Borders::ALL).title(" Overall Progress "))
+        .gauge_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .ratio(progress_ratio)
+        .label(gauge_label);
+    frame.render_widget(gauge, chunks[2]);
+}

@@ -28,6 +28,7 @@ pub use colorizer::{
 pub use chart::{
     UpscalerTrainingState, render as render_upscaler_chart,
     ColorizerTrainingState, render_colorizer_chart,
+    ArtTrainingState, render_art_chart,
 };
 pub use paint_studio::{GalleryItem, PaintConfig, PaintPaths, PaintResult, PaintStudio, PassProgress};
 
