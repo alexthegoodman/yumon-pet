@@ -1,7 +1,7 @@
-//! Multi-Sample Grid Visualizer for Pass 4/5 Upscaler (Grayscale to Grayscale).
+//! Multi-Sample Grid Visualizer for Pass 4/5 Upscaler (Color and Grayscale).
 //!
 //! Generates side-by-side comparison grids of 16 (or custom N) samples:
-//! [ Input (NN) | Model Predicted 256x256 (Grayscale) | Ground Truth 256x256 (Grayscale) ]
+//! [ Input (NN) | Model Predicted 256x256 | Ground Truth 256x256 ]
 //!
 //! Features:
 //! - Direct disk seeking (<1ms load time)
@@ -29,7 +29,6 @@ pub type EvalBackend = burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, 
 
 pub const UPSCALER_CACHE_MAGIC: &[u8; 8] = b"YUMON_UP";
 pub const TARGET_SIZE: usize = 256;
-pub const TARGET_LEN: usize = TARGET_SIZE * TARGET_SIZE; // 65,536 bytes
 pub const HEADER_SIZE: usize = 32;
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,14 +44,14 @@ pub enum GridLayout {
 }
 
 #[derive(Parser, Debug)]
-#[command(about = "Generate multi-sample visual comparison grids for Grayscale Upscaler")]
+#[command(about = "Generate multi-sample visual comparison grids for Upscaler")]
 struct Args {
     /// Path to model checkpoint file or checkpoint directory.
     #[arg(short, long, default_value = "checkpoints/yumon-upscaler-64")]
     checkpoint: PathBuf,
 
     /// Path to training cache binary file.
-    #[arg(long, default_value = "training-cache/upscaler_64_gray.bin")]
+    #[arg(long, default_value = "training-cache/upscaler_64_color.bin")]
     cache: PathBuf,
 
     /// Output path for the generated comparison grid PNG.
@@ -93,6 +92,10 @@ struct CheckpointMetadata {
     #[serde(default = "default_channels")]
     channels: usize,
     #[serde(default)]
+    in_channels: usize,
+    #[serde(default)]
+    out_channels: usize,
+    #[serde(default)]
     scales_from: Option<usize>,
 }
 
@@ -103,6 +106,7 @@ struct CacheHeaderInfo {
     total_samples: usize,
     record_size: usize,
     input_grid_size: usize,
+    channels: usize,
     input_len: usize,
     target_len: usize,
 }
@@ -116,20 +120,23 @@ fn read_cache_header(cache_path: &PathBuf) -> Result<CacheHeaderInfo> {
     ensure!(&header[0..8] == UPSCALER_CACHE_MAGIC, "Invalid cache magic header");
 
     let version = u32::from_le_bytes(header[8..12].try_into().unwrap());
-    ensure!(version == 4, "Expected cache version 4 (grayscale), got version {}", version);
+    ensure!(version == 4, "Expected cache version 4, got version {}", version);
 
     let total_samples = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
     let record_size = u32::from_le_bytes(header[16..20].try_into().unwrap()) as usize;
     let input_grid_size = u32::from_le_bytes(header[20..24].try_into().unwrap()) as usize;
     let target_size = u32::from_le_bytes(header[24..28].try_into().unwrap()) as usize;
+    let channels = u32::from_le_bytes(header[28..32].try_into().unwrap()) as usize;
+    let channels = if channels == 0 { 1 } else { channels };
 
-    let input_len = input_grid_size * input_grid_size;
-    let target_len = target_size * target_size;
+    let input_len = channels * input_grid_size * input_grid_size;
+    let target_len = channels * target_size * target_size;
 
     Ok(CacheHeaderInfo {
         total_samples,
         record_size,
         input_grid_size,
+        channels,
         input_len,
         target_len,
     })
@@ -190,7 +197,7 @@ fn load_samples_from_cache(
         });
     }
 
-    println!("  ✓ Loaded {} grayscale sample records in {:.2?}", samples.len(), t0.elapsed());
+    println!("  ✓ Loaded {} sample records ({} channels) in {:.2?}", samples.len(), info.channels, t0.elapsed());
     Ok(samples)
 }
 
@@ -214,50 +221,103 @@ fn render_triplet_cell(
     x_offset: u32,
     y_offset: u32,
     in_grid: usize,
+    channels: usize,
     in_slice: &[f32],
     pred_slice: &[f32],
     target_slice: &[f32],
 ) {
     let scale = (TARGET_SIZE / in_grid).max(1);
 
-    // 1. Input (Nearest-neighbor upscaled to 256x256)
-    for y in 0..TARGET_SIZE {
-        let src_y = (y / scale).min(in_grid - 1);
-        for x in 0..TARGET_SIZE {
-            let src_x = (x / scale).min(in_grid - 1);
-            let p_in = src_y * in_grid + src_x;
-            let val = (((in_slice[p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-            img.put_pixel(x_offset + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
+    if channels == 3 {
+        let plane_in = in_grid * in_grid;
+        let plane_target = TARGET_SIZE * TARGET_SIZE;
+
+        // 1. Input (Nearest-neighbor upscaled to 256x256 RGB)
+        for y in 0..TARGET_SIZE {
+            let src_y = (y / scale).min(in_grid - 1);
+            for x in 0..TARGET_SIZE {
+                let src_x = (x / scale).min(in_grid - 1);
+                let p_in = src_y * in_grid + src_x;
+                let r = (((in_slice[0 * plane_in + p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                let g = (((in_slice[1 * plane_in + p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                let b = (((in_slice[2 * plane_in + p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                img.put_pixel(x_offset + x as u32, y_offset + y as u32, image::Rgb([r, g, b]));
+            }
         }
-    }
 
-    // Border line 1
-    for y in 0..TARGET_SIZE {
-        img.put_pixel(x_offset + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
-    }
-
-    // 2. Model Predicted 256x256 Grayscale
-    let x_pred_base = x_offset + TARGET_SIZE as u32 + 1;
-    for y in 0..TARGET_SIZE {
-        for x in 0..TARGET_SIZE {
-            let idx = y * TARGET_SIZE + x;
-            let val = (((pred_slice[idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-            img.put_pixel(x_pred_base + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
+        // Border line 1
+        for y in 0..TARGET_SIZE {
+            img.put_pixel(x_offset + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
         }
-    }
 
-    // Border line 2
-    for y in 0..TARGET_SIZE {
-        img.put_pixel(x_pred_base + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
-    }
+        // 2. Model Predicted 256x256 RGB
+        let x_pred_base = x_offset + TARGET_SIZE as u32 + 1;
+        for y in 0..TARGET_SIZE {
+            for x in 0..TARGET_SIZE {
+                let idx = y * TARGET_SIZE + x;
+                let r = (((pred_slice[0 * plane_target + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                let g = (((pred_slice[1 * plane_target + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                let b = (((pred_slice[2 * plane_target + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                img.put_pixel(x_pred_base + x as u32, y_offset + y as u32, image::Rgb([r, g, b]));
+            }
+        }
 
-    // 3. Ground Truth 256x256 Grayscale
-    let x_target_base = x_pred_base + TARGET_SIZE as u32 + 1;
-    for y in 0..TARGET_SIZE {
-        for x in 0..TARGET_SIZE {
-            let idx = y * TARGET_SIZE + x;
-            let val = (((target_slice[idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-            img.put_pixel(x_target_base + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
+        // Border line 2
+        for y in 0..TARGET_SIZE {
+            img.put_pixel(x_pred_base + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
+        }
+
+        // 3. Ground Truth 256x256 RGB
+        let x_target_base = x_pred_base + TARGET_SIZE as u32 + 1;
+        for y in 0..TARGET_SIZE {
+            for x in 0..TARGET_SIZE {
+                let idx = y * TARGET_SIZE + x;
+                let r = (((target_slice[0 * plane_target + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                let g = (((target_slice[1 * plane_target + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                let b = (((target_slice[2 * plane_target + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                img.put_pixel(x_target_base + x as u32, y_offset + y as u32, image::Rgb([r, g, b]));
+            }
+        }
+    } else {
+        // 1. Input (Nearest-neighbor upscaled to 256x256 Grayscale)
+        for y in 0..TARGET_SIZE {
+            let src_y = (y / scale).min(in_grid - 1);
+            for x in 0..TARGET_SIZE {
+                let src_x = (x / scale).min(in_grid - 1);
+                let p_in = src_y * in_grid + src_x;
+                let val = (((in_slice[p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                img.put_pixel(x_offset + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
+            }
+        }
+
+        // Border line 1
+        for y in 0..TARGET_SIZE {
+            img.put_pixel(x_offset + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
+        }
+
+        // 2. Model Predicted 256x256 Grayscale
+        let x_pred_base = x_offset + TARGET_SIZE as u32 + 1;
+        for y in 0..TARGET_SIZE {
+            for x in 0..TARGET_SIZE {
+                let idx = y * TARGET_SIZE + x;
+                let val = (((pred_slice[idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                img.put_pixel(x_pred_base + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
+            }
+        }
+
+        // Border line 2
+        for y in 0..TARGET_SIZE {
+            img.put_pixel(x_pred_base + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
+        }
+
+        // 3. Ground Truth 256x256 Grayscale
+        let x_target_base = x_pred_base + TARGET_SIZE as u32 + 1;
+        for y in 0..TARGET_SIZE {
+            for x in 0..TARGET_SIZE {
+                let idx = y * TARGET_SIZE + x;
+                let val = (((target_slice[idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                img.put_pixel(x_target_base + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
+            }
         }
     }
 }
@@ -266,22 +326,32 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let t_start = Instant::now();
 
+    let cache_path = if args.cache.exists() {
+        args.cache.clone()
+    } else if PathBuf::from("training-cache/upscaler_64_gray.bin").exists() {
+        PathBuf::from("training-cache/upscaler_64_gray.bin")
+    } else {
+        args.cache.clone()
+    };
+
     println!("==================================================");
-    println!("  Pass 4/5 Grayscale Upscaler Multi-Sample Visualizer");
+    println!("     Pass 4/5 Upscaler Multi-Sample Visualizer");
     println!("==================================================");
     println!("  Checkpoint : {}", args.checkpoint.display());
-    println!("  Cache file : {}", args.cache.display());
+    println!("  Cache file : {}", cache_path.display());
     println!("  Output PNG : {}", args.out.display());
     println!("  Samples    : {}", args.count);
     println!("  Layout     : {:?}", args.layout);
 
     // 1. Read cache header info
-    let cache_info = read_cache_header(&args.cache)?;
+    let cache_info = read_cache_header(&cache_path)?;
     println!(
-        "  Cache Info : {} samples, 1x{}x{} input -> 1x{}x{} target",
+        "  Cache Info : {} samples, {}x{}x{} input -> {}x{}x{} target",
         cache_info.total_samples,
+        cache_info.channels,
         cache_info.input_grid_size,
         cache_info.input_grid_size,
+        cache_info.channels,
         TARGET_SIZE,
         TARGET_SIZE
     );
@@ -290,6 +360,8 @@ fn main() -> Result<()> {
     let (model_path, meta_path) = resolve_model_path(&args.checkpoint);
 
     let mut channels = 32;
+    let mut in_channels = cache_info.channels;
+    let mut out_channels = cache_info.channels;
     let mut scales_from = cache_info.input_grid_size;
 
     if let Some(ref m) = meta_path {
@@ -297,8 +369,13 @@ fn main() -> Result<()> {
             if let Ok(content) = fs::read_to_string(m) {
                 if let Ok(meta) = serde_json::from_str::<CheckpointMetadata>(&content) {
                     if meta.channels > 0 { channels = meta.channels; }
+                    if meta.in_channels > 0 { in_channels = meta.in_channels; }
+                    if meta.out_channels > 0 { out_channels = meta.out_channels; }
                     if let Some(s) = meta.scales_from { scales_from = s; }
-                    println!("  Auto-detected metadata: channels={}, scales_from={}", channels, scales_from);
+                    println!(
+                        "  Auto-detected metadata: channels={}, in_channels={}, out_channels={}, scales_from={}",
+                        channels, in_channels, out_channels, scales_from
+                    );
                 }
             }
         }
@@ -310,9 +387,11 @@ fn main() -> Result<()> {
     let device: <EvalBackend as Backend>::Device = Default::default();
 
     // 3. Initialize & load model
-    print!("  Initializing model on GPU (channels={}, scales_from={})... ", channels, scales_from);
+    print!("  Initializing model on GPU (channels={}, in_channels={}, out_channels={}, scales_from={})... ", channels, in_channels, out_channels, scales_from);
     let config = UpscalerModelConfig::new()
         .with_channels(channels)
+        .with_in_channels(in_channels)
+        .with_out_channels(out_channels)
         .with_scales_from(scales_from);
 
     let model: UpscalerModel<EvalBackend> = config.init(&device);
@@ -335,12 +414,12 @@ fn main() -> Result<()> {
 
     // 5. Fast direct disk read of selected sample records
     println!("  Fetching {} samples directly from binary cache...", indices.len());
-    let samples = load_samples_from_cache(&args.cache, &cache_info, &indices)?;
+    let samples = load_samples_from_cache(&cache_path, &cache_info, &indices)?;
 
     // 6. Batched GPU inference (in chunks of 4)
     let b = samples.len();
     println!("  Running GPU inference on {} samples in chunks of 4...", b);
-    let mut pred_data = Vec::with_capacity(b * TARGET_LEN);
+    let mut pred_data = Vec::with_capacity(b * cache_info.target_len);
 
     let num_chunks = (b + 3) / 4;
     for (chunk_idx, chunk) in samples.chunks(4).enumerate() {
@@ -352,7 +431,7 @@ fn main() -> Result<()> {
         }
 
         let in_tensor = Tensor::from_floats(
-            TensorData::new(flat_in, [chunk_len, 1, cache_info.input_grid_size, cache_info.input_grid_size]),
+            TensorData::new(flat_in, [chunk_len, cache_info.channels, cache_info.input_grid_size, cache_info.input_grid_size]),
             &device,
         );
 
@@ -429,6 +508,11 @@ fn main() -> Result<()> {
             let total_h = panel_h;
             let mut grid_img = image::RgbImage::from_pixel(total_w, total_h, bg_color);
 
+            let is_color = cache_info.channels == 3;
+            let plane_in = cache_info.input_grid_size * cache_info.input_grid_size;
+            let plane_target = TARGET_SIZE * TARGET_SIZE;
+            let scale = (TARGET_SIZE / cache_info.input_grid_size).max(1);
+
             for (i, s) in samples.iter().enumerate() {
                 let r = (i as u32) / cols;
                 let c = (i as u32) % cols;
@@ -436,25 +520,38 @@ fn main() -> Result<()> {
                 let y_local = cell_margin + r * (TARGET_SIZE as u32 + cell_margin);
 
                 // Panel 1: Input (x_local)
-                let scale = (TARGET_SIZE / cache_info.input_grid_size).max(1);
                 for y in 0..TARGET_SIZE {
                     let src_y = (y / scale).min(cache_info.input_grid_size - 1);
                     for x in 0..TARGET_SIZE {
                         let src_x = (x / scale).min(cache_info.input_grid_size - 1);
                         let p_in = src_y * cache_info.input_grid_size + src_x;
-                        let val = (((s.input_f32[p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                        grid_img.put_pixel(x_local + x as u32, y_local + y as u32, image::Rgb([val, val, val]));
+                        if is_color {
+                            let r_val = (((s.input_f32[0 * plane_in + p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                            let g_val = (((s.input_f32[1 * plane_in + p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                            let b_val = (((s.input_f32[2 * plane_in + p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                            grid_img.put_pixel(x_local + x as u32, y_local + y as u32, image::Rgb([r_val, g_val, b_val]));
+                        } else {
+                            let val = (((s.input_f32[p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                            grid_img.put_pixel(x_local + x as u32, y_local + y as u32, image::Rgb([val, val, val]));
+                        }
                     }
                 }
 
                 // Panel 2: Predicted (panel_w + cell_margin + x_local)
                 let x_pred = panel_w + cell_margin + x_local;
-                let pred_slice = &pred_data[i * TARGET_LEN..(i + 1) * TARGET_LEN];
+                let pred_slice = &pred_data[i * cache_info.target_len..(i + 1) * cache_info.target_len];
                 for y in 0..TARGET_SIZE {
                     for x in 0..TARGET_SIZE {
                         let idx = y * TARGET_SIZE + x;
-                        let val = (((pred_slice[idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                        grid_img.put_pixel(x_pred + x as u32, y_local + y as u32, image::Rgb([val, val, val]));
+                        if is_color {
+                            let r_val = (((pred_slice[0 * plane_target + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                            let g_val = (((pred_slice[1 * plane_target + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                            let b_val = (((pred_slice[2 * plane_target + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                            grid_img.put_pixel(x_pred + x as u32, y_local + y as u32, image::Rgb([r_val, g_val, b_val]));
+                        } else {
+                            let val = (((pred_slice[idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                            grid_img.put_pixel(x_pred + x as u32, y_local + y as u32, image::Rgb([val, val, val]));
+                        }
                     }
                 }
 
@@ -463,8 +560,15 @@ fn main() -> Result<()> {
                 for y in 0..TARGET_SIZE {
                     for x in 0..TARGET_SIZE {
                         let idx = y * TARGET_SIZE + x;
-                        let val = (((s.target_f32[idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                        grid_img.put_pixel(x_gt + x as u32, y_local + y as u32, image::Rgb([val, val, val]));
+                        if is_color {
+                            let r_val = (((s.target_f32[0 * plane_target + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                            let g_val = (((s.target_f32[1 * plane_target + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                            let b_val = (((s.target_f32[2 * plane_target + idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                            grid_img.put_pixel(x_gt + x as u32, y_local + y as u32, image::Rgb([r_val, g_val, b_val]));
+                        } else {
+                            let val = (((s.target_f32[idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                            grid_img.put_pixel(x_gt + x as u32, y_local + y as u32, image::Rgb([val, val, val]));
+                        }
                     }
                 }
             }
@@ -479,12 +583,13 @@ fn main() -> Result<()> {
     let mut grid_img = image::RgbImage::from_pixel(img_w, img_h, bg_color);
     for (i, (x_pos, y_pos)) in render_positions.into_iter().enumerate() {
         let s = &samples[i];
-        let pred_slice = &pred_data[i * TARGET_LEN..(i + 1) * TARGET_LEN];
+        let pred_slice = &pred_data[i * cache_info.target_len..(i + 1) * cache_info.target_len];
         render_triplet_cell(
             &mut grid_img,
             x_pos,
             y_pos,
             cache_info.input_grid_size,
+            cache_info.channels,
             &s.input_f32,
             pred_slice,
             &s.target_f32,

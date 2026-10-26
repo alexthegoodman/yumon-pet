@@ -1,7 +1,7 @@
-//! 2D Convolutional Neural Upscaler: 64x64/32x32 -> 256x256 (Grayscale to Grayscale).
+//! 2D Convolutional Neural Upscaler: 64x64/32x32 -> 256x256.
 //!
-//! Takes a 1-channel grayscale input at 64x64 (or 32x32) and produces a crisp
-//! 1-channel grayscale super-resolved output at 256x256.
+//! Takes a 3-channel RGB (or 1-channel grayscale) input at 64x64 (or 32x32) and produces
+//! a crisp 3-channel RGB (or 1-channel grayscale) super-resolved output at 256x256.
 //!
 //! Lightweight, ultra-fast convolutional residual architecture optimized for
 //! high-frequency edge and texture synthesis on WGPU/CubeCL with Huber and LSGAN losses.
@@ -50,6 +50,12 @@ pub struct UpscalerModelConfig {
     #[config(default = 64)]
     pub scales_from: usize,
 
+    #[config(default = 3)]
+    pub in_channels: usize,
+
+    #[config(default = 3)]
+    pub out_channels: usize,
+
     #[config(default = 32)]
     pub channels: usize,
 
@@ -65,8 +71,7 @@ impl UpscalerModelConfig {
         let c = self.channels;
         let c_half = (c / 2).max(16);
 
-        // 1-channel grayscale input
-        let stem = Conv2dConfig::new([1, c], [3, 3])
+        let stem = Conv2dConfig::new([self.in_channels, c], [3, 3])
             .with_padding(PaddingConfig2d::Same)
             .init(device);
 
@@ -102,8 +107,8 @@ impl UpscalerModelConfig {
             .init(device);
         let refine_blocks2 = make_res_blocks(self.num_refine_blocks_per_layer, c_half, device);
 
-        // Final output convolution to 1-channel grayscale
-        let out_conv = Conv2dConfig::new([c_half, 1], [3, 3])
+        // Final output convolution
+        let out_conv = Conv2dConfig::new([c_half, self.out_channels], [3, 3])
             .with_padding(PaddingConfig2d::Same)
             .init(device);
 
@@ -187,9 +192,12 @@ impl<B: Backend> UpscalerModel<B> {
     }
 }
 
-/// Configuration for the PatchGAN Discriminator for 256x256 grayscale images.
+/// Configuration for the PatchGAN Discriminator for 256x256 images.
 #[derive(Config, Debug)]
 pub struct UpscalerDiscriminatorConfig {
+    #[config(default = 3)]
+    pub in_channels: usize,
+
     #[config(default = 32)]
     pub base_channels: usize,
 }
@@ -197,8 +205,7 @@ pub struct UpscalerDiscriminatorConfig {
 impl UpscalerDiscriminatorConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> UpscalerDiscriminator<B> {
         let c = self.base_channels;
-        // 1-channel grayscale input
-        let conv1 = Conv2dConfig::new([1, c], [4, 4])
+        let conv1 = Conv2dConfig::new([self.in_channels, c], [4, 4])
             .with_stride([2, 2])
             .with_padding(PaddingConfig2d::Explicit(1, 1))
             .init(device);

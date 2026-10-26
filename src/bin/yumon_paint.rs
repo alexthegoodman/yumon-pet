@@ -350,8 +350,19 @@ fn main() -> Result<()> {
         let model_path = ckpt_dir.join("model");
         if model_path.exists() || ckpt_dir.join("model.bin").exists() || ckpt_dir.join("model.mpk").exists() {
             println!("Loading Neural Upscaler from {}...", ckpt_dir.display());
+            let (channels, in_channels, out_channels) = if let Ok(meta_str) = fs::read_to_string(ckpt_dir.join("metadata.json")) {
+                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_str) {
+                    let c = meta.get("channels").and_then(|c| c.as_u64()).unwrap_or(32) as usize;
+                    let in_c = meta.get("in_channels").and_then(|c| c.as_u64()).unwrap_or(3) as usize;
+                    let out_c = meta.get("out_channels").and_then(|c| c.as_u64()).unwrap_or(3) as usize;
+                    (c, in_c, out_c)
+                } else { (32, 3, 3) }
+            } else { (32, 3, 3) };
+
             let config = UpscalerModelConfig::new()
-                .with_channels(32);
+                .with_channels(channels)
+                .with_in_channels(in_channels)
+                .with_out_channels(out_channels);
             let model: UpscalerModel<BackendType> = config.init(&device);
             let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
             match model.load_file(&model_path, &recorder, &device) {
@@ -713,7 +724,7 @@ fn main() -> Result<()> {
         print_terminal_canvas(&canvas_hwc);
     }
 
-    // PASS 5: Deep Neural Super-Resolution (64x64 -> 256x256 Grayscale)
+    // PASS 5: Deep Neural Super-Resolution (64x64 -> 256x256)
     let mut final_neural_256: Option<Vec<u8>> = None;
     if args.passes >= 5 {
         println!("\n═══════════════════════════════════════════════════════");
@@ -723,53 +734,107 @@ fn main() -> Result<()> {
 
         if let Some(upscaler) = &upscaler {
             let plane = CANVAS_SIZE * CANVAS_SIZE; // 4096
-            let mut flat = vec![0.0f32; plane];
-            if !pass4_colors.is_empty() {
-                for (i, &tok) in pass4_colors.iter().take(plane).enumerate() {
-                    let c = (tok as usize).saturating_sub(COLOR_START_ID).min(PALETTE_SIZE - 1) as u8;
-                    let [r, g, b] = palette_to_rgb(c);
-                    let lum = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114 + 500) / 1000).min(255) as u8;
-                    flat[i] = (lum as f32 / 255.0) * 2.0 - 1.0;
-                }
-            } else {
-                for y in 0..CANVAS_SIZE {
-                    for x in 0..CANVAS_SIZE {
-                        let idx = (y * CANVAS_SIZE + x) * 3;
-                        let r = canvas_hwc[idx] as u32;
-                        let g = canvas_hwc[idx + 1] as u32;
-                        let b = canvas_hwc[idx + 2] as u32;
-                        let lum = ((r * 299 + g * 587 + b * 114 + 500) / 1000).min(255) as u8;
-                        flat[y * CANVAS_SIZE + x] = (lum as f32 / 255.0) * 2.0 - 1.0;
+            let is_color_upscaler = upscaler.config.in_channels == 3;
+
+            if is_color_upscaler {
+                let mut flat = vec![0.0f32; 3 * plane];
+                if !pass4_colors.is_empty() {
+                    for (i, &tok) in pass4_colors.iter().take(plane).enumerate() {
+                        let c = (tok as usize).saturating_sub(COLOR_START_ID).min(PALETTE_SIZE - 1) as u8;
+                        let [r, g, b] = palette_to_rgb(c);
+                        flat[0 * plane + i] = (r as f32 / 255.0) * 2.0 - 1.0;
+                        flat[1 * plane + i] = (g as f32 / 255.0) * 2.0 - 1.0;
+                        flat[2 * plane + i] = (b as f32 / 255.0) * 2.0 - 1.0;
+                    }
+                } else {
+                    for y in 0..CANVAS_SIZE {
+                        for x in 0..CANVAS_SIZE {
+                            let idx = (y * CANVAS_SIZE + x) * 3;
+                            let p = y * CANVAS_SIZE + x;
+                            let r = canvas_hwc[idx];
+                            let g = canvas_hwc[idx + 1];
+                            let b = canvas_hwc[idx + 2];
+                            flat[0 * plane + p] = (r as f32 / 255.0) * 2.0 - 1.0;
+                            flat[1 * plane + p] = (g as f32 / 255.0) * 2.0 - 1.0;
+                            flat[2 * plane + p] = (b as f32 / 255.0) * 2.0 - 1.0;
+                        }
                     }
                 }
-            }
 
-            let input_tensor = Tensor::<BackendType, 4>::from_floats(
-                TensorData::new(flat, [1, 1, CANVAS_SIZE, CANVAS_SIZE]),
-                &device,
-            );
-            let out_tensor = upscaler.forward(input_tensor);
-            let out_data: Vec<f32> = out_tensor.into_data().convert::<f32>().to_vec().unwrap();
-            let mut rgb_256 = vec![0u8; 256 * 256 * 3];
-            for y in 0..256 {
-                for x in 0..256 {
-                    let idx = y * 256 + x;
-                    let val = (((out_data[idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                    let out_idx = idx * 3;
-                    rgb_256[out_idx] = val;
-                    rgb_256[out_idx + 1] = val;
-                    rgb_256[out_idx + 2] = val;
+                let input_tensor = Tensor::<BackendType, 4>::from_floats(
+                    TensorData::new(flat, [1, 3, CANVAS_SIZE, CANVAS_SIZE]),
+                    &device,
+                );
+                let out_tensor = upscaler.forward(input_tensor);
+                let out_data: Vec<f32> = out_tensor.into_data().convert::<f32>().to_vec().unwrap();
+                let plane_256 = 256 * 256;
+                let mut rgb_256 = vec![0u8; plane_256 * 3];
+                for y in 0..256 {
+                    for x in 0..256 {
+                        let p = y * 256 + x;
+                        let r = (((out_data[0 * plane_256 + p] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                        let g = (((out_data[1 * plane_256 + p] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                        let b = (((out_data[2 * plane_256 + p] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                        let out_idx = p * 3;
+                        rgb_256[out_idx] = r;
+                        rgb_256[out_idx + 1] = g;
+                        rgb_256[out_idx + 2] = b;
+                    }
                 }
+                println!("  ✓ Pass 5 Complete ({:.2?}): Neural super-resolution synthesized 256x256 color art.", t_pass5.elapsed());
+                println!("\n🎨 Final 256x256 TrueColor Terminal Canvas:");
+                print_terminal_rgb(&rgb_256, 256, 256);
+                final_neural_256 = Some(rgb_256);
+            } else {
+                let mut flat = vec![0.0f32; plane];
+                if !pass4_colors.is_empty() {
+                    for (i, &tok) in pass4_colors.iter().take(plane).enumerate() {
+                        let c = (tok as usize).saturating_sub(COLOR_START_ID).min(PALETTE_SIZE - 1) as u8;
+                        let [r, g, b] = palette_to_rgb(c);
+                        let lum = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114 + 500) / 1000).min(255) as u8;
+                        flat[i] = (lum as f32 / 255.0) * 2.0 - 1.0;
+                    }
+                } else {
+                    for y in 0..CANVAS_SIZE {
+                        for x in 0..CANVAS_SIZE {
+                            let idx = (y * CANVAS_SIZE + x) * 3;
+                            let r = canvas_hwc[idx] as u32;
+                            let g = canvas_hwc[idx + 1] as u32;
+                            let b = canvas_hwc[idx + 2] as u32;
+                            let lum = ((r * 299 + g * 587 + b * 114 + 500) / 1000).min(255) as u8;
+                            flat[y * CANVAS_SIZE + x] = (lum as f32 / 255.0) * 2.0 - 1.0;
+                        }
+                    }
+                }
+
+                let input_tensor = Tensor::<BackendType, 4>::from_floats(
+                    TensorData::new(flat, [1, 1, CANVAS_SIZE, CANVAS_SIZE]),
+                    &device,
+                );
+                let out_tensor = upscaler.forward(input_tensor);
+                let out_data: Vec<f32> = out_tensor.into_data().convert::<f32>().to_vec().unwrap();
+                let mut rgb_256 = vec![0u8; 256 * 256 * 3];
+                for y in 0..256 {
+                    for x in 0..256 {
+                        let idx = y * 256 + x;
+                        let val = (((out_data[idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                        let out_idx = idx * 3;
+                        rgb_256[out_idx] = val;
+                        rgb_256[out_idx + 1] = val;
+                        rgb_256[out_idx + 2] = val;
+                    }
+                }
+                final_neural_256 = Some(rgb_256);
+                println!("  ✓ Pass 5 Complete ({:.2?}): Neural super-resolution synthesized 256x256 grayscale art.", t_pass5.elapsed());
             }
-            final_neural_256 = Some(rgb_256);
-            println!("  ✓ Pass 5 Complete ({:.2?}): Neural super-resolution synthesized 256x256 grayscale art.", t_pass5.elapsed());
         } else {
             println!("  Neural upscaler checkpoint not loaded; saving artwork using Pass 4 resolution.");
         }
     }
 
     // PASS 6: Zhang 2016 Colorizer (256x256 Grayscale -> 256x256 Full Color RGB)
-    if args.passes >= 6 {
+    let ran_color_upscaler = upscaler.as_ref().map(|u| u.config.in_channels == 3).unwrap_or(false);
+    if args.passes >= 6 && !ran_color_upscaler {
         println!("\n═══════════════════════════════════════════════════════");
         println!("  Pass 6: Deep Colorization (256x256 Full Color RGB)");
         println!("═══════════════════════════════════════════════════════");

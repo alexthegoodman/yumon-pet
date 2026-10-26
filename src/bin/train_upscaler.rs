@@ -180,15 +180,20 @@ struct UpscalerMetadata {
     #[serde(default)]
     adv_loss: Option<f32>,
     channels: usize,
+    #[serde(default)]
+    in_channels: usize,
+    #[serde(default)]
+    out_channels: usize,
     scales_from: usize,
     gan: bool,
     timestamp: String,
 }
 
-/// Precomputed in-memory dataset of normalized planar f32 grayscale tensors.
+/// Precomputed in-memory dataset of normalized planar f32 tensors.
 struct InMemDataset {
     total_samples: usize,
     input_grid_size: usize,
+    channels: usize,
     input_len: usize,
     target_len: usize,
     inputs: Vec<f32>,
@@ -209,20 +214,24 @@ impl InMemDataset {
         file.read_exact(&mut ver_bytes)?;
         let version = u32::from_le_bytes(ver_bytes);
 
-        let (total_samples, record_size, input_grid_size, target_size) = if version == 4 {
+        let (total_samples, record_size, input_grid_size, target_size, channels) = if version == 4 {
             let mut rest = [0u8; 20];
             file.read_exact(&mut rest)?;
             let total_samples = u32::from_le_bytes(rest[0..4].try_into().unwrap()) as usize;
             let record_size = u32::from_le_bytes(rest[4..8].try_into().unwrap()) as usize;
             let input_grid_size = u32::from_le_bytes(rest[8..12].try_into().unwrap()) as usize;
             let target_size = u32::from_le_bytes(rest[12..16].try_into().unwrap()) as usize;
-            (total_samples, record_size, input_grid_size, target_size)
+            let raw_channels = u32::from_le_bytes(rest[16..20].try_into().unwrap()) as usize;
+            let channels = if raw_channels == 0 { 1 } else { raw_channels };
+            (total_samples, record_size, input_grid_size, target_size, channels)
         } else {
-            anyhow::bail!("Unsupported cache version: {}. Expected version 4 (grayscale). Please regenerate with cache_upscaler.", version);
+            anyhow::bail!("Unsupported cache version: {}. Expected version 4. Please regenerate with cache_upscaler.", version);
         };
 
-        let input_len = input_grid_size * input_grid_size;
-        let target_len = target_size * target_size;
+        let plane_in = input_grid_size * input_grid_size;
+        let plane_target = target_size * target_size;
+        let input_len = channels * plane_in;
+        let target_len = channels * plane_target;
         ensure!(
             record_size == input_len + target_len,
             "Record size mismatch: header says {} vs expected {}",
@@ -231,8 +240,9 @@ impl InMemDataset {
         );
 
         println!(
-            "  Cache metadata: {} samples, 1x{}x{} input -> 1x{}x{} target (Grayscale)",
-            total_samples, input_grid_size, input_grid_size, target_size, target_size
+            "  Cache metadata: {} samples, {}x{}x{} input -> {}x{}x{} target ({})",
+            total_samples, channels, input_grid_size, input_grid_size, channels, target_size, target_size,
+            if channels == 3 { "RGB Color" } else { "Grayscale" }
         );
         println!("  Loading {} records ({:.2} MB) from disk into RAM...", total_samples, (total_samples * record_size) as f64 / 1e6);
 
@@ -266,10 +276,11 @@ impl InMemDataset {
                 }
             });
 
-        println!("  ✓ Grayscale dataset ready in RAM in {:.2?} (Zero disk I/O during training!)", t_load.elapsed());
+        println!("  ✓ Dataset ready in RAM in {:.2?} (Zero disk I/O during training!)", t_load.elapsed());
         Ok(Self {
             total_samples,
             input_grid_size,
+            channels,
             input_len,
             target_len,
             inputs,
@@ -295,11 +306,11 @@ impl InMemDataset {
         }
 
         let in_tensor = Tensor::from_floats(
-            TensorData::new(flat_in, [b, 1, self.input_grid_size, self.input_grid_size]),
+            TensorData::new(flat_in, [b, self.channels, self.input_grid_size, self.input_grid_size]),
             device,
         );
         let target_tensor = Tensor::from_floats(
-            TensorData::new(flat_target, [b, 1, TARGET_SIZE, TARGET_SIZE]),
+            TensorData::new(flat_target, [b, self.channels, TARGET_SIZE, TARGET_SIZE]),
             device,
         );
 
@@ -344,44 +355,96 @@ fn save_preview_grid(
         let target_slice = &dataset.targets[idx * target_len..(idx + 1) * target_len];
         let pred_slice = &pred_data[i * target_len..(i + 1) * target_len];
 
-        // 1. Input upscaled nearest-neighbor to 256x256
-        for y in 0..TARGET_SIZE {
-            let src_y = (y / scale).min(in_grid - 1);
-            for x in 0..TARGET_SIZE {
-                let src_x = (x / scale).min(in_grid - 1);
-                let p_in = src_y * in_grid + src_x;
-                let val = (((in_slice[p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                grid_img.put_pixel(x_offset + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
+        if dataset.channels == 3 {
+            let plane_in = in_grid * in_grid;
+            let plane_target = TARGET_SIZE * TARGET_SIZE;
+
+            // 1. Input upscaled nearest-neighbor to 256x256
+            for y in 0..TARGET_SIZE {
+                let src_y = (y / scale).min(in_grid - 1);
+                for x in 0..TARGET_SIZE {
+                    let src_x = (x / scale).min(in_grid - 1);
+                    let p_in = src_y * in_grid + src_x;
+                    let r = (((in_slice[0 * plane_in + p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    let g = (((in_slice[1 * plane_in + p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    let b = (((in_slice[2 * plane_in + p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    grid_img.put_pixel(x_offset + x as u32, y_offset + y as u32, image::Rgb([r, g, b]));
+                }
             }
-        }
 
-        // Separator 1
-        for y in 0..TARGET_SIZE {
-            grid_img.put_pixel(x_offset + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
-        }
-
-        // 2. Model Predicted 256x256 Grayscale
-        let x_pred_base = x_offset + TARGET_SIZE as u32 + 1;
-        for y in 0..TARGET_SIZE {
-            for x in 0..TARGET_SIZE {
-                let p_idx = y * TARGET_SIZE + x;
-                let val = (((pred_slice[p_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                grid_img.put_pixel(x_pred_base + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
+            // Separator 1
+            for y in 0..TARGET_SIZE {
+                grid_img.put_pixel(x_offset + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
             }
-        }
 
-        // Separator 2
-        for y in 0..TARGET_SIZE {
-            grid_img.put_pixel(x_pred_base + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
-        }
+            // 2. Model Predicted 256x256 RGB
+            let x_pred_base = x_offset + TARGET_SIZE as u32 + 1;
+            for y in 0..TARGET_SIZE {
+                for x in 0..TARGET_SIZE {
+                    let p_idx = y * TARGET_SIZE + x;
+                    let r = (((pred_slice[0 * plane_target + p_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    let g = (((pred_slice[1 * plane_target + p_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    let b = (((pred_slice[2 * plane_target + p_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    grid_img.put_pixel(x_pred_base + x as u32, y_offset + y as u32, image::Rgb([r, g, b]));
+                }
+            }
 
-        // 3. Ground Truth 256x256 Grayscale
-        let x_target_base = x_pred_base + TARGET_SIZE as u32 + 1;
-        for y in 0..TARGET_SIZE {
-            for x in 0..TARGET_SIZE {
-                let t_idx = y * TARGET_SIZE + x;
-                let val = (((target_slice[t_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
-                grid_img.put_pixel(x_target_base + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
+            // Separator 2
+            for y in 0..TARGET_SIZE {
+                grid_img.put_pixel(x_pred_base + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
+            }
+
+            // 3. Ground Truth 256x256 RGB
+            let x_target_base = x_pred_base + TARGET_SIZE as u32 + 1;
+            for y in 0..TARGET_SIZE {
+                for x in 0..TARGET_SIZE {
+                    let t_idx = y * TARGET_SIZE + x;
+                    let r = (((target_slice[0 * plane_target + t_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    let g = (((target_slice[1 * plane_target + t_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    let b = (((target_slice[2 * plane_target + t_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    grid_img.put_pixel(x_target_base + x as u32, y_offset + y as u32, image::Rgb([r, g, b]));
+                }
+            }
+        } else {
+            // 1. Input upscaled nearest-neighbor to 256x256
+            for y in 0..TARGET_SIZE {
+                let src_y = (y / scale).min(in_grid - 1);
+                for x in 0..TARGET_SIZE {
+                    let src_x = (x / scale).min(in_grid - 1);
+                    let p_in = src_y * in_grid + src_x;
+                    let val = (((in_slice[p_in] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    grid_img.put_pixel(x_offset + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
+                }
+            }
+
+            // Separator 1
+            for y in 0..TARGET_SIZE {
+                grid_img.put_pixel(x_offset + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
+            }
+
+            // 2. Model Predicted 256x256 Grayscale
+            let x_pred_base = x_offset + TARGET_SIZE as u32 + 1;
+            for y in 0..TARGET_SIZE {
+                for x in 0..TARGET_SIZE {
+                    let p_idx = y * TARGET_SIZE + x;
+                    let val = (((pred_slice[p_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    grid_img.put_pixel(x_pred_base + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
+                }
+            }
+
+            // Separator 2
+            for y in 0..TARGET_SIZE {
+                grid_img.put_pixel(x_pred_base + TARGET_SIZE as u32, y_offset + y as u32, image::Rgb([30, 30, 40]));
+            }
+
+            // 3. Ground Truth 256x256 Grayscale
+            let x_target_base = x_pred_base + TARGET_SIZE as u32 + 1;
+            for y in 0..TARGET_SIZE {
+                for x in 0..TARGET_SIZE {
+                    let t_idx = y * TARGET_SIZE + x;
+                    let val = (((target_slice[t_idx] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0)) as u8;
+                    grid_img.put_pixel(x_target_base + x as u32, y_offset + y as u32, image::Rgb([val, val, val]));
+                }
             }
         }
     }
@@ -458,12 +521,14 @@ fn main() -> Result<()> {
 
     println!("  Train samples   : {}", train_indices.len());
     println!("  Val samples     : {}", val_indices.len());
-    println!("  Model resolution: 1x{}x{} -> 1x256x256 (Grayscale)", scales_from, scales_from);
+    println!("  Model resolution: {}x{}x{} -> {}x256x256 ({})", dataset.channels, scales_from, scales_from, dataset.channels, if dataset.channels == 3 { "RGB Color" } else { "Grayscale" });
 
     // 2. Initialize Model, Discriminator, and Loss
     let config = UpscalerModelConfig::new()
         .with_scales_from(scales_from)
-        .with_channels(args.channels);
+        .with_channels(args.channels)
+        .with_in_channels(dataset.channels)
+        .with_out_channels(dataset.channels);
 
     let mut model: UpscalerModel<TrainBackend> = config.init(&device);
     let loss_fn = HuberLossConfig::new(1.0).init();
@@ -475,7 +540,8 @@ fn main() -> Result<()> {
 
     let (mut discriminator, mut optimizer_d) = if args.gan {
         let d_config = UpscalerDiscriminatorConfig::new()
-            .with_base_channels(args.d_channels);
+            .with_base_channels(args.d_channels)
+            .with_in_channels(dataset.channels);
         let disc: UpscalerDiscriminator<TrainBackend> = d_config.init(&device);
         let opt_d = AdamWConfig::new()
             .with_epsilon(1e-8)
@@ -759,6 +825,8 @@ fn main() -> Result<()> {
             d_loss: if args.gan { Some(last_d_loss_val) } else { None },
             adv_loss: if args.gan { Some(last_adv_loss_val) } else { None },
             channels: args.channels,
+            in_channels: dataset.channels,
+            out_channels: dataset.channels,
             scales_from,
             gan: args.gan,
             timestamp: chrono::Local::now().to_rfc3339(),
