@@ -6,7 +6,7 @@
   "vocab_file": "training-cache/diffusion_talk_vocab.json",
   "max_seq_len": 128,
   "seed": 4815162342,
-  "vocab_size": 4288,
+  "vocab_size": 4512,
   "embed_dim": 256,
   "n_layers": 6,
   "attn_heads": 8,

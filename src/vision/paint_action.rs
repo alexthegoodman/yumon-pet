@@ -1,4 +1,4 @@
-//! Discrete paint actions, 64-color palette, coordinate quantization,
+//! Discrete paint actions, 256-color palette, coordinate quantization,
 //! and canvas progression generation for Yumon Art.
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ pub const CANVAS_CHANNELS: usize = 3;
 pub const PATCH_SIZE: usize = 4;
 pub const GRID_SIZE: usize = CANVAS_SIZE / PATCH_SIZE; // 16
 pub const NUM_PATCHES: usize = GRID_SIZE * GRID_SIZE;  // 256
-pub const PALETTE_SIZE: usize = 32;
+pub const PALETTE_SIZE: usize = 256;
 
 // Dedicated paint token space (mapped above the 4096 Kilo Talk vocabulary)
 pub const CANVAS_START_ID: usize = 4096;
@@ -23,28 +23,33 @@ pub const PASS_4_ID: usize       = 4103; // Fine pixel art details (64x64 pixels
 
 pub const ROW_START_ID: usize    = 4110; // 4110..4173 (64 row coordinates y: 0..63)
 pub const COL_START_ID: usize    = 4174; // 4174..4237 (64 col coordinates x: 0..63)
-pub const COLOR_START_ID: usize  = 4238; // 4238..4269 (32 5-bit grayscale colors: 0..31)
-pub const RADIUS_START_ID: usize = 4270; // 4270..4277 (8 brush radii: 1..8)
-pub const ART_VOCAB_SIZE: usize  = 4288;
+pub const COLOR_START_ID: usize  = 4238; // 4238..4493 (256 8-bit palette colors: 0..255)
+pub const RADIUS_START_ID: usize = 4494; // 4494..4501 (8 brush radii: 1..8)
+pub const ART_VOCAB_SIZE: usize  = 4512;
 
 /// Backward compatibility alias
 pub const COORD_START_ID: usize  = 4110;
 
-/// Map standard 24-bit RGB [0..255] into a 32-shade grayscale luminance palette [0..31].
+/// Map standard 24-bit RGB [0..255] into an 8-bit palette (3 bits R, 3 bits G, 2 bits B).
 #[inline]
 pub fn rgb_to_palette(r: u8, g: u8, b: u8) -> u8 {
-    // Standard perceptual grayscale luminance (Rec. 601: 0.299 R + 0.587 G + 0.114 B)
-    let lum = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114 + 500) / 1000).min(255);
-    // Quantize 256 luminance levels into 32 shades (0..31)
-    ((lum * 31 + 127) / 255).min(31) as u8
+    let r_bin = ((r as usize * 7 + 127) / 255).min(7) as u8;
+    let g_bin = ((g as usize * 7 + 127) / 255).min(7) as u8;
+    let b_bin = ((b as usize * 3 + 127) / 255).min(3) as u8;
+    (r_bin * 32 + g_bin * 4 + b_bin) as u8
 }
 
-/// Expand a 32-shade grayscale palette index [0..31] back into RGB bytes (R=G=B) in [0..255].
+/// Expand an 8-bit palette index back into RGB bytes.
 #[inline]
 pub fn palette_to_rgb(idx: u8) -> [u8; 3] {
-    let clamped = (idx as u32).min(31);
-    let val = ((clamped * 255 + 15) / 31).min(255) as u8;
-    [val, val, val]
+    let i = idx as usize;
+    let r_bin = (i >> 5) & 0x07;
+    let g_bin = (i >> 2) & 0x07;
+    let b_bin = i & 0x03;
+    let r = ((r_bin * 255) / 7) as u8;
+    let g = ((g_bin * 255) / 7) as u8;
+    let b = ((b_bin * 255) / 3) as u8;
+    [r, g, b]
 }
 
 /// Discrete paint command issued by Yumon's MoE.

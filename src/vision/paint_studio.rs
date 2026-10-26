@@ -794,7 +794,7 @@ impl<B: FlashAttention> PaintStudio<B> {
                     pass: 4,
                     total_passes,
                     stage_name: "Fine Details".into(),
-                    description: "High-resolution 64x64 grayscale pixels synthesized (4,096 tokens)".into(),
+                    description: "High-resolution 64x64 color pixels synthesized (4,096 tokens)".into(),
                     width: CANVAS_SIZE as u32,
                     height: CANVAS_SIZE as u32,
                     data_url: p4_url,
@@ -817,14 +817,19 @@ impl<B: FlashAttention> PaintStudio<B> {
                 if !pass4_colors.is_empty() {
                     for (i, &tok) in pass4_colors.iter().take(plane).enumerate() {
                         let c = (tok as usize).saturating_sub(COLOR_START_ID).min(PALETTE_SIZE - 1) as u8;
-                        let lum = palette_to_rgb(c)[0];
+                        let [r, g, b] = palette_to_rgb(c);
+                        let lum = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114 + 500) / 1000).min(255) as u8;
                         flat[i] = (lum as f32 / 255.0) * 2.0 - 1.0;
                     }
                 } else {
                     for y in 0..CANVAS_SIZE {
                         for x in 0..CANVAS_SIZE {
                             let idx = (y * CANVAS_SIZE + x) * 3;
-                            flat[y * CANVAS_SIZE + x] = (current_canvas_hwc[idx] as f32 / 255.0) * 2.0 - 1.0;
+                            let r = current_canvas_hwc[idx] as u32;
+                            let g = current_canvas_hwc[idx + 1] as u32;
+                            let b = current_canvas_hwc[idx + 2] as u32;
+                            let lum = ((r * 299 + g * 587 + b * 114 + 500) / 1000).min(255) as u8;
+                            flat[y * CANVAS_SIZE + x] = (lum as f32 / 255.0) * 2.0 - 1.0;
                         }
                     }
                 }

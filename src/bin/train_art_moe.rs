@@ -8,6 +8,7 @@ use {
             autodiff::checkpoint::strategy::BalancedCheckpointing,
             Autodiff,
         },
+        module::AutodiffModule,
         optim::{AdamWConfig, GradientsParams, Optimizer},
         prelude::*,
         tensor::{Int, TensorData},
@@ -27,10 +28,16 @@ use {
         samples::TrainingStage,
         tokenizer::PAD_TOKEN,
     },
+    yumon_pet::vision::paint_action::{
+        CANVAS_CHANNELS, CANVAS_SIZE, COLOR_START_ID, DONE_ID, PALETTE_SIZE,
+        PASS_1_ID, PASS_2_ID, PASS_3_ID, PASS_4_ID,
+        pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
+    },
 };
 
+pub type InnerBackend = burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>;
 pub type TrainBackend = Autodiff<
-    burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>,
+    InnerBackend,
     BalancedCheckpointing,
 >;
 
@@ -142,6 +149,211 @@ fn load_samples_from_cache(path: &Path) -> Result<Vec<ArtSample>> {
     Ok(samples)
 }
 
+/// Save visual comparison preview grid:
+/// 4 columns x 4 rows of [ Input (Prior Stage) | Model Predicted | Ground Truth Target ]
+#[cfg(not(target_arch = "wasm32"))]
+fn save_art_preview_grid(
+    samples: &[ArtSample],
+    inference_model: &YumonMoeBrain<InnerBackend>,
+    device: &<InnerBackend as Backend>::Device,
+    cfg: &ArtConfig,
+    out_path: &Path,
+) -> Result<()> {
+    if samples.is_empty() {
+        return Ok(());
+    }
+
+    let b = samples.len().min(16);
+    let preview_samples = &samples[..b];
+    let cols = 4u32.min(b as u32);
+    let rows = ((b as u32) + cols - 1) / cols;
+
+    let scale = 2u32;
+    let panel_size = (CANVAS_SIZE as u32) * scale; // 128 px
+    let triplet_w = panel_size * 3 + 2;            // 386 px
+    let triplet_h = panel_size;                    // 128 px
+    let cell_margin = 8u32;
+    let bg_color = image::Rgb([18, 18, 26]);
+
+    let img_w = cell_margin + cols * (triplet_w + cell_margin);
+    let img_h = cell_margin + rows * (triplet_h + cell_margin);
+
+    let mut grid_img = image::RgbImage::from_pixel(img_w, img_h, bg_color);
+
+    for (i, s) in preview_samples.iter().enumerate() {
+        let r = (i as u32) / cols;
+        let c = (i as u32) % cols;
+        let x_offset = cell_margin + c * (triplet_w + cell_margin);
+        let y_offset = cell_margin + r * (triplet_h + cell_margin);
+
+        // 1. Input / conditioning canvas from previous pass (if any)
+        let input_canvas = match s.pass {
+            1 => vec![24u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS],
+            2 => {
+                let p1_pos = s.tokens.iter().position(|&t| t == PASS_1_ID as u32);
+                let p2_pos = s.tokens.iter().position(|&t| t == PASS_2_ID as u32);
+                if let (Some(p1), Some(p2)) = (p1_pos, p2_pos) {
+                    if p2 > p1 + 1 {
+                        pass1_tokens_to_image(&s.tokens[p1 + 1..p2])
+                    } else {
+                        vec![24u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS]
+                    }
+                } else {
+                    vec![24u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS]
+                }
+            }
+            3 => {
+                let p2_pos = s.tokens.iter().position(|&t| t == PASS_2_ID as u32);
+                let p3_pos = s.tokens.iter().position(|&t| t == PASS_3_ID as u32);
+                if let (Some(p2), Some(p3)) = (p2_pos, p3_pos) {
+                    if p3 > p2 + 1 {
+                        pass2_tokens_to_image(&s.tokens[p2 + 1..p3])
+                    } else {
+                        vec![24u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS]
+                    }
+                } else {
+                    vec![24u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS]
+                }
+            }
+            4 => {
+                let p3_pos = s.tokens.iter().position(|&t| t == PASS_3_ID as u32);
+                let p4_pos = s.tokens.iter().position(|&t| t == PASS_4_ID as u32);
+                if let (Some(p3), Some(p4)) = (p3_pos, p4_pos) {
+                    if p4 > p3 + 1 {
+                        pass3_tokens_to_image(&s.tokens[p3 + 1..p4])
+                    } else {
+                        vec![24u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS]
+                    }
+                } else {
+                    vec![24u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS]
+                }
+            }
+            _ => vec![24u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS],
+        };
+
+        // Render Panel 1: Input (upscaled nearest-neighbor to panel_size)
+        for py in 0..panel_size {
+            let src_y = (py / scale) as usize;
+            for px in 0..panel_size {
+                let src_x = (px / scale) as usize;
+                let idx = (src_y * CANVAS_SIZE + src_x) * 3;
+                grid_img.put_pixel(
+                    x_offset + px,
+                    y_offset + py,
+                    image::Rgb([input_canvas[idx], input_canvas[idx + 1], input_canvas[idx + 2]]),
+                );
+            }
+        }
+
+        // Separator 1
+        for py in 0..panel_size {
+            grid_img.put_pixel(x_offset + panel_size, y_offset + py, image::Rgb([40, 40, 50]));
+        }
+
+        // 2. Model Predicted target colors
+        let end = if s.tokens.last() == Some(&(DONE_ID as u32)) {
+            s.tokens.len() - 1
+        } else {
+            s.tokens.len()
+        };
+
+        let target_len = end.saturating_sub(s.target_start);
+        let max_seq_len = cfg.max_seq_len;
+        let t_len = s.tokens.len().min(max_seq_len);
+        let input_seq_len = t_len.saturating_sub(1);
+
+        let mut pred_colors = Vec::with_capacity(target_len);
+        if input_seq_len > 0 && s.target_start > 0 {
+            let input_tokens: Vec<i32> = s.tokens[..input_seq_len].iter().map(|&t| t as i32).collect();
+            let input_tensor = Tensor::<InnerBackend, 2, Int>::from_ints(
+                TensorData::new(input_tokens, [1, input_seq_len]),
+                device,
+            );
+            let logits = inference_model.forward(input_tensor);
+            let logits_data: Vec<f32> = logits.into_data().convert::<f32>().to_vec().unwrap();
+            let vocab_size = cfg.vocab_size;
+
+            let start_pos = s.target_start.saturating_sub(1);
+            let end_pos = end.saturating_sub(1).min(input_seq_len);
+
+            for j in start_pos..end_pos {
+                let offset = j * vocab_size;
+                let color_slice = &logits_data[offset + COLOR_START_ID..offset + COLOR_START_ID + PALETTE_SIZE];
+                let (best_idx, _) = color_slice
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                    .unwrap_or((0, &0.0));
+                pred_colors.push((COLOR_START_ID + best_idx) as u32);
+            }
+        }
+
+        let pred_canvas = match s.pass {
+            1 => pass1_tokens_to_image(&pred_colors),
+            2 => pass2_tokens_to_image(&pred_colors),
+            3 => pass3_tokens_to_image(&pred_colors),
+            4 => pass4_tokens_to_image(&pred_colors),
+            _ => pass4_tokens_to_image(&pred_colors),
+        };
+
+        let x_pred_base = x_offset + panel_size + 1;
+        // Render Panel 2: Predicted
+        for py in 0..panel_size {
+            let src_y = (py / scale) as usize;
+            for px in 0..panel_size {
+                let src_x = (px / scale) as usize;
+                let idx = (src_y * CANVAS_SIZE + src_x) * 3;
+                grid_img.put_pixel(
+                    x_pred_base + px,
+                    y_offset + py,
+                    image::Rgb([pred_canvas[idx], pred_canvas[idx + 1], pred_canvas[idx + 2]]),
+                );
+            }
+        }
+
+        // Separator 2
+        for py in 0..panel_size {
+            grid_img.put_pixel(x_pred_base + panel_size, y_offset + py, image::Rgb([40, 40, 50]));
+        }
+
+        // 3. Ground Truth Target Canvas
+        let target_colors = if s.target_start < end {
+            &s.tokens[s.target_start..end]
+        } else {
+            &[]
+        };
+
+        let target_canvas = match s.pass {
+            1 => pass1_tokens_to_image(target_colors),
+            2 => pass2_tokens_to_image(target_colors),
+            3 => pass3_tokens_to_image(target_colors),
+            4 => pass4_tokens_to_image(target_colors),
+            _ => pass4_tokens_to_image(target_colors),
+        };
+
+        let x_target_base = x_pred_base + panel_size + 1;
+        // Render Panel 3: Target Ground Truth
+        for py in 0..panel_size {
+            let src_y = (py / scale) as usize;
+            for px in 0..panel_size {
+                let src_x = (px / scale) as usize;
+                let idx = (src_y * CANVAS_SIZE + src_x) * 3;
+                grid_img.put_pixel(
+                    x_target_base + px,
+                    y_offset + py,
+                    image::Rgb([target_canvas[idx], target_canvas[idx + 1], target_canvas[idx + 2]]),
+                );
+            }
+        }
+    }
+
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    grid_img.save(out_path)?;
+    Ok(())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -198,6 +410,13 @@ fn main() -> Result<()> {
     let train_samples = all_samples;
 
     println!("Split: {} train / {} validation", train_samples.len(), val_samples.len());
+
+    // Fixed preview samples for consistent visual evaluation across epochs
+    let preview_samples: Vec<ArtSample> = if !val_samples.is_empty() {
+        val_samples.iter().take(16).cloned().collect()
+    } else {
+        train_samples.iter().take(16).cloned().collect()
+    };
 
     // 2. Initialize Model (Pure Causal Language Model with Flash Attention)
     let brain_config = YumonMoeBrainConfig::new(cfg.vocab_size, TrainingStage::Language)
@@ -445,6 +664,24 @@ fn main() -> Result<()> {
             let recorder = burn::record::BinFileRecorder::<burn::record::FullPrecisionSettings>::new();
             let _ = model.clone().save_file(out_dir.join("model"), &recorder);
         // }
+
+        // 5. Save visual preview sample grid (up to 16 samples)
+        let preview_path = out_dir.join(format!("preview_epoch_{:02}.png", epoch));
+        let latest_preview_path = out_dir.join("preview_latest.png");
+        let inference_model = model.valid();
+
+        if let Err(e) = save_art_preview_grid(
+            &preview_samples,
+            &inference_model,
+            &device,
+            &cfg,
+            &preview_path,
+        ) {
+            eprintln!("Warning: Failed to save preview image grid: {}", e);
+        } else {
+            println!("  [Preview] Saved 16-sample comparison grid to {}", preview_path.display());
+            let _ = std::fs::copy(&preview_path, &latest_preview_path);
+        }
     }
 
     println!("\nTraining complete! Best validation loss: {:.4}", best_val_loss);

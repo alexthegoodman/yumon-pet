@@ -709,7 +709,7 @@ fn main() -> Result<()> {
         }
 
         canvas_hwc = pass4_tokens_to_image(&pass4_colors);
-        println!("  ✓ Pass 4 Complete ({:.2?}): High-resolution 64x64 grayscale details established.", t_pass4.elapsed());
+        println!("  ✓ Pass 4 Complete ({:.2?}): High-resolution 64x64 color details established.", t_pass4.elapsed());
         print_terminal_canvas(&canvas_hwc);
     }
 
@@ -727,14 +727,19 @@ fn main() -> Result<()> {
             if !pass4_colors.is_empty() {
                 for (i, &tok) in pass4_colors.iter().take(plane).enumerate() {
                     let c = (tok as usize).saturating_sub(COLOR_START_ID).min(PALETTE_SIZE - 1) as u8;
-                    let lum = palette_to_rgb(c)[0];
+                    let [r, g, b] = palette_to_rgb(c);
+                    let lum = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114 + 500) / 1000).min(255) as u8;
                     flat[i] = (lum as f32 / 255.0) * 2.0 - 1.0;
                 }
             } else {
                 for y in 0..CANVAS_SIZE {
                     for x in 0..CANVAS_SIZE {
                         let idx = (y * CANVAS_SIZE + x) * 3;
-                        flat[y * CANVAS_SIZE + x] = (canvas_hwc[idx] as f32 / 255.0) * 2.0 - 1.0;
+                        let r = canvas_hwc[idx] as u32;
+                        let g = canvas_hwc[idx + 1] as u32;
+                        let b = canvas_hwc[idx + 2] as u32;
+                        let lum = ((r * 299 + g * 587 + b * 114 + 500) / 1000).min(255) as u8;
+                        flat[y * CANVAS_SIZE + x] = (lum as f32 / 255.0) * 2.0 - 1.0;
                     }
                 }
             }

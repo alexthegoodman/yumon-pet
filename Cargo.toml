@@ -93,6 +93,11 @@ path = "src/bin/train_colorizer.rs"
 name = "eval_colorizer"
 path = "src/bin/eval_colorizer.rs"
 
+[[bin]]
+name = "eval_pixel_generator"
+path = "src/bin/eval_pixel_generator.rs"
+
+
 
 
 [features]
