@@ -6,8 +6,9 @@
   "batch_size": 4,
   "lr": 0.0003,
   "min_lr": 0.00003,
-  "channels": 64,
-  "num_res_blocks": 5,
+  "channels": 32,
+  "num_res_blocks": 3,
   "val_fraction": 0.02,
-  "temperature": 0.38
+  "temperature": 0.20,
+  "chroma_boost": 1.8
 }

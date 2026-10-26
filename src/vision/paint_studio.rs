@@ -39,7 +39,7 @@ use super::{
         pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
     },
     upscaler::{UpscalerModel, UpscalerModelConfig},
-    colorizer::{colorize_fused_rgb, ColorizerModel, ColorizerModelConfig, DEFAULT_TEMPERATURE},
+    colorizer::{colorize_fused_rgb, ColorizerModel, ColorizerModelConfig, DEFAULT_TEMPERATURE, DEFAULT_CHROMA_BOOST},
 };
 
 /// Configuration for an art generation run.
@@ -885,7 +885,7 @@ impl<B: FlashAttention> PaintStudio<B> {
                     TensorData::new(flat_in, [1, 1, 256, 256]),
                     &self.device,
                 );
-                let (pred_a, pred_b) = colorizer.predict_ab_annealed(in_tensor, DEFAULT_TEMPERATURE);
+                let (pred_a, pred_b) = colorizer.predict_ab_annealed(in_tensor, DEFAULT_TEMPERATURE, DEFAULT_CHROMA_BOOST);
                 let color_img = colorize_fused_rgb(&raw_l, &pred_a, &pred_b, 256);
                 final_canvas_hwc = color_img.into_raw();
                 out_w = 256;

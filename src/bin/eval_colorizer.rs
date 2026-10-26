@@ -23,7 +23,7 @@ use std::{
 
 use yumon_pet::vision::colorizer::{
     colorize_fused_rgb, ColorizerModel, ColorizerModelConfig, COLOR_BINS_AB,
-    DEFAULT_TEMPERATURE, INPUT_SIZE, NUM_COLOR_BINS, TARGET_GRID,
+    DEFAULT_TEMPERATURE, DEFAULT_CHROMA_BOOST, INPUT_SIZE, NUM_COLOR_BINS, TARGET_GRID,
 };
 
 pub type EvalBackend = burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>;
@@ -59,9 +59,13 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     num_res_blocks: usize,
 
-    /// Softmax annealing temperature (default 0.38).
+    /// Softmax annealing temperature (default 0.20).
     #[arg(long, default_value_t = DEFAULT_TEMPERATURE)]
     temperature: f32,
+
+    /// Saturation chroma boost multiplier to counteract expectation contraction (default 1.8).
+    #[arg(long, default_value_t = DEFAULT_CHROMA_BOOST)]
+    chroma_boost: f32,
 }
 
 fn main() -> Result<()> {
@@ -73,6 +77,7 @@ fn main() -> Result<()> {
     println!("==================================================");
     println!("  Checkpoint      : {}", args.checkpoint.display());
     println!("  Temperature (T) : {:.2}", args.temperature);
+    println!("  Chroma boost    : {:.2}", args.chroma_boost);
 
     // 1. Initialize and load model
     let config = ColorizerModelConfig::new()
@@ -117,7 +122,7 @@ fn main() -> Result<()> {
         );
 
         let t0 = Instant::now();
-        let (pred_a, pred_b) = model.predict_ab_annealed(in_tensor, args.temperature);
+        let (pred_a, pred_b) = model.predict_ab_annealed(in_tensor, args.temperature, args.chroma_boost);
         let colorized = colorize_fused_rgb(&raw_l, &pred_a, &pred_b, INPUT_SIZE);
         println!("  ✓ Colorized in {:.2?}", t0.elapsed());
 
@@ -180,7 +185,7 @@ fn main() -> Result<()> {
                 TensorData::new(flat_in, [1, 1, INPUT_SIZE, INPUT_SIZE]),
                 &device,
             );
-            let (pred_a, pred_b) = model.predict_ab_annealed(in_tensor, args.temperature);
+            let (pred_a, pred_b) = model.predict_ab_annealed(in_tensor, args.temperature, args.chroma_boost);
             let pred_img = colorize_fused_rgb(l_slice, &pred_a, &pred_b, INPUT_SIZE);
 
             let x_pred = x_offset + INPUT_SIZE as u32 + 1;

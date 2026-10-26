@@ -22,7 +22,7 @@ pub use patch_encoder::{VisionPatchEncoder, VisionPatchEncoderConfig};
 pub use upscaler::{UpscalerModel, UpscalerModelConfig, UpscalerDiscriminator, UpscalerDiscriminatorConfig};
 pub use colorizer::{
     ColorizerModel, ColorizerModelConfig, ColorizerLut, COLOR_BINS_AB, NUM_COLOR_BINS,
-    DEFAULT_TEMPERATURE, srgb_to_lab, lab_to_srgb, colorize_fused_rgb, rebalanced_cross_entropy,
+    DEFAULT_TEMPERATURE, DEFAULT_CHROMA_BOOST, srgb_to_lab, lab_to_srgb, colorize_fused_rgb, rebalanced_cross_entropy,
 };
 pub use chart::{
     UpscalerTrainingState, render as render_upscaler_chart,

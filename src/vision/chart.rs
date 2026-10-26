@@ -433,12 +433,15 @@ pub struct ColorizerTrainingState {
     pub current_lr: f64,
     pub current_loss: f32,
     pub current_acc: f32,
+    pub current_top5_acc: f32,
+    pub current_ab_error: f32,
     pub current_val_loss: Option<f32>,
     pub current_val_acc: Option<f32>,
 
     pub loss_history: Vec<(f64, f64)>,
     pub val_loss_history: Vec<(f64, f64)>,
     pub acc_history: Vec<(f64, f64)>,
+    pub top5_history: Vec<(f64, f64)>,
     pub lr_history: Vec<(f64, f64)>,
 
     pub start_time: Instant,
@@ -456,11 +459,14 @@ impl ColorizerTrainingState {
             current_lr: 0.0,
             current_loss: 0.0,
             current_acc: 0.0,
+            current_top5_acc: 0.0,
+            current_ab_error: 0.0,
             current_val_loss: None,
             current_val_acc: None,
             loss_history: Vec::new(),
             val_loss_history: Vec::new(),
             acc_history: Vec::new(),
+            top5_history: Vec::new(),
             lr_history: Vec::new(),
             start_time: Instant::now(),
             last_preview_path: None,
@@ -472,11 +478,12 @@ impl ColorizerTrainingState {
         let file = std::fs::File::create(path)?;
         let mut writer = std::io::BufWriter::new(file);
 
-        writeln!(writer, "step,loss,acc,lr")?;
+        writeln!(writer, "step,loss,acc,top5,lr")?;
         for (i, &(step, loss)) in self.loss_history.iter().enumerate() {
             let acc = self.acc_history.get(i).map_or(0.0, |p| p.1);
+            let top5 = self.top5_history.get(i).map_or(0.0, |p| p.1);
             let lr = self.lr_history.get(i).map_or(0.0, |p| p.1);
-            writeln!(writer, "{},{},{},{}", step, loss, acc, lr)?;
+            writeln!(writer, "{},{},{},{},{}", step, loss, acc, top5, lr)?;
         }
         Ok(())
     }
@@ -498,13 +505,13 @@ pub fn render_colorizer_chart(frame: &mut ratatui::Frame, state: &ColorizerTrain
     let elapsed_str = format!("{:02}:{:02}", elapsed.as_secs() / 60, elapsed.as_secs() % 60);
 
     let val_str = match (state.current_val_loss, state.current_val_acc) {
-        (Some(vl), Some(va)) => format!("{:.4} (Acc: {:.1}%)", vl, va),
+        (Some(vl), Some(va)) => format!("{:.4} (Top-5: {:.1}%)", vl, va),
         (Some(vl), None) => format!("{:.4}", vl),
         _ => "N/A".to_string(),
     };
 
     let stats_text = format!(
-        " Epoch {}/{} │ Batch {}/{} │ LR {:.2e} │ Loss: {:.4} │ Top-1 Acc: {:.1}% │ Val: {} │ ⏱ {}",
+        " Epoch {}/{} │ Batch {}/{} │ LR {:.2e} │ Loss: {:.4} │ Top-1: {:.1}% │ Top-5: {:.1}% │ ΔE: {:.1} │ Val: {} │ ⏱ {}",
         state.epoch,
         state.total_epochs,
         state.batch,
@@ -512,6 +519,8 @@ pub fn render_colorizer_chart(frame: &mut ratatui::Frame, state: &ColorizerTrain
         state.current_lr,
         state.current_loss,
         state.current_acc,
+        state.current_top5_acc,
+        state.current_ab_error,
         val_str,
         elapsed_str,
     );
@@ -601,13 +610,20 @@ pub fn render_colorizer_chart(frame: &mut ratatui::Frame, state: &ColorizerTrain
 
     // Acc Chart
     let acc_data = &state.acc_history;
+    let top5_data = &state.top5_history;
     let acc_datasets = vec![
         Dataset::default()
-            .name("Top-1 Acc %")
+            .name("Top-1 %")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::DarkGray))
+            .data(acc_data),
+        Dataset::default()
+            .name("Top-5 %")
             .marker(symbols::Marker::Braille)
             .graph_type(GraphType::Line)
             .style(Style::default().fg(Color::Cyan))
-            .data(acc_data),
+            .data(top5_data),
     ];
 
     let acc_chart = Chart::new(acc_datasets)

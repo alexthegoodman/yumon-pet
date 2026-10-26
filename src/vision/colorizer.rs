@@ -29,8 +29,11 @@ pub const NUM_COLOR_BINS: usize = 313;
 /// Grid step size in Lab space from Zhang et al. (2016).
 pub const COLOR_GRID_STEP: f32 = 10.0;
 
-/// Default inference temperature for annealed-mean softmax ($T = 0.38$).
-pub const DEFAULT_TEMPERATURE: f32 = 0.38;
+/// Default inference temperature for annealed-mean softmax ($T = 0.20$).
+pub const DEFAULT_TEMPERATURE: f32 = 0.20;
+
+/// Default chroma saturation multiplier to counteract expectation contraction.
+pub const DEFAULT_CHROMA_BOOST: f32 = 1.8;
 
 /// Default input resolution (256x256).
 pub const INPUT_SIZE: usize = 256;
@@ -632,6 +635,7 @@ impl<B: Backend> ColorizerModel<B> {
         &self,
         x: Tensor<B, 4>,
         temperature: f32,
+        chroma_boost: f32,
     ) -> (Vec<f32>, Vec<f32>) {
         let logits = self.forward(x);
         let [b, q, h, w] = logits.dims();
@@ -659,8 +663,8 @@ impl<B: Backend> ColorizerModel<B> {
                 sum_b += prob * pts[bin][1];
             }
 
-            out_a[p_idx] = sum_a;
-            out_b[p_idx] = sum_b;
+            out_a[p_idx] = (sum_a * chroma_boost).clamp(-128.0, 127.0);
+            out_b[p_idx] = (sum_b * chroma_boost).clamp(-128.0, 127.0);
         }
 
         (out_a, out_b)
@@ -760,6 +764,195 @@ pub fn rebalanced_cross_entropy<B: Backend>(
     let flat_targets = targets.reshape([b * spatial_len]);
     let target_weights = weights.select(0, flat_targets).reshape([b, spatial_len]);
 
-    // Reweighted cross entropy: mean over batch and spatial pixels
-    (nll * target_weights).mean()
+    // Weighted cross entropy properly normalized by total batch weight
+    let total_weight = target_weights.clone().sum().clamp_min(1.0);
+    (nll * target_weights).sum() / total_weight
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type B = burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>;
+
+    #[test]
+    fn test_loss_computation() {
+        let device = Default::default();
+        let b = 2;
+        let q = NUM_COLOR_BINS;
+        let h = 64;
+        let w = 64;
+        let spatial_len = h * w;
+
+        let mut flat_logits = vec![0.0f32; b * q * spatial_len];
+        for batch in 0..b {
+            for s in 0..spatial_len {
+                flat_logits[batch * (q * spatial_len) + 5 * spatial_len + s] = 10.0;
+            }
+        }
+        let logits: Tensor<B, 4> = Tensor::from_floats(
+            TensorData::new(flat_logits, [b, q, h, w]),
+            &device,
+        );
+
+        let targets: Tensor<B, 2, Int> = Tensor::from_ints(
+            TensorData::new(vec![5i32; b * spatial_len], [b, spatial_len]),
+            &device,
+        );
+
+        let weights: Tensor<B, 1> = Tensor::from_floats(
+            TensorData::new(vec![1.0f32; q], [q]),
+            &device,
+        );
+
+        let loss = rebalanced_cross_entropy(logits.clone(), targets.clone(), weights);
+        let loss_val: f32 = loss.into_data().convert::<f32>().to_vec().unwrap()[0];
+        println!("Loss when predicting target: {loss_val}");
+
+        let wrong_targets: Tensor<B, 2, Int> = Tensor::from_ints(
+            TensorData::new(vec![0i32; b * spatial_len], [b, spatial_len]),
+            &device,
+        );
+        let wrong_loss = rebalanced_cross_entropy(
+            logits,
+            wrong_targets,
+            Tensor::from_floats(TensorData::new(vec![1.0f32; q], [q]), &device),
+        );
+        let wrong_loss_val: f32 = wrong_loss.into_data().convert::<f32>().to_vec().unwrap()[0];
+        println!("Loss when predicting WRONG target: {wrong_loss_val}");
+
+        assert!(loss_val < 0.1, "Loss when correct should be tiny, was {loss_val}");
+        assert!(wrong_loss_val > 5.0, "Loss when wrong should be large, was {wrong_loss_val}");
+    }
+
+    #[test]
+    fn test_4d_tensor_layout() {
+        let device = Default::default();
+        let data = vec![
+            10.0, 11.0, 12.0, 13.0,
+            20.0, 21.0, 22.0, 23.0,
+        ];
+        let t: Tensor<B, 4> = Tensor::from_floats(TensorData::new(data.clone(), [1, 2, 2, 2]), &device);
+        let vec_out: Vec<f32> = t.into_data().convert::<f32>().to_vec().unwrap();
+        println!("vec_out: {:?}", vec_out);
+        assert_eq!(data, vec_out);
+    }
+
+    #[test]
+    fn test_inspect_saved_model() {
+        let device = Default::default();
+        let config = ColorizerModelConfig::new()
+            .with_scales_from(256)
+            .with_channels(64)
+            .with_num_res_blocks(5);
+        let model: ColorizerModel<B> = config.init(&device);
+        let recorder = burn::record::BinFileRecorder::<burn::record::FullPrecisionSettings>::default();
+        let path = std::path::PathBuf::from("checkpoints/yumon-colorizer-256/model");
+        let model = match model.load_file(&path, &recorder, &device) {
+            Ok(m) => m,
+            Err(e) => {
+                println!("Failed to load: {e}");
+                return;
+            }
+        };
+
+        let input = Tensor::<B, 4>::zeros([1, 1, 256, 256], &device);
+        let logits = model.forward(input);
+        let [b, q, h, w] = logits.dims();
+        println!("Logits dims: {:?}", [b, q, h, w]);
+
+        let logit_data: Vec<f32> = logits.into_data().convert::<f32>().to_vec().unwrap();
+        let min_l = logit_data.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max_l = logit_data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let mean_l = logit_data.iter().sum::<f32>() / logit_data.len() as f32;
+        println!("Logits min: {min_l}, max: {max_l}, mean: {mean_l}");
+
+        let p_idx = 32 * 64 + 32;
+        let mut best_bin = 0;
+        let mut best_val = f32::NEG_INFINITY;
+        for bin in 0..q {
+            let val = logit_data[bin * 4096 + p_idx];
+            if val > best_val {
+                best_val = val;
+                best_bin = bin;
+            }
+        }
+        println!("Predicted bin at (32,32): {best_bin} with logit {best_val}");
+    }
+
+    #[test]
+    fn test_image_iter_order() {
+        let img = image::RgbImage::new(3, 2);
+        let mut coords = Vec::new();
+        for (x, y, _) in img.enumerate_pixels() {
+            coords.push((x, y));
+        }
+        println!("Coords: {:?}", coords);
+        assert_eq!(coords[0], (0, 0));
+        assert_eq!(coords[1], (1, 0));
+        assert_eq!(coords[2], (2, 0));
+        assert_eq!(coords[3], (0, 1));
+        assert_eq!(coords[4], (1, 1));
+        assert_eq!(coords[5], (2, 1));
+    }
+
+    #[test]
+    fn test_sample0_predictions() {
+        let device = Default::default();
+        let config = ColorizerModelConfig::new()
+            .with_scales_from(256)
+            .with_channels(64)
+            .with_num_res_blocks(5);
+        let model: ColorizerModel<B> = config.init(&device);
+        let recorder = burn::record::BinFileRecorder::<burn::record::FullPrecisionSettings>::default();
+        let path = std::path::PathBuf::from("checkpoints/yumon-colorizer-256/model");
+        let model = model.load_file(&path, &recorder, &device).unwrap();
+
+        let mut f = std::fs::File::open("training-cache/colorizer_256.bin").unwrap();
+        use std::io::Read;
+        let mut header = [0u8; 1284];
+        f.read_exact(&mut header).unwrap();
+        let mut sample0 = vec![0u8; 73728];
+        f.read_exact(&mut sample0).unwrap();
+        let l_bytes = &sample0[..65536];
+
+        let flat_in: Vec<f32> = l_bytes.iter().map(|&b| (b as f32 / 255.0) * 2.0 - 1.0).collect();
+        let in_tensor = Tensor::<B, 4>::from_floats(
+            TensorData::new(flat_in, [1, 1, 256, 256]),
+            &device,
+        );
+
+        let (pred_a, pred_b) = model.predict_ab_annealed(in_tensor.clone(), 0.38, 1.0);
+
+        let max_a = pred_a.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let max_b = pred_b.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let mean_a = pred_a.iter().map(|v| v.abs()).sum::<f32>() / pred_a.len() as f32;
+        let mean_b = pred_b.iter().map(|v| v.abs()).sum::<f32>() / pred_b.len() as f32;
+
+        println!("T=0.38 -> max |a|: {max_a:.2}, max |b|: {max_b:.2}, mean |a|: {mean_a:.2}, mean |b|: {mean_b:.2}");
+
+        let (pred_a_low, pred_b_low) = model.predict_ab_annealed(in_tensor.clone(), 0.15, DEFAULT_CHROMA_BOOST);
+        let max_a_l = pred_a_low.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let max_b_l = pred_b_low.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let mean_a_l = pred_a_low.iter().map(|v| v.abs()).sum::<f32>() / pred_a_low.len() as f32;
+        let mean_b_l = pred_b_low.iter().map(|v| v.abs()).sum::<f32>() / pred_b_low.len() as f32;
+
+        println!("T=0.15 -> max |a|: {max_a_l:.2}, max |b|: {max_b_l:.2}, mean |a|: {mean_a_l:.2}, mean |b|: {mean_b_l:.2}");
+
+        let pts = &COLOR_BINS_AB;
+        let tgt_bytes = &sample0[65536..];
+        let mut gt_a = vec![0.0f32; 4096];
+        let mut gt_b = vec![0.0f32; 4096];
+        for i in 0..4096 {
+            let bin = u16::from_le_bytes([tgt_bytes[i*2], tgt_bytes[i*2+1]]) as usize;
+            gt_a[i] = pts[bin][0];
+            gt_b[i] = pts[bin][1];
+        }
+        let gt_max_a = gt_a.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let gt_max_b = gt_b.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let gt_mean_a = gt_a.iter().map(|v| v.abs()).sum::<f32>() / gt_a.len() as f32;
+        let gt_mean_b = gt_b.iter().map(|v| v.abs()).sum::<f32>() / gt_b.len() as f32;
+
+        println!("Ground Truth -> max |a|: {gt_max_a:.2}, max |b|: {gt_max_b:.2}, mean |a|: {gt_mean_a:.2}, mean |b|: {gt_mean_b:.2}");
+    }
 }

@@ -33,7 +33,7 @@ use {
             pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
         },
         upscaler::{UpscalerModel, UpscalerModelConfig},
-        colorizer::{colorize_fused_rgb, ColorizerModel, ColorizerModelConfig, DEFAULT_TEMPERATURE},
+        colorizer::{colorize_fused_rgb, ColorizerModel, ColorizerModelConfig, DEFAULT_TEMPERATURE, DEFAULT_CHROMA_BOOST},
     },
 };
 
@@ -78,9 +78,13 @@ struct Args {
     #[arg(long, default_value = "checkpoints/yumon-colorizer-256")]
     colorizer_checkpoint: PathBuf,
 
-    /// Annealed-mean softmax temperature for Colorizer (default 0.38).
+    /// Annealed-mean softmax temperature for Colorizer (default 0.20).
     #[arg(long, default_value_t = DEFAULT_TEMPERATURE)]
     colorizer_temperature: f32,
+
+    /// Saturation chroma boost multiplier for Colorizer (default 1.8).
+    #[arg(long, default_value_t = DEFAULT_CHROMA_BOOST)]
+    colorizer_chroma_boost: f32,
 
     /// Number of cascaded generation passes to execute (1 = 8x8, 2 = 16x16, 3 = 32x32, 4 = 64x64, 5 = 256x256 gray, 6 = 256x256 Full Color).
     #[arg(long, default_value_t = 6)]
@@ -792,7 +796,7 @@ fn main() -> Result<()> {
                 &device,
             );
 
-            let (pred_a, pred_b) = colorizer.predict_ab_annealed(in_tensor, args.colorizer_temperature);
+            let (pred_a, pred_b) = colorizer.predict_ab_annealed(in_tensor, args.colorizer_temperature, args.colorizer_chroma_boost);
             let color_img = colorize_fused_rgb(&l_bytes, &pred_a, &pred_b, 256);
             let color_rgb_256 = color_img.into_raw();
 

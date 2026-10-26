@@ -35,7 +35,7 @@ use yumon_pet::vision::{
     chart::{render_colorizer_chart, ColorizerTrainingState},
     colorizer::{
         ColorizerModel, ColorizerModelConfig, COLOR_BINS_AB, NUM_COLOR_BINS,
-        DEFAULT_TEMPERATURE, rebalanced_cross_entropy,
+        DEFAULT_TEMPERATURE, DEFAULT_CHROMA_BOOST, rebalanced_cross_entropy,
     },
 };
 
@@ -97,6 +97,10 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_TEMPERATURE)]
     temperature: f32,
 
+    /// Saturation chroma boost multiplier to counteract expectation contraction (default 1.8).
+    #[arg(long, default_value_t = DEFAULT_CHROMA_BOOST)]
+    chroma_boost: f32,
+
     /// Disable interactive Ratatui TUI dashboard.
     #[arg(long, default_value_t = false)]
     no_tui: bool,
@@ -124,6 +128,8 @@ struct ColorizerConfigFile {
     val_fraction: f64,
     #[serde(default = "default_temperature")]
     temperature: f32,
+    #[serde(default = "default_chroma_boost")]
+    chroma_boost: f32,
     #[serde(default)]
     no_tui: bool,
 }
@@ -138,6 +144,7 @@ fn default_channels() -> usize { 64 }
 fn default_num_res_blocks() -> usize { 5 }
 fn default_val_fraction() -> f64 { 0.02 }
 fn default_temperature() -> f32 { DEFAULT_TEMPERATURE }
+fn default_chroma_boost() -> f32 { DEFAULT_CHROMA_BOOST }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ColorizerMetadata {
@@ -146,9 +153,12 @@ struct ColorizerMetadata {
     train_loss: f32,
     val_loss: f32,
     train_acc: f32,
+    train_top5: f32,
     val_acc: f32,
+    val_top5: f32,
     channels: usize,
     temperature: f32,
+    chroma_boost: f32,
     timestamp: String,
 }
 
@@ -292,6 +302,7 @@ fn save_colorizer_preview_grid(
     model: &ColorizerModel<TrainBackend>,
     device: &<TrainBackend as Backend>::Device,
     temperature: f32,
+    chroma_boost: f32,
     out_path: &PathBuf,
 ) -> Result<()> {
     let b = indices.len();
@@ -333,12 +344,12 @@ fn save_colorizer_preview_grid(
             grid_img.put_pixel(x_offset + INPUT_SIZE as u32, y_offset + y as u32, image::Rgb([40, 40, 50]));
         }
 
-        // 2. Model Predicted Colorized (Annealed Mean Softmax)
+        // 2. Model Predicted Colorized (Annealed Mean Softmax + Chroma Boost)
         let single_in = Tensor::from_floats(
             TensorData::new(in_slice.to_vec(), [1, 1, INPUT_SIZE, INPUT_SIZE]),
             device,
         );
-        let (pred_a, pred_b) = model.predict_ab_annealed(single_in, temperature);
+        let (pred_a, pred_b) = model.predict_ab_annealed(single_in, temperature, chroma_boost);
         let pred_img = yumon_pet::vision::colorizer::colorize_fused_rgb(raw_l_slice, &pred_a, &pred_b, INPUT_SIZE);
 
         let x_pred_base = x_offset + INPUT_SIZE as u32 + 1;
@@ -395,6 +406,7 @@ fn main() -> Result<()> {
         args.num_res_blocks = cfg.num_res_blocks;
         args.val_fraction = cfg.val_fraction;
         args.temperature = cfg.temperature;
+        args.chroma_boost = cfg.chroma_boost;
         args.no_tui = cfg.no_tui;
     }
 
@@ -411,6 +423,7 @@ fn main() -> Result<()> {
     println!("  ResBlocks       : {}", args.num_res_blocks);
     println!("  Learning rate   : {:.2e} -> {:.2e}", args.lr, args.min_lr);
     println!("  Temperature (T) : {:.2}", args.temperature);
+    println!("  Chroma boost    : {:.2}", args.chroma_boost);
 
     fs::create_dir_all(&args.out_dir)?;
 
@@ -500,7 +513,9 @@ fn main() -> Result<()> {
 
         let mut batch_count = 0;
         let mut last_loss_val = 0.0f32;
-        let mut last_acc_val = 0.0f32;
+        let mut last_top1_val = 0.0f32;
+        let mut last_top5_val = 0.0f32;
+        let mut last_delta_e_val = 0.0f32;
 
         for chunk in epoch_indices.chunks(args.batch_size) {
             if chunk.len() < args.batch_size {
@@ -515,26 +530,74 @@ fn main() -> Result<()> {
             // Forward pass: [B, 313, 64, 64]
             let logits = model.forward(input_tensor);
 
-            // Rebalanced cross-entropy loss
+            // Rebalanced cross-entropy loss properly normalized by batch target weights
             let loss = rebalanced_cross_entropy(
                 logits.clone(),
                 target_tensor.clone(),
                 weights_tensor.clone(),
             );
 
-            // Compute Top-1 accuracy for metrics
-            let acc_val = if should_inspect {
+            // Compute Top-1, Top-5, and ΔE metrics on inspection batches
+            let (top1_val, top5_val, delta_e_val) = if should_inspect {
                 let [b, q, h, w] = logits.dims();
-                let flat_logits = logits
+                let spatial_len = h * w;
+                let flat_logits_data: Vec<f32> = logits
                     .swap_dims(1, 2)
                     .swap_dims(2, 3)
-                    .reshape([b, h * w, q]);
-                let pred_classes = flat_logits.argmax(2).reshape([b, h * w]);
-                let matches = pred_classes.equal(target_tensor).int();
-                let acc: f32 = matches.float().mean().into_data().convert::<f32>().to_vec().unwrap()[0];
-                acc * 100.0
+                    .into_data()
+                    .convert::<f32>()
+                    .to_vec()
+                    .unwrap();
+                let target_data: Vec<i32> = target_tensor.clone().into_data().convert::<i32>().to_vec().unwrap();
+
+                let mut top1_correct = 0usize;
+                let mut top5_correct = 0usize;
+                let mut total_delta_e = 0.0f32;
+                let pts = &COLOR_BINS_AB;
+                let total_pixels = b * spatial_len;
+
+                for p in 0..total_pixels {
+                    let tgt_bin = target_data[p] as usize;
+                    let tgt_a = pts[tgt_bin][0];
+                    let tgt_b = pts[tgt_bin][1];
+
+                    let logit_offset = p * q;
+                    let tgt_logit = flat_logits_data[logit_offset + tgt_bin];
+
+                    let mut count_higher = 0;
+                    let mut best_bin = 0;
+                    let mut max_l = f32::NEG_INFINITY;
+
+                    for bin in 0..q {
+                        let l = flat_logits_data[logit_offset + bin];
+                        if l > max_l {
+                            max_l = l;
+                            best_bin = bin;
+                        }
+                        if l > tgt_logit {
+                            count_higher += 1;
+                        }
+                    }
+
+                    if best_bin == tgt_bin {
+                        top1_correct += 1;
+                    }
+                    if count_higher < 5 {
+                        top5_correct += 1;
+                    }
+
+                    let pred_a = pts[best_bin][0];
+                    let pred_b = pts[best_bin][1];
+                    let de = ((pred_a - tgt_a).powi(2) + (pred_b - tgt_b).powi(2)).sqrt();
+                    total_delta_e += de;
+                }
+
+                let t1 = (top1_correct as f32 / total_pixels as f32) * 100.0;
+                let t5 = (top5_correct as f32 / total_pixels as f32) * 100.0;
+                let de = total_delta_e / total_pixels as f32;
+                (t1, t5, de)
             } else {
-                last_acc_val
+                (last_top1_val, last_top5_val, last_delta_e_val)
             };
 
             batch_count += 1;
@@ -542,7 +605,9 @@ fn main() -> Result<()> {
             if should_inspect {
                 let loss_val: f32 = loss.clone().into_data().convert::<f32>().to_vec().unwrap()[0];
                 last_loss_val = loss_val;
-                last_acc_val = acc_val;
+                last_top1_val = top1_val;
+                last_top5_val = top5_val;
+                last_delta_e_val = delta_e_val;
 
                 let global_step = (epoch - 1) * num_batches + batch_count;
                 tui_state.epoch = epoch;
@@ -550,16 +615,19 @@ fn main() -> Result<()> {
                 tui_state.global_step = global_step;
                 tui_state.current_lr = lr;
                 tui_state.current_loss = loss_val;
-                tui_state.current_acc = acc_val;
+                tui_state.current_acc = top1_val;
+                tui_state.current_top5_acc = top5_val;
+                tui_state.current_ab_error = delta_e_val;
 
                 tui_state.loss_history.push((global_step as f64, loss_val as f64));
-                tui_state.acc_history.push((global_step as f64, acc_val as f64));
+                tui_state.acc_history.push((global_step as f64, top1_val as f64));
+                tui_state.top5_history.push((global_step as f64, top5_val as f64));
                 tui_state.lr_history.push((global_step as f64, lr));
 
                 if let Some(term) = terminal.as_mut() {
                     let _ = term.draw(|f| render_colorizer_chart(f, &tui_state));
                 } else if let Some(ref p) = pb {
-                    p.set_prefix(format!("{:.4} (Acc: {:.1}%)", loss_val, acc_val));
+                    p.set_prefix(format!("{:.4} (T1: {:.1}%, T5: {:.1}%, ΔE: {:.1})", loss_val, top1_val, top5_val, delta_e_val));
                 }
             }
 
@@ -575,15 +643,17 @@ fn main() -> Result<()> {
 
         if let Some(p) = pb {
             p.finish_with_message(format!(
-                "{}/{} [Loss: {:.4} | Acc: {:.1}%]",
-                epoch, args.epochs, last_loss_val, last_acc_val
+                "{}/{} [Loss: {:.4} | T1: {:.1}% | T5: {:.1}% | ΔE: {:.1}]",
+                epoch, args.epochs, last_loss_val, last_top1_val, last_top5_val, last_delta_e_val
             ));
         }
 
         // 5. Validation Loop
         let eval_count = val_indices.len().min(128);
         let mut val_loss_sum = 0.0f32;
-        let mut val_acc_sum = 0.0f32;
+        let mut val_top1_sum = 0.0f32;
+        let mut val_top5_sum = 0.0f32;
+        let mut val_de_sum = 0.0f32;
         let mut val_batches = 0;
 
         for chunk in val_indices[..eval_count].chunks(args.batch_size) {
@@ -598,24 +668,76 @@ fn main() -> Result<()> {
             val_loss_sum += loss_val;
 
             let [b, q, h, w] = logits.dims();
-            let flat_logits = logits
+            let spatial_len = h * w;
+            let flat_logits_data: Vec<f32> = logits
                 .swap_dims(1, 2)
                 .swap_dims(2, 3)
-                .reshape([b, h * w, q]);
-            let pred_classes = flat_logits.argmax(2).reshape([b, h * w]);
-            let matches = pred_classes.equal(target_tensor).int();
-            let acc: f32 = matches.float().mean().into_data().convert::<f32>().to_vec().unwrap()[0];
-            val_acc_sum += acc * 100.0;
+                .into_data()
+                .convert::<f32>()
+                .to_vec()
+                .unwrap();
+            let target_data: Vec<i32> = target_tensor.into_data().convert::<i32>().to_vec().unwrap();
 
+            let mut top1_correct = 0usize;
+            let mut top5_correct = 0usize;
+            let mut total_delta_e = 0.0f32;
+            let pts = &COLOR_BINS_AB;
+            let total_pixels = b * spatial_len;
+
+            for p in 0..total_pixels {
+                let tgt_bin = target_data[p] as usize;
+                let tgt_a = pts[tgt_bin][0];
+                let tgt_b = pts[tgt_bin][1];
+
+                let logit_offset = p * q;
+                let tgt_logit = flat_logits_data[logit_offset + tgt_bin];
+
+                let mut count_higher = 0;
+                let mut best_bin = 0;
+                let mut max_l = f32::NEG_INFINITY;
+
+                for bin in 0..q {
+                    let l = flat_logits_data[logit_offset + bin];
+                    if l > max_l {
+                        max_l = l;
+                        best_bin = bin;
+                    }
+                    if l > tgt_logit {
+                        count_higher += 1;
+                    }
+                }
+
+                if best_bin == tgt_bin {
+                    top1_correct += 1;
+                }
+                if count_higher < 5 {
+                    top5_correct += 1;
+                }
+
+                let pred_a = pts[best_bin][0];
+                let pred_b = pts[best_bin][1];
+                let de = ((pred_a - tgt_a).powi(2) + (pred_b - tgt_b).powi(2)).sqrt();
+                total_delta_e += de;
+            }
+
+            let t1 = (top1_correct as f32 / total_pixels as f32) * 100.0;
+            let t5 = (top5_correct as f32 / total_pixels as f32) * 100.0;
+            let de = total_delta_e / total_pixels as f32;
+
+            val_top1_sum += t1;
+            val_top5_sum += t5;
+            val_de_sum += de;
             val_batches += 1;
         }
 
         let avg_val_loss = if val_batches > 0 { val_loss_sum / val_batches as f32 } else { 0.0 };
-        let avg_val_acc = if val_batches > 0 { val_acc_sum / val_batches as f32 } else { 0.0 };
+        let avg_val_top1 = if val_batches > 0 { val_top1_sum / val_batches as f32 } else { 0.0 };
+        let avg_val_top5 = if val_batches > 0 { val_top5_sum / val_batches as f32 } else { 0.0 };
+        let avg_val_de = if val_batches > 0 { val_de_sum / val_batches as f32 } else { 0.0 };
 
         let global_step = epoch * num_batches;
         tui_state.current_val_loss = Some(avg_val_loss);
-        tui_state.current_val_acc = Some(avg_val_acc);
+        tui_state.current_val_acc = Some(avg_val_top5);
         tui_state.val_loss_history.push((global_step as f64, avg_val_loss as f64));
         let _ = tui_state.save_csv(&args.out_dir.join("loss_history.csv"));
 
@@ -623,8 +745,8 @@ fn main() -> Result<()> {
             let _ = term.draw(|f| render_colorizer_chart(f, &tui_state));
         } else {
             println!(
-                "  Epoch {:>2}/{} ({:.1?}): Val Loss = {:.4} | Val Acc = {:.1}% | LR = {:.2e}",
-                epoch, args.epochs, t_epoch.elapsed(), avg_val_loss, avg_val_acc, lr
+                "  Epoch {:>2}/{} ({:.1?}): Val Loss = {:.4} | Top-1 = {:.1}% | Top-5 = {:.1}% | ΔE = {:.1} | LR = {:.2e}",
+                epoch, args.epochs, t_epoch.elapsed(), avg_val_loss, avg_val_top1, avg_val_top5, avg_val_de, lr
             );
         }
 
@@ -639,6 +761,7 @@ fn main() -> Result<()> {
             &model,
             &device,
             args.temperature,
+            args.chroma_boost,
             &preview_path,
         ) {
             eprintln!("Warning: Failed to save preview image grid: {}", e);
@@ -659,10 +782,13 @@ fn main() -> Result<()> {
             epochs: args.epochs,
             train_loss: last_loss_val,
             val_loss: avg_val_loss,
-            train_acc: last_acc_val,
-            val_acc: avg_val_acc,
+            train_acc: last_top1_val,
+            train_top5: last_top5_val,
+            val_acc: avg_val_top1,
+            val_top5: avg_val_top5,
             channels: args.channels,
             temperature: args.temperature,
+            chroma_boost: args.chroma_boost,
             timestamp: chrono::Local::now().to_rfc3339(),
         };
         let meta_json = serde_json::to_string_pretty(&meta)?;
