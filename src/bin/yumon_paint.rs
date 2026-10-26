@@ -66,7 +66,7 @@ struct Args {
     #[arg(long)]
     checkpoint_pass3: Option<PathBuf>,
 
-    /// Pass 4 MoE checkpoint directory (Fine Grayscale Details, e.g. checkpoints/yumon-art-pass4-db).
+    /// Pass 4 MoE checkpoint directory (Fine Details, e.g. checkpoints/yumon-art-pass4-db).
     #[arg(long)]
     checkpoint_pass4: Option<PathBuf>,
 
@@ -86,8 +86,8 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_CHROMA_BOOST)]
     colorizer_chroma_boost: f32,
 
-    /// Number of cascaded generation passes to execute (1 = 8x8, 2 = 16x16, 3 = 32x32, 4 = 64x64, 5 = 256x256 gray, 6 = 256x256 Full Color).
-    #[arg(long, default_value_t = 6)]
+    /// Number of cascaded generation passes to execute (1 = 8x8, 2 = 16x16, 3 = 32x32, 4 = 64x64, 5 = 256x256 Full Color Super-Resolution).
+    #[arg(long, default_value_t = 5)]
     passes: usize,
 
     /// Path to Kilo Talk vocabulary.
@@ -257,16 +257,22 @@ fn load_or_init_pass_brain(
     pass_name: &str,
     pass_ckpt: Option<&PathBuf>,
     fallback_ckpt: Option<&PathBuf>,
+    default_candidates: &[&str],
     max_seq_len: usize,
     device: &<BackendType as Backend>::Device,
 ) -> Result<YumonMoeBrain<BackendType>> {
-    let target = pass_ckpt.or(fallback_ckpt);
+    let auto_found = default_candidates
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists() && (p.join("model").exists() || p.join("model.bin").exists() || p.join("model.mpk").exists()));
+
+    let target = pass_ckpt.or(fallback_ckpt).or(auto_found.as_ref());
     if let Some(ckpt) = target {
         println!("Loading {} checkpoint from {}...", pass_name, ckpt.display());
         let (model, _, _) = YumonMoeBrain::<BackendType>::load(ckpt.to_str().unwrap(), device)?;
         Ok(model)
     } else {
-        println!("No {} checkpoint specified — initializing compact untrained MoE architecture...", pass_name);
+        println!("No {} checkpoint specified or found on disk — initializing compact untrained MoE architecture...", pass_name);
         let cfg = YumonMoeBrainConfig::new(ART_VOCAB_SIZE, TrainingStage::Language)
             .with_embed_dim(64)
             .with_hidden_units(64)
@@ -305,6 +311,7 @@ fn main() -> Result<()> {
         "Pass 1",
         args.checkpoint_pass1.as_ref(),
         args.checkpoint.as_ref(),
+        &["checkpoints/yumon-art-pass1-db", "checkpoints/yumon-art-pass1"],
         128,
         &device,
     )?;
@@ -314,6 +321,7 @@ fn main() -> Result<()> {
             "Pass 2",
             args.checkpoint_pass2.as_ref(),
             args.checkpoint.as_ref(),
+            &["checkpoints/yumon-art-pass2-db", "checkpoints/yumon-art-pass2"],
             512,
             &device,
         )?)
@@ -326,6 +334,7 @@ fn main() -> Result<()> {
             "Pass 3",
             args.checkpoint_pass3.as_ref(),
             args.checkpoint.as_ref(),
+            &["checkpoints/yumon-art-pass3-db", "checkpoints/yumon-art-pass3"],
             1536,
             &device,
         )?)
@@ -338,6 +347,7 @@ fn main() -> Result<()> {
             "Pass 4",
             args.checkpoint_pass4.as_ref(),
             args.checkpoint.as_ref(),
+            &["checkpoints/yumon-art-pass4-db", "checkpoints/yumon-art-pass4"],
             5500,
             &device,
         )?)
@@ -637,11 +647,11 @@ fn main() -> Result<()> {
         print_terminal_canvas(&canvas_hwc);
     }
 
-    // PASS 4: Fine Grayscale Details (64x64 Pixels, 4,096 color tokens)
+    // PASS 4: Fine Color Details (64x64 Pixels, 4,096 color tokens)
     let mut pass4_colors = Vec::with_capacity(4096);
     if let Some(brain_p4) = &brain_p4 {
         println!("\n═══════════════════════════════════════════════════════");
-        println!("  🎨 Pass 4 / {}: Fine Grayscale Details (4,096 Pixels)", args.passes);
+        println!("  🎨 Pass 4 / {}: Fine Color Details (4,096 Pixels)", args.passes);
         println!("═══════════════════════════════════════════════════════");
         let t_pass4 = Instant::now();
 
