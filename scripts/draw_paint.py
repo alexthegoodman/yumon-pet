@@ -824,20 +824,20 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       <summary>⚙️ Generation & Guidance Controls</summary>
       <div class="sliders-grid">
         <div class="slider-item">
-          <label><span>Pass 3 Guidance (16x16 anchor)</span><strong id="valGuideP3">0.25</strong></label>
-          <input type="range" id="guideP3" min="0" max="1.5" step="0.05" value="0.25"/>
+          <label><span>Pass 3 Guidance (16x16 anchor)</span><strong id="valGuideP3">8</strong></label>
+          <input type="range" id="guideP3" min="0" max="10" step="0.25" value="8"/>
         </div>
         <div class="slider-item">
-          <label><span>Pass 4 Guidance (32x32 anchor)</span><strong id="valGuideP4">5.5</strong></label>
-          <input type="range" id="guideP4" min="0" max="10" step="0.25" value="5.5"/>
+          <label><span>Pass 4 Guidance (32x32 anchor)</span><strong id="valGuideP4">8</strong></label>
+          <input type="range" id="guideP4" min="0" max="10" step="0.25" value="8"/>
         </div>
         <div class="slider-item">
-          <label><span>Pass 3 Temp (Anatomy)</span><strong id="valTempP3">1.25</strong></label>
-          <input type="range" id="tempP3" min="0.4" max="2.0" step="0.05" value="1.25"/>
+          <label><span>Pass 3 Temp (Anatomy)</span><strong id="valTempP3">2.2</strong></label>
+          <input type="range" id="tempP3" min="0.4" max="3.0" step="0.05" value="2.2"/>
         </div>
         <div class="slider-item">
-          <label><span>Pass 4 Temp (Details)</span><strong id="valTempP4">1.20</strong></label>
-          <input type="range" id="tempP4" min="0.4" max="2.0" step="0.05" value="1.20"/>
+          <label><span>Pass 4 Temp (Details)</span><strong id="valTempP4">0.5</strong></label>
+          <input type="range" id="tempP4" min="0.4" max="3.0" step="0.05" value="0.5"/>
         </div>
       </div>
     </details>
