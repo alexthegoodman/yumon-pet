@@ -136,10 +136,16 @@ class SparseMoE(nn.Module):
         self.router = nn.Linear(dim, num_experts, bias=False)
         self.experts = nn.ModuleList([SwiGLU(dim, ff_dim) for _ in range(num_experts)])
 
-    def forward(self, x: torch.Tensor, active_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        active_mask: Optional[torch.Tensor] = None,
+        router_input: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         x: [N, dim] where N = batch_size * seq_len
         active_mask: [N] bool tensor, True for non-padding tokens
+        router_input: [N, dim] optional conditioning input for router decisions
         Returns:
             output: [N, dim]
             balance_loss: scalar tensor
@@ -148,8 +154,9 @@ class SparseMoE(nn.Module):
         N, D = x.shape
         device = x.device
 
-        # Router logits in fp32 for numerical stability
-        router_logits = self.router(x).float()  # [N, num_experts]
+        # Router logits in fp32 for numerical stability (from router_input if provided, else x)
+        r_in = router_input if router_input is not None else x
+        router_logits = self.router(r_in).float()  # [N, num_experts]
         probabilities = F.softmax(router_logits, dim=-1)  # [N, num_experts]
 
         # Top-k selection
@@ -180,6 +187,16 @@ class SparseMoE(nn.Module):
         log_z = torch.logsumexp(active_logits, dim=-1)
         z_loss = torch.mean(log_z ** 2)
 
+        # Re-normalize top-k gates when top_k > 1 so that the sum of expert weights
+        # per token equals 1.0, preserving token activation energy and preventing
+        # gate attenuation when multiple experts attend to a token.
+        if self.top_k > 1:
+            topk_probs = torch.gather(probabilities, dim=-1, index=topk_indices)
+            topk_sum = topk_probs.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+            dispatch_probabilities = probabilities / topk_sum
+        else:
+            dispatch_probabilities = probabilities
+
         # Sparse dispatch: accumulate expert outputs on device
         output = torch.zeros((N, D), dtype=x.dtype, device=device)
 
@@ -201,8 +218,8 @@ class SparseMoE(nn.Module):
             if token_rows.numel() == 0:
                 continue
 
-            # Full-softmax gating preserves language-loss router gradients
-            gates = probabilities[token_rows, expert_id].unsqueeze(-1).to(x.dtype)
+            # Dispatch gating with re-normalized weights when top_k > 1
+            gates = dispatch_probabilities[token_rows, expert_id].unsqueeze(-1).to(x.dtype)
             expert_in = x[token_rows]
             expert_out = self.experts[expert_id](expert_in)
 

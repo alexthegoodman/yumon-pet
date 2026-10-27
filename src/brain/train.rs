@@ -1054,6 +1054,8 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             adaptive_depth:  self.config.adaptive_depth.clone(),
             kv_heads:        self.config.kv_heads,
             use_mrope:       self.config.use_mrope,
+            use_coord_router: self.config.use_coord_router,
+            num_shared_experts: self.config.num_shared_experts,
         };
         self.save(dir, tokenizer, &meta)
     }

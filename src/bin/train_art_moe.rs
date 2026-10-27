@@ -98,6 +98,10 @@ pub struct ArtConfig {
     pub out_dir: String,
     #[serde(default)]
     pub pass: Option<usize>,
+    #[serde(default)]
+    pub use_coord_router: Option<bool>,
+    #[serde(default)]
+    pub num_shared_experts: Option<usize>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -459,6 +463,9 @@ fn main() -> Result<()> {
     };
 
     // 2. Initialize Model (Pure Causal Language Model with Flash Attention)
+    let use_coord_router = cfg.use_coord_router.unwrap_or(true);
+    let num_shared_experts = cfg.num_shared_experts.unwrap_or(0);
+
     let brain_config = YumonMoeBrainConfig::new(cfg.vocab_size, TrainingStage::Language)
         .with_embed_dim(cfg.embed_dim)
         .with_hidden_units(cfg.embed_dim)
@@ -468,7 +475,9 @@ fn main() -> Result<()> {
         .with_max_seq_len(cfg.max_seq_len)
         .with_num_experts(cfg.num_experts)
         .with_top_k(cfg.top_k)
-        .with_is_multimodal(false);
+        .with_is_multimodal(false)
+        .with_use_coord_router(use_coord_router)
+        .with_num_shared_experts(num_shared_experts);
 
     let mut model: YumonMoeBrain<TrainBackend> = brain_config.init(&device);
     let mut optimizer = AdamWConfig::new()
@@ -747,6 +756,8 @@ fn main() -> Result<()> {
                 is_multimodal: false,
                 has_edge_head: false,
                 use_mrope: true,
+                use_coord_router,
+                num_shared_experts,
             };
 
             let meta_json = serde_json::to_string_pretty(&meta)?;

@@ -1,7 +1,9 @@
 {
   "architecture": "moe",
-  "num_experts": 4,
-  "top_k": 1,
+  "num_experts": 8,
+  "top_k": 2,
+  "use_coord_router": true,
+  "num_shared_experts": 1,
   "cache": "training-cache/diffusion_kilo_samples.bin",
   "vocab_file": "training-cache/diffusion_talk_vocab.json",
   "max_seq_len": 512,
