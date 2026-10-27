@@ -31,6 +31,16 @@ pub struct ArtSample {
     pub pass: u8,
     pub tokens: Vec<u32>,
     pub target_start: usize,
+    #[serde(default)]
+    pub spatial_weights: Option<Vec<f32>>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct ArtSampleV3 {
+    pub prompt_text: String,
+    pub pass: u8,
+    pub tokens: Vec<u32>,
+    pub target_start: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -155,7 +165,18 @@ fn main() -> Result<()> {
         let sample_len = u32::from_le_bytes(sample_len_bytes) as usize;
         let mut sample_bytes = vec![0u8; sample_len];
         reader.read_exact(&mut sample_bytes)?;
-        let sample: ArtSample = bincode::deserialize(&sample_bytes)?;
+        let sample: ArtSample = if meta.version == 3 {
+            let v3: ArtSampleV3 = bincode::deserialize(&sample_bytes)?;
+            ArtSample {
+                prompt_text: v3.prompt_text,
+                pass: v3.pass,
+                tokens: v3.tokens,
+                target_start: v3.target_start,
+                spatial_weights: None,
+            }
+        } else {
+            bincode::deserialize(&sample_bytes)?
+        };
 
         // File names
         let img_filename = format!("sample_{:05}.png", global_idx);

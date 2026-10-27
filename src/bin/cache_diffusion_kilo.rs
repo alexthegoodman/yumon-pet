@@ -19,12 +19,13 @@ use {
         yumon_talk::TranslationContext,
     },
     yumon_pet::vision::paint_action::{
-        ART_VOCAB_SIZE, CANVAS_SIZE, generate_cascaded_sequence_samples,
+        ART_VOCAB_SIZE, CANVAS_SIZE, FaceRoi, FaceRoiDatabase, compute_pass_spatial_weights,
+        generate_cascaded_sequence_samples,
     },
 };
 
 pub const ART_CACHE_MAGIC: &[u8; 8] = b"YUMONART";
-pub const ART_CACHE_VERSION: u32 = 3;
+pub const ART_CACHE_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ArtCacheMetadata {
@@ -42,6 +43,8 @@ pub struct ArtSample {
     pub pass: u8,
     pub tokens: Vec<u32>,
     pub target_start: usize,
+    #[serde(default)]
+    pub spatial_weights: Option<Vec<f32>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -68,6 +71,10 @@ struct Args {
     /// Limit number of images to convert (None = all).
     #[arg(long)]
     limit: Option<usize>,
+
+    /// Path to face & eye ROI annotations JSON file (optional).
+    #[arg(long, default_value = "training-cache/diffusion_face_rois.json")]
+    rois: Option<PathBuf>,
 
     /// Filter to a specific pass (1, 2, 3, or 4). If omitted, caches all passes.
     #[arg(long)]
@@ -131,9 +138,60 @@ fn main() -> Result<()> {
     }
     println!("Total manifest JSON files found: {}", manifest_files.len());
 
-    // 3. Collect image items from manifests
-    let mut items: Vec<(PathBuf, String)> = Vec::new();
-    'collect: for (dir, manifest_path) in &manifest_files {
+    if let Some(p) = args.pass {
+        anyhow::ensure!(p >= 1 && p <= 4, "Invalid pass {p}; must be 1, 2, 3, or 4");
+    }
+
+    // 3. Load face & eye ROI annotations if provided
+    let rois_map: HashMap<String, FaceRoi> = if let Some(ref path) = args.rois {
+        if path.exists() {
+            println!("\nLoading face & eye ROI annotations from {}...", path.display());
+            match File::open(path) {
+                Ok(f) => {
+                    let rdr = BufReader::new(f);
+                    let db: Result<FaceRoiDatabase, _> = serde_json::from_reader(rdr);
+                    match db {
+                        Ok(db) => {
+                            let with_eyes = db
+                                .annotations
+                                .values()
+                                .filter(|r| !r.no_face && (!r.eyes.is_empty() || r.face.is_some()))
+                                .count();
+                            let skipped = db.annotations.values().filter(|r| r.no_face).count();
+                            println!(
+                                "Loaded {} total ROI records: {} with annotated faces/eyes, {} marked as no-face.",
+                                db.annotations.len(),
+                                with_eyes,
+                                skipped
+                            );
+                            db.annotations
+                        }
+                        Err(e) => {
+                            eprintln!("Warning: Failed to parse ROI database: {}", e);
+                            HashMap::new()
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to open ROI file: {}", e);
+                    HashMap::new()
+                }
+            }
+        } else {
+            println!("ROI annotations file not found at {}; proceeding with uniform weights.", path.display());
+            HashMap::new()
+        }
+    } else {
+        HashMap::new()
+    };
+
+    // 4. Collect image items from manifests (prioritizing annotated faces first)
+    println!("\nScanning manifests for available images...");
+    let mut annotated_face_items: Vec<(PathBuf, String)> = Vec::new();
+    let mut other_annotated_items: Vec<(PathBuf, String)> = Vec::new();
+    let mut unannotated_items: Vec<(PathBuf, String)> = Vec::new();
+
+    for (dir, manifest_path) in &manifest_files {
         let file = File::open(manifest_path)?;
         let reader = BufReader::new(file);
         let manifest: HashMap<String, ManifestItem> = serde_json::from_reader(reader)
@@ -142,24 +200,60 @@ fn main() -> Result<()> {
         for (filename, item) in manifest {
             let img_path = dir.join(&filename);
             if img_path.exists() {
-                items.push((img_path, item.p));
-            }
-            if let Some(limit) = args.limit {
-                if items.len() >= limit {
-                    break 'collect;
+                if let Some(roi) = rois_map.get(&filename) {
+                    if !roi.no_face && (!roi.eyes.is_empty() || roi.face.is_some()) {
+                        annotated_face_items.push((img_path, item.p));
+                    } else {
+                        other_annotated_items.push((img_path, item.p));
+                    }
+                } else {
+                    unannotated_items.push((img_path, item.p));
                 }
             }
         }
     }
 
-    println!("Total images to process: {}", items.len());
-    ensure!(!items.is_empty(), "No valid image files found in manifest");
+    let total_available = annotated_face_items.len() + other_annotated_items.len() + unannotated_items.len();
+    println!("Found {} available images across all manifests:", total_available);
+    println!("  - {} with annotated face/eyes", annotated_face_items.len());
+    println!("  - {} marked as no-face / skipped", other_annotated_items.len());
+    println!("  - {} unannotated", unannotated_items.len());
 
-    if let Some(p) = args.pass {
-        anyhow::ensure!(p >= 1 && p <= 4, "Invalid pass {p}; must be 1, 2, 3, or 4");
+    let mut items: Vec<(PathBuf, String)> = Vec::new();
+    // Priority 1: Annotated face images
+    let total_face_rois = annotated_face_items.len();
+    items.extend(annotated_face_items);
+    // Priority 2: Other annotated images (marked no-face)
+    items.extend(other_annotated_items);
+    // Priority 3: Unannotated images
+    items.extend(unannotated_items);
+
+    if let Some(limit) = args.limit {
+        if items.len() > limit {
+            items.truncate(limit);
+        }
     }
 
-    // 4. Process images and generate cascaded sequence training samples
+    let final_face_count = items
+        .iter()
+        .filter(|(path, _)| {
+            let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+            rois_map.get(filename).is_some_and(|r| !r.no_face && (!r.eyes.is_empty() || r.face.is_some()))
+        })
+        .count();
+    let final_other_count = items.len() - final_face_count;
+
+    println!("\nSelected {} images to process (limit: {:?}):", items.len(), args.limit);
+    if total_face_rois > 0 && final_face_count >= total_face_rois {
+        println!("  - Priority 1: {} annotated face images (100% of available annotated faces included!)", final_face_count);
+    } else {
+        println!("  - Priority 1: {} annotated face images", final_face_count);
+    }
+    println!("  - Fill / other: {} images (unannotated or skipped)", final_other_count);
+
+    ensure!(!items.is_empty(), "No valid image files found to process");
+
+    // 5. Process images and generate cascaded sequence training samples
     let pb = ProgressBar::new(items.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -185,6 +279,11 @@ fn main() -> Result<()> {
 
             let raw_hwc = img.into_raw();
 
+            // Check if this image has annotated face/eye ROIs
+            let filename = img_path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+            let roi = rois_map.get(filename);
+            let has_roi = roi.is_some_and(|r| !r.no_face && (!r.eyes.is_empty() || r.face.is_some()));
+
             // Tokenize prompt into Kilo Talk tokens
             let mut ctx = TranslationContext::new();
             let prompt_toks = match vocab.encode(prompt_text, &mut ctx) {
@@ -203,11 +302,18 @@ fn main() -> Result<()> {
                     }
                 }
 
+                let spatial_weights = if has_roi {
+                    Some(compute_pass_spatial_weights(roi, pass, 10.0, 3.0, 1.0))
+                } else {
+                    None
+                };
+
                 out.push(ArtSample {
                     prompt_text: prompt_text.clone(),
                     pass,
                     tokens,
                     target_start,
+                    spatial_weights,
                 });
             }
 
@@ -217,7 +323,15 @@ fn main() -> Result<()> {
 
     pb.finish_with_message("Done processing images!");
 
-    println!("\nGenerated {} total training samples from {} images", samples.len(), items.len());
+    let weighted_samples = samples.iter().filter(|s| s.spatial_weights.is_some()).count();
+    let uniform_samples = samples.len() - weighted_samples;
+    println!(
+        "\nGenerated {} total training samples from {} images:",
+        samples.len(),
+        items.len()
+    );
+    println!("  - Samples with spatial ROI weights: {}", weighted_samples);
+    println!("  - Samples with uniform weights    : {}", uniform_samples);
 
     // 5. Write binary cache
     if let Some(parent) = args.output.parent() {
@@ -261,6 +375,13 @@ fn main() -> Result<()> {
         println!("  Total tokens : {}", s.tokens.len());
         println!("  Target start : {}", s.target_start);
         println!("  Target count : {}", s.tokens.len() - s.target_start);
+        if let Some(ref sw) = s.spatial_weights {
+            let eye_count = sw.iter().filter(|&&w| w >= 9.0).count();
+            let face_count = sw.iter().filter(|&&w| w >= 2.5 && w < 9.0).count();
+            println!("  Spatial W    : Active (eye tokens: {}, face tokens: {})", eye_count, face_count);
+        } else {
+            println!("  Spatial W    : Uniform (1.0)");
+        }
     }
 
     Ok(())

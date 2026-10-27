@@ -18,6 +18,16 @@ pub struct ArtSample {
     pub pass: u8,
     pub tokens: Vec<u32>,
     pub target_start: usize,
+    #[serde(default)]
+    pub spatial_weights: Option<Vec<f32>>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug)]
+pub struct ArtSampleV3 {
+    pub prompt_text: String,
+    pub pass: u8,
+    pub tokens: Vec<u32>,
+    pub target_start: usize,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -44,12 +54,29 @@ fn main() -> anyhow::Result<()> {
         let sample_len = u32::from_le_bytes(sample_len_bytes) as usize;
         let mut sample_bytes = vec![0u8; sample_len];
         std::io::Read::read_exact(&mut reader, &mut sample_bytes)?;
-        let sample: ArtSample = bincode::deserialize(&sample_bytes)?;
+        let sample: ArtSample = if meta.version == 3 {
+            let v3: ArtSampleV3 = bincode::deserialize(&sample_bytes)?;
+            ArtSample {
+                prompt_text: v3.prompt_text,
+                pass: v3.pass,
+                tokens: v3.tokens,
+                target_start: v3.target_start,
+                spatial_weights: None,
+            }
+        } else {
+            bincode::deserialize(&sample_bytes)?
+        };
         *pass_counts.entry(sample.pass).or_insert(0) += 1;
         total += 1;
         if total <= 3 {
-            println!("Sample {}: pass={}, prompt=\"{}\", target_start={}, total_tokens={}",
-                total, sample.pass, sample.prompt_text, sample.target_start, sample.tokens.len());
+            let sw_info = if let Some(ref sw) = sample.spatial_weights {
+                let eyes = sw.iter().filter(|&&w| w >= 9.0).count();
+                format!(", spatial_weights: Some(eye_toks={})", eyes)
+            } else {
+                "".to_string()
+            };
+            println!("Sample {}: pass={}, prompt=\"{}\", target_start={}, total_tokens={}{}",
+                total, sample.pass, sample.prompt_text, sample.target_start, sample.tokens.len(), sw_info);
         }
     }
 

@@ -38,6 +38,16 @@ pub struct ArtSample {
     pub pass: u8,
     pub tokens: Vec<u32>,
     pub target_start: usize,
+    #[serde(default)]
+    pub spatial_weights: Option<Vec<f32>>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug)]
+pub struct ArtSampleV3 {
+    pub prompt_text: String,
+    pub pass: u8,
+    pub tokens: Vec<u32>,
+    pub target_start: usize,
 }
 
 fn load_pass1_samples(path: &Path, max_samples: usize) -> Result<Vec<ArtSample>> {
@@ -51,6 +61,7 @@ fn load_pass1_samples(path: &Path, max_samples: usize) -> Result<Vec<ArtSample>>
     let meta_len = u32::from_le_bytes(meta_len_buf) as usize;
     let mut meta_bytes = vec![0u8; meta_len];
     reader.read_exact(&mut meta_bytes)?;
+    let meta: ArtCacheMetadata = bincode::deserialize(&meta_bytes)?;
 
     let mut samples = Vec::new();
     let mut len_buf = [0u8; 4];
@@ -58,7 +69,18 @@ fn load_pass1_samples(path: &Path, max_samples: usize) -> Result<Vec<ArtSample>>
         let sample_len = u32::from_le_bytes(len_buf) as usize;
         let mut sample_bytes = vec![0u8; sample_len];
         reader.read_exact(&mut sample_bytes)?;
-        let sample: ArtSample = bincode::deserialize(&sample_bytes)?;
+        let sample: ArtSample = if meta.version == 3 {
+            let v3: ArtSampleV3 = bincode::deserialize(&sample_bytes)?;
+            ArtSample {
+                prompt_text: v3.prompt_text,
+                pass: v3.pass,
+                tokens: v3.tokens,
+                target_start: v3.target_start,
+                spatial_weights: None,
+            }
+        } else {
+            bincode::deserialize(&sample_bytes)?
+        };
         if sample.pass == 1 {
             samples.push(sample);
             if samples.len() >= max_samples {

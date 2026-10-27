@@ -998,6 +998,121 @@ pub fn build_cascaded_inference_coords(
     coords
 }
 
+/// Face and Eye Region of Interest (ROI) annotation for an image.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct FaceRoi {
+    #[serde(default)]
+    pub eyes: Vec<[usize; 2]>,
+    #[serde(default)]
+    pub face: Option<[usize; 4]>,
+    #[serde(default)]
+    pub no_face: bool,
+}
+
+/// Collection of Face & Eye ROI annotations (e.g. loaded from diffusion_face_rois.json).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FaceRoiDatabase {
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default = "default_roi_canvas_size")]
+    pub canvas_size: usize,
+    pub annotations: std::collections::HashMap<String, FaceRoi>,
+}
+
+fn default_roi_canvas_size() -> usize {
+    CANVAS_SIZE
+}
+
+/// Compute per-token spatial weights for a pass based on optional FaceRoi.
+/// - Background: `w_bg` (default 1.0)
+/// - Face bounding box: `w_face` (default 3.0)
+/// - Eye coordinates + 1-pixel neighborhood: `w_eye` (default 10.0)
+///
+/// Returns a `Vec<f32>` whose length matches the number of target color tokens for that pass:
+/// - Pass 1: 64 tokens (8x8)
+/// - Pass 2: 256 tokens (16x16)
+/// - Pass 3: 1,024 tokens (32x32)
+/// - Pass 4: 4,096 tokens (64x64)
+pub fn compute_pass_spatial_weights(
+    roi: Option<&FaceRoi>,
+    pass: u8,
+    w_eye: f32,
+    w_face: f32,
+    w_bg: f32,
+) -> Vec<f32> {
+    let (grid_dim, patch_size) = match pass {
+        1 => (8, 8),
+        2 => (16, 4),
+        3 => (32, 2),
+        4 => (64, 1),
+        _ => (64, 1),
+    };
+    let num_tokens = grid_dim * grid_dim;
+
+    let Some(roi) = roi else {
+        return vec![w_bg; num_tokens];
+    };
+
+    if roi.no_face || (roi.eyes.is_empty() && roi.face.is_none()) {
+        return vec![w_bg; num_tokens];
+    }
+
+    // 1. Build 64x64 pixel grid initialized to w_bg
+    let mut grid = [w_bg; CANVAS_SIZE * CANVAS_SIZE];
+
+    // 2. Mark face bounding box if present
+    if let Some(box_coords) = roi.face {
+        let min_x = box_coords[0].min(box_coords[2]).min(CANVAS_SIZE - 1);
+        let max_x = box_coords[0].max(box_coords[2]).min(CANVAS_SIZE - 1);
+        let min_y = box_coords[1].min(box_coords[3]).min(CANVAS_SIZE - 1);
+        let max_y = box_coords[1].max(box_coords[3]).min(CANVAS_SIZE - 1);
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                grid[y * CANVAS_SIZE + x] = w_face;
+            }
+        }
+    }
+
+    // 3. Mark eye points (+ 1-pixel neighborhood) with highest priority
+    for eye in &roi.eyes {
+        let ex = eye[0].min(CANVAS_SIZE - 1) as i32;
+        let ey = eye[1].min(CANVAS_SIZE - 1) as i32;
+
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let ny = (ey + dy).clamp(0, (CANVAS_SIZE - 1) as i32) as usize;
+                let nx = (ex + dx).clamp(0, (CANVAS_SIZE - 1) as i32) as usize;
+                grid[ny * CANVAS_SIZE + nx] = w_eye;
+            }
+        }
+    }
+
+    // 4. Max-pool down to the pass token grid (ensures micro-eye signals are preserved)
+    let mut token_weights = Vec::with_capacity(num_tokens);
+    for gy in 0..grid_dim {
+        let y_start = gy * patch_size;
+        let y_end = y_start + patch_size;
+        for gx in 0..grid_dim {
+            let x_start = gx * patch_size;
+            let x_end = x_start + patch_size;
+
+            let mut max_w = w_bg;
+            for y in y_start..y_end {
+                for x in x_start..x_end {
+                    let w = grid[y * CANVAS_SIZE + x];
+                    if w > max_w {
+                        max_w = w;
+                    }
+                }
+            }
+            token_weights.push(max_w);
+        }
+    }
+
+    token_weights
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1147,5 +1262,43 @@ mod tests {
         assert_eq!(inf_coords.len(), prefix.len() + 64 + 16);
         assert_eq!(inf_coords[3], (3.0, 4.0, 4.0)); // first gen token
         assert_eq!(inf_coords[3 + 63], (66.0, 60.0, 60.0)); // last gen token
+    }
+
+    #[test]
+    fn test_compute_pass_spatial_weights() {
+        // Test an image with eyes at (11, 23) and (12, 23) and face box (10, 21, 15, 27)
+        let roi = FaceRoi {
+            eyes: vec![[11, 23], [12, 23]],
+            face: Some([10, 21, 15, 27]),
+            no_face: false,
+        };
+
+        // Pass 1: 64 tokens (8x8)
+        let w_p1 = compute_pass_spatial_weights(Some(&roi), 1, 10.0, 3.0, 1.0);
+        assert_eq!(w_p1.len(), 64);
+        assert!(w_p1.contains(&10.0));
+
+        // Pass 2: 256 tokens (16x16)
+        let w_p2 = compute_pass_spatial_weights(Some(&roi), 2, 10.0, 3.0, 1.0);
+        assert_eq!(w_p2.len(), 256);
+        let eye_count = w_p2.iter().filter(|&&w| (w - 10.0).abs() < 1e-4).count();
+        let bg_count = w_p2.iter().filter(|&&w| (w - 1.0).abs() < 1e-4).count();
+        assert!(eye_count > 0, "Pass 2 should have eye tokens with weight 10.0");
+        assert_eq!(eye_count + bg_count + w_p2.iter().filter(|&&w| (w - 3.0).abs() < 1e-4).count(), 256);
+
+        // Pass 3: 1,024 tokens (32x32)
+        let w_p3 = compute_pass_spatial_weights(Some(&roi), 3, 10.0, 3.0, 1.0);
+        assert_eq!(w_p3.len(), 1024);
+
+        // Pass 4: 4,096 tokens (64x64)
+        let w_p4 = compute_pass_spatial_weights(Some(&roi), 4, 10.0, 3.0, 1.0);
+        assert_eq!(w_p4.len(), 4096);
+        assert_eq!(w_p4[23 * 64 + 11], 10.0);
+        assert_eq!(w_p4[23 * 64 + 12], 10.0);
+
+        // Empty / None roi should return all 1.0
+        let w_none = compute_pass_spatial_weights(None, 2, 10.0, 3.0, 1.0);
+        assert_eq!(w_none.len(), 256);
+        assert!(w_none.iter().all(|&w| w == 1.0));
     }
 }

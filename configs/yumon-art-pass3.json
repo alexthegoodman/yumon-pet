@@ -1,7 +1,7 @@
 {
   "architecture": "moe",
-  "num_experts": 4,
-  "top_k": 1,
+  "num_experts": 8,
+  "top_k": 2,
   "cache": "training-cache/diffusion_kilo_samples.bin",
   "vocab_file": "training-cache/diffusion_talk_vocab.json",
   "max_seq_len": 1536,
@@ -12,7 +12,7 @@
   "attn_heads": 8,
   "ff_dim": 512,
   "batch_size": 1,
-  "epochs": 10,
+  "epochs": 3,
   "first_lr": 0.0003,
   "last_lr": 0.00003,
   "validation_fraction": 0.02,

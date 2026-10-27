@@ -17,7 +17,10 @@ pub mod colorizer;
 pub mod paint_studio;
 pub mod chart;
 
-pub use paint_action::{PaintAction, CANVAS_SIZE, PATCH_SIZE, GRID_SIZE, NUM_PATCHES, ART_VOCAB_SIZE};
+pub use paint_action::{
+    PaintAction, CANVAS_SIZE, PATCH_SIZE, GRID_SIZE, NUM_PATCHES, ART_VOCAB_SIZE,
+    FaceRoi, FaceRoiDatabase, compute_pass_spatial_weights,
+};
 pub use patch_encoder::{VisionPatchEncoder, VisionPatchEncoderConfig};
 pub use upscaler::{UpscalerModel, UpscalerModelConfig, UpscalerDiscriminator, UpscalerDiscriminatorConfig};
 pub use colorizer::{

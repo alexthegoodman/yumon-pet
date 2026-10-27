@@ -54,6 +54,16 @@ pub struct ArtSample {
     pub pass: u8,
     pub tokens: Vec<u32>,
     pub target_start: usize,
+    #[serde(default)]
+    pub spatial_weights: Option<Vec<f32>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ArtSampleV3 {
+    pub prompt_text: String,
+    pub pass: u8,
+    pub tokens: Vec<u32>,
+    pub target_start: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -153,9 +163,28 @@ fn load_samples_from_cache(path: &Path) -> Result<Vec<ArtSample>> {
         let sample_len = u32::from_le_bytes(len_buf) as usize;
         let mut sample_bytes = vec![0u8; sample_len];
         reader.read_exact(&mut sample_bytes)?;
-        let sample: ArtSample = bincode::deserialize(&sample_bytes)?;
+        let sample: ArtSample = if meta.version == 3 {
+            let v3: ArtSampleV3 = bincode::deserialize(&sample_bytes)?;
+            ArtSample {
+                prompt_text: v3.prompt_text,
+                pass: v3.pass,
+                tokens: v3.tokens,
+                target_start: v3.target_start,
+                spatial_weights: None,
+            }
+        } else {
+            bincode::deserialize(&sample_bytes)?
+        };
         samples.push(sample);
     }
+
+    let weighted_count = samples.iter().filter(|s| s.spatial_weights.is_some()).count();
+    println!(
+        "Loaded {} samples (cache v{}, {} with boosted spatial ROI weights)",
+        samples.len(),
+        meta.version,
+        weighted_count
+    );
 
     Ok(samples)
 }
@@ -520,9 +549,13 @@ fn main() -> Result<()> {
                         flat_inputs.push(s.tokens[i] as i32);
                         let tgt = s.tokens[i + 1] as i32;
                         flat_targets.push(tgt);
-                        // Compute loss on target color tokens (starting at target_start)
+                        // Compute loss on target color tokens (starting at target_start) with optional spatial weights
                         if i + 1 >= s.target_start && tgt != PAD_TOKEN as i32 {
-                            flat_mask.push(1.0f32);
+                            let target_idx = (i + 1) - s.target_start;
+                            let w = s.spatial_weights.as_ref()
+                                .and_then(|sw| sw.get(target_idx).copied())
+                                .unwrap_or(1.0);
+                            flat_mask.push(w);
                         } else {
                             flat_mask.push(0.0f32);
                         }
@@ -618,7 +651,11 @@ fn main() -> Result<()> {
                         let tgt = s.tokens[i + 1] as i32;
                         flat_targets.push(tgt);
                         if i + 1 >= s.target_start && tgt != PAD_TOKEN as i32 {
-                            flat_mask.push(1.0f32);
+                            let target_idx = (i + 1) - s.target_start;
+                            let w = s.spatial_weights.as_ref()
+                                .and_then(|sw| sw.get(target_idx).copied())
+                                .unwrap_or(1.0);
+                            flat_mask.push(w);
                         } else {
                             flat_mask.push(0.0f32);
                         }

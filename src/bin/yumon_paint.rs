@@ -99,19 +99,19 @@ struct Args {
     temperature: Option<f32>,
 
     /// Pass 1 sampling temperature (broad composition: high temp for rich, vibrant palette choices).
-    #[arg(long, default_value_t = 1.1)]
+    #[arg(long, default_value_t = 1.4)]
     temperature_pass1: f32,
 
     /// Pass 2 sampling temperature (shapes and silhouettes).
-    #[arg(long, default_value_t = 1.6)]
+    #[arg(long, default_value_t = 1.4)]
     temperature_pass2: f32,
 
     /// Pass 3 sampling temperature (anatomy & features).
-    #[arg(long, default_value_t = 1.2)]
+    #[arg(long, default_value_t = 1.25)]
     temperature_pass3: f32,
 
     /// Pass 4 sampling temperature (fine pixel art details, high spatial precision).
-    #[arg(long, default_value_t = 1.2)]
+    #[arg(long, default_value_t = 1.25)]
     temperature_pass4: f32,
 
     /// Top-K sampling filter (0 to disable, e.g. 24).
@@ -119,7 +119,7 @@ struct Args {
     top_k: usize,
 
     /// Top-P (nucleus) sampling filter (1.0 to disable, e.g. 0.88).
-    #[arg(long, default_value_t = 0.84)]
+    #[arg(long, default_value_t = 0.73)]
     top_p: f32,
 
     /// Repetition penalty applied to runs of identical consecutive colors (0.0 to disable).
