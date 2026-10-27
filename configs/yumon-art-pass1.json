@@ -4,6 +4,7 @@
   "top_k": 2,
   "use_coord_router": true,
   "num_shared_experts": 1,
+  "use_face_weighting": false,
   "cache": "training-cache/diffusion_kilo_samples.bin",
   "vocab_file": "training-cache/diffusion_talk_vocab.json",
   "max_seq_len": 128,

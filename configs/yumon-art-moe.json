@@ -3,6 +3,7 @@
   "num_experts": 8,
   "top_k": 2,
   "use_coord_router": true,
+  "use_face_weighting": false,
   "num_shared_experts": 1,
   "cache": "training-cache/diffusion_kilo_samples.bin",
   "vocab_file": "training-cache/diffusion_talk_vocab.json",

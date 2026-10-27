@@ -102,6 +102,8 @@ pub struct ArtConfig {
     pub use_coord_router: Option<bool>,
     #[serde(default)]
     pub num_shared_experts: Option<usize>,
+    #[serde(default, alias = "use_spatial_weights")]
+    pub use_face_weighting: Option<bool>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -131,6 +133,14 @@ struct Args {
     /// Override target pass (1, 2, 3, or 4).
     #[arg(long)]
     pass: Option<usize>,
+
+    /// Override face/eye spatial ROI weighting in loss calculation (e.g. --use-face-weighting=false).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    use_face_weighting: Option<bool>,
+
+    /// Disable face/eye spatial ROI weighting in loss calculation.
+    #[arg(long, default_value_t = false, alias = "no-spatial-weights")]
+    no_face_weighting: bool,
 
     /// Disable interactive Ratatui TUI dashboard.
     #[arg(long, default_value_t = false)]
@@ -414,6 +424,13 @@ fn main() -> Result<()> {
     let batch_size = args.batch_size.unwrap_or(cfg.batch_size);
     let out_dir = args.out_dir.unwrap_or_else(|| PathBuf::from(&cfg.out_dir));
     let target_pass = args.pass.or(cfg.pass);
+    let use_face_weighting = if args.no_face_weighting {
+        false
+    } else if let Some(val) = args.use_face_weighting {
+        val
+    } else {
+        cfg.use_face_weighting.unwrap_or(true)
+    };
 
     println!("Cache binary   : {}", cache_path.display());
     println!("Output dir     : {}", out_dir.display());
@@ -428,6 +445,7 @@ fn main() -> Result<()> {
     println!("Embed dim      : {}", cfg.embed_dim);
     println!("Layers         : {}", cfg.n_layers);
     println!("Experts        : {} (top-{})", cfg.num_experts, cfg.top_k);
+    println!("Face weighting : {}", if use_face_weighting { "Enabled (boosted spatial ROI weights)" } else { "Disabled (uniform target loss)" });
     println!("Position Emb   : M-RoPE 3D (t, y, x) continuous coordinates");
 
     // 1. Load dataset
@@ -561,9 +579,13 @@ fn main() -> Result<()> {
                         // Compute loss on target color tokens (starting at target_start) with optional spatial weights
                         if i + 1 >= s.target_start && tgt != PAD_TOKEN as i32 {
                             let target_idx = (i + 1) - s.target_start;
-                            let w = s.spatial_weights.as_ref()
-                                .and_then(|sw| sw.get(target_idx).copied())
-                                .unwrap_or(1.0);
+                            let w = if use_face_weighting {
+                                s.spatial_weights.as_ref()
+                                    .and_then(|sw| sw.get(target_idx).copied())
+                                    .unwrap_or(1.0)
+                            } else {
+                                1.0
+                            };
                             flat_mask.push(w);
                         } else {
                             flat_mask.push(0.0f32);
@@ -661,9 +683,13 @@ fn main() -> Result<()> {
                         flat_targets.push(tgt);
                         if i + 1 >= s.target_start && tgt != PAD_TOKEN as i32 {
                             let target_idx = (i + 1) - s.target_start;
-                            let w = s.spatial_weights.as_ref()
-                                .and_then(|sw| sw.get(target_idx).copied())
-                                .unwrap_or(1.0);
+                            let w = if use_face_weighting {
+                                s.spatial_weights.as_ref()
+                                    .and_then(|sw| sw.get(target_idx).copied())
+                                    .unwrap_or(1.0)
+                            } else {
+                                1.0
+                            };
                             flat_mask.push(w);
                         } else {
                             flat_mask.push(0.0f32);
@@ -813,4 +839,145 @@ fn main() -> Result<()> {
 
     println!("\nTraining complete! Best validation loss: {:.4}", best_val_loss);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_art_config_use_face_weighting_defaults() {
+        let json = r#"{
+            "architecture": "moe",
+            "num_experts": 8,
+            "top_k": 2,
+            "cache": "training-cache/diffusion_kilo_samples.bin",
+            "vocab_file": "training-cache/diffusion_talk_vocab.json",
+            "max_seq_len": 512,
+            "seed": 42,
+            "vocab_size": 4512,
+            "embed_dim": 64,
+            "n_layers": 4,
+            "attn_heads": 4,
+            "ff_dim": 256,
+            "batch_size": 4,
+            "epochs": 10,
+            "first_lr": 0.0003,
+            "last_lr": 0.00003,
+            "validation_fraction": 0.02,
+            "out_dir": "checkpoints/test"
+        }"#;
+
+        let cfg: ArtConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.use_face_weighting, None);
+        // Default when omitted should be true
+        assert!(cfg.use_face_weighting.unwrap_or(true));
+    }
+
+    #[test]
+    fn test_art_config_use_face_weighting_disabled() {
+        let json = r#"{
+            "architecture": "moe",
+            "num_experts": 8,
+            "top_k": 2,
+            "use_face_weighting": false,
+            "cache": "training-cache/diffusion_kilo_samples.bin",
+            "vocab_file": "training-cache/diffusion_talk_vocab.json",
+            "max_seq_len": 512,
+            "seed": 42,
+            "vocab_size": 4512,
+            "embed_dim": 64,
+            "n_layers": 4,
+            "attn_heads": 4,
+            "ff_dim": 256,
+            "batch_size": 4,
+            "epochs": 10,
+            "first_lr": 0.0003,
+            "last_lr": 0.00003,
+            "validation_fraction": 0.02,
+            "out_dir": "checkpoints/test"
+        }"#;
+
+        let cfg: ArtConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.use_face_weighting, Some(false));
+    }
+
+    #[test]
+    fn test_art_config_use_spatial_weights_alias() {
+        let json = r#"{
+            "architecture": "moe",
+            "num_experts": 8,
+            "top_k": 2,
+            "use_spatial_weights": false,
+            "cache": "test.bin",
+            "vocab_file": "test.json",
+            "max_seq_len": 512,
+            "seed": 42,
+            "vocab_size": 4512,
+            "embed_dim": 64,
+            "n_layers": 4,
+            "attn_heads": 4,
+            "ff_dim": 256,
+            "batch_size": 4,
+            "epochs": 10,
+            "first_lr": 0.0003,
+            "last_lr": 0.00003,
+            "validation_fraction": 0.02,
+            "out_dir": "checkpoints/test"
+        }"#;
+
+        let cfg: ArtConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.use_face_weighting, Some(false));
+    }
+
+    #[test]
+    fn test_loss_mask_with_and_without_face_weighting() {
+        let sample = ArtSample {
+            prompt_text: "test".to_string(),
+            pass: 4,
+            tokens: vec![1, 2, 10, 20, 30],
+            target_start: 2,
+            spatial_weights: Some(vec![3.0, 10.0, 1.0]),
+        };
+
+        // When face weighting is enabled:
+        let weights_enabled: Vec<f32> = (0..3)
+            .map(|target_idx| {
+                sample.spatial_weights.as_ref()
+                    .and_then(|sw| sw.get(target_idx).copied())
+                    .unwrap_or(1.0)
+            })
+            .collect();
+        assert_eq!(weights_enabled, vec![3.0, 10.0, 1.0]);
+
+        // When face weighting is disabled:
+        let use_face_weighting = false;
+        let weights_disabled: Vec<f32> = (0..3)
+            .map(|target_idx| {
+                if use_face_weighting {
+                    sample.spatial_weights.as_ref()
+                        .and_then(|sw| sw.get(target_idx).copied())
+                        .unwrap_or(1.0)
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        assert_eq!(weights_disabled, vec![1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_cli_flags_parsing() {
+        let args = Args::try_parse_from(["train_art_moe", "--no-face-weighting"]).unwrap();
+        assert!(args.no_face_weighting);
+
+        let args = Args::try_parse_from(["train_art_moe", "--no-spatial-weights"]).unwrap();
+        assert!(args.no_face_weighting);
+
+        let args = Args::try_parse_from(["train_art_moe", "--use-face-weighting=false"]).unwrap();
+        assert_eq!(args.use_face_weighting, Some(false));
+
+        let args = Args::try_parse_from(["train_art_moe", "--use-face-weighting=true"]).unwrap();
+        assert_eq!(args.use_face_weighting, Some(true));
+    }
 }
