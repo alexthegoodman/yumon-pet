@@ -22,7 +22,7 @@ import shutil
 import webbrowser
 import subprocess
 from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -68,40 +68,46 @@ class StudioServer(BaseHTTPRequestHandler):
         return
 
     def send_json(self, status_code: int, data: dict):
-        body = json.dumps(data).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        path = parsed.path
-
-        if path in ("/", "/index.html"):
-            body = HTML_CONTENT.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+        try:
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-            return
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            pass
 
-        elif path == "/api/status":
-            bin_path = find_paint_binary()
-            self.send_json(200, {
-                "status": "ready" if bin_path.exists() else "building",
-                "binary": str(bin_path),
-                "binary_exists": bin_path.exists(),
-                "vocab_exists": (PROJECT_ROOT / "training-cache" / "diffusion_talk_vocab.json").exists(),
-                "pass3_ckpt": (PROJECT_ROOT / "checkpoints" / "yumon-art-pass3-db").exists(),
-                "pass4_ckpt": (PROJECT_ROOT / "checkpoints" / "yumon-art-pass4-db").exists(),
-                "upscaler_ckpt": (PROJECT_ROOT / "checkpoints" / "yumon-upscaler-64").exists(),
-            })
-            return
+    def do_GET(self):
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
 
-        self.send_error(404, "Not Found")
+            if path in ("/", "/index.html"):
+                body = HTML_CONTENT.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            elif path == "/api/status":
+                bin_path = find_paint_binary()
+                self.send_json(200, {
+                    "status": "ready" if bin_path.exists() else "building",
+                    "binary": str(bin_path),
+                    "binary_exists": bin_path.exists(),
+                    "vocab_exists": (PROJECT_ROOT / "training-cache" / "diffusion_talk_vocab.json").exists(),
+                    "pass3_ckpt": (PROJECT_ROOT / "checkpoints" / "yumon-art-pass3-db").exists(),
+                    "pass4_ckpt": (PROJECT_ROOT / "checkpoints" / "yumon-art-pass4-db").exists(),
+                    "upscaler_ckpt": (PROJECT_ROOT / "checkpoints" / "yumon-upscaler-64").exists(),
+                })
+                return
+
+            self.send_error(404, "Not Found")
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            pass
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -168,7 +174,8 @@ class StudioServer(BaseHTTPRequestHandler):
                     cwd=str(PROJECT_ROOT),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=360,
                 )
             except subprocess.TimeoutExpired:
@@ -178,14 +185,16 @@ class StudioServer(BaseHTTPRequestHandler):
                 self.send_json(500, {"error": f"Failed running yumon_paint: {e}"})
                 return
 
+            stdout = proc.stdout or ""
+            stderr = proc.stderr or ""
             elapsed = round(time.time() - t_start, 2)
 
             if proc.returncode != 0:
-                print(f"[Error] yumon_paint stderr:\n{proc.stderr}", file=sys.stderr)
+                print(f"[Error] yumon_paint stderr:\n{stderr}", file=sys.stderr)
                 self.send_json(500, {
                     "error": "yumon_paint process failed",
-                    "stderr": proc.stderr[-2000:],
-                    "stdout": proc.stdout[-2000:],
+                    "stderr": stderr[-2000:],
+                    "stdout": stdout[-2000:],
                 })
                 return
 
@@ -212,7 +221,7 @@ class StudioServer(BaseHTTPRequestHandler):
                     "pass4": p4_b64,
                     "upscaled": up_b64,
                 },
-                "log": proc.stdout[-1500:],
+                "log": stdout[-1500:],
             })
             return
 
@@ -1564,7 +1573,7 @@ def main():
                 break
             port += 1
 
-    server = HTTPServer(("localhost", port), StudioServer)
+    server = ThreadingHTTPServer(("localhost", port), StudioServer)
     url = f"http://localhost:{port}"
 
     print("╔═══════════════════════════════════════════════════════════════════╗")

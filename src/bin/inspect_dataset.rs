@@ -77,6 +77,21 @@ fn main() -> anyhow::Result<()> {
             };
             println!("Sample {}: pass={}, prompt=\"{}\", target_start={}, total_tokens={}{}",
                 total, sample.pass, sample.prompt_text, sample.target_start, sample.tokens.len(), sw_info);
+            if sample.pass == 3 {
+                println!("Sample 3 tokens: total={}", sample.tokens.len());
+                println!("Prefix before conditioning: {:?}", &sample.tokens[..sample.target_start.min(20)]);
+                println!("Marker before conditioning (at prompt end): {:?}", sample.tokens[sample.target_start - 257]);
+                println!("First 10 cond tokens: {:?}", &sample.tokens[sample.target_start - 256 .. sample.target_start - 246]);
+                println!("Last 10 cond tokens: {:?}", &sample.tokens[sample.target_start - 10 .. sample.target_start]);
+                println!("Marker at target_start - 1: {:?}", sample.tokens[sample.target_start - 1]);
+                println!("First 10 target tokens: {:?}", &sample.tokens[sample.target_start .. sample.target_start + 10]);
+                let min_c = sample.tokens[sample.target_start - 256 .. sample.target_start - 1].iter().min();
+                let max_c = sample.tokens[sample.target_start - 256 .. sample.target_start - 1].iter().max();
+                println!("Cond token range: min={:?}, max={:?}", min_c, max_c);
+                let min_t = sample.tokens[sample.target_start .. sample.tokens.len() - 1].iter().min();
+                let max_t = sample.tokens[sample.target_start .. sample.tokens.len() - 1].iter().max();
+                println!("Target token range: min={:?}, max={:?}", min_t, max_t);
+            }
         }
     }
 
