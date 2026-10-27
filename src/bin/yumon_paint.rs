@@ -99,11 +99,11 @@ struct Args {
     temperature: Option<f32>,
 
     /// Pass 1 sampling temperature (broad composition: high temp for rich, vibrant palette choices).
-    #[arg(long, default_value_t = 1.8)]
+    #[arg(long, default_value_t = 1.1)]
     temperature_pass1: f32,
 
     /// Pass 2 sampling temperature (shapes and silhouettes).
-    #[arg(long, default_value_t = 0.95)]
+    #[arg(long, default_value_t = 1.6)]
     temperature_pass2: f32,
 
     /// Pass 3 sampling temperature (anatomy & features).
