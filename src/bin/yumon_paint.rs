@@ -111,7 +111,7 @@ struct Args {
     temperature_pass3: f32,
 
     /// Pass 4 sampling temperature (fine pixel art details, high spatial precision).
-    #[arg(long, default_value_t = 1.1)]
+    #[arg(long, default_value_t = 1.2)]
     temperature_pass4: f32,
 
     /// Top-K sampling filter (0 to disable, e.g. 24).
@@ -127,11 +127,11 @@ struct Args {
     repeat_penalty: f32,
 
     /// Optional shape guidance weight from prior silhouette pass for Pass 3 (default 0.4; 0.0 to disable).
-    #[arg(long, default_value_t = 0.6)]
+    #[arg(long, default_value_t = 0.25)]
     shape_guidance: f32,
 
     /// Shape guidance weight for Pass 4 fine details anchored to Pass 3 (default 3.5; 0.0 to disable).
-    #[arg(long, default_value_t = 4.5)]
+    #[arg(long, default_value_t = 5.5)]
     shape_guidance_pass4: f32,
 
     /// Output artwork PNG file path.
