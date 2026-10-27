@@ -1,6 +1,7 @@
 //! Discrete paint actions, 256-color palette, coordinate quantization,
 //! and canvas progression generation for Yumon Art.
 
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 pub const CANVAS_SIZE: usize = 64;
@@ -795,11 +796,149 @@ pub fn pass4_tokens_to_image(tokens: &[u32]) -> Vec<u8> {
     canvas
 }
 
-/// Generate cascaded autoregressive sequence samples for an image across 4 dyadic passes.
-/// Returns a list of `(pass: u8, tokens: Vec<u32>, target_start: usize)`.
-pub fn generate_cascaded_sequence_samples(
+/// Configuration for synthetic noise injected into cascaded conditioning tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ConditioningNoiseConfig {
+    /// Probability of perturbing a token's color with RGB jitter (0.0 .. 1.0).
+    pub jitter_prob: f32,
+    /// Magnitude of RGB jitter in [0.0 .. 255.0] (default ~35.0).
+    pub jitter_mag: f32,
+    /// Probability of adopting a spatial neighbor's color (simulates stroke bleed / edge drift).
+    pub neighbor_drift_prob: f32,
+    /// Probability of mutating to a random palette token (salt & pepper / high temperature rogue dabs).
+    pub random_token_prob: f32,
+}
+
+impl Default for ConditioningNoiseConfig {
+    fn default() -> Self {
+        Self {
+            jitter_prob: 0.20,
+            jitter_mag: 35.0,
+            neighbor_drift_prob: 0.10,
+            random_token_prob: 0.02,
+        }
+    }
+}
+
+/// Corrupt a slice of conditioning color tokens in a `grid_w x grid_h` spatial grid using synthetic noise.
+/// Applies random palette replacement, spatial neighbor drift, and RGB color jitter.
+pub fn corrupt_conditioning_tokens<R: rand::Rng + ?Sized>(
+    tokens: &[u32],
+    grid_w: usize,
+    grid_h: usize,
+    cfg: &ConditioningNoiseConfig,
+    rng: &mut R,
+) -> Vec<u32> {
+    assert_eq!(tokens.len(), grid_w * grid_h, "token count must match grid dimensions");
+    let mut noisy = tokens.to_vec();
+
+    let p_rand = cfg.random_token_prob.clamp(0.0, 1.0);
+    let p_drift = cfg.neighbor_drift_prob.clamp(0.0, 1.0 - p_rand);
+    let p_jitter = cfg.jitter_prob.clamp(0.0, 1.0 - p_rand - p_drift);
+
+    for i in 0..tokens.len() {
+        let tok = tokens[i];
+        if (tok as usize) < COLOR_START_ID || (tok as usize) >= COLOR_START_ID + PALETTE_SIZE {
+            continue;
+        }
+
+        let r: f32 = rng.gen_range(0.0f32..1.0f32);
+        if r < p_rand {
+            // 1. Rogue / random palette token
+            let random_color = rng.gen_range(0..PALETTE_SIZE);
+            noisy[i] = (COLOR_START_ID + random_color) as u32;
+        } else if r < p_rand + p_drift {
+            // 2. Spatial neighbor drift (stroke bleed / edge displacement)
+            let y = i / grid_w;
+            let x = i % grid_w;
+            let mut neighbors = [0usize; 4];
+            let mut num_neighbors = 0;
+
+            if x > 0 {
+                neighbors[num_neighbors] = y * grid_w + (x - 1);
+                num_neighbors += 1;
+            }
+            if x + 1 < grid_w {
+                neighbors[num_neighbors] = y * grid_w + (x + 1);
+                num_neighbors += 1;
+            }
+            if y > 0 {
+                neighbors[num_neighbors] = (y - 1) * grid_w + x;
+                num_neighbors += 1;
+            }
+            if y + 1 < grid_h {
+                neighbors[num_neighbors] = (y + 1) * grid_w + x;
+                num_neighbors += 1;
+            }
+
+            if num_neighbors > 0 {
+                let chosen = neighbors[rng.gen_range(0..num_neighbors)];
+                noisy[i] = tokens[chosen];
+            }
+        } else if r < p_rand + p_drift + p_jitter {
+            // 3. RGB color jitter
+            let pal_idx = ((tok as usize) - COLOR_START_ID).min(PALETTE_SIZE - 1) as u8;
+            let [cr, cg, cb] = palette_to_rgb(pal_idx);
+
+            let dr = rng.gen_range(-cfg.jitter_mag..=cfg.jitter_mag);
+            let dg = rng.gen_range(-cfg.jitter_mag..=cfg.jitter_mag);
+            let db = rng.gen_range(-cfg.jitter_mag..=cfg.jitter_mag);
+
+            let nr = (cr as f32 + dr).clamp(0.0, 255.0).round() as u8;
+            let ng = (cg as f32 + dg).clamp(0.0, 255.0).round() as u8;
+            let nb = (cb as f32 + db).clamp(0.0, 255.0).round() as u8;
+
+            let new_pal = rgb_to_palette(nr, ng, nb);
+            noisy[i] = (COLOR_START_ID + new_pal as usize) as u32;
+        }
+    }
+
+    noisy
+}
+
+/// Corrupt the conditioning tokens of an autoregressive sequence sample for a specific pass.
+/// Preserves prompt tokens, pass control tokens, and target tokens.
+pub fn corrupt_sample_tokens<R: rand::Rng + ?Sized>(
+    pass: u8,
+    tokens: &[u32],
+    cfg: &ConditioningNoiseConfig,
+    rng: &mut R,
+) -> Vec<u32> {
+    if pass <= 1 {
+        return tokens.to_vec();
+    }
+
+    let (prev_pass_id, curr_pass_id, grid_w, grid_h) = match pass {
+        2 => (PASS_1_ID as u32, PASS_2_ID as u32, 8, 8),
+        3 => (PASS_2_ID as u32, PASS_3_ID as u32, 16, 16),
+        4 => (PASS_3_ID as u32, PASS_4_ID as u32, 32, 32),
+        _ => return tokens.to_vec(),
+    };
+
+    let p_prev = tokens.iter().position(|&t| t == prev_pass_id);
+    let p_curr = tokens.iter().position(|&t| t == curr_pass_id);
+
+    if let (Some(start), Some(end)) = (p_prev, p_curr) {
+        if end > start + 1 && (end - start - 1) == grid_w * grid_h {
+            let cond_slice = &tokens[start + 1..end];
+            let noisy_cond = corrupt_conditioning_tokens(cond_slice, grid_w, grid_h, cfg, rng);
+            let mut out = tokens.to_vec();
+            out[start + 1..end].copy_from_slice(&noisy_cond);
+            return out;
+        }
+    }
+
+    tokens.to_vec()
+}
+
+/// Generate cascaded autoregressive sequence samples, allowing optional custom
+/// (e.g. noise-injected or model-generated) conditioning tokens for passes 2, 3, and 4.
+pub fn generate_cascaded_sequence_samples_custom(
     prompt_tokens: &[u32],
     target_hwc: &[u8],
+    cond_pass1: Option<&[u32]>,
+    cond_pass2: Option<&[u32]>,
+    cond_pass3: Option<&[u32]>,
 ) -> Vec<(u8, Vec<u32>, usize)> {
     let pass1_colors = image_to_pass1_tokens(target_hwc);
     let pass2_colors = image_to_pass2_tokens(target_hwc);
@@ -817,33 +956,36 @@ pub fn generate_cascaded_sequence_samples(
     p1_tokens.push(DONE_ID as u32);
     samples.push((1, p1_tokens, p1_target_start));
 
-    // Pass 2 (16x16 patches): [BOS, prompt..., PASS_1_ID, c_0..c_63, PASS_2_ID, s_0..s_255, DONE_ID]
+    // Pass 2 (16x16 patches): [BOS, prompt..., PASS_1_ID, cond_1..., PASS_2_ID, s_0..s_255, DONE_ID]
+    let p1_cond = cond_pass1.unwrap_or(&pass1_colors);
     let mut p2_tokens = vec![1u32]; // BOS_TOKEN
     p2_tokens.extend_from_slice(prompt_tokens);
     p2_tokens.push(PASS_1_ID as u32);
-    p2_tokens.extend(&pass1_colors);
+    p2_tokens.extend_from_slice(p1_cond);
     p2_tokens.push(PASS_2_ID as u32);
     let p2_target_start = p2_tokens.len();
     p2_tokens.extend(&pass2_colors);
     p2_tokens.push(DONE_ID as u32);
     samples.push((2, p2_tokens, p2_target_start));
 
-    // Pass 3 (32x32 sub-patches): [BOS, prompt..., PASS_2_ID, s_0..s_255, PASS_3_ID, m_0..m_1023, DONE_ID]
+    // Pass 3 (32x32 sub-patches): [BOS, prompt..., PASS_2_ID, cond_2..., PASS_3_ID, m_0..m_1023, DONE_ID]
+    let p2_cond = cond_pass2.unwrap_or(&pass2_colors);
     let mut p3_tokens = vec![1u32]; // BOS_TOKEN
     p3_tokens.extend_from_slice(prompt_tokens);
     p3_tokens.push(PASS_2_ID as u32);
-    p3_tokens.extend(&pass2_colors);
+    p3_tokens.extend_from_slice(p2_cond);
     p3_tokens.push(PASS_3_ID as u32);
     let p3_target_start = p3_tokens.len();
     p3_tokens.extend(&pass3_colors);
     p3_tokens.push(DONE_ID as u32);
     samples.push((3, p3_tokens, p3_target_start));
 
-    // Pass 4 (64x64 pixels): [BOS, prompt..., PASS_3_ID, m_0..m_1023, PASS_4_ID, p_0..p_4095, DONE_ID]
+    // Pass 4 (64x64 pixels): [BOS, prompt..., PASS_3_ID, cond_3..., PASS_4_ID, p_0..p_4095, DONE_ID]
+    let p3_cond = cond_pass3.unwrap_or(&pass3_colors);
     let mut p4_tokens = vec![1u32]; // BOS_TOKEN
     p4_tokens.extend_from_slice(prompt_tokens);
     p4_tokens.push(PASS_3_ID as u32);
-    p4_tokens.extend(&pass3_colors);
+    p4_tokens.extend_from_slice(p3_cond);
     p4_tokens.push(PASS_4_ID as u32);
     let p4_target_start = p4_tokens.len();
     p4_tokens.extend(&pass4_colors);
@@ -851,6 +993,57 @@ pub fn generate_cascaded_sequence_samples(
     samples.push((4, p4_tokens, p4_target_start));
 
     samples
+}
+
+/// Generate cascaded autoregressive sequence samples for an image across 4 dyadic passes.
+/// Returns a list of `(pass: u8, tokens: Vec<u32>, target_start: usize)`.
+pub fn generate_cascaded_sequence_samples(
+    prompt_tokens: &[u32],
+    target_hwc: &[u8],
+) -> Vec<(u8, Vec<u32>, usize)> {
+    generate_cascaded_sequence_samples_custom(prompt_tokens, target_hwc, None, None, None)
+}
+
+/// Generate cascaded autoregressive sequence samples with synthetic noise injected into
+/// the conditioning tokens of Passes 2, 3, and 4.
+pub fn generate_cascaded_sequence_samples_with_noise<R: rand::Rng + ?Sized>(
+    prompt_tokens: &[u32],
+    target_hwc: &[u8],
+    noise_cfg: &ConditioningNoiseConfig,
+    noisy_pass2: bool,
+    noisy_pass3: bool,
+    noisy_pass4: bool,
+    rng: &mut R,
+) -> Vec<(u8, Vec<u32>, usize)> {
+    let pass1_colors = image_to_pass1_tokens(target_hwc);
+    let pass2_colors = image_to_pass2_tokens(target_hwc);
+    let pass3_colors = image_to_pass3_tokens(target_hwc);
+
+    let noisy_p1 = if noisy_pass2 {
+        Some(corrupt_conditioning_tokens(&pass1_colors, 8, 8, noise_cfg, rng))
+    } else {
+        None
+    };
+
+    let noisy_p2 = if noisy_pass3 {
+        Some(corrupt_conditioning_tokens(&pass2_colors, 16, 16, noise_cfg, rng))
+    } else {
+        None
+    };
+
+    let noisy_p3 = if noisy_pass4 {
+        Some(corrupt_conditioning_tokens(&pass3_colors, 32, 32, noise_cfg, rng))
+    } else {
+        None
+    };
+
+    generate_cascaded_sequence_samples_custom(
+        prompt_tokens,
+        target_hwc,
+        noisy_p1.as_deref(),
+        noisy_p2.as_deref(),
+        noisy_p3.as_deref(),
+    )
 }
 
 /// Extract multimodal 3D coordinates (t, y, x) for a sequence of token IDs.
@@ -1300,5 +1493,69 @@ mod tests {
         let w_none = compute_pass_spatial_weights(None, 2, 10.0, 3.0, 1.0);
         assert_eq!(w_none.len(), 256);
         assert!(w_none.iter().all(|&w| w == 1.0));
+    }
+
+    #[test]
+    fn test_corrupt_conditioning_tokens() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let orig: Vec<u32> = (0..64).map(|i| (COLOR_START_ID + (i % 256)) as u32).collect();
+
+        // Zero noise should leave tokens untouched
+        let no_noise_cfg = ConditioningNoiseConfig {
+            jitter_prob: 0.0,
+            jitter_mag: 0.0,
+            neighbor_drift_prob: 0.0,
+            random_token_prob: 0.0,
+        };
+        let clean = corrupt_conditioning_tokens(&orig, 8, 8, &no_noise_cfg, &mut rng);
+        assert_eq!(clean, orig);
+
+        // Active noise should perturb some tokens while staying in valid color range
+        let noisy_cfg = ConditioningNoiseConfig::default();
+        let noisy = corrupt_conditioning_tokens(&orig, 8, 8, &noisy_cfg, &mut rng);
+        assert_eq!(noisy.len(), 64);
+        assert_ne!(noisy, orig, "At least some tokens should be perturbed");
+        for &tok in &noisy {
+            assert!(
+                (tok as usize) >= COLOR_START_ID && (tok as usize) < COLOR_START_ID + PALETTE_SIZE,
+                "Token {} is outside valid palette range",
+                tok
+            );
+        }
+    }
+
+    #[test]
+    fn test_corrupt_sample_tokens() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
+        let mut rng = StdRng::seed_from_u64(123);
+        let dummy = vec![128u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
+        let samples = generate_cascaded_sequence_samples(&[50, 60], &dummy);
+
+        let noisy_cfg = ConditioningNoiseConfig::default();
+
+        // Pass 1: no conditioning to corrupt
+        let p1_corrupt = corrupt_sample_tokens(1, &samples[0].1, &noisy_cfg, &mut rng);
+        assert_eq!(p1_corrupt, samples[0].1);
+
+        // Pass 2: should corrupt only conditioning tokens between PASS_1_ID and PASS_2_ID
+        let p2_orig = &samples[1].1;
+        let p2_corrupt = corrupt_sample_tokens(2, p2_orig, &noisy_cfg, &mut rng);
+        assert_eq!(p2_corrupt.len(), p2_orig.len());
+        assert_ne!(p2_corrupt, *p2_orig);
+
+        let p1_idx = p2_orig.iter().position(|&t| t == PASS_1_ID as u32).unwrap();
+        let p2_idx = p2_orig.iter().position(|&t| t == PASS_2_ID as u32).unwrap();
+
+        // Prompt and PASS_1_ID untouched
+        assert_eq!(&p2_corrupt[..=p1_idx], &p2_orig[..=p1_idx]);
+        // PASS_2_ID and target tokens (after target_start) untouched!
+        assert_eq!(&p2_corrupt[p2_idx..], &p2_orig[p2_idx..]);
+        // Target start matches
+        assert_eq!(samples[1].2, p2_idx + 1);
     }
 }

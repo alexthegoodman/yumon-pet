@@ -15,7 +15,7 @@ use {
     },
     clap::Parser,
     indicatif::{ProgressBar, ProgressStyle},
-    rand::{seq::SliceRandom, thread_rng},
+    rand::{seq::SliceRandom, thread_rng, Rng},
     serde::{Deserialize, Serialize},
     ratatui::{
         backend::CrosstermBackend,
@@ -38,6 +38,7 @@ use {
             CANVAS_CHANNELS, CANVAS_SIZE, COLOR_START_ID, DONE_ID, PALETTE_SIZE,
             PASS_1_ID, PASS_2_ID, PASS_3_ID, PASS_4_ID,
             pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
+            ConditioningNoiseConfig, corrupt_sample_tokens,
         },
     },
 };
@@ -145,6 +146,26 @@ struct Args {
     /// Disable interactive Ratatui TUI dashboard.
     #[arg(long, default_value_t = false)]
     no_tui: bool,
+
+    /// On-the-fly synthetic noise injection probability on conditioning tokens during training (0.0 = disabled, use cache as-is).
+    #[arg(long, default_value_t = 0.0)]
+    noisy_conditioning_ratio: f32,
+
+    /// Probability of perturbing a conditioning token with RGB color jitter on-the-fly (0.0 to 1.0).
+    #[arg(long, default_value_t = 0.20)]
+    noise_jitter_prob: f32,
+
+    /// Maximum RGB jitter magnitude (0.0 to 255.0) for on-the-fly color perturbation.
+    #[arg(long, default_value_t = 35.0)]
+    noise_jitter_mag: f32,
+
+    /// Probability of a conditioning token adopting a spatial neighbor's color on-the-fly.
+    #[arg(long, default_value_t = 0.10)]
+    noise_drift_prob: f32,
+
+    /// Probability of a conditioning token mutating to a random palette color on-the-fly.
+    #[arg(long, default_value_t = 0.02)]
+    noise_random_prob: f32,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -432,6 +453,21 @@ fn main() -> Result<()> {
         cfg.use_face_weighting.unwrap_or(true)
     };
 
+    let noise_cfg = ConditioningNoiseConfig {
+        jitter_prob: args.noise_jitter_prob,
+        jitter_mag: args.noise_jitter_mag,
+        neighbor_drift_prob: args.noise_drift_prob,
+        random_token_prob: args.noise_random_prob,
+    };
+    if args.noisy_conditioning_ratio > 0.0 {
+        println!("On-the-fly noise: {:.1}% ratio (jitter: {:.1}%, drift: {:.1}%, random: {:.1}%)",
+            args.noisy_conditioning_ratio * 100.0,
+            args.noise_jitter_prob * 100.0,
+            args.noise_drift_prob * 100.0,
+            args.noise_random_prob * 100.0
+        );
+    }
+
     println!("Cache binary   : {}", cache_path.display());
     println!("Output dir     : {}", out_dir.display());
     if let Some(p) = target_pass {
@@ -569,11 +605,24 @@ fn main() -> Result<()> {
             let mut flat_targets = Vec::with_capacity(bs * seq_len);
             let mut flat_mask = Vec::with_capacity(bs * seq_len);
 
+            let mut rng = rand::thread_rng();
+
             for s in chunk {
-                let t_len = s.tokens.len().min(max_len);
+                let corrupt_buf;
+                let s_tokens: &[u32] = if args.noisy_conditioning_ratio > 0.0
+                    && s.pass > 1
+                    && rng.gen_range(0.0f32..1.0f32) < args.noisy_conditioning_ratio
+                {
+                    corrupt_buf = corrupt_sample_tokens(s.pass, &s.tokens, &noise_cfg, &mut rng);
+                    &corrupt_buf
+                } else {
+                    &s.tokens
+                };
+
+                let t_len = s_tokens.len().min(max_len);
                 for i in 0..seq_len {
                     if i + 1 < t_len {
-                        flat_inputs.push(s.tokens[i] as i32);
+                        flat_inputs.push(s_tokens[i] as i32);
                         let tgt = s.tokens[i + 1] as i32;
                         flat_targets.push(tgt);
                         // Compute loss on target color tokens (starting at target_start) with optional spatial weights

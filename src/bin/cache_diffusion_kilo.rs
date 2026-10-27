@@ -6,6 +6,7 @@ use {
     anyhow::{Context, Result, ensure},
     clap::Parser,
     indicatif::{ProgressBar, ProgressStyle},
+    rand::Rng,
     rayon::prelude::*,
     serde::{Deserialize, Serialize},
     std::{
@@ -20,7 +21,7 @@ use {
     },
     yumon_pet::vision::paint_action::{
         ART_VOCAB_SIZE, CANVAS_SIZE, FaceRoi, FaceRoiDatabase, compute_pass_spatial_weights,
-        generate_cascaded_sequence_samples,
+        generate_cascaded_sequence_samples, ConditioningNoiseConfig, corrupt_sample_tokens,
     },
 };
 
@@ -91,6 +92,30 @@ struct Args {
     /// Number of sample previews to print upon completion.
     #[arg(long, default_value_t = 3)]
     previews: usize,
+
+    /// Fraction of conditioning samples for Passes 2-4 that receive synthetic noise (0.0 = all clean, 0.5 = 50% clean / 50% noisy, 1.0 = all noisy).
+    #[arg(long, default_value_t = 0.5)]
+    noisy_ratio: f32,
+
+    /// If true, generates BOTH a clean sample AND a noisy sample for each image in Passes 2-4 (exact 50/50 mix, doubling training pairs).
+    #[arg(long, default_value_t = false)]
+    augment_noisy: bool,
+
+    /// Probability of perturbing a conditioning token with RGB color jitter (0.0 to 1.0).
+    #[arg(long, default_value_t = 0.20)]
+    noise_jitter_prob: f32,
+
+    /// Maximum RGB jitter magnitude (0.0 to 255.0) for color perturbation.
+    #[arg(long, default_value_t = 35.0)]
+    noise_jitter_mag: f32,
+
+    /// Probability of a conditioning token adopting a spatial neighbor's color (simulates stroke bleed / boundary drift).
+    #[arg(long, default_value_t = 0.10)]
+    noise_drift_prob: f32,
+
+    /// Probability of a conditioning token mutating to a random palette color (salt-and-pepper / rogue dabs).
+    #[arg(long, default_value_t = 0.02)]
+    noise_random_prob: f32,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -112,6 +137,19 @@ fn main() -> Result<()> {
         println!("Pass filter        : Pass {}", p);
     } else {
         println!("Pass filter        : All passes (1, 2, 3, 4)");
+    }
+    println!("\nSynthetic Conditioning Noise Configuration:");
+    if args.noisy_ratio > 0.0 || args.augment_noisy {
+        if args.augment_noisy {
+            println!("  Mode             : Augment (1 clean + 1 noisy copy for each image in Passes 2-4)");
+        } else {
+            println!("  Noisy ratio      : {:.1}% probabilistic mix", args.noisy_ratio * 100.0);
+        }
+        println!("  RGB jitter prob  : {:.1}% (magnitude: {:.1})", args.noise_jitter_prob * 100.0, args.noise_jitter_mag);
+        println!("  Neighbor drift   : {:.1}% (spatial stroke bleed / edge drift)", args.noise_drift_prob * 100.0);
+        println!("  Random token     : {:.1}% (rogue / high-temp palette mutations)", args.noise_random_prob * 100.0);
+    } else {
+        println!("  Conditioning     : 100% Clean Ground Truth (noise disabled)");
     }
 
     // 1. Load Kilo Talk vocabulary
@@ -254,6 +292,13 @@ fn main() -> Result<()> {
     ensure!(!items.is_empty(), "No valid image files found to process");
 
     // 5. Process images and generate cascaded sequence training samples
+    let noise_cfg = ConditioningNoiseConfig {
+        jitter_prob: args.noise_jitter_prob,
+        jitter_mag: args.noise_jitter_mag,
+        neighbor_drift_prob: args.noise_drift_prob,
+        random_token_prob: args.noise_random_prob,
+    };
+
     let pb = ProgressBar::new(items.len() as u64);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -291,11 +336,13 @@ fn main() -> Result<()> {
                 Err(_) => return Vec::new(),
             };
 
+            let mut rng = rand::thread_rng();
+
             // Generate cascaded sequence training samples
             let seq_samples = generate_cascaded_sequence_samples(&prompt_toks, &raw_hwc);
 
-            let mut out = Vec::with_capacity(seq_samples.len());
-            for (pass, tokens, target_start) in seq_samples {
+            let mut out = Vec::with_capacity(seq_samples.len() * (if args.augment_noisy { 2 } else { 1 }));
+            for (pass, clean_tokens, target_start) in seq_samples {
                 if let Some(target_p) = args.pass {
                     if pass != target_p as u8 {
                         continue;
@@ -308,13 +355,50 @@ fn main() -> Result<()> {
                     None
                 };
 
-                out.push(ArtSample {
-                    prompt_text: prompt_text.clone(),
-                    pass,
-                    tokens,
-                    target_start,
-                    spatial_weights,
-                });
+                if pass == 1 {
+                    // Pass 1 has no conditioning image tokens (prompt -> 8x8)
+                    out.push(ArtSample {
+                        prompt_text: prompt_text.clone(),
+                        pass,
+                        tokens: clean_tokens,
+                        target_start,
+                        spatial_weights,
+                    });
+                } else if args.augment_noisy {
+                    // 1. Clean sample
+                    out.push(ArtSample {
+                        prompt_text: prompt_text.clone(),
+                        pass,
+                        tokens: clean_tokens.clone(),
+                        target_start,
+                        spatial_weights: spatial_weights.clone(),
+                    });
+
+                    // 2. Augmented noisy sample
+                    let noisy_tokens = corrupt_sample_tokens(pass, &clean_tokens, &noise_cfg, &mut rng);
+                    out.push(ArtSample {
+                        prompt_text: prompt_text.clone(),
+                        pass,
+                        tokens: noisy_tokens,
+                        target_start,
+                        spatial_weights,
+                    });
+                } else {
+                    let is_noisy = args.noisy_ratio > 0.0 && rng.gen_range(0.0f32..1.0f32) < args.noisy_ratio;
+                    let tokens = if is_noisy {
+                        corrupt_sample_tokens(pass, &clean_tokens, &noise_cfg, &mut rng)
+                    } else {
+                        clean_tokens
+                    };
+
+                    out.push(ArtSample {
+                        prompt_text: prompt_text.clone(),
+                        pass,
+                        tokens,
+                        target_start,
+                        spatial_weights,
+                    });
+                }
             }
 
             out
@@ -325,11 +409,19 @@ fn main() -> Result<()> {
 
     let weighted_samples = samples.iter().filter(|s| s.spatial_weights.is_some()).count();
     let uniform_samples = samples.len() - weighted_samples;
+    let p1_count = samples.iter().filter(|s| s.pass == 1).count();
+    let p2_count = samples.iter().filter(|s| s.pass == 2).count();
+    let p3_count = samples.iter().filter(|s| s.pass == 3).count();
+    let p4_count = samples.iter().filter(|s| s.pass == 4).count();
     println!(
         "\nGenerated {} total training samples from {} images:",
         samples.len(),
         items.len()
     );
+    println!("  - Pass 1 (Prompt -> 8x8)          : {}", p1_count);
+    println!("  - Pass 2 (8x8 -> 16x16)           : {}", p2_count);
+    println!("  - Pass 3 (16x16 -> 32x32)         : {}", p3_count);
+    println!("  - Pass 4 (32x32 -> 64x64)         : {}", p4_count);
     println!("  - Samples with spatial ROI weights: {}", weighted_samples);
     println!("  - Samples with uniform weights    : {}", uniform_samples);
 
