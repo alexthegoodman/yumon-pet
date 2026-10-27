@@ -29,7 +29,7 @@ use {
             PASS_1_ID, PASS_2_ID, PASS_3_ID, PASS_4_ID,
             COLOR_START_ID, PALETTE_SIZE,
             build_cascaded_inference_coords,
-            palette_to_rgb,
+            palette_to_rgb, rgb_to_palette,
             pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
         },
         upscaler::{UpscalerModel, UpscalerModelConfig},
@@ -150,6 +150,15 @@ struct Args {
     /// Can also specify per-copy reuse levels separated by semicolons (e.g. "2;3" for 2 extra copies).
     #[arg(long, default_value = "0", alias = "reuse-pass")]
     reuse_passes: String,
+
+    /// Optional 16x16 user input drawing (JSON array of 256 palette indices 0..255, or 16x16 PNG image).
+    /// Skips Pass 1 and Pass 2, directly starting at Pass 3 (32x32) conditioned on the drawing.
+    #[arg(long)]
+    input_pass2: Option<PathBuf>,
+
+    /// Save intermediate images (_pass2.png, _pass3.png, _pass4.png) alongside the output file.
+    #[arg(long, default_value_t = false)]
+    save_intermediate: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -385,6 +394,56 @@ fn print_terminal_rgb(canvas: &[u8], width: usize, height: usize) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn load_pass2_input(path: &Path) -> Result<Vec<u32>> {
+    let content = fs::read(path).with_context(|| format!("reading input pass2 from {}", path.display()))?;
+
+    // Try parsing as JSON first
+    if let Ok(text) = std::str::from_utf8(&content) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
+            let mut indices: Vec<u8> = Vec::new();
+            if let Some(arr) = val.as_array() {
+                for item in arr {
+                    if let Some(n) = item.as_u64() {
+                        indices.push(n as u8);
+                    }
+                }
+            } else if let Some(arr) = val.get("pixels").and_then(|p| p.as_array()) {
+                for item in arr {
+                    if let Some(n) = item.as_u64() {
+                        indices.push(n as u8);
+                    }
+                }
+            }
+
+            if indices.len() >= 256 {
+                let tokens = indices.iter().take(256).map(|&idx| (COLOR_START_ID + idx as usize) as u32).collect();
+                return Ok(tokens);
+            }
+        }
+    }
+
+    // Try parsing as an image (16x16 PNG, JPG, etc.)
+    let img = image::load_from_memory(&content)
+        .with_context(|| format!("parsing image from {}", path.display()))?;
+    let rgb = img.to_rgb8();
+    let resized = if rgb.width() != 16 || rgb.height() != 16 {
+        image::imageops::resize(&rgb, 16, 16, image::imageops::FilterType::Nearest)
+    } else {
+        rgb
+    };
+
+    let mut tokens = Vec::with_capacity(256);
+    for y in 0..16 {
+        for x in 0..16 {
+            let pixel = resized.get_pixel(x, y);
+            let palette_idx = rgb_to_palette(pixel[0], pixel[1], pixel[2]);
+            tokens.push((COLOR_START_ID + palette_idx as usize) as u32);
+        }
+    }
+    Ok(tokens)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn load_or_init_pass_brain(
     pass_name: &str,
     pass_ckpt: Option<&PathBuf>,
@@ -454,16 +513,21 @@ fn main() -> Result<()> {
     println!("Kilo Talk tokens ({}): {:?}", prompt_tokens.len(), prompt_tokens);
 
     // 3. Initialize / Load Causal MoE Brains for Cascaded Passes
-    let brain_p1 = load_or_init_pass_brain(
-        "Pass 1",
-        args.checkpoint_pass1.as_ref(),
-        args.checkpoint.as_ref(),
-        &["checkpoints/yumon-art-pass1-db", "checkpoints/yumon-art-pass1"],
-        128,
-        &device,
-    )?;
+    let brain_p1 = if args.input_pass2.is_none() {
+        Some(load_or_init_pass_brain(
+            "Pass 1",
+            args.checkpoint_pass1.as_ref(),
+            args.checkpoint.as_ref(),
+            &["checkpoints/yumon-art-pass1-db", "checkpoints/yumon-art-pass1"],
+            128,
+            &device,
+        )?)
+    } else {
+        println!("Skipping Pass 1 brain initialization (manual 16x16 input provided).");
+        None
+    };
 
-    let brain_p2 = if args.passes >= 2 {
+    let brain_p2 = if args.input_pass2.is_none() && args.passes >= 2 {
         Some(load_or_init_pass_brain(
             "Pass 2",
             args.checkpoint_pass2.as_ref(),
@@ -473,6 +537,9 @@ fn main() -> Result<()> {
             &device,
         )?)
     } else {
+        if args.input_pass2.is_some() {
+            println!("Skipping Pass 2 brain initialization (manual 16x16 input provided).");
+        }
         None
     };
 
@@ -598,190 +665,18 @@ fn main() -> Result<()> {
 
         // 4. Initialize Blank Canvas
         let mut canvas_hwc = vec![240u8; CANVAS_SIZE * CANVAS_SIZE * CANVAS_CHANNELS];
-        let pass1_canvas: Option<Vec<u8>>;
+        let mut pass1_canvas: Option<Vec<u8>> = None;
         let mut pass2_canvas: Option<Vec<u8>> = None;
         let mut pass3_canvas: Option<Vec<u8>> = None;
         let mut pass4_canvas: Option<Vec<u8>> = None;
 
-        if copy_idx == 0 || reuse_level == 0 {
-            println!("\n🖼  Initial Canvas State (Blank):");
-            print_terminal_canvas(&canvas_hwc);
-        }
+        let mut pass2_colors = Vec::with_capacity(256);
 
-        if total_copies > 1 {
-            println!("\n🎨 Yumon is generating artwork copy {}/{} across {} cascaded passes...\n", copy_num, total_copies, args.passes);
-        } else {
-            println!("\n🎨 Yumon is generating the artwork across {} cascaded passes...\n", args.passes);
-        }
-
-        // PASS 1: Broad Composition (8x8 Blocks, 64 color tokens)
-        let mut pass1_colors = Vec::with_capacity(64);
-        if copy_idx > 0 && reuse_level >= 1 && shared_p1_colors.is_some() {
+        if let Some(ref input_path) = args.input_pass2 {
             println!("\n═══════════════════════════════════════════════════════");
-            println!("  🎨 Pass 1 / {}: Reusing Broad Composition (64 Blocks)", args.passes);
+            println!("  🎨 Pass 2 / {}: Loading Manual 16x16 Drawing from {}", args.passes, input_path.display());
             println!("═══════════════════════════════════════════════════════");
-            pass1_colors = shared_p1_colors.as_ref().unwrap().clone();
-            let c = shared_p1_canvas.as_ref().unwrap().clone();
-            canvas_hwc = c.clone();
-            pass1_canvas = Some(c);
-            let stats1 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
-            println!("  ✓ Pass 1 Reused: Global composition cached ({} colors, V/H ratio: {:.2}).", stats1.0, stats1.3);
-            print_terminal_canvas(&canvas_hwc);
-        } else {
-            println!("\n═══════════════════════════════════════════════════════");
-            println!("  🎨 Pass 1 / {}: Broad Composition (64 Blocks, Temp: {:.2})", args.passes, temp_p1);
-            println!("═══════════════════════════════════════════════════════");
-            let t_pass1 = Instant::now();
-
-            let mut p1_prefix = vec![BOS_TOKEN as i32];
-            for &tok in &prompt_tokens {
-                p1_prefix.push(tok as i32);
-            }
-            p1_prefix.push(PASS_1_ID as i32);
-
-            let p1_coords = build_cascaded_inference_coords(&p1_prefix, 1, 64);
-            let mut cache_p1 = brain_p1.new_kv_cache_mrope(&[p1_coords], &device);
-            let prefill_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-                TensorData::new(p1_prefix.clone(), [1, p1_prefix.len()]),
-                &device,
-            );
-            let logits = brain_p1.forward_cached(prefill_tensor, &mut cache_p1);
-            let mut last_logit: Vec<f32> = logits
-                .slice([0..1, p1_prefix.len() - 1..p1_prefix.len(), 0..ART_VOCAB_SIZE])
-                .into_data()
-                .convert::<f32>()
-                .to_vec()
-                .unwrap();
-
-            let mut p1_last_color = None;
-            let mut p1_consecutive = 0;
-            for i in 0..64 {
-                if i % 8 == 0 {
-                    p1_last_color = None;
-                    p1_consecutive = 0;
-                }
-                let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-                let best_palette_idx = sample_color_token(
-                    color_logits,
-                    temp_p1,
-                    args.top_k,
-                    args.top_p,
-                    p1_last_color,
-                    p1_consecutive,
-                    args.repeat_penalty,
-                    3,
-                ) as u8;
-                if Some(best_palette_idx as usize) == p1_last_color {
-                    p1_consecutive += 1;
-                } else {
-                    p1_last_color = Some(best_palette_idx as usize);
-                    p1_consecutive = 1;
-                }
-                let next_token = (COLOR_START_ID + best_palette_idx as usize) as u32;
-                pass1_colors.push(next_token);
-
-                let step_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-                    TensorData::new(vec![next_token as i32], [1, 1]),
-                    &device,
-                );
-                let step_logits = brain_p1.forward_cached(step_tensor, &mut cache_p1);
-                last_logit = step_logits.reshape([ART_VOCAB_SIZE]).into_data().convert::<f32>().to_vec().unwrap();
-            }
-
-            canvas_hwc = pass1_tokens_to_image(&pass1_colors);
-            pass1_canvas = Some(canvas_hwc.clone());
-            if copy_idx == 0 {
-                shared_p1_colors = Some(pass1_colors.clone());
-                shared_p1_canvas = Some(canvas_hwc.clone());
-            }
-            let stats1 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
-            println!("  ✓ Pass 1 Complete ({:.2?}): Global composition established ({} colors, V/H ratio: {:.2}).", t_pass1.elapsed(), stats1.0, stats1.3);
-            print_terminal_canvas(&canvas_hwc);
-        }
-
-    // PASS 2: Shapes & Silhouettes (16x16 Patches, 256 color tokens)
-    let mut pass2_colors = Vec::with_capacity(256);
-    if let Some(brain_p2) = &brain_p2 {
-        if copy_idx > 0 && reuse_level >= 2 && shared_p2_colors.is_some() {
-            println!("\n═══════════════════════════════════════════════════════");
-            println!("  🎨 Pass 2 / {}: Reusing Shapes & Silhouettes (256 Patches)", args.passes);
-            println!("═══════════════════════════════════════════════════════");
-            pass2_colors = shared_p2_colors.as_ref().unwrap().clone();
-            let c = shared_p2_canvas.as_ref().unwrap().clone();
-            canvas_hwc = c.clone();
-            pass2_canvas = Some(c);
-            let stats2 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
-            println!("  ✓ Pass 2 Reused: Shapes and silhouettes cached ({} colors, V/H ratio: {:.2}).", stats2.0, stats2.3);
-            print_terminal_canvas(&canvas_hwc);
-        } else {
-            println!("\n═══════════════════════════════════════════════════════");
-            println!("  🎨 Pass 2 / {}: Shapes & Silhouettes (256 Patches, Temp: {:.2})", args.passes, temp_p2);
-            println!("═══════════════════════════════════════════════════════");
-            let t_pass2 = Instant::now();
-
-            let mut p2_prefix = vec![BOS_TOKEN as i32];
-            for &tok in &prompt_tokens {
-                p2_prefix.push(tok as i32);
-            }
-            p2_prefix.push(PASS_1_ID as i32);
-            for &tok in &pass1_colors {
-                p2_prefix.push(tok as i32);
-            }
-            p2_prefix.push(PASS_2_ID as i32);
-
-            let p2_coords = build_cascaded_inference_coords(&p2_prefix, 2, 256);
-            let mut cache_p2 = brain_p2.new_kv_cache_mrope(&[p2_coords], &device);
-            let prefill_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-                TensorData::new(p2_prefix.clone(), [1, p2_prefix.len()]),
-                &device,
-            );
-            let logits = brain_p2.forward_cached(prefill_tensor, &mut cache_p2);
-            let mut last_logit: Vec<f32> = logits
-                .slice([0..1, p2_prefix.len() - 1..p2_prefix.len(), 0..ART_VOCAB_SIZE])
-                .into_data()
-                .convert::<f32>()
-                .to_vec()
-                .unwrap();
-
-            let mut p2_last_color = None;
-            let mut p2_consecutive = 0;
-            for i in 0..256 {
-                if i % 16 == 0 {
-                    p2_last_color = None;
-                    p2_consecutive = 0;
-                }
-                let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
-                let best_palette_idx = sample_color_token(
-                    color_logits,
-                    temp_p2,
-                    args.top_k,
-                    args.top_p,
-                    p2_last_color,
-                    p2_consecutive,
-                    args.repeat_penalty,
-                    4,
-                ) as u8;
-                if Some(best_palette_idx as usize) == p2_last_color {
-                    p2_consecutive += 1;
-                } else {
-                    p2_last_color = Some(best_palette_idx as usize);
-                    p2_consecutive = 1;
-                }
-                let next_token = (COLOR_START_ID + best_palette_idx as usize) as u32;
-                pass2_colors.push(next_token);
-
-                let step_tensor = Tensor::<BackendType, 2, Int>::from_ints(
-                    TensorData::new(vec![next_token as i32], [1, 1]),
-                    &device,
-                );
-                let step_logits = brain_p2.forward_cached(step_tensor, &mut cache_p2);
-                last_logit = step_logits.reshape([ART_VOCAB_SIZE]).into_data().convert::<f32>().to_vec().unwrap();
-
-                if (i + 1) % 64 == 0 {
-                    println!("  [Pass 2 Progress] Patch {:>3}/256 refined...", i + 1);
-                }
-            }
-
+            pass2_colors = load_pass2_input(input_path)?;
             canvas_hwc = pass2_tokens_to_image(&pass2_colors);
             pass2_canvas = Some(canvas_hwc.clone());
             if copy_idx == 0 {
@@ -789,10 +684,201 @@ fn main() -> Result<()> {
                 shared_p2_canvas = Some(canvas_hwc.clone());
             }
             let stats2 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
-            println!("  ✓ Pass 2 Complete ({:.2?}): Subject shapes and silhouettes refined ({} colors, V/H ratio: {:.2}).", t_pass2.elapsed(), stats2.0, stats2.3);
+            println!("  ✓ Manual 16x16 Drawing Loaded: ({} colors, V/H ratio: {:.2}).", stats2.0, stats2.3);
             print_terminal_canvas(&canvas_hwc);
+        } else {
+            if copy_idx == 0 || reuse_level == 0 {
+                println!("\n🖼  Initial Canvas State (Blank):");
+                print_terminal_canvas(&canvas_hwc);
+            }
+
+            if total_copies > 1 {
+                println!("\n🎨 Yumon is generating artwork copy {}/{} across {} cascaded passes...\n", copy_num, total_copies, args.passes);
+            } else {
+                println!("\n🎨 Yumon is generating the artwork across {} cascaded passes...\n", args.passes);
+            }
+
+            // PASS 1: Broad Composition (8x8 Blocks, 64 color tokens)
+            let mut pass1_colors = Vec::with_capacity(64);
+            if let Some(brain_p1) = &brain_p1 {
+                if copy_idx > 0 && reuse_level >= 1 && shared_p1_colors.is_some() {
+                    println!("\n═══════════════════════════════════════════════════════");
+                    println!("  🎨 Pass 1 / {}: Reusing Broad Composition (64 Blocks)", args.passes);
+                    println!("═══════════════════════════════════════════════════════");
+                    pass1_colors = shared_p1_colors.as_ref().unwrap().clone();
+                    let c = shared_p1_canvas.as_ref().unwrap().clone();
+                    canvas_hwc = c.clone();
+                    pass1_canvas = Some(c);
+                    let stats1 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
+                    println!("  ✓ Pass 1 Reused: Global composition cached ({} colors, V/H ratio: {:.2}).", stats1.0, stats1.3);
+                    print_terminal_canvas(&canvas_hwc);
+                } else {
+                    println!("\n═══════════════════════════════════════════════════════");
+                    println!("  🎨 Pass 1 / {}: Broad Composition (64 Blocks, Temp: {:.2})", args.passes, temp_p1);
+                    println!("═══════════════════════════════════════════════════════");
+                    let t_pass1 = Instant::now();
+
+                    let mut p1_prefix = vec![BOS_TOKEN as i32];
+                    for &tok in &prompt_tokens {
+                        p1_prefix.push(tok as i32);
+                    }
+                    p1_prefix.push(PASS_1_ID as i32);
+
+                    let p1_coords = build_cascaded_inference_coords(&p1_prefix, 1, 64);
+                    let mut cache_p1 = brain_p1.new_kv_cache_mrope(&[p1_coords], &device);
+                    let prefill_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+                        TensorData::new(p1_prefix.clone(), [1, p1_prefix.len()]),
+                        &device,
+                    );
+                    let logits = brain_p1.forward_cached(prefill_tensor, &mut cache_p1);
+                    let mut last_logit: Vec<f32> = logits
+                        .slice([0..1, p1_prefix.len() - 1..p1_prefix.len(), 0..ART_VOCAB_SIZE])
+                        .into_data()
+                        .convert::<f32>()
+                        .to_vec()
+                        .unwrap();
+
+                    let mut p1_last_color = None;
+                    let mut p1_consecutive = 0;
+                    for i in 0..64 {
+                        if i % 8 == 0 {
+                            p1_last_color = None;
+                            p1_consecutive = 0;
+                        }
+                        let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
+                        let best_palette_idx = sample_color_token(
+                            color_logits,
+                            temp_p1,
+                            args.top_k,
+                            args.top_p,
+                            p1_last_color,
+                            p1_consecutive,
+                            args.repeat_penalty,
+                            3,
+                        ) as u8;
+                        if Some(best_palette_idx as usize) == p1_last_color {
+                            p1_consecutive += 1;
+                        } else {
+                            p1_last_color = Some(best_palette_idx as usize);
+                            p1_consecutive = 1;
+                        }
+                        let next_token = (COLOR_START_ID + best_palette_idx as usize) as u32;
+                        pass1_colors.push(next_token);
+
+                        let step_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+                            TensorData::new(vec![next_token as i32], [1, 1]),
+                            &device,
+                        );
+                        let step_logits = brain_p1.forward_cached(step_tensor, &mut cache_p1);
+                        last_logit = step_logits.reshape([ART_VOCAB_SIZE]).into_data().convert::<f32>().to_vec().unwrap();
+                    }
+
+                    canvas_hwc = pass1_tokens_to_image(&pass1_colors);
+                    pass1_canvas = Some(canvas_hwc.clone());
+                    if copy_idx == 0 {
+                        shared_p1_colors = Some(pass1_colors.clone());
+                        shared_p1_canvas = Some(canvas_hwc.clone());
+                    }
+                    let stats1 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
+                    println!("  ✓ Pass 1 Complete ({:.2?}): Global composition established ({} colors, V/H ratio: {:.2}).", t_pass1.elapsed(), stats1.0, stats1.3);
+                    print_terminal_canvas(&canvas_hwc);
+                }
+            }
+
+            // PASS 2: Shapes & Silhouettes (16x16 Patches, 256 color tokens)
+            if let Some(brain_p2) = &brain_p2 {
+                if copy_idx > 0 && reuse_level >= 2 && shared_p2_colors.is_some() {
+                    println!("\n═══════════════════════════════════════════════════════");
+                    println!("  🎨 Pass 2 / {}: Reusing Shapes & Silhouettes (256 Patches)", args.passes);
+                    println!("═══════════════════════════════════════════════════════");
+                    pass2_colors = shared_p2_colors.as_ref().unwrap().clone();
+                    let c = shared_p2_canvas.as_ref().unwrap().clone();
+                    canvas_hwc = c.clone();
+                    pass2_canvas = Some(c);
+                    let stats2 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
+                    println!("  ✓ Pass 2 Reused: Shapes and silhouettes cached ({} colors, V/H ratio: {:.2}).", stats2.0, stats2.3);
+                    print_terminal_canvas(&canvas_hwc);
+                } else {
+                    println!("\n═══════════════════════════════════════════════════════");
+                    println!("  🎨 Pass 2 / {}: Shapes & Silhouettes (256 Patches, Temp: {:.2})", args.passes, temp_p2);
+                    println!("═══════════════════════════════════════════════════════");
+                    let t_pass2 = Instant::now();
+
+                    let mut p2_prefix = vec![BOS_TOKEN as i32];
+                    for &tok in &prompt_tokens {
+                        p2_prefix.push(tok as i32);
+                    }
+                    p2_prefix.push(PASS_1_ID as i32);
+                    for &tok in &pass1_colors {
+                        p2_prefix.push(tok as i32);
+                    }
+                    p2_prefix.push(PASS_2_ID as i32);
+
+                    let p2_coords = build_cascaded_inference_coords(&p2_prefix, 2, 256);
+                    let mut cache_p2 = brain_p2.new_kv_cache_mrope(&[p2_coords], &device);
+                    let prefill_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+                        TensorData::new(p2_prefix.clone(), [1, p2_prefix.len()]),
+                        &device,
+                    );
+                    let logits = brain_p2.forward_cached(prefill_tensor, &mut cache_p2);
+                    let mut last_logit: Vec<f32> = logits
+                        .slice([0..1, p2_prefix.len() - 1..p2_prefix.len(), 0..ART_VOCAB_SIZE])
+                        .into_data()
+                        .convert::<f32>()
+                        .to_vec()
+                        .unwrap();
+
+                    let mut p2_last_color = None;
+                    let mut p2_consecutive = 0;
+                    for i in 0..256 {
+                        if i % 16 == 0 {
+                            p2_last_color = None;
+                            p2_consecutive = 0;
+                        }
+                        let color_logits = &last_logit[COLOR_START_ID..COLOR_START_ID + PALETTE_SIZE];
+                        let best_palette_idx = sample_color_token(
+                            color_logits,
+                            temp_p2,
+                            args.top_k,
+                            args.top_p,
+                            p2_last_color,
+                            p2_consecutive,
+                            args.repeat_penalty,
+                            4,
+                        ) as u8;
+                        if Some(best_palette_idx as usize) == p2_last_color {
+                            p2_consecutive += 1;
+                        } else {
+                            p2_last_color = Some(best_palette_idx as usize);
+                            p2_consecutive = 1;
+                        }
+                        let next_token = (COLOR_START_ID + best_palette_idx as usize) as u32;
+                        pass2_colors.push(next_token);
+
+                        let step_tensor = Tensor::<BackendType, 2, Int>::from_ints(
+                            TensorData::new(vec![next_token as i32], [1, 1]),
+                            &device,
+                        );
+                        let step_logits = brain_p2.forward_cached(step_tensor, &mut cache_p2);
+                        last_logit = step_logits.reshape([ART_VOCAB_SIZE]).into_data().convert::<f32>().to_vec().unwrap();
+
+                        if (i + 1) % 64 == 0 {
+                            println!("  [Pass 2 Progress] Patch {:>3}/256 refined...", i + 1);
+                        }
+                    }
+
+                    canvas_hwc = pass2_tokens_to_image(&pass2_colors);
+                    pass2_canvas = Some(canvas_hwc.clone());
+                    if copy_idx == 0 {
+                        shared_p2_colors = Some(pass2_colors.clone());
+                        shared_p2_canvas = Some(canvas_hwc.clone());
+                    }
+                    let stats2 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
+                    println!("  ✓ Pass 2 Complete ({:.2?}): Subject shapes and silhouettes refined ({} colors, V/H ratio: {:.2}).", t_pass2.elapsed(), stats2.0, stats2.3);
+                    print_terminal_canvas(&canvas_hwc);
+                }
+            }
         }
-    }
 
     // PASS 3: Anatomy & Features (32x32 Sub-Patches, 1,024 color tokens)
     let mut pass3_colors = Vec::with_capacity(1024);
@@ -1289,6 +1375,30 @@ fn main() -> Result<()> {
             let _ = upscaled_buf.save(&args.output);
         }
         saved_copies.push(copy_dest.clone());
+
+        if args.save_intermediate {
+            if let Some(ref p2) = pass2_canvas {
+                let p2_path = parent.join(format!("{}_pass2.{}", stem, ext));
+                if let Some(buf) = image::RgbImage::from_raw(CANVAS_SIZE as u32, CANVAS_SIZE as u32, p2.clone()) {
+                    let _ = buf.save(&p2_path);
+                    println!("   - Pass 2 (64x64):  {}", p2_path.display());
+                }
+            }
+            if let Some(ref p3) = pass3_canvas {
+                let p3_path = parent.join(format!("{}_pass3.{}", stem, ext));
+                if let Some(buf) = image::RgbImage::from_raw(CANVAS_SIZE as u32, CANVAS_SIZE as u32, p3.clone()) {
+                    let _ = buf.save(&p3_path);
+                    println!("   - Pass 3 (64x64):  {}", p3_path.display());
+                }
+            }
+            if let Some(ref p4) = pass4_canvas {
+                let p4_path = parent.join(format!("{}_pass4.{}", stem, ext));
+                if let Some(buf) = image::RgbImage::from_raw(CANVAS_SIZE as u32, CANVAS_SIZE as u32, p4.clone()) {
+                    let _ = buf.save(&p4_path);
+                    println!("   - Pass 4 (64x64):  {}", p4_path.display());
+                }
+            }
+        }
 
         if total_copies > 1 {
             println!("\n🎨 Artwork copy {}/{} saved successfully:", copy_num, total_copies);

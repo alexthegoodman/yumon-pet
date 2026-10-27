@@ -12,7 +12,8 @@ use std::{
     path::PathBuf,
 };
 use yumon_pet::vision::paint_action::{
-    CANVAS_SIZE, pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
+    CANVAS_SIZE, PASS_1_ID, PASS_2_ID, PASS_3_ID, PASS_4_ID,
+    pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
 };
 
 #[derive(Deserialize, Debug)]
@@ -95,6 +96,47 @@ fn upscale_nn(src: &[u8], width: usize, height: usize, scale: usize) -> Vec<u8> 
     out
 }
 
+fn make_pair_image(input: Option<&[u8]>, target: &[u8], scale: usize) -> (usize, usize, Vec<u8>) {
+    let card_w = CANVAS_SIZE * scale;
+    let card_h = CANVAS_SIZE * scale;
+    let gap = 16;
+    let total_w = card_w * 2 + gap;
+    let total_h = card_h;
+    let mut out = vec![24u8; total_w * total_h * 3]; // dark background
+
+    let target_up = upscale_nn(target, CANVAS_SIZE, CANVAS_SIZE, scale);
+    let input_up = input.map(|inp| upscale_nn(inp, CANVAS_SIZE, CANVAS_SIZE, scale));
+
+    for y in 0..card_h {
+        // Left: Input conditioning (or checkerboard placeholder if None)
+        for x in 0..card_w {
+            let out_idx = (y * total_w + x) * 3;
+            if let Some(ref inp) = input_up {
+                let in_idx = (y * card_w + x) * 3;
+                out[out_idx] = inp[in_idx];
+                out[out_idx + 1] = inp[in_idx + 1];
+                out[out_idx + 2] = inp[in_idx + 2];
+            } else {
+                let check = if (x / (8 * scale) + y / (8 * scale)) % 2 == 0 { 40 } else { 28 };
+                out[out_idx] = check;
+                out[out_idx + 1] = check;
+                out[out_idx + 2] = check;
+            }
+        }
+
+        // Right: Target Ground Truth
+        for x in 0..card_w {
+            let out_idx = (y * total_w + (card_w + gap + x)) * 3;
+            let tgt_idx = (y * card_w + x) * 3;
+            out[out_idx] = target_up[tgt_idx];
+            out[out_idx + 1] = target_up[tgt_idx + 1];
+            out[out_idx + 2] = target_up[tgt_idx + 2];
+        }
+    }
+
+    (total_w, total_h, out)
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -155,6 +197,8 @@ fn main() -> Result<()> {
         args.cache.display()
     ));
 
+    let mut pass_counts = [0usize; 4];
+
     for idx in 0..export_count {
         let global_idx = args.offset + idx;
         let mut sample_len_bytes = [0u8; 4];
@@ -178,12 +222,7 @@ fn main() -> Result<()> {
             bincode::deserialize(&sample_bytes)?
         };
 
-        // File names
-        let img_filename = format!("sample_{:05}.png", global_idx);
-        let raw_filename = format!("sample_{:05}_64.png", global_idx);
-        let img_path = args.output_dir.join(&img_filename);
-        let raw_path = args.output_dir.join(&raw_filename);
-
+        // Target tokens & canvas (the ground-truth output the model learns to produce)
         let target_colors = if sample.target_start < sample.tokens.len() {
             let end = if sample.tokens.last() == Some(&4099) {
                 sample.tokens.len() - 1
@@ -195,7 +234,7 @@ fn main() -> Result<()> {
             &[]
         };
 
-        let preview_canvas = match sample.pass {
+        let target_canvas = match sample.pass {
             1 => pass1_tokens_to_image(target_colors),
             2 => pass2_tokens_to_image(target_colors),
             3 => pass3_tokens_to_image(target_colors),
@@ -203,22 +242,91 @@ fn main() -> Result<()> {
             _ => pass4_tokens_to_image(target_colors),
         };
 
-        // Save raw 64x64 PNG
-        let raw_img = image::RgbImage::from_raw(
-            CANVAS_SIZE as u32,
-            CANVAS_SIZE as u32,
-            preview_canvas.clone(),
-        ).context("creating 64x64 ImageBuffer")?;
-        raw_img.save(&raw_path)?;
+        // Extract conditioning input canvas (what the model actually ingests)
+        let (input_canvas, cond_token_count) = match sample.pass {
+            1 => (None, 0),
+            2 => {
+                let p1_pos = sample.tokens.iter().position(|&t| t == PASS_1_ID as u32);
+                let p2_pos = sample.tokens.iter().position(|&t| t == PASS_2_ID as u32);
+                if let (Some(p1), Some(p2)) = (p1_pos, p2_pos) {
+                    if p2 > p1 + 1 {
+                        let cond_tokens = &sample.tokens[p1 + 1..p2];
+                        (Some(pass1_tokens_to_image(cond_tokens)), cond_tokens.len())
+                    } else {
+                        (None, 0)
+                    }
+                } else {
+                    (None, 0)
+                }
+            }
+            3 => {
+                let p2_pos = sample.tokens.iter().position(|&t| t == PASS_2_ID as u32);
+                let p3_pos = sample.tokens.iter().position(|&t| t == PASS_3_ID as u32);
+                if let (Some(p2), Some(p3)) = (p2_pos, p3_pos) {
+                    if p3 > p2 + 1 {
+                        let cond_tokens = &sample.tokens[p2 + 1..p3];
+                        (Some(pass2_tokens_to_image(cond_tokens)), cond_tokens.len())
+                    } else {
+                        (None, 0)
+                    }
+                } else {
+                    (None, 0)
+                }
+            }
+            4 => {
+                let p3_pos = sample.tokens.iter().position(|&t| t == PASS_3_ID as u32);
+                let p4_pos = sample.tokens.iter().position(|&t| t == PASS_4_ID as u32);
+                if let (Some(p3), Some(p4)) = (p3_pos, p4_pos) {
+                    if p4 > p3 + 1 {
+                        let cond_tokens = &sample.tokens[p3 + 1..p4];
+                        (Some(pass3_tokens_to_image(cond_tokens)), cond_tokens.len())
+                    } else {
+                        (None, 0)
+                    }
+                } else {
+                    (None, 0)
+                }
+            }
+            _ => (None, 0),
+        };
 
-        // Save upscaled 256x256 PNG for crisp display
-        let upscaled_bytes = upscale_nn(&preview_canvas, CANVAS_SIZE, CANVAS_SIZE, args.scale);
-        let upscaled_img = image::RgbImage::from_raw(
+        if sample.pass >= 1 && (sample.pass as usize) <= 4 {
+            pass_counts[sample.pass as usize - 1] += 1;
+        }
+
+        // File names
+        let pair_filename = format!("sample_{:05}.png", global_idx);
+        let pair_path = args.output_dir.join(&pair_filename);
+        let target_filename = format!("sample_{:05}_target.png", global_idx);
+        let target_path = args.output_dir.join(&target_filename);
+
+        // Save target image
+        let upscaled_target = upscale_nn(&target_canvas, CANVAS_SIZE, CANVAS_SIZE, args.scale);
+        let target_img = image::RgbImage::from_raw(
             (CANVAS_SIZE * args.scale) as u32,
             (CANVAS_SIZE * args.scale) as u32,
-            upscaled_bytes,
-        ).context("creating upscaled ImageBuffer")?;
-        upscaled_img.save(&img_path)?;
+            upscaled_target,
+        ).context("creating target ImageBuffer")?;
+        target_img.save(&target_path)?;
+
+        // Save conditioning input image if present
+        if let Some(ref inp) = input_canvas {
+            let input_filename = format!("sample_{:05}_input.png", global_idx);
+            let input_path = args.output_dir.join(&input_filename);
+            let upscaled_input = upscale_nn(inp, CANVAS_SIZE, CANVAS_SIZE, args.scale);
+            let input_img = image::RgbImage::from_raw(
+                (CANVAS_SIZE * args.scale) as u32,
+                (CANVAS_SIZE * args.scale) as u32,
+                upscaled_input,
+            ).context("creating input ImageBuffer")?;
+            input_img.save(&input_path)?;
+        }
+
+        // Save side-by-side composite pair: [Ingested Conditioning] -> [Target Output]
+        let (pair_w, pair_h, pair_bytes) = make_pair_image(input_canvas.as_deref(), &target_canvas, args.scale);
+        let pair_img = image::RgbImage::from_raw(pair_w as u32, pair_h as u32, pair_bytes)
+            .context("creating pair ImageBuffer")?;
+        pair_img.save(&pair_path)?;
 
         let pass_name = match sample.pass {
             1 => "Pass 1 (8x8 Composition)",
@@ -227,13 +335,25 @@ fn main() -> Result<()> {
             4 => "Pass 4 (64x64 Pixel Art)",
             _ => "Unknown Pass",
         };
-        let action_desc = format!("{} • {} tokens", pass_name, target_colors.len());
+        let action_desc = format!("{} • Target: {} tokens", pass_name, target_colors.len());
         let swatch_html = format!("<span class=\"action-tag\">{}</span>", pass_name);
+
+        let input_tag = if sample.pass == 1 {
+            "<span class=\"noise-badge prompt-only\">✎ Prompt Only</span>".to_string()
+        } else {
+            format!("<span class=\"noise-badge cond\">⇦ {} Ingested Tokens</span>", cond_token_count)
+        };
+
+        let cond_desc = if sample.pass == 1 {
+            "Prompt Only (Pass 1)".to_string()
+        } else {
+            format!("Cascaded Conditioning ({} input tokens)", cond_token_count)
+        };
 
         // Add to text manifest
         manifest_lines.push(format!(
-            "Sample #{:05}\n  Image  : {}\n  Action : {}\n  Prompt : {}\n",
-            global_idx, img_filename, action_desc, sample.prompt_text
+            "Sample #{:05}\n  Image       : {}\n  Pass        : {}\n  Conditioning: {}\n  Prompt      : {}\n",
+            global_idx, pair_filename, action_desc, cond_desc, sample.prompt_text
         ));
 
         // Add to HTML card
@@ -249,13 +369,17 @@ fn main() -> Result<()> {
           <img src="{}" alt="Sample {:05}" />
         </a>
       </div>
+      <div class="labels-row">
+        <span>⇦ Ingested Conditioning</span>
+        <span>Target Output ⇨</span>
+      </div>
       <div class="details">
-        <div class="swatch-row">{}</div>
+        <div class="swatch-row">{} {}</div>
         <p class="prompt">"{}"</p>
       </div>
     </div>
 "#,
-            global_idx, action_desc, img_filename, img_filename, global_idx, swatch_html, escaped_prompt
+            global_idx, action_desc, pair_filename, pair_filename, global_idx, swatch_html, input_tag, escaped_prompt
         ));
     }
 
@@ -298,7 +422,7 @@ fn main() -> Result<()> {
     }}
     .grid {{
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
       gap: 20px;
       max-width: 1400px;
       margin: 0 auto;
@@ -337,11 +461,21 @@ fn main() -> Result<()> {
       background: #0d1117;
     }}
     img {{
-      width: 256px;
-      height: 256px;
+      width: 100%;
+      max-width: 440px;
+      height: auto;
       image-rendering: pixelated;
       border-radius: 4px;
       border: 1px solid #30363d;
+    }}
+    .labels-row {{
+      display: flex;
+      justify-content: space-around;
+      font-size: 11px;
+      color: #8b949e;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin: 4px 14px 0 14px;
     }}
     .details {{
       padding: 14px;
@@ -356,6 +490,25 @@ fn main() -> Result<()> {
       gap: 8px;
       font-size: 12px;
       color: #8b949e;
+    }}
+    .noise-badge {{
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }}
+    .noise-badge.noisy {{
+      background: #9e6a03;
+      color: #fff;
+    }}
+    .noise-badge.clean {{
+      background: #238636;
+      color: #fff;
+    }}
+    .noise-badge.prompt-only {{
+      background: #1f6feb;
+      color: #fff;
     }}
     .swatch {{
       width: 16px;
@@ -404,5 +557,15 @@ fn main() -> Result<()> {
     println!("Saved interactive HTML gallery to {}", html_path.display());
 
     println!("\n✅ Successfully exported {} samples to {}!", export_count, args.output_dir.display());
+    println!("\nExport Summary ({} samples exported):", export_count);
+    println!("  - Pass 1 (Prompt -> 8x8) : {}", pass_counts[0]);
+    println!("  - Pass 2 (8x8 -> 16x16)  : {}", pass_counts[1]);
+    println!("  - Pass 3 (16x16 -> 32x32): {}", pass_counts[2]);
+    println!("  - Pass 4 (32x32 -> 64x64): {}", pass_counts[3]);
+    println!("\n🖼  Each sample exported as side-by-side composite: [Ingested Conditioning Input] ➔ [Target Predicted Output]");
+    println!("    - Combined Pair : sample_XXXXX.png");
+    println!("    - Standalone In : sample_XXXXX_input.png (Passes 2-4)");
+    println!("    - Standalone Tgt: sample_XXXXX_target.png");
+    println!("    - HTML Gallery  : index.html");
     Ok(())
 }
