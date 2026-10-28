@@ -97,6 +97,14 @@ path = "src/bin/eval_colorizer.rs"
 name = "eval_pixel_generator"
 path = "src/bin/eval_pixel_generator.rs"
 
+[[bin]]
+name = "train_dcgan"
+path = "src/bin/train_dcgan.rs"
+
+[[bin]]
+name = "eval_dcgan"
+path = "src/bin/eval_dcgan.rs"
+
 
 
 

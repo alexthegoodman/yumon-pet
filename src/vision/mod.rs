@@ -4,6 +4,7 @@
 ///   - patch_encoder       : 2D coordinate-aware 64x64 canvas patch encoder for MoE
 ///   - paint_action        : Discrete paint commands & canvas progression
 ///   - upscaler            : Pass 4 deep residual super-resolution (32x32 -> 256x256)
+///   - dcgan_model         : Vanilla unconditional DCGAN (latent -> 64x64 RGB)
 
 pub mod model;
 pub mod loader;
@@ -13,6 +14,7 @@ pub mod train;
 pub mod paint_action;
 pub mod patch_encoder;
 pub mod upscaler;
+pub mod dcgan_model;
 pub mod colorizer;
 pub mod paint_studio;
 pub mod chart;
@@ -25,6 +27,12 @@ pub use paint_action::{
 };
 pub use patch_encoder::{VisionPatchEncoder, VisionPatchEncoderConfig};
 pub use upscaler::{UpscalerModel, UpscalerModelConfig, UpscalerDiscriminator, UpscalerDiscriminatorConfig};
+pub use dcgan_model::{
+    DcganGenerator, DcganGeneratorConfig,
+    DcganDiscriminator, DcganDiscriminatorConfig,
+    discriminator_loss, generator_loss,
+    DCGAN_NOISE_DIM, DCGAN_CHANNELS, DCGAN_IMAGE_SIZE,
+};
 pub use colorizer::{
     ColorizerModel, ColorizerModelConfig, ColorizerLut, COLOR_BINS_AB, NUM_COLOR_BINS,
     DEFAULT_TEMPERATURE, DEFAULT_CHROMA_BOOST, OFFICIAL_PRIOR_PROBS, official_class_weights,
