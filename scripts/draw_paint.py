@@ -14,6 +14,7 @@ Usage:
 import os
 import sys
 import json
+import struct
 import time
 import socket
 import base64
@@ -23,11 +24,18 @@ import webbrowser
 import subprocess
 from pathlib import Path
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TMP_DIR = PROJECT_ROOT / "tmp" / "draw_paint"
 TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+TRAINING_CACHE = PROJECT_ROOT / "training-cache" / "diffusion_kilo_samples.bin"
+
+COLOR_START_ID = 4238
+DONE_ID = 4099
+PALETTE_SIZE = 256
+PASS_2_GRID = 256
 
 RELEASE_EXE = PROJECT_ROOT / "target" / "release" / "yumon_paint.exe"
 DEBUG_EXE = PROJECT_ROOT / "target" / "debug" / "yumon_paint.exe"
@@ -61,6 +69,93 @@ def file_to_base64_data_uri(path: Path) -> str:
     with open(path, "rb") as f:
         encoded = base64.b64encode(f.read()).decode("utf-8")
     return f"data:image/png;base64,{encoded}"
+
+def _parse_cache_sample(sample_bytes: bytes, version: int):
+    """Decode one bincode-serialized ArtSample into (prompt, pass_id, tokens, target_start)."""
+    off = 0
+    n = struct.unpack_from("<Q", sample_bytes, off)[0]
+    off += 8
+    prompt = sample_bytes[off:off + n].decode("utf-8", "replace")
+    off += n
+    pass_id = sample_bytes[off]
+    off += 1
+    n_tokens = struct.unpack_from("<Q", sample_bytes, off)[0]
+    off += 8
+    tokens = list(struct.unpack_from("<{}I".format(n_tokens), sample_bytes, off))
+    off += n_tokens * 4
+    target_start = struct.unpack_from("<Q", sample_bytes, off)[0]
+    off += 8
+    if version >= 4:
+        tag = sample_bytes[off]
+        off += 1
+        if tag == 1:
+            n_weights = struct.unpack_from("<Q", sample_bytes, off)[0]
+            off += 8
+            off += n_weights * 4
+    return prompt, pass_id, tokens, target_start
+
+_pass2_index = None
+
+def load_pass2_samples():
+    """Parse the kilo art cache and return a list of pass-2 (16x16) samples.
+
+    Each entry is ``{"prompt": str, "pixels": bytes}`` where ``pixels`` is 256
+    palette indices (0..255) laid out row-major, ready to drop into the 16x16 grid.
+    """
+    global _pass2_index
+    if _pass2_index is not None:
+        return _pass2_index
+
+    items = []
+    if not TRAINING_CACHE.is_file():
+        _pass2_index = items
+        return items
+
+    try:
+        with open(TRAINING_CACHE, "rb") as f:
+            if f.read(8) != b"YUMONART":
+                _pass2_index = items
+                return items
+
+            meta_len = struct.unpack("<I", f.read(4))[0]
+            meta_bytes = f.read(meta_len)
+            version = struct.unpack_from("<I", meta_bytes, 0)[0]
+
+            while True:
+                len_buf = f.read(4)
+                if len(len_buf) < 4:
+                    break
+                sample_len = struct.unpack("<I", len_buf)[0]
+                sample_bytes = f.read(sample_len)
+                if len(sample_bytes) < sample_len:
+                    break
+
+                prompt, pass_id, tokens, target_start = _parse_cache_sample(sample_bytes, version)
+                if pass_id != 2:
+                    continue
+
+                colors = tokens[target_start:]
+                if colors and colors[-1] == DONE_ID:
+                    colors = colors[:-1]
+
+                palette = []
+                for t in colors:
+                    if COLOR_START_ID <= t < COLOR_START_ID + PALETTE_SIZE:
+                        palette.append(t - COLOR_START_ID)
+                    else:
+                        palette.append(255)
+                if len(palette) < PASS_2_GRID:
+                    palette.extend([255] * (PASS_2_GRID - len(palette)))
+                palette = palette[:PASS_2_GRID]
+
+                items.append({"prompt": prompt, "pixels": bytes(palette)})
+    except Exception as e:
+        print(f"[Warning] Could not parse training cache {TRAINING_CACHE.name}: {e}", file=sys.stderr)
+        _pass2_index = []
+        return _pass2_index
+
+    _pass2_index = items
+    return items
 
 class StudioServer(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -102,6 +197,36 @@ class StudioServer(BaseHTTPRequestHandler):
                     "pass3_ckpt": (PROJECT_ROOT / "checkpoints" / "yumon-art-pass3-db").exists(),
                     "pass4_ckpt": (PROJECT_ROOT / "checkpoints" / "yumon-art-pass4-db").exists(),
                     "upscaler_ckpt": (PROJECT_ROOT / "checkpoints" / "yumon-upscaler-codebook").exists(),
+                })
+                return
+
+            elif path == "/api/cache-pass2":
+                params = parse_qs(parsed.query)
+                query = (params.get("q", [""])[0] or "").strip().lower()
+                try:
+                    page = max(0, int(params.get("page", ["0"])[0]))
+                except ValueError:
+                    page = 0
+                try:
+                    page_size = int(params.get("page_size", ["48"])[0])
+                except ValueError:
+                    page_size = 48
+                page_size = max(1, min(120, page_size))
+
+                samples = load_pass2_samples()
+                if query:
+                    samples = [s for s in samples if query in s["prompt"].lower()]
+
+                total = len(samples)
+                start = page * page_size
+                window = samples[start:start + page_size]
+
+                self.send_json(200, {
+                    "items": [{"prompt": s["prompt"], "pixels": list(s["pixels"])} for s in window],
+                    "total": total,
+                    "page": page,
+                    "page_size": page_size,
+                    "has_more": start + page_size < total,
                 })
                 return
 
@@ -480,6 +605,68 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     border-color: var(--accent-purple);
   }
 
+  /* Training Cache Pass 2 Browser */
+  .cache-modal {
+    width: min(720px, 90vw);
+    max-height: 88vh;
+  }
+  .cache-search {
+    display: flex;
+    gap: 6px;
+    width: 100%;
+  }
+  .cache-search input {
+    flex: 1;
+    background: #13161c;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: #fff;
+    padding: 7px 10px;
+    font-size: 0.8rem;
+    outline: none;
+  }
+  .cache-search input:focus { border-color: var(--accent-cyan); }
+  .cache-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+    gap: 6px;
+    width: 100%;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 2px;
+    align-content: start;
+  }
+  .cache-item {
+    background: var(--panel-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 3px;
+    cursor: pointer;
+    transition: all 0.12s ease;
+    line-height: 0;
+  }
+  .cache-item:hover {
+    border-color: var(--accent-cyan);
+    box-shadow: 0 0 8px rgba(0,229,255,0.35);
+  }
+  .cache-item canvas {
+    width: 100%;
+    aspect-ratio: 1;
+    image-rendering: pixelated;
+    border-radius: 2px;
+    background: #0d0f13;
+    display: block;
+  }
+  .cache-pager {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    font-size: 0.74rem;
+    color: var(--text-muted);
+    font-family: "Fira Code", monospace;
+  }
+
   /* Prompt Input */
   .prompt-group {
     display: flex;
@@ -805,6 +992,12 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       <div class="presets-bar" id="presetsBar"></div>
     </div>
 
+    <!-- Cache Pass 2 Launcher -->
+    <div>
+      <div class="section-label">Cache Pass 2 (16×16) Starters</div>
+      <button class="tool-btn" id="btnBrowseCache" style="width:100%; justify-content:center;">🗂️ Browse Training Cache Pass 2…</button>
+    </div>
+
     <!-- Prompt Box -->
     <div class="prompt-group">
       <div class="section-label">Art Prompt Guiding Yumon</div>
@@ -824,20 +1017,20 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       <summary>⚙️ Generation & Guidance Controls</summary>
       <div class="sliders-grid">
         <div class="slider-item">
-          <label><span>Pass 3 Guidance (16x16 anchor)</span><strong id="valGuideP3">8</strong></label>
-          <input type="range" id="guideP3" min="0" max="10" step="0.25" value="8"/>
+          <label><span>Pass 3 Guidance (16x16 anchor)</span><strong id="valGuideP3">3</strong></label>
+          <input type="range" id="guideP3" min="0" max="10" step="0.25" value="3"/>
         </div>
         <div class="slider-item">
-          <label><span>Pass 4 Guidance (32x32 anchor)</span><strong id="valGuideP4">8</strong></label>
-          <input type="range" id="guideP4" min="0" max="10" step="0.25" value="8"/>
+          <label><span>Pass 4 Guidance (32x32 anchor)</span><strong id="valGuideP4">8.5</strong></label>
+          <input type="range" id="guideP4" min="0" max="10" step="0.25" value="8.5"/>
         </div>
         <div class="slider-item">
-          <label><span>Pass 3 Temp (Anatomy)</span><strong id="valTempP3">2.2</strong></label>
-          <input type="range" id="tempP3" min="0.4" max="3.0" step="0.05" value="2.2"/>
+          <label><span>Pass 3 Temp (Anatomy)</span><strong id="valTempP3">1.95</strong></label>
+          <input type="range" id="tempP3" min="0.4" max="3.0" step="0.05" value="1.95"/>
         </div>
         <div class="slider-item">
-          <label><span>Pass 4 Temp (Details)</span><strong id="valTempP4">0.5</strong></label>
-          <input type="range" id="tempP4" min="0.4" max="3.0" step="0.05" value="0.5"/>
+          <label><span>Pass 4 Temp (Details)</span><strong id="valTempP4">2.15</strong></label>
+          <input type="range" id="tempP4" min="0.4" max="3.0" step="0.05" value="2.15"/>
         </div>
       </div>
     </details>
@@ -928,6 +1121,29 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     <div style="display:flex; gap:10px;">
       <a id="modalDownload" href="#" download="yumon_art.png" class="tool-btn" style="text-decoration:none;">💾 Download PNG</a>
       <button class="tool-btn" id="modalClose">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Cache Pass 2 Picker Modal -->
+<div class="modal-overlay" id="cacheModalOverlay">
+  <div class="modal-content cache-modal">
+    <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
+      <h3 style="color:var(--accent-cyan); font-size:1rem;">Cache Pass 2 (16×16) Starters</h3>
+      <span id="cacheCount" style="font-size:0.78rem; color:var(--text-muted); font-family:'Fira Code',monospace;">loading…</span>
+    </div>
+    <div class="cache-search">
+      <input type="text" id="cacheSearch" placeholder="Search by prompt…"/>
+      <button class="tool-btn" id="cacheSearchBtn">🔍</button>
+    </div>
+    <div class="cache-grid" id="cacheGrid"></div>
+    <div class="cache-pager">
+      <button class="tool-btn" id="cachePrev">◀ Prev</button>
+      <span id="cachePageInfo">Page 1</span>
+      <button class="tool-btn" id="cacheNext">Next ▶</button>
+    </div>
+    <div style="display:flex; gap:10px; justify-content:flex-end; width:100%;">
+      <button class="tool-btn" id="cacheModalClose">Close</button>
     </div>
   </div>
 </div>
@@ -1558,6 +1774,107 @@ initPresets();
 selectPaletteIndex(0); // Black brush to start
 renderCanvas();
 updateStage1Preview();
+
+// Training Cache Pass 2 Browser
+const CACHE_PAGE_SIZE = 48;
+let cachePage = 0;
+let cacheTotal = 0;
+
+function renderCacheThumbnail(pixels) {
+  const c = document.createElement("canvas");
+  c.width = 16;
+  c.height = 16;
+  const cctx = c.getContext("2d");
+  const img = cctx.createImageData(16, 16);
+  for (let i = 0; i < 256; i++) {
+    const [r, g, b] = paletteToRgb(pixels[i]);
+    img.data[i * 4] = r;
+    img.data[i * 4 + 1] = g;
+    img.data[i * 4 + 2] = b;
+    img.data[i * 4 + 3] = 255;
+  }
+  cctx.putImageData(img, 0, 0);
+  return c;
+}
+
+async function loadCachePage() {
+  const q = document.getElementById("cacheSearch").value.trim();
+  const params = new URLSearchParams({ page: cachePage, page_size: CACHE_PAGE_SIZE });
+  if (q) params.set("q", q);
+  const gridEl = document.getElementById("cacheGrid");
+  gridEl.innerHTML = '<span style="font-size:0.72rem;color:var(--text-muted);font-style:italic;">Loading…</span>';
+
+  try {
+    const res = await fetch("/api/cache-pass2?" + params.toString());
+    const data = await res.json();
+    cacheTotal = data.total || 0;
+    document.getElementById("cacheCount").innerText = `${data.total} starters`;
+
+    gridEl.innerHTML = "";
+    if (!data.items || data.items.length === 0) {
+      gridEl.innerHTML = '<span style="font-size:0.72rem;color:var(--text-muted);font-style:italic;">No pass 2 starters found.</span>';
+    } else {
+      data.items.forEach(item => {
+        const card = document.createElement("div");
+        card.className = "cache-item";
+        card.title = item.prompt;
+        card.appendChild(renderCacheThumbnail(item.pixels));
+        card.addEventListener("click", () => {
+          saveStateForUndo();
+          grid = [...item.pixels];
+          document.getElementById("promptInput").value = item.prompt;
+          renderCanvas();
+          updateStage1Preview();
+          document.getElementById("cacheModalOverlay").classList.remove("open");
+        });
+        gridEl.appendChild(card);
+      });
+    }
+
+    const totalPages = Math.max(1, Math.ceil(cacheTotal / CACHE_PAGE_SIZE));
+    document.getElementById("cachePageInfo").innerText = `Page ${cachePage + 1} / ${totalPages}`;
+    document.getElementById("cachePrev").disabled = cachePage <= 0;
+    document.getElementById("cacheNext").disabled = (cachePage + 1) * CACHE_PAGE_SIZE >= cacheTotal;
+  } catch (err) {
+    gridEl.innerHTML = `<span style="font-size:0.72rem;color:var(--accent-magenta);font-style:italic;">Failed to load cache: ${err.message}</span>`;
+  }
+}
+
+function openCacheModal() {
+  document.getElementById("cacheModalOverlay").classList.add("open");
+  loadCachePage();
+}
+function closeCacheModal() {
+  document.getElementById("cacheModalOverlay").classList.remove("open");
+}
+
+document.getElementById("btnBrowseCache").addEventListener("click", openCacheModal);
+document.getElementById("cacheModalClose").addEventListener("click", closeCacheModal);
+document.getElementById("cacheModalOverlay").addEventListener("click", e => {
+  if (e.target.id === "cacheModalOverlay") closeCacheModal();
+});
+document.getElementById("cacheSearchBtn").addEventListener("click", () => {
+  cachePage = 0;
+  loadCachePage();
+});
+document.getElementById("cacheSearch").addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    cachePage = 0;
+    loadCachePage();
+  }
+});
+document.getElementById("cachePrev").addEventListener("click", () => {
+  if (cachePage > 0) {
+    cachePage--;
+    loadCachePage();
+  }
+});
+document.getElementById("cacheNext").addEventListener("click", () => {
+  if ((cachePage + 1) * CACHE_PAGE_SIZE < cacheTotal) {
+    cachePage++;
+    loadCachePage();
+  }
+});
 </script>
 
 </body>
