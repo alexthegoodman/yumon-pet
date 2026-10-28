@@ -970,3 +970,277 @@ pub fn render_art_chart(frame: &mut ratatui::Frame, state: &ArtTrainingState) {
         .label(gauge_label);
     frame.render_widget(gauge, chunks[2]);
 }
+
+// ─── DCGAN Training Dashboard ──────────────────────────────────────────────
+
+pub struct DcganTrainingState {
+    pub epoch: usize,
+    pub total_epochs: usize,
+    pub batch: usize,
+    pub total_batches: usize,
+    pub global_step: usize,
+
+    pub current_lr: f64,
+    pub current_g_loss: f32,
+    pub current_d_loss: f32,
+
+    pub g_loss_history: Vec<(f64, f64)>,
+    pub d_loss_history: Vec<(f64, f64)>,
+    pub lr_history: Vec<(f64, f64)>,
+
+    pub start_time: Instant,
+    pub last_preview_path: Option<String>,
+}
+
+impl DcganTrainingState {
+    pub fn new(total_epochs: usize, total_batches: usize, lr: f64) -> Self {
+        Self {
+            epoch: 1,
+            total_epochs,
+            batch: 0,
+            total_batches,
+            global_step: 0,
+            current_lr: lr,
+            current_g_loss: 0.0,
+            current_d_loss: 0.0,
+            g_loss_history: Vec::new(),
+            d_loss_history: Vec::new(),
+            lr_history: Vec::new(),
+            start_time: Instant::now(),
+            last_preview_path: None,
+        }
+    }
+
+    pub fn save_csv(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let file = std::fs::File::create(path)?;
+        let mut writer = std::io::BufWriter::new(file);
+
+        writeln!(writer, "step,g_loss,d_loss,lr")?;
+        for (i, &(step, g)) in self.g_loss_history.iter().enumerate() {
+            let d = self.d_loss_history.get(i).map_or(0.0, |p| p.1);
+            let lr = self.lr_history.get(i).map_or(0.0, |p| p.1);
+            writeln!(writer, "{},{},{},{}", step, g, d, lr)?;
+        }
+        writer.flush()?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn save_chart_image(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        use crate::brain::chart::plot::{dim, text, Panel, Series, BACKGROUND};
+        use image::Rgb;
+
+        let (width, height) = (1200u32, 800u32);
+        let mut img = image::RgbImage::from_pixel(width, height, BACKGROUND);
+        let (left, panel_w) = (80, width as i32 - 80 - 24);
+
+        let title_str = format!("Yumon Vanilla DCGAN - Loss Dynamics (Epoch {})", self.epoch);
+        text(&mut img, &title_str, left, 14, Rgb([255, 255, 255]));
+
+        let g_smooth = ema(&self.g_loss_history, EMA_ALPHA);
+        let d_smooth = ema(&self.d_loss_history, EMA_ALPHA);
+
+        let cyan = Rgb([0, 255, 255]);
+        let orange = Rgb([255, 140, 0]);
+
+        // Panel 1: Loss curves (Generator in Cyan, Discriminator in Orange)
+        let loss_series: Vec<Series> = vec![
+            (&self.g_loss_history, dim(cyan, 0.35)),
+            (&g_smooth, cyan),
+            (&self.d_loss_history, dim(orange, 0.35)),
+            (&d_smooth, orange),
+        ];
+
+        let loss_panel = Panel::new(left, 40, panel_w, 520, false, false).fit(&loss_series, false);
+        loss_panel.draw(&mut img, &loss_series);
+
+        // Legend
+        text(&mut img, "Cyan: G Loss (EMA)", left + 10, 50, cyan);
+        text(&mut img, "Orange: D Loss (EMA)", left + 200, 50, orange);
+
+        // Panel 2: Learning rate
+        let lr_color = Rgb([0, 255, 128]);
+        let lr_series: [Series; 1] = [(&self.lr_history, lr_color)];
+        Panel::new(left, 590, panel_w, 160, false, false)
+            .fit(&lr_series, true)
+            .draw(&mut img, &lr_series);
+        text(&mut img, "Learning Rate", left + 10, 600, lr_color);
+
+        img.save(path)?;
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn render_dcgan_chart(frame: &mut ratatui::Frame, state: &DcganTrainingState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Header stats
+            Constraint::Min(10),   // Charts
+            Constraint::Length(3), // Progress gauge
+        ])
+        .split(frame.area());
+
+    // 1. Header
+    let elapsed = state.start_time.elapsed();
+    let elapsed_str = format!("{:02}:{:02}", elapsed.as_secs() / 60, elapsed.as_secs() % 60);
+
+    let stats_text = format!(
+        " Epoch {}/{} │ Batch {}/{} │ LR {:.2e} │ G: {:.4} │ D: {:.4} │ ⏱ {}",
+        state.epoch,
+        state.total_epochs,
+        state.batch,
+        state.total_batches,
+        state.current_lr,
+        state.current_g_loss,
+        state.current_d_loss,
+        elapsed_str,
+    );
+
+    let header = Paragraph::new(stats_text)
+        .style(Style::default().fg(Color::White))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Yumon Vanilla DCGAN (64x64 RGB) ")
+                .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        );
+    frame.render_widget(header, chunks[0]);
+
+    // 2. Charts (2 side-by-side: Generator Loss vs Discriminator Loss)
+    let chart_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(50), // Generator Loss
+            Constraint::Percentage(50), // Discriminator Loss
+        ])
+        .split(chunks[1]);
+
+    let x_max = (state.global_step as f64).max(10.0);
+
+    // Left: Generator Loss Chart
+    let g_data = &state.g_loss_history;
+    let g_ema = ema(g_data, EMA_ALPHA);
+
+    let mut g_min = f64::INFINITY;
+    let mut g_max = 0.0f64;
+    for &(_, y) in g_data {
+        if y.is_finite() {
+            g_min = g_min.min(y);
+            g_max = g_max.max(y);
+        }
+    }
+    if !g_min.is_finite() { g_min = 0.0; }
+    if g_max <= g_min { g_max = g_min + 1.0; }
+
+    let g_datasets = vec![
+        Dataset::default()
+            .name("G Raw")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::DarkGray))
+            .data(g_data),
+        Dataset::default()
+            .name("G EMA")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Cyan))
+            .data(&g_ema),
+    ];
+
+    let g_chart = Chart::new(g_datasets)
+        .block(
+            Block::default()
+                .title(" Generator Loss (Cyan=EMA) ")
+                .borders(Borders::ALL),
+        )
+        .x_axis(
+            Axis::default()
+                .bounds([0.0, x_max])
+                .labels(vec!["0".to_string(), format!("{}", state.global_step)]),
+        )
+        .y_axis(
+            Axis::default()
+                .bounds([g_min * 0.9, g_max * 1.1])
+                .labels(vec![format!("{:.2}", g_min), format!("{:.2}", g_max)]),
+        );
+    frame.render_widget(g_chart, chart_cols[0]);
+
+    // Right: Discriminator Loss Chart
+    let d_data = &state.d_loss_history;
+    let d_ema = ema(d_data, EMA_ALPHA);
+
+    let mut d_min = f64::INFINITY;
+    let mut d_max = 0.0f64;
+    for &(_, y) in d_data {
+        if y.is_finite() {
+            d_min = d_min.min(y);
+            d_max = d_max.max(y);
+        }
+    }
+    if !d_min.is_finite() { d_min = 0.0; }
+    if d_max <= d_min { d_max = d_min + 1.0; }
+
+    let d_datasets = vec![
+        Dataset::default()
+            .name("D Raw")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::DarkGray))
+            .data(d_data),
+        Dataset::default()
+            .name("D EMA")
+            .marker(symbols::Marker::Braille)
+            .graph_type(GraphType::Line)
+            .style(Style::default().fg(Color::Yellow))
+            .data(&d_ema),
+    ];
+
+    let d_chart = Chart::new(d_datasets)
+        .block(
+            Block::default()
+                .title(" Discriminator Loss (Yellow=EMA) ")
+                .borders(Borders::ALL),
+        )
+        .x_axis(
+            Axis::default()
+                .bounds([0.0, x_max])
+                .labels(vec!["0".to_string(), format!("{}", state.global_step)]),
+        )
+        .y_axis(
+            Axis::default()
+                .bounds([d_min * 0.9, d_max * 1.1])
+                .labels(vec![format!("{:.2}", d_min), format!("{:.2}", d_max)]),
+        );
+    frame.render_widget(d_chart, chart_cols[1]);
+
+    // 3. Progress Gauge
+    let total_batches_all = state.total_epochs * state.total_batches;
+    let completed_batches =
+        (state.epoch.saturating_sub(1)) * state.total_batches + state.batch;
+    let progress_ratio = if total_batches_all > 0 {
+        (completed_batches as f64 / total_batches_all as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    let gauge_label = if let Some(ref path) = state.last_preview_path {
+        format!("{:.1}% │ Last preview: {}", progress_ratio * 100.0, path)
+    } else {
+        format!("{:.1}%", progress_ratio * 100.0)
+    };
+
+    let gauge = Gauge::default()
+        .block(Block::default().borders(Borders::ALL).title(" Overall Progress "))
+        .gauge_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .ratio(progress_ratio)
+        .label(gauge_label);
+    frame.render_widget(gauge, chunks[2]);
+}

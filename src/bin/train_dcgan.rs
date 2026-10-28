@@ -23,14 +23,17 @@ use image::imageops::FilterType;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
+use ratatui::{backend::CrosstermBackend, Terminal, TerminalOptions, Viewport};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::{stdout, IsTerminal},
     path::{Path, PathBuf},
     time::Instant,
 };
 
+use yumon_pet::vision::chart::{render_dcgan_chart, DcganTrainingState};
 use yumon_pet::vision::dcgan_model::{
     discriminator_loss, generator_loss, sample_noise, sample_noise_vec,
     DcganDiscriminator, DcganDiscriminatorConfig, DcganGenerator, DcganGeneratorConfig,
@@ -90,6 +93,10 @@ struct Args {
     /// Random seed for shuffling and noise sampling.
     #[arg(long, default_value_t = 42)]
     seed: u64,
+
+    /// Disable inline interactive terminal TUI dashboard.
+    #[arg(long, default_value_t = false)]
+    no_tui: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -317,18 +324,44 @@ fn main() -> Result<()> {
     let mut last_g_loss = 0.0f32;
     let mut last_d_loss = 0.0f32;
 
+    let mut tui_state = DcganTrainingState::new(args.epochs, num_batches, args.lr);
+
+    let mut terminal = if !args.no_tui && stdout().is_terminal() {
+        let backend = CrosstermBackend::new(stdout());
+        match Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(24),
+            },
+        ) {
+            Ok(term) => Some(term),
+            Err(e) => {
+                eprintln!("Warning: Failed to initialize inline TUI terminal: {e}. Falling back to standard output.");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     for epoch in 1..=args.epochs {
         indices.shuffle(&mut rng);
         let t_epoch = Instant::now();
+        tui_state.epoch = epoch;
 
-        let pb = ProgressBar::new(num_batches as u64);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [Epoch {msg}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) G:{prefix}")
-                .unwrap()
-                .progress_chars("#>-"),
-        );
-        pb.set_message(format!("{}/{}", epoch, args.epochs));
+        let pb = if terminal.is_none() {
+            let bar = ProgressBar::new(num_batches as u64);
+            bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [Epoch {msg}] [{bar:30.cyan/blue}] {pos}/{len} ({eta}) G:{prefix}")
+                    .unwrap()
+                    .progress_chars("#>-"),
+            );
+            bar.set_message(format!("{}/{}", epoch, args.epochs));
+            Some(bar)
+        } else {
+            None
+        };
 
         let mut epoch_g = 0.0f32;
         let mut epoch_d = 0.0f32;
@@ -367,21 +400,36 @@ fn main() -> Result<()> {
             last_g_loss = g_loss_val;
             last_d_loss = d_loss_val;
 
-            pb.set_prefix(format!("{:.4}", g_loss_val));
-            pb.inc(1);
+            let global_step = (epoch - 1) * num_batches + bi + 1;
+            tui_state.batch = bi + 1;
+            tui_state.global_step = global_step;
+            tui_state.current_g_loss = g_loss_val;
+            tui_state.current_d_loss = d_loss_val;
+            tui_state.g_loss_history.push((global_step as f64, g_loss_val as f64));
+            tui_state.d_loss_history.push((global_step as f64, d_loss_val as f64));
+            tui_state.lr_history.push((global_step as f64, args.lr));
 
-            if bi == 0 || bi == num_batches - 1 {
-                println!(
-                    "  [{}] step {} G:{:.4} D:{:.4}",
-                    epoch, bi, g_loss_val, d_loss_val
-                );
+            if let Some(term) = terminal.as_mut() {
+                let _ = term.draw(|f| render_dcgan_chart(f, &tui_state));
+            } else if let Some(p) = pb.as_ref() {
+                p.set_prefix(format!("{:.4}", g_loss_val));
+                p.inc(1);
+
+                if bi == 0 || bi == num_batches - 1 {
+                    println!(
+                        "  [{}] step {} G:{:.4} D:{:.4}",
+                        epoch, bi, g_loss_val, d_loss_val
+                    );
+                }
             }
         }
 
-        pb.finish_with_message(format!(
-            "{}/{} [G:{:.4} D:{:.4}]",
-            epoch, args.epochs, epoch_g / steps.max(1) as f32, epoch_d / steps.max(1) as f32
-        ));
+        if let Some(p) = pb {
+            p.finish_with_message(format!(
+                "{}/{} [G:{:.4} D:{:.4}]",
+                epoch, args.epochs, epoch_g / steps.max(1) as f32, epoch_d / steps.max(1) as f32
+            ));
+        }
 
         // --- Preview grid from fixed noise (inference mode) ---
         let gen_valid = generator.valid();
@@ -395,6 +443,21 @@ fn main() -> Result<()> {
             eprintln!("Warning: failed to save preview grid: {e}");
         } else {
             let _ = fs::copy(&preview_path, args.out_dir.join("preview_latest.png"));
+            tui_state.last_preview_path = Some(preview_path.to_string_lossy().to_string());
+        }
+
+        // --- Save chart PNG and CSV ---
+        let chart_path = args.out_dir.join("chart.png");
+        let epoch_chart_path = args.out_dir.join(format!("chart_epoch_{:02}.png", epoch));
+        if let Err(e) = tui_state.save_chart_image(&chart_path) {
+            eprintln!("Warning: failed to save chart image: {e}");
+        } else {
+            let _ = fs::copy(&chart_path, &epoch_chart_path);
+        }
+        let _ = tui_state.save_csv(&args.out_dir.join("loss_history.csv"));
+
+        if let Some(term) = terminal.as_mut() {
+            let _ = term.draw(|f| render_dcgan_chart(f, &tui_state));
         }
 
         // --- Checkpoint ---
@@ -420,15 +483,21 @@ fn main() -> Result<()> {
             serde_json::to_string_pretty(&meta)?,
         )?;
 
-        println!(
-            "  Epoch {:>3}/{} ({:.1?}): avg G:{:.4} avg D:{:.4} | saved {}",
-            epoch,
-            args.epochs,
-            t_epoch.elapsed(),
-            epoch_g / steps.max(1) as f32,
-            epoch_d / steps.max(1) as f32,
-            args.out_dir.display()
-        );
+        if terminal.is_none() {
+            println!(
+                "  Epoch {:>3}/{} ({:.1?}): avg G:{:.4} avg D:{:.4} | saved {}",
+                epoch,
+                args.epochs,
+                t_epoch.elapsed(),
+                epoch_g / steps.max(1) as f32,
+                epoch_d / steps.max(1) as f32,
+                args.out_dir.display()
+            );
+        }
+    }
+
+    if let Some(mut term) = terminal {
+        let _ = term.clear();
     }
 
     println!("\nTraining complete. Generator saved to {}", args.out_dir.join("generator").display());
