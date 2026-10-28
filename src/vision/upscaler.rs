@@ -10,6 +10,7 @@ use burn::{
     module::{Ignored, Module},
     nn::{
         conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig},
+        pool::{AdaptiveAvgPool2d, AdaptiveAvgPool2dConfig},
         PaddingConfig2d,
     },
     prelude::*,
@@ -553,6 +554,48 @@ impl<B: Backend> AnyUpscaler<B> {
     }
 }
 
+/// Compute multi-scale patch contrast/variance loss between prediction and target.
+///
+/// Measures the local standard deviation of pixel values across 4x4 and 8x8 patches.
+/// Penalizes the model when it predicts flat, featureless splotches in regions where
+/// the ground truth possesses rich texture (bark, hair, stubble, scales), while preserving
+/// smoothness in genuinely flat regions (sky, backdrop).
+pub fn patch_variance_loss<B: Backend>(
+    pred: Tensor<B, 4>,
+    target: Tensor<B, 4>,
+) -> Tensor<B, 1> {
+    let pool_4x4: AdaptiveAvgPool2d = AdaptiveAvgPool2dConfig::new([64, 64]).init();
+    let pool_8x8: AdaptiveAvgPool2d = AdaptiveAvgPool2dConfig::new([32, 32]).init();
+
+    // 1. Scale 1: 4x4 micro-texture patches
+    let mean_pred_4 = pool_4x4.forward(pred.clone());
+    let mean_sq_pred_4 = pool_4x4.forward(pred.clone() * pred.clone());
+    let var_pred_4 = relu(mean_sq_pred_4 - mean_pred_4.clone() * mean_pred_4);
+    let std_pred_4 = (var_pred_4 + 1e-5).sqrt();
+
+    let mean_tgt_4 = pool_4x4.forward(target.clone());
+    let mean_sq_tgt_4 = pool_4x4.forward(target.clone() * target.clone());
+    let var_tgt_4 = relu(mean_sq_tgt_4 - mean_tgt_4.clone() * mean_tgt_4);
+    let std_tgt_4 = (var_tgt_4 + 1e-5).sqrt();
+
+    let loss_4 = (std_pred_4 - std_tgt_4).abs().mean();
+
+    // 2. Scale 2: 8x8 meso-texture patches
+    let mean_pred_8 = pool_8x8.forward(pred.clone());
+    let mean_sq_pred_8 = pool_8x8.forward(pred.clone() * pred);
+    let var_pred_8 = relu(mean_sq_pred_8 - mean_pred_8.clone() * mean_pred_8);
+    let std_pred_8 = (var_pred_8 + 1e-5).sqrt();
+
+    let mean_tgt_8 = pool_8x8.forward(target.clone());
+    let mean_sq_tgt_8 = pool_8x8.forward(target.clone() * target);
+    let var_tgt_8 = relu(mean_sq_tgt_8 - mean_tgt_8.clone() * mean_tgt_8);
+    let std_tgt_8 = (var_tgt_8 + 1e-5).sqrt();
+
+    let loss_8 = (std_pred_8 - std_tgt_8).abs().mean();
+
+    (loss_4 + loss_8) * 0.5
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,6 +603,18 @@ mod tests {
     use cubecl::wgpu::WgpuRuntime;
 
     type TestBackend = CubeBackend<WgpuRuntime, f32, i32, u32>;
+
+    #[test]
+    fn test_patch_variance_loss() {
+        let device = Default::default();
+        // A flat prediction [1, 1, 64, 64] vs a textured target
+        let flat_pred: Tensor<TestBackend, 4> = Tensor::zeros([1, 1, 64, 64], &device);
+        let ones: Tensor<TestBackend, 4> = Tensor::ones([1, 1, 64, 64], &device);
+        let loss = patch_variance_loss(flat_pred, ones);
+        // Both are flat, so loss should be 0.0
+        let loss_val: f32 = loss.into_data().convert::<f32>().to_vec().unwrap()[0];
+        assert!(loss_val < 1e-3);
+    }
 
     #[test]
     fn test_tensor_round() {

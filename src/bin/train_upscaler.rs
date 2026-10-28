@@ -35,7 +35,7 @@ use ratatui::{
 use yumon_pet::vision::{
     chart::{render as render_upscaler_chart, UpscalerTrainingState},
     upscaler::{
-        default_fsq_levels, CodebookUpscalerModel, CodebookUpscalerModelConfig,
+        default_fsq_levels, patch_variance_loss, CodebookUpscalerModel, CodebookUpscalerModelConfig,
         UpscalerDiscriminator, UpscalerDiscriminatorConfig, UpscalerModel, UpscalerModelConfig,
     },
 };
@@ -754,10 +754,10 @@ fn run_training<M: TrainableUpscaler>(
                 );
                 let edge_loss = gradient_loss(
                     pred.clone(),
-                    target_tensor,
+                    target_tensor.clone(),
                 );
 
-                let (d_fake_for_g, d_fake_feats) = disc.forward_with_features(pred);
+                let (d_fake_for_g, d_fake_feats) = disc.forward_with_features(pred.clone());
                 let adv_err = d_fake_for_g - 1.0;
                 let adv_loss = (adv_err.clone() * adv_err).mean();
 
@@ -777,7 +777,13 @@ fn run_training<M: TrainableUpscaler>(
                     0.0
                 };
 
+                let texture_loss = patch_variance_loss(
+                    pred.clone(),
+                    target_tensor.clone(),
+                );
+
                 let g_loss = pixel_loss + edge_loss * 0.1
+                    + texture_loss * 0.2
                     + adv_loss * (args.adv_weight as f32)
                     + feat_loss * (args.feat_weight as f32);
 
@@ -791,10 +797,14 @@ fn run_training<M: TrainableUpscaler>(
                     Reduction::Mean,
                 );
                 let edge_loss = gradient_loss(
+                    pred.clone(),
+                    target_tensor.clone(),
+                );
+                let texture_loss = patch_variance_loss(
                     pred,
                     target_tensor,
                 );
-                (pixel_loss + edge_loss * 0.1, 0.0, 0.0)
+                (pixel_loss + edge_loss * 0.1 + texture_loss * 0.2, 0.0, 0.0)
             };
 
             batch_count += 1;

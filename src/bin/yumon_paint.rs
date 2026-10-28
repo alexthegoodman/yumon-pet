@@ -74,7 +74,7 @@ struct Args {
     checkpoint_pass4: Option<PathBuf>,
 
     /// Pass 5 Neural Upscaler checkpoint directory (e.g. checkpoints/yumon-upscaler-64).
-    #[arg(long, default_value = "checkpoints/yumon-upscaler-64")]
+    #[arg(long, default_value = "checkpoints/yumon-upscaler-codebook")]
     upscaler_checkpoint: PathBuf,
 
     /// Pass 6 Full Zhang 2016 Colorizer checkpoint directory (e.g. checkpoints/yumon-colorizer-256).
