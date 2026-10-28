@@ -43,22 +43,47 @@ use yumon_pet::vision::{
 pub type TrainBackend = Autodiff<
     burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>,
 >;
+pub type InnerBackend = <TrainBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend;
 
 use burn::module::AutodiffModule;
 
 pub trait TrainableUpscaler: AutodiffModule<TrainBackend> + Clone + Send + 'static {
+    type ValidModel: Module<InnerBackend> + Send + 'static;
+
     fn forward_train(&self, x: Tensor<TrainBackend, 4>) -> Tensor<TrainBackend, 4>;
+    fn to_valid(&self) -> Self::ValidModel;
+    fn forward_valid(valid_model: &Self::ValidModel, x: Tensor<InnerBackend, 4>) -> Tensor<InnerBackend, 4>;
 }
 
 impl TrainableUpscaler for UpscalerModel<TrainBackend> {
+    type ValidModel = UpscalerModel<InnerBackend>;
+
     fn forward_train(&self, x: Tensor<TrainBackend, 4>) -> Tensor<TrainBackend, 4> {
         self.forward(x)
+    }
+
+    fn to_valid(&self) -> Self::ValidModel {
+        self.valid()
+    }
+
+    fn forward_valid(valid_model: &Self::ValidModel, x: Tensor<InnerBackend, 4>) -> Tensor<InnerBackend, 4> {
+        valid_model.forward(x)
     }
 }
 
 impl TrainableUpscaler for CodebookUpscalerModel<TrainBackend> {
+    type ValidModel = CodebookUpscalerModel<InnerBackend>;
+
     fn forward_train(&self, x: Tensor<TrainBackend, 4>) -> Tensor<TrainBackend, 4> {
         self.forward(x)
+    }
+
+    fn to_valid(&self) -> Self::ValidModel {
+        self.valid()
+    }
+
+    fn forward_valid(valid_model: &Self::ValidModel, x: Tensor<InnerBackend, 4>) -> Tensor<InnerBackend, 4> {
+        valid_model.forward(x)
     }
 }
 
@@ -356,10 +381,10 @@ impl InMemDataset {
 }
 
 /// Save 16-sample visual comparison grid: 4 rows x 4 columns of [Input NN | Model Predicted 256 | Ground Truth 256]
-fn save_preview_grid(
+fn save_preview_grid<B: Backend>(
     dataset: &InMemDataset,
     indices: &[usize],
-    pred_tensor: Tensor<TrainBackend, 4>,
+    pred_tensor: Tensor<B, 4>,
     out_path: &PathBuf,
 ) -> Result<()> {
     let b = indices.len();
@@ -599,6 +624,7 @@ fn run_training<M: TrainableUpscaler>(
 ) -> Result<()> {
     let mut rng = thread_rng();
     let loss_fn = HuberLossConfig::new(1.0).init();
+    let val_loss_fn = HuberLossConfig::new(1.0).init();
 
     let mut optimizer = AdamWConfig::new()
         .with_epsilon(1e-8)
@@ -827,15 +853,16 @@ fn run_training<M: TrainableUpscaler>(
             }
         }
 
-        // 4. Validation Loop
+        // 4. Validation Loop (using model.valid() to prevent autodiff VRAM buildup)
         let eval_count = val_indices.len().min(128);
         let mut val_loss_sum = 0.0f32;
         let mut val_batches = 0;
+        let inference_model = model.to_valid();
 
         for chunk in val_indices[..eval_count].chunks(args.batch_size) {
             let (input_tensor, target_tensor) = dataset.make_batch_tensors(chunk, device);
-            let pred = model.forward_train(input_tensor);
-            let loss = loss_fn.forward(pred, target_tensor, Reduction::Mean);
+            let pred = M::forward_valid(&inference_model, input_tensor);
+            let loss = val_loss_fn.forward(pred, target_tensor, Reduction::Mean);
             let loss_val: f32 = loss.into_data().convert::<f32>().to_vec().unwrap()[0];
             val_loss_sum += loss_val;
             val_batches += 1;
@@ -861,7 +888,7 @@ fn run_training<M: TrainableUpscaler>(
         let preview_count = 16.min(val_indices.len());
         let preview_indices = &val_indices[..preview_count];
         let (preview_in, _) = dataset.make_batch_tensors(preview_indices, device);
-        let preview_pred = model.forward_train(preview_in);
+        let preview_pred = M::forward_valid(&inference_model, preview_in);
 
         let preview_path = args.out_dir.join(format!("preview_epoch_{:02}.png", epoch));
 
