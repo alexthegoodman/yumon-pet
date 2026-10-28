@@ -37,6 +37,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 INFERENCE_CACHE_DIR = PROJECT_ROOT / "inference-cache"
 STUDIO_DIR = INFERENCE_CACHE_DIR / "draw_paint"
 STUDIO_DIR.mkdir(parents=True, exist_ok=True)
+STARTERS_DIR = PROJECT_ROOT / "starters"
+STARTERS_DIR.mkdir(parents=True, exist_ok=True)
 TMP_DIR = PROJECT_ROOT / "tmp" / "draw_paint"
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -72,6 +74,21 @@ def rgb_to_palette(r: int, g: int, b: int) -> int:
     g_bin = min(7, (g * 7 + 127) // 255)
     b_bin = min(3, (b * 3 + 127) // 255)
     return r_bin * 32 + g_bin * 4 + b_bin
+
+def init_starters_folder():
+    STARTERS_DIR.mkdir(parents=True, exist_ok=True)
+    readme = STARTERS_DIR / "README.txt"
+    if not readme.exists():
+        readme.write_text(
+            "===========================================================\n"
+            "   Yumon Paint Studio — Custom Starters Folder\n"
+            "===========================================================\n\n"
+            "Drop any images (PNG, JPG, WEBP, GIF, etc.) into this folder!\n"
+            "They will appear in Yumon Paint Studio as custom 16x16 canvas starters.\n"
+            "Images of any size will be automatically downscaled and quantized to\n"
+            "Yumon's 256-color palette.\n",
+            encoding="utf-8"
+        )
 
 def file_to_base64_data_uri(path: Path) -> str:
     if not path.is_file():
@@ -253,6 +270,46 @@ class StudioServer(BaseHTTPRequestHandler):
                 self.serve_static_file(target, PROJECT_ROOT / "tmp")
                 return
 
+            elif path.startswith("/starters/"):
+                rel = path[len("/starters/"):].lstrip("/")
+                target = STARTERS_DIR / rel
+                self.serve_static_file(target, STARTERS_DIR)
+                return
+
+            elif path == "/api/starters":
+                items = []
+                if STARTERS_DIR.is_dir():
+                    for p in sorted(STARTERS_DIR.iterdir(), key=lambda x: x.name.lower()):
+                        if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"):
+                            try:
+                                from PIL import Image
+                                with Image.open(p) as img:
+                                    rgba = img.convert("RGBA")
+                                    thumb16 = rgba.resize((16, 16), Image.Resampling.LANCZOS)
+                                    bg = Image.new("RGBA", (16, 16), (255, 255, 255, 255))
+                                    composite = Image.alpha_composite(bg, thumb16)
+                                    rgb = composite.convert("RGB")
+                                    tokens = []
+                                    for px in rgb.getdata():
+                                        tokens.append(rgb_to_palette(px[0], px[1], px[2]))
+                                    name_clean = p.stem.replace("_", " ").replace("-", " ")
+                                    items.append({
+                                        "filename": p.name,
+                                        "prompt": name_clean,
+                                        "url": f"/starters/{p.name}",
+                                        "pixels": tokens,
+                                        "width": img.width,
+                                        "height": img.height,
+                                    })
+                            except Exception as e:
+                                print(f"[Warning] Could not process starter image {p.name}: {e}")
+                self.send_json(200, {
+                    "starters": items,
+                    "folder": str(STARTERS_DIR.resolve()),
+                    "total": len(items),
+                })
+                return
+
             elif path == "/api/status":
                 bin_path = find_paint_binary()
                 self.send_json(200, {
@@ -366,10 +423,11 @@ class StudioServer(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache, no-transform")
-            self.send_header("Connection", "keep-alive")
+            self.send_header("Connection", "close")
             self.send_header("X-Accel-Buffering", "no")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
+            self.close_connection = True
 
             def emit(event: str, data: dict):
                 try:
@@ -539,6 +597,25 @@ class StudioServer(BaseHTTPRequestHandler):
             })
             return
 
+        elif parsed.path == "/api/starters/upload":
+            content_len = int(self.headers.get("Content-Length", 0))
+            raw_body = self.rfile.read(content_len).decode("utf-8")
+            try:
+                payload = json.loads(raw_body)
+                raw_filename = payload.get("filename", f"starter_{int(time.time())}.png")
+                filename = Path(raw_filename).name
+                b64_data = payload.get("data", "")
+                if "," in b64_data:
+                    b64_data = b64_data.split(",", 1)[1]
+                raw_bytes = base64.b64decode(b64_data)
+                target = STARTERS_DIR / filename
+                target.write_bytes(raw_bytes)
+                self.send_json(200, {"status": "ok", "filename": filename})
+                return
+            except Exception as e:
+                self.send_json(400, {"error": f"Failed uploading starter: {e}"})
+                return
+
         self.send_error(404, "Not Found")
 
 HTML_CONTENT = r"""<!DOCTYPE html>
@@ -644,6 +721,55 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     cursor: crosshair;
     user-select: none;
     line-height: 0;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .canvas-container.drag-over {
+    border-color: var(--accent-cyan) !important;
+    box-shadow: 0 0 25px rgba(0, 229, 255, 0.7) !important;
+  }
+  #starterDropZone.drag-over {
+    border-color: var(--accent-cyan) !important;
+    background: #192535 !important;
+  }
+  .starter-card {
+    background: var(--panel-sub);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .starter-card:hover {
+    border-color: var(--accent-cyan);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 14px rgba(0, 229, 255, 0.25);
+  }
+  .starter-card canvas {
+    width: 100%;
+    aspect-ratio: 1;
+    image-rendering: pixelated;
+    border-radius: 4px;
+    background: #0d0f13;
+    display: block;
+  }
+  .starter-card-title {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    width: 100%;
+    text-align: center;
+  }
+  .starter-card-sub {
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    font-family: "Fira Code", monospace;
   }
   canvas#pixelCanvas {
     display: block;
@@ -1164,6 +1290,14 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         <button class="tool-btn" id="toolGrid" title="Toggle Grid">🔲 Grid</button>
         <button class="tool-btn" id="toolClear" title="Clear Canvas">🗑️ Clear</button>
       </div>
+      <div class="enhancer-bar" style="display:flex; gap:8px; margin-top:8px; width:100%;">
+        <button class="tool-btn" id="btnAddDepth" title="Add light, shadows, and 3D bevel depth (D)" style="flex:1; justify-content:center; background:#142333; border-color:#00e5ff66; color:#00e5ff; font-weight:600;">
+          ✨ Add Depth
+        </button>
+        <button class="tool-btn" id="btnAddVariation" title="Add micro-texture and dithering variation (V)" style="flex:1; justify-content:center; background:#241733; border-color:#9d4edd66; color:#c77dff; font-weight:600;">
+          🎲 Add Variation
+        </button>
+      </div>
     </div>
 
     <!-- Palette Section -->
@@ -1197,6 +1331,17 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     <div>
       <div class="section-label">Cache Pass 2 (16×16) Starters</div>
       <button class="tool-btn" id="btnBrowseCache" style="width:100%; justify-content:center;">🗂️ Browse Training Cache Pass 2…</button>
+    </div>
+
+    <!-- Starters Folder Launcher -->
+    <div>
+      <div class="section-label">
+        <span>Custom Starters (Folder)</span>
+        <span style="font-size:0.72rem; color:var(--accent-gold); font-family:'Fira Code',monospace;" title="Drop images into this folder">📁 starters/</span>
+      </div>
+      <button class="tool-btn" id="btnBrowseStarters" style="width:100%; justify-content:center; background:#1c2436; border-color:var(--accent-cyan); color:#fff; font-weight:600;">
+        🖼️ My Starters (Custom Folder)…
+      </button>
     </div>
 
     <!-- Prompt Box -->
@@ -1345,6 +1490,36 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     </div>
     <div style="display:flex; gap:10px; justify-content:flex-end; width:100%;">
       <button class="tool-btn" id="cacheModalClose">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Custom Starters Picker Modal -->
+<div class="modal-overlay" id="startersModalOverlay">
+  <div class="modal-content cache-modal" style="width: min(800px, 92vw);">
+    <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
+      <div>
+        <h3 style="color:var(--accent-cyan); font-size:1.05rem;">📁 Custom Starters Library</h3>
+        <span style="font-size:0.75rem; color:var(--text-muted);">Drop images into <code id="startersFolderPath" style="color:var(--accent-gold); font-family:'Fira Code',monospace;">starters/</code></span>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <span id="startersCount" style="font-size:0.78rem; color:var(--text-muted); font-family:'Fira Code',monospace;">0 images</span>
+        <button class="tool-btn" id="btnRefreshStarters" title="Rescan starters folder">🔄 Refresh</button>
+        <button class="tool-btn" id="btnCopyStartersPath" title="Copy folder path to clipboard">📋 Copy Path</button>
+      </div>
+    </div>
+
+    <!-- Drag & Drop Upload Zone -->
+    <div id="starterDropZone" style="border: 2px dashed #3a4454; border-radius: 8px; padding: 14px; text-align: center; background: #12151b; cursor: pointer; transition: all 0.2s; width:100%;">
+      <span style="font-size: 0.82rem; color: var(--text-muted);">📥 Drag & drop images here (PNG, JPG, WEBP, GIF) or click to browse files…</span>
+      <input type="file" id="starterFileInput" accept="image/*" multiple style="display: none;"/>
+    </div>
+
+    <div class="cache-grid" id="startersGrid" style="max-height: 52vh; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; width:100%;"></div>
+
+    <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
+      <span style="font-size:0.72rem; color:var(--text-muted); font-style:italic;">Click any starter to load its 16×16 drawing onto the canvas.</span>
+      <button class="tool-btn" id="startersModalClose">Close</button>
     </div>
   </div>
 </div>
@@ -1995,7 +2170,8 @@ btnGenerate.addEventListener("click", async () => {
             const el = document.getElementById(id);
             if (el) el.classList.remove("processing");
           });
-          return;
+          try { await reader.cancel(); } catch (e) {}
+          break;
         } else if (ev === "complete") {
           ["cardStage1", "cardStage2", "cardStage3", "cardStage4"].forEach(id => {
             const el = document.getElementById(id);
@@ -2021,6 +2197,8 @@ btnGenerate.addEventListener("click", async () => {
             data.images ? data.images.pass4 : lastUrls.pass4,
             data.duration_seconds
           );
+          try { await reader.cancel(); } catch (e) {}
+          break;
         }
       }
     }
@@ -2047,6 +2225,8 @@ window.addEventListener("keydown", e => {
   if (e.key === "e" || e.key === "E") setTool("eraser");
   if (e.key === "b" || e.key === "B") setTool("fill");
   if (e.key === "i" || e.key === "I") setTool("picker");
+  if (e.key === "d" || e.key === "D") addDepth();
+  if (e.key === "v" || e.key === "V") addVariation();
   if (e.ctrlKey && (e.key === "z" || e.key === "Z")) {
     document.getElementById("toolUndo").click();
   }
@@ -2165,6 +2345,322 @@ document.getElementById("cacheNext").addEventListener("click", () => {
     loadCachePage();
   }
 });
+
+// --- Enhancer Tools: Add Depth & Add Variation ---
+function addDepth() {
+  saveStateForUndo();
+  const nextGrid = [...grid];
+
+  for (let y = 0; y < GRID_SIZE; y++) {
+    for (let x = 0; x < GRID_SIZE; x++) {
+      const idx = y * GRID_SIZE + x;
+      const token = grid[idx];
+      if (token === 255) continue; // Keep canvas background clean
+
+      const [r, g, b] = paletteToRgb(token);
+
+      // Check boundary edges for top-left directional illumination
+      const isTopEdge = (y === 0) || (grid[(y - 1) * GRID_SIZE + x] === 255);
+      const isLeftEdge = (x === 0) || (grid[y * GRID_SIZE + (x - 1)] === 255);
+      const isBottomEdge = (y === GRID_SIZE - 1) || (grid[(y + 1) * GRID_SIZE + x] === 255);
+      const isRightEdge = (x === GRID_SIZE - 1) || (grid[y * GRID_SIZE + (x + 1)] === 255);
+
+      let factor = 1.0;
+      let boost = 0;
+
+      if (isTopEdge || isLeftEdge) {
+        // Highlight top-left bevel & rim light
+        factor = (isTopEdge && isLeftEdge) ? 1.35 : 1.22;
+        boost = 16;
+      } else if (isBottomEdge || isRightEdge) {
+        // Shadow bottom-right bevel & drop shadow
+        factor = (isBottomEdge && isRightEdge) ? 0.68 : 0.78;
+        boost = -8;
+      } else {
+        // Subtle interior vertical form gradient
+        const verticalBias = ((y - 7.5) / 8.0) * 0.18;
+        factor = 1.0 - verticalBias;
+      }
+
+      const newR = Math.max(0, Math.min(255, Math.round(r * factor + boost)));
+      const newG = Math.max(0, Math.min(255, Math.round(g * factor + boost)));
+      const newB = Math.max(0, Math.min(255, Math.round(b * factor + boost)));
+
+      nextGrid[idx] = rgbToPalette(newR, newG, newB);
+    }
+  }
+
+  grid = nextGrid;
+  renderCanvas();
+  updateStage1Preview();
+}
+
+function addVariation() {
+  saveStateForUndo();
+  const nextGrid = [...grid];
+
+  for (let y = 0; y < GRID_SIZE; y++) {
+    for (let x = 0; x < GRID_SIZE; x++) {
+      const idx = y * GRID_SIZE + x;
+      const token = grid[idx];
+      if (token === 255) continue;
+
+      const [r, g, b] = paletteToRgb(token);
+
+      // Alternating 2x2 checkerboard dither pattern + organic jitter
+      const dither = ((x + y) % 2 === 0) ? 0.10 : -0.10;
+      const jitter = (Math.random() - 0.5) * 0.14; // ±7% organic hue/luminance noise
+      const factor = 1.0 + dither + jitter;
+
+      const newR = Math.max(0, Math.min(255, Math.round(r * factor)));
+      const newG = Math.max(0, Math.min(255, Math.round(g * factor)));
+      const newB = Math.max(0, Math.min(255, Math.round(b * factor)));
+
+      nextGrid[idx] = rgbToPalette(newR, newG, newB);
+    }
+  }
+
+  grid = nextGrid;
+  renderCanvas();
+  updateStage1Preview();
+}
+
+const btnDepthEl = document.getElementById("btnAddDepth");
+if (btnDepthEl) btnDepthEl.addEventListener("click", addDepth);
+
+const btnVarEl = document.getElementById("btnAddVariation");
+if (btnVarEl) btnVarEl.addEventListener("click", addVariation);
+
+// Image Converter (Downscales any image to 16x16 with 256 Yumon palette)
+function applyImageToCanvas(img, filename = "") {
+  saveStateForUndo();
+  const offscreen = document.createElement("canvas");
+  offscreen.width = 16;
+  offscreen.height = 16;
+  const offCtx = offscreen.getContext("2d");
+  offCtx.fillStyle = "#ffffff";
+  offCtx.fillRect(0, 0, 16, 16);
+  offCtx.drawImage(img, 0, 0, 16, 16);
+
+  const imgData = offCtx.getImageData(0, 0, 16, 16).data;
+  const newGrid = new Array(256);
+  for (let i = 0; i < 256; i++) {
+    const r = imgData[i * 4];
+    const g = imgData[i * 4 + 1];
+    const b = imgData[i * 4 + 2];
+    newGrid[i] = rgbToPalette(r, g, b);
+  }
+  grid = newGrid;
+
+  if (filename) {
+    const cleanPrompt = filename.replace(/\.[^/.]+$/, "").replace(/[-_]/g, " ");
+    document.getElementById("promptInput").value = cleanPrompt;
+  }
+  renderCanvas();
+  updateStage1Preview();
+}
+
+// --- Custom Starters Folder Library ---
+let startersFolderPath = "";
+
+async function loadStarters() {
+  const gridEl = document.getElementById("startersGrid");
+  if (!gridEl) return;
+  gridEl.innerHTML = '<span style="font-size:0.75rem;color:var(--text-muted);font-style:italic;">Loading starters folder…</span>';
+
+  try {
+    const res = await fetch("/api/starters?t=" + Date.now());
+    const data = await res.json();
+    startersFolderPath = data.folder || "starters/";
+    const pathEl = document.getElementById("startersFolderPath");
+    if (pathEl) pathEl.innerText = startersFolderPath;
+    const countEl = document.getElementById("startersCount");
+    if (countEl) countEl.innerText = `${data.total || 0} images`;
+
+    gridEl.innerHTML = "";
+    if (!data.starters || data.starters.length === 0) {
+      gridEl.innerHTML = `
+        <div style="grid-column: 1 / -1; padding: 24px 10px; text-align: center; color: var(--text-muted);">
+          <div style="font-size: 1.8rem; margin-bottom: 8px;">📂</div>
+          <div style="font-weight: 600; color: #fff; margin-bottom: 4px;">No starter images in folder yet</div>
+          <div style="font-size: 0.78rem;">Drop any images (PNG, JPG, WEBP, GIF) into the folder:<br/><code style="color:var(--accent-gold);">${startersFolderPath}</code><br/>or drag & drop them directly into the upload box above!</div>
+        </div>
+      `;
+      return;
+    }
+
+    data.starters.forEach(item => {
+      const card = document.createElement("div");
+      card.className = "starter-card";
+      card.title = `${item.prompt} (${item.filename})`;
+
+      const thumb = renderCacheThumbnail(item.pixels);
+      card.appendChild(thumb);
+
+      const title = document.createElement("span");
+      title.className = "starter-card-title";
+      title.innerText = item.prompt;
+      card.appendChild(title);
+
+      const sub = document.createElement("span");
+      sub.className = "starter-card-sub";
+      sub.innerText = item.width ? `${item.width}×${item.height}` : "16×16";
+      card.appendChild(sub);
+
+      card.addEventListener("click", () => {
+        saveStateForUndo();
+        grid = [...item.pixels];
+        document.getElementById("promptInput").value = item.prompt;
+        renderCanvas();
+        updateStage1Preview();
+        closeStartersModal();
+      });
+
+      gridEl.appendChild(card);
+    });
+  } catch (err) {
+    gridEl.innerHTML = `<span style="font-size:0.75rem;color:var(--accent-magenta);font-style:italic;">Failed to load starters: ${err.message}</span>`;
+  }
+}
+
+function openStartersModal() {
+  document.getElementById("startersModalOverlay").classList.add("open");
+  loadStarters();
+}
+
+function closeStartersModal() {
+  document.getElementById("startersModalOverlay").classList.remove("open");
+}
+
+const btnBrowseStarters = document.getElementById("btnBrowseStarters");
+if (btnBrowseStarters) btnBrowseStarters.addEventListener("click", openStartersModal);
+
+const startersModalClose = document.getElementById("startersModalClose");
+if (startersModalClose) startersModalClose.addEventListener("click", closeStartersModal);
+
+const btnRefreshStarters = document.getElementById("btnRefreshStarters");
+if (btnRefreshStarters) btnRefreshStarters.addEventListener("click", loadStarters);
+
+const btnCopyPath = document.getElementById("btnCopyStartersPath");
+if (btnCopyPath) {
+  btnCopyPath.addEventListener("click", () => {
+    if (startersFolderPath) {
+      navigator.clipboard.writeText(startersFolderPath).then(() => {
+        const orig = btnCopyPath.innerText;
+        btnCopyPath.innerText = "✅ Copied!";
+        setTimeout(() => { btnCopyPath.innerText = orig; }, 1500);
+      });
+    }
+  });
+}
+
+const startersOverlay = document.getElementById("startersModalOverlay");
+if (startersOverlay) {
+  startersOverlay.addEventListener("click", e => {
+    if (e.target.id === "startersModalOverlay") closeStartersModal();
+  });
+}
+
+// File upload / Dropzone inside modal
+const starterDropZone = document.getElementById("starterDropZone");
+const starterFileInput = document.getElementById("starterFileInput");
+
+if (starterDropZone && starterFileInput) {
+  starterDropZone.addEventListener("click", () => starterFileInput.click());
+
+  starterFileInput.addEventListener("change", e => {
+    if (e.target.files && e.target.files.length > 0) {
+      handleUploadedFiles(e.target.files);
+    }
+  });
+
+  starterDropZone.addEventListener("dragover", e => {
+    e.preventDefault();
+    starterDropZone.classList.add("drag-over");
+  });
+
+  starterDropZone.addEventListener("dragleave", () => {
+    starterDropZone.classList.remove("drag-over");
+  });
+
+  starterDropZone.addEventListener("drop", e => {
+    e.preventDefault();
+    starterDropZone.classList.remove("drag-over");
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleUploadedFiles(e.dataTransfer.files);
+    }
+  });
+}
+
+function handleUploadedFiles(files) {
+  Array.from(files).forEach(file => {
+    if (!file.type.startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = async evt => {
+      const dataUri = evt.target.result;
+      const img = new Image();
+      img.onload = () => {
+        applyImageToCanvas(img, file.name);
+      };
+      img.src = dataUri;
+
+      // Persist to starters/ folder
+      try {
+        await fetch("/api/starters/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: file.name, data: dataUri })
+        });
+        loadStarters();
+      } catch (err) {
+        console.warn("Upload failed:", err);
+      }
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// Drag & drop directly onto the Canvas Container
+const canvasContainer = document.querySelector(".canvas-container");
+if (canvasContainer) {
+  canvasContainer.addEventListener("dragover", e => {
+    e.preventDefault();
+    canvasContainer.classList.add("drag-over");
+  });
+
+  canvasContainer.addEventListener("dragleave", () => {
+    canvasContainer.classList.remove("drag-over");
+  });
+
+  canvasContainer.addEventListener("drop", e => {
+    e.preventDefault();
+    canvasContainer.classList.remove("drag-over");
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const file = e.dataTransfer.files[0];
+      if (file && file.type.startsWith("image/")) {
+        const reader = new FileReader();
+        reader.onload = async evt => {
+          const dataUri = evt.target.result;
+          const img = new Image();
+          img.onload = () => {
+            applyImageToCanvas(img, file.name);
+          };
+          img.src = dataUri;
+
+          // Also save to starters/
+          try {
+            await fetch("/api/starters/upload", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ filename: file.name, data: dataUri })
+            });
+          } catch (err) {}
+        };
+        reader.readAsDataURL(file);
+      }
+    }
+  });
+}
 </script>
 
 </body>
@@ -2172,6 +2668,7 @@ document.getElementById("cacheNext").addEventListener("click", () => {
 """
 
 def main():
+    init_starters_folder()
     port = 8088
     # Try finding an open port starting from 8088
     while True:
