@@ -101,7 +101,7 @@ class StudioServer(BaseHTTPRequestHandler):
                     "vocab_exists": (PROJECT_ROOT / "training-cache" / "diffusion_talk_vocab.json").exists(),
                     "pass3_ckpt": (PROJECT_ROOT / "checkpoints" / "yumon-art-pass3-db").exists(),
                     "pass4_ckpt": (PROJECT_ROOT / "checkpoints" / "yumon-art-pass4-db").exists(),
-                    "upscaler_ckpt": (PROJECT_ROOT / "checkpoints" / "yumon-upscaler-64").exists(),
+                    "upscaler_ckpt": (PROJECT_ROOT / "checkpoints" / "yumon-upscaler-codebook").exists(),
                 })
                 return
 
