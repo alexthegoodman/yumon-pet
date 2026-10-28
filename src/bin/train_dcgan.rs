@@ -243,14 +243,15 @@ fn save_sample_grid(
         let col = (i as u32) % cols;
         let x0 = margin + col * (tile + margin);
         let y0 = margin + row * (tile + margin);
+        let base = i * c * plane;
         for y in 0..h {
             for x in 0..w {
                 let p = y * w + x;
-                let r = ((data[0 * plane + p] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0) as u8;
+                let r = ((data[base + 0 * plane + p] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0) as u8;
                 let (g, b) = if c >= 3 {
                     (
-                        ((data[1 * plane + p] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0) as u8,
-                        ((data[2 * plane + p] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0) as u8,
+                        ((data[base + 1 * plane + p] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0) as u8,
+                        ((data[base + 2 * plane + p] + 1.0) * 0.5 * 255.0).clamp(0.0, 255.0) as u8,
                     )
                 } else {
                     (r, r)
