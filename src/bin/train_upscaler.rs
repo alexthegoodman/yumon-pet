@@ -712,7 +712,8 @@ fn run_training<M: TrainableUpscaler>(
                 continue;
             }
 
-            let should_inspect = (batch_count + 1) % 10 == 0 || (batch_count + 1) == num_batches;
+            // let should_inspect = (batch_count + 1) % 10 == 0 || (batch_count + 1) == num_batches;
+            let should_inspect = true;
 
             // High-speed RAM batch slicing (Zero Disk I/O)
             let (input_tensor, target_tensor) = dataset.make_batch_tensors(chunk, device);
