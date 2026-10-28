@@ -23,7 +23,10 @@ use std::{
     time::Instant,
 };
 
-use yumon_pet::vision::upscaler::{UpscalerModel, UpscalerModelConfig};
+use yumon_pet::vision::upscaler::{
+    AnyUpscaler, CodebookUpscalerModel, CodebookUpscalerModelConfig,
+    UpscalerModel, UpscalerModelConfig,
+};
 
 pub type EvalBackend = burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>;
 
@@ -97,6 +100,8 @@ struct CheckpointMetadata {
     out_channels: usize,
     #[serde(default)]
     scales_from: Option<usize>,
+    #[serde(default)]
+    codebook: bool,
 }
 
 fn default_channels() -> usize { 32 }
@@ -387,18 +392,45 @@ fn main() -> Result<()> {
     let device: <EvalBackend as Backend>::Device = Default::default();
 
     // 3. Initialize & load model
-    print!("  Initializing model on GPU (channels={}, in_channels={}, out_channels={}, scales_from={})... ", channels, in_channels, out_channels, scales_from);
-    let config = UpscalerModelConfig::new()
-        .with_channels(channels)
-        .with_in_channels(in_channels)
-        .with_out_channels(out_channels)
-        .with_scales_from(scales_from);
+    let is_codebook = meta_path.as_ref().map_or(false, |m| {
+        if let Ok(content) = fs::read_to_string(m) {
+            if let Ok(meta) = serde_json::from_str::<CheckpointMetadata>(&content) {
+                return meta.codebook;
+            }
+        }
+        false
+    });
 
-    let model: UpscalerModel<EvalBackend> = config.init(&device);
+    print!(
+        "  Initializing {} model on GPU (channels={}, in_channels={}, out_channels={}, scales_from={})... ",
+        if is_codebook { "FSQ Codebook" } else { "Standard" },
+        channels, in_channels, out_channels, scales_from
+    );
+
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-    let model = model
-        .load_file(&model_path, &recorder, &device)
-        .with_context(|| format!("Failed to load upscaler model from: {}", model_path.display()))?;
+    let model = if is_codebook {
+        let config = CodebookUpscalerModelConfig::new()
+            .with_channels(channels)
+            .with_in_channels(in_channels)
+            .with_out_channels(out_channels)
+            .with_scales_from(scales_from);
+        let m: CodebookUpscalerModel<EvalBackend> = config.init(&device);
+        let m = m
+            .load_file(&model_path, &recorder, &device)
+            .with_context(|| format!("Failed to load codebook upscaler model from: {}", model_path.display()))?;
+        AnyUpscaler::Codebook(m)
+    } else {
+        let config = UpscalerModelConfig::new()
+            .with_channels(channels)
+            .with_in_channels(in_channels)
+            .with_out_channels(out_channels)
+            .with_scales_from(scales_from);
+        let m: UpscalerModel<EvalBackend> = config.init(&device);
+        let m = m
+            .load_file(&model_path, &recorder, &device)
+            .with_context(|| format!("Failed to load standard upscaler model from: {}", model_path.display()))?;
+        AnyUpscaler::Standard(m)
+    };
     println!("✓ Loaded.");
 
     // 4. Determine sample indices

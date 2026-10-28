@@ -35,6 +35,7 @@ use ratatui::{
 use yumon_pet::vision::{
     chart::{render as render_upscaler_chart, UpscalerTrainingState},
     upscaler::{
+        default_fsq_levels, CodebookUpscalerModel, CodebookUpscalerModelConfig,
         UpscalerDiscriminator, UpscalerDiscriminatorConfig, UpscalerModel, UpscalerModelConfig,
     },
 };
@@ -42,6 +43,24 @@ use yumon_pet::vision::{
 pub type TrainBackend = Autodiff<
     burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>,
 >;
+
+use burn::module::AutodiffModule;
+
+pub trait TrainableUpscaler: AutodiffModule<TrainBackend> + Clone + Send + 'static {
+    fn forward_train(&self, x: Tensor<TrainBackend, 4>) -> Tensor<TrainBackend, 4>;
+}
+
+impl TrainableUpscaler for UpscalerModel<TrainBackend> {
+    fn forward_train(&self, x: Tensor<TrainBackend, 4>) -> Tensor<TrainBackend, 4> {
+        self.forward(x)
+    }
+}
+
+impl TrainableUpscaler for CodebookUpscalerModel<TrainBackend> {
+    fn forward_train(&self, x: Tensor<TrainBackend, 4>) -> Tensor<TrainBackend, 4> {
+        self.forward(x)
+    }
+}
 
 pub const UPSCALER_CACHE_MAGIC: &[u8; 8] = b"YUMON_UP";
 pub const TARGET_SIZE: usize = 256;
@@ -79,8 +98,16 @@ struct Args {
     min_lr: f64,
 
     /// Feature channels in the residual backbone.
-    #[arg(long, default_value_t = 32)]
+    #[arg(long, default_value_t = 64)]
     channels: usize,
+
+    /// Number of residual blocks in the backbone (default 4).
+    #[arg(long, default_value_t = 4)]
+    res_blocks: usize,
+
+    /// Enable discrete FSQ codebook quantization bottleneck to hallucinate sharp textures.
+    #[arg(long, default_value_t = true)]
+    codebook: bool,
 
     /// Input resolution (auto-detected from cache if omitted).
     #[arg(long)]
@@ -135,6 +162,10 @@ struct UpscalerConfigFile {
     min_lr: f64,
     #[serde(default = "default_channels")]
     channels: usize,
+    #[serde(default = "default_res_blocks")]
+    res_blocks: usize,
+    #[serde(default = "default_codebook")]
+    codebook: bool,
     #[serde(default)]
     scales_from: Option<usize>,
     #[serde(default = "default_val_fraction")]
@@ -161,7 +192,9 @@ fn default_epochs() -> usize { 10 }
 fn default_batch_size() -> usize { 8 }
 fn default_lr() -> f64 { 3e-4 }
 fn default_min_lr() -> f64 { 3e-5 }
-fn default_channels() -> usize { 32 }
+fn default_channels() -> usize { 64 }
+fn default_res_blocks() -> usize { 4 }
+fn default_codebook() -> bool { true }
 fn default_val_fraction() -> f64 { 0.02 }
 fn default_adv_weight() -> f64 { 0.02 }
 fn default_feat_weight() -> f64 { 0.05 }
@@ -186,6 +219,10 @@ struct UpscalerMetadata {
     out_channels: usize,
     scales_from: usize,
     gan: bool,
+    #[serde(default)]
+    codebook: bool,
+    #[serde(default)]
+    fsq_levels: Option<Vec<usize>>,
     timestamp: String,
 }
 
@@ -468,6 +505,8 @@ fn main() -> Result<()> {
         args.lr = cfg.lr;
         args.min_lr = cfg.min_lr;
         args.channels = cfg.channels;
+        args.res_blocks = cfg.res_blocks;
+        args.codebook = cfg.codebook;
         args.scales_from = cfg.scales_from;
         args.val_fraction = cfg.val_fraction;
         args.gan = cfg.gan;
@@ -482,13 +521,15 @@ fn main() -> Result<()> {
     let device: <TrainBackend as Backend>::Device = Default::default();
 
     println!("==================================================");
-    println!("     Yumon Pass 4/5 Grayscale Upscaler Trainer");
+    println!("     Yumon Pass 4/5 Upscaler Trainer (256x256)");
     println!("==================================================");
     println!("  Cache binary    : {}", args.cache.display());
     println!("  Output directory: {}", args.out_dir.display());
     println!("  Epochs          : {}", args.epochs);
     println!("  Batch size      : {}", args.batch_size);
     println!("  Channels        : {}", args.channels);
+    println!("  Res blocks      : {}", args.res_blocks);
+    println!("  Architecture    : {}", if args.codebook { "FSQ Codebook Quantized (Zero-Blur)" } else { "Continuous ResNet" });
     println!("  Learning rate   : {:.2e} -> {:.2e}", args.lr, args.min_lr);
     if args.gan {
         println!("  GAN Training    : ENABLED (PatchGAN LSGAN + Feature-Matching)");
@@ -523,14 +564,40 @@ fn main() -> Result<()> {
     println!("  Val samples     : {}", val_indices.len());
     println!("  Model resolution: {}x{}x{} -> {}x256x256 ({})", dataset.channels, scales_from, scales_from, dataset.channels, if dataset.channels == 3 { "RGB Color" } else { "Grayscale" });
 
-    // 2. Initialize Model, Discriminator, and Loss
-    let config = UpscalerModelConfig::new()
-        .with_scales_from(scales_from)
-        .with_channels(args.channels)
-        .with_in_channels(dataset.channels)
-        .with_out_channels(dataset.channels);
+    if args.codebook {
+        let config = CodebookUpscalerModelConfig::new()
+            .with_scales_from(scales_from)
+            .with_channels(args.channels)
+            .with_in_channels(dataset.channels)
+            .with_out_channels(dataset.channels)
+            .with_num_res_blocks(args.res_blocks);
+        let model = config.init(&device);
+        run_training(model, &args, &dataset, scales_from, train_indices, val_indices, &device, true)?;
+    } else {
+        let config = UpscalerModelConfig::new()
+            .with_scales_from(scales_from)
+            .with_channels(args.channels)
+            .with_in_channels(dataset.channels)
+            .with_out_channels(dataset.channels)
+            .with_num_res_blocks(args.res_blocks);
+        let model = config.init(&device);
+        run_training(model, &args, &dataset, scales_from, train_indices, val_indices, &device, false)?;
+    }
 
-    let mut model: UpscalerModel<TrainBackend> = config.init(&device);
+    Ok(())
+}
+
+fn run_training<M: TrainableUpscaler>(
+    mut model: M,
+    args: &Args,
+    dataset: &InMemDataset,
+    scales_from: usize,
+    train_indices: Vec<usize>,
+    val_indices: Vec<usize>,
+    device: &<TrainBackend as Backend>::Device,
+    is_codebook: bool,
+) -> Result<()> {
+    let mut rng = thread_rng();
     let loss_fn = HuberLossConfig::new(1.0).init();
 
     let mut optimizer = AdamWConfig::new()
@@ -542,7 +609,7 @@ fn main() -> Result<()> {
         let d_config = UpscalerDiscriminatorConfig::new()
             .with_base_channels(args.d_channels)
             .with_in_channels(dataset.channels);
-        let disc: UpscalerDiscriminator<TrainBackend> = d_config.init(&device);
+        let disc: UpscalerDiscriminator<TrainBackend> = d_config.init(device);
         let opt_d = AdamWConfig::new()
             .with_epsilon(1e-8)
             .with_weight_decay(1e-4)
@@ -622,10 +689,10 @@ fn main() -> Result<()> {
             let should_inspect = (batch_count + 1) % 10 == 0 || (batch_count + 1) == num_batches;
 
             // High-speed RAM batch slicing (Zero Disk I/O)
-            let (input_tensor, target_tensor) = dataset.make_batch_tensors(chunk, &device);
+            let (input_tensor, target_tensor) = dataset.make_batch_tensors(chunk, device);
 
             // Forward pass: Generator produces 1x256x256 grayscale image
-            let pred = model.forward(input_tensor);
+            let pred = model.forward_train(input_tensor);
 
             let (loss, d_loss_item, adv_loss_item) = if discriminator.is_some() {
                 let mut disc = discriminator.take().unwrap();
@@ -766,8 +833,8 @@ fn main() -> Result<()> {
         let mut val_batches = 0;
 
         for chunk in val_indices[..eval_count].chunks(args.batch_size) {
-            let (input_tensor, target_tensor) = dataset.make_batch_tensors(chunk, &device);
-            let pred = model.forward(input_tensor);
+            let (input_tensor, target_tensor) = dataset.make_batch_tensors(chunk, device);
+            let pred = model.forward_train(input_tensor);
             let loss = loss_fn.forward(pred, target_tensor, Reduction::Mean);
             let loss_val: f32 = loss.into_data().convert::<f32>().to_vec().unwrap()[0];
             val_loss_sum += loss_val;
@@ -793,8 +860,8 @@ fn main() -> Result<()> {
         // 5. Save visual preview sample grid (16 validation samples)
         let preview_count = 16.min(val_indices.len());
         let preview_indices = &val_indices[..preview_count];
-        let (preview_in, _) = dataset.make_batch_tensors(preview_indices, &device);
-        let preview_pred = model.forward(preview_in);
+        let (preview_in, _) = dataset.make_batch_tensors(preview_indices, device);
+        let preview_pred = model.forward_train(preview_in);
 
         let preview_path = args.out_dir.join(format!("preview_epoch_{:02}.png", epoch));
 
@@ -829,6 +896,8 @@ fn main() -> Result<()> {
             out_channels: dataset.channels,
             scales_from,
             gan: args.gan,
+            codebook: is_codebook,
+            fsq_levels: if is_codebook { Some(default_fsq_levels()) } else { None },
             timestamp: chrono::Local::now().to_rfc3339(),
         };
         let meta_json = serde_json::to_string_pretty(&meta)?;

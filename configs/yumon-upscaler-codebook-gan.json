@@ -1,0 +1,20 @@
+{
+  "model_type": "codebook_upscaler_gan",
+  "cache": "training-cache/upscaler_64_color.bin",
+  "out_dir": "checkpoints/yumon-upscaler-codebook-gan",
+  "scales_from": 64,
+  "channels": 64,
+  "res_blocks": 4,
+  "codebook": true,
+  "batch_size": 1,
+  "epochs": 20,
+  "lr": 0.0003,
+  "min_lr": 0.00003,
+  "val_fraction": 0.02,
+  "gan": true,
+  "adv_weight": 0.02,
+  "feat_weight": 0.05,
+  "d_lr": 0.00003,
+  "d_channels": 32,
+  "real_label": 0.9
+}

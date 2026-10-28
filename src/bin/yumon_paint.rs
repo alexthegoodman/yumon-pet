@@ -32,7 +32,10 @@ use {
             palette_to_rgb, rgb_to_palette,
             pass1_tokens_to_image, pass2_tokens_to_image, pass3_tokens_to_image, pass4_tokens_to_image,
         },
-        upscaler::{UpscalerModel, UpscalerModelConfig},
+        upscaler::{
+            AnyUpscaler, CodebookUpscalerModel, CodebookUpscalerModelConfig,
+            UpscalerModel, UpscalerModelConfig,
+        },
         colorizer::{colorize_fused_rgb, ColorizerModel, ColorizerModelConfig, DEFAULT_TEMPERATURE, DEFAULT_CHROMA_BOOST},
     },
 };
@@ -569,31 +572,47 @@ fn main() -> Result<()> {
         None
     };
 
-    let upscaler = if args.passes >= 5 {
+    let upscaler: Option<AnyUpscaler<BackendType>> = if args.passes >= 5 {
         let ckpt_dir = &args.upscaler_checkpoint;
         let model_path = ckpt_dir.join("model");
         if model_path.exists() || ckpt_dir.join("model.bin").exists() || ckpt_dir.join("model.mpk").exists() {
             println!("Loading Neural Upscaler from {}...", ckpt_dir.display());
-            let (channels, in_channels, out_channels) = if let Ok(meta_str) = fs::read_to_string(ckpt_dir.join("metadata.json")) {
+            let (channels, in_channels, out_channels, is_codebook) = if let Ok(meta_str) = fs::read_to_string(ckpt_dir.join("metadata.json")) {
                 if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_str) {
                     let c = meta.get("channels").and_then(|c| c.as_u64()).unwrap_or(32) as usize;
                     let in_c = meta.get("in_channels").and_then(|c| c.as_u64()).unwrap_or(3) as usize;
                     let out_c = meta.get("out_channels").and_then(|c| c.as_u64()).unwrap_or(3) as usize;
-                    (c, in_c, out_c)
-                } else { (32, 3, 3) }
-            } else { (32, 3, 3) };
+                    let cb = meta.get("codebook").and_then(|cb| cb.as_bool()).unwrap_or(false);
+                    (c, in_c, out_c, cb)
+                } else { (32, 3, 3, false) }
+            } else { (32, 3, 3, false) };
 
-            let config = UpscalerModelConfig::new()
-                .with_channels(channels)
-                .with_in_channels(in_channels)
-                .with_out_channels(out_channels);
-            let model: UpscalerModel<BackendType> = config.init(&device);
             let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-            match model.load_file(&model_path, &recorder, &device) {
-                Ok(m) => Some(m),
-                Err(e) => {
-                    eprintln!("Warning: Failed to load upscaler weights: {}. Will fallback to nearest-neighbor.", e);
-                    None
+            if is_codebook {
+                let config = CodebookUpscalerModelConfig::new()
+                    .with_channels(channels)
+                    .with_in_channels(in_channels)
+                    .with_out_channels(out_channels);
+                let model: CodebookUpscalerModel<BackendType> = config.init(&device);
+                match model.load_file(&model_path, &recorder, &device) {
+                    Ok(m) => Some(AnyUpscaler::Codebook(m)),
+                    Err(e) => {
+                        eprintln!("Warning: Failed to load codebook upscaler weights: {}. Will fallback to nearest-neighbor.", e);
+                        None
+                    }
+                }
+            } else {
+                let config = UpscalerModelConfig::new()
+                    .with_channels(channels)
+                    .with_in_channels(in_channels)
+                    .with_out_channels(out_channels);
+                let model: UpscalerModel<BackendType> = config.init(&device);
+                match model.load_file(&model_path, &recorder, &device) {
+                    Ok(m) => Some(AnyUpscaler::Standard(m)),
+                    Err(e) => {
+                        eprintln!("Warning: Failed to load upscaler weights: {}. Will fallback to nearest-neighbor.", e);
+                        None
+                    }
                 }
             }
         } else {
@@ -1116,7 +1135,7 @@ fn main() -> Result<()> {
 
         if let Some(upscaler) = &upscaler {
             let plane = CANVAS_SIZE * CANVAS_SIZE; // 4096
-            let is_color_upscaler = upscaler.config.in_channels == 3;
+            let is_color_upscaler = upscaler.in_channels() == 3;
 
             if is_color_upscaler {
                 let mut flat = vec![0.0f32; 3 * plane];
@@ -1215,7 +1234,7 @@ fn main() -> Result<()> {
     }
 
     // PASS 6: Zhang 2016 Colorizer (256x256 Grayscale -> 256x256 Full Color RGB)
-    let ran_color_upscaler = upscaler.as_ref().map(|u| u.config.in_channels == 3).unwrap_or(false);
+    let ran_color_upscaler = upscaler.as_ref().map(|u| u.in_channels() == 3).unwrap_or(false);
     if args.passes >= 6 && !ran_color_upscaler {
         println!("\n═══════════════════════════════════════════════════════");
         println!("  Pass 6: Deep Colorization (256x256 Full Color RGB)");
