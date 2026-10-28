@@ -13,6 +13,13 @@ Usage:
 
 import os
 import sys
+
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import json
 import struct
 import time
@@ -27,6 +34,9 @@ from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+INFERENCE_CACHE_DIR = PROJECT_ROOT / "inference-cache"
+STUDIO_DIR = INFERENCE_CACHE_DIR / "draw_paint"
+STUDIO_DIR.mkdir(parents=True, exist_ok=True)
 TMP_DIR = PROJECT_ROOT / "tmp" / "draw_paint"
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -168,10 +178,54 @@ class StudioServer(BaseHTTPRequestHandler):
             self.send_response(status_code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(body)
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
             pass
+
+    def serve_static_file(self, target: Path, base_dir: Path):
+        try:
+            target_resolved = target.resolve()
+            base_resolved = base_dir.resolve()
+            # Directory traversal security check
+            try:
+                target_resolved.relative_to(base_resolved)
+            except ValueError:
+                self.send_error(403, "Forbidden")
+                return
+
+            if not target_resolved.is_file():
+                self.send_error(404, "File Not Found")
+                return
+
+            ext = target_resolved.suffix.lower()
+            mime = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".webp": "image/webp",
+                ".gif": "image/gif",
+                ".json": "application/json",
+            }.get(ext, "application/octet-stream")
+
+            size = target_resolved.stat().st_size
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            with open(target_resolved, "rb") as f:
+                shutil.copyfileobj(f, self.wfile)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            pass
+        except Exception as e:
+            try:
+                self.send_error(500, f"Error serving static file: {e}")
+            except Exception:
+                pass
 
     def do_GET(self):
         try:
@@ -185,6 +239,18 @@ class StudioServer(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                return
+
+            elif path.startswith("/inference-cache/"):
+                rel = path[len("/inference-cache/"):].lstrip("/")
+                target = INFERENCE_CACHE_DIR / rel
+                self.serve_static_file(target, INFERENCE_CACHE_DIR)
+                return
+
+            elif path.startswith("/tmp/"):
+                rel = path[len("/tmp/"):].lstrip("/")
+                target = PROJECT_ROOT / "tmp" / rel
+                self.serve_static_file(target, PROJECT_ROOT / "tmp")
                 return
 
             elif path == "/api/status":
@@ -263,8 +329,8 @@ class StudioServer(BaseHTTPRequestHandler):
             top_p = float(payload.get("top_p", 0.73))
 
             run_id = f"gen_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-            input_json_path = TMP_DIR / f"{run_id}_input.json"
-            output_png_path = TMP_DIR / f"{run_id}.png"
+            input_json_path = STUDIO_DIR / f"{run_id}_input.json"
+            output_png_path = STUDIO_DIR / f"{run_id}.png"
 
             # Write input drawing JSON
             with open(input_json_path, "w", encoding="utf-8") as f:
@@ -276,6 +342,56 @@ class StudioServer(BaseHTTPRequestHandler):
                     "error": f"Yumon Paint binary not found at {bin_path}. Run `cargo build --release --bin yumon_paint` first."
                 })
                 return
+
+            p2_file = STUDIO_DIR / f"{run_id}_pass2.png"
+            p3_file = STUDIO_DIR / f"{run_id}_pass3.png"
+            p4_file = STUDIO_DIR / f"{run_id}_pass4.png"
+
+            p2_url = f"/inference-cache/draw_paint/{run_id}_pass2.png"
+            p3_url = f"/inference-cache/draw_paint/{run_id}_pass3.png"
+            p4_url = f"/inference-cache/draw_paint/{run_id}_pass4.png"
+            final_url = f"/inference-cache/draw_paint/{run_id}.png"
+
+            # Render Pass 2 right away if PIL is available
+            try:
+                from PIL import Image
+                img16 = Image.new("RGB", (16, 16))
+                img16.putdata([tuple(palette_to_rgb(px)) for px in pixels])
+                img64 = img16.resize((64, 64), Image.Resampling.NEAREST)
+                img64.save(p2_file)
+            except Exception:
+                pass
+
+            # Respond with Server-Sent Events stream for progressive loading
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-transform")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            def emit(event: str, data: dict):
+                try:
+                    chunk = f"event: {event}\ndata: {json.dumps(data)}\n\n".encode("utf-8")
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                    pass
+
+            emit("start", {
+                "run_id": run_id,
+                "prompt": prompt,
+                "status": "Starting synthesis cascade..."
+            })
+
+            if p2_file.exists():
+                emit("pass", {
+                    "pass": "pass2",
+                    "stage": 1,
+                    "url": f"{p2_url}?t={int(time.time() * 1000)}",
+                    "title": "Manual Input (Pass 2)",
+                })
 
             cmd = [
                 str(bin_path),
@@ -294,59 +410,132 @@ class StudioServer(BaseHTTPRequestHandler):
 
             t_start = time.time()
             try:
-                proc = subprocess.run(
+                proc = subprocess.Popen(
                     cmd,
                     cwd=str(PROJECT_ROOT),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    text=True,
                     encoding="utf-8",
                     errors="replace",
-                    timeout=360,
+                    bufsize=1,
                 )
-            except subprocess.TimeoutExpired:
-                self.send_json(504, {"error": "Generation timed out after 360 seconds."})
-                return
             except Exception as e:
-                self.send_json(500, {"error": f"Failed running yumon_paint: {e}"})
+                emit("error", {"error": f"Failed running yumon_paint: {e}"})
                 return
 
-            stdout = proc.stdout or ""
-            stderr = proc.stderr or ""
+            seen_stages = set()
+            if p2_file.exists():
+                seen_stages.add("pass2")
+
+            log_output = []
+
+            while True:
+                line = proc.stdout.readline() if proc.stdout else ""
+                if line:
+                    log_output.append(line)
+                    stripped = line.strip()
+
+                    if ("Pass 2 Complete" in stripped or "Manual 16x16" in stripped or "_pass2.png" in stripped) and "pass2" not in seen_stages:
+                        seen_stages.add("pass2")
+                        emit("pass", {
+                            "pass": "pass2",
+                            "stage": 1,
+                            "url": f"{p2_url}?t={int(time.time() * 1000)}",
+                            "title": "Manual Input (Pass 2)",
+                        })
+
+                    if ("Pass 3 Complete" in stripped or "_pass3.png" in stripped) and "pass3" not in seen_stages:
+                        seen_stages.add("pass3")
+                        emit("pass", {
+                            "pass": "pass3",
+                            "stage": 2,
+                            "url": f"{p3_url}?t={int(time.time() * 1000)}",
+                            "title": "Pass 3: Anatomy & Features",
+                        })
+
+                    if ("Pass 4 Complete" in stripped or "_pass4.png" in stripped) and "pass4" not in seen_stages:
+                        seen_stages.add("pass4")
+                        emit("pass", {
+                            "pass": "pass4",
+                            "stage": 3,
+                            "url": f"{p4_url}?t={int(time.time() * 1000)}",
+                            "title": "Pass 4: Fine Color Details",
+                        })
+
+                    if ("Pass 5 Complete" in stripped or "Artwork saved" in stripped or "Final (256x256)" in stripped) and "pass5" not in seen_stages:
+                        seen_stages.add("pass5")
+                        emit("pass", {
+                            "pass": "upscaled",
+                            "stage": 4,
+                            "url": f"{final_url}?t={int(time.time() * 1000)}",
+                            "title": "Pass 5: Neural Super-Resolution",
+                        })
+
+                # Check file existence as fallback
+                if "pass2" not in seen_stages and p2_file.exists():
+                    seen_stages.add("pass2")
+                    emit("pass", {
+                        "pass": "pass2",
+                        "stage": 1,
+                        "url": f"{p2_url}?t={int(time.time() * 1000)}",
+                        "title": "Manual Input (Pass 2)",
+                    })
+                if "pass3" not in seen_stages and p3_file.exists():
+                    seen_stages.add("pass3")
+                    emit("pass", {
+                        "pass": "pass3",
+                        "stage": 2,
+                        "url": f"{p3_url}?t={int(time.time() * 1000)}",
+                        "title": "Pass 3: Anatomy & Features",
+                    })
+                if "pass4" not in seen_stages and p4_file.exists():
+                    seen_stages.add("pass4")
+                    emit("pass", {
+                        "pass": "pass4",
+                        "stage": 3,
+                        "url": f"{p4_url}?t={int(time.time() * 1000)}",
+                        "title": "Pass 4: Fine Color Details",
+                    })
+                if "pass5" not in seen_stages and output_png_path.exists():
+                    seen_stages.add("pass5")
+                    emit("pass", {
+                        "pass": "upscaled",
+                        "stage": 4,
+                        "url": f"{final_url}?t={int(time.time() * 1000)}",
+                        "title": "Pass 5: Neural Super-Resolution",
+                    })
+
+                if proc.poll() is not None and not line:
+                    break
+
+                if not line:
+                    time.sleep(0.04)
+
+            stderr = proc.stderr.read() if proc.stderr else ""
             elapsed = round(time.time() - t_start, 2)
 
             if proc.returncode != 0:
                 print(f"[Error] yumon_paint stderr:\n{stderr}", file=sys.stderr)
-                self.send_json(500, {
+                emit("error", {
                     "error": "yumon_paint process failed",
                     "stderr": stderr[-2000:],
-                    "stdout": stdout[-2000:],
+                    "stdout": "".join(log_output)[-2000:],
                 })
                 return
 
-            # Read intermediate outputs
-            stem = run_id
-            p2_file = TMP_DIR / f"{stem}_pass2.png"
-            p3_file = TMP_DIR / f"{stem}_pass3.png"
-            p4_file = TMP_DIR / f"{stem}_pass4.png"
-            upscaled_file = output_png_path
-
-            p2_b64 = file_to_base64_data_uri(p2_file)
-            p3_b64 = file_to_base64_data_uri(p3_file)
-            p4_b64 = file_to_base64_data_uri(p4_file)
-            up_b64 = file_to_base64_data_uri(upscaled_file)
-
-            self.send_json(200, {
+            emit("complete", {
                 "status": "ok",
                 "run_id": run_id,
                 "duration_seconds": elapsed,
                 "prompt": prompt,
                 "images": {
-                    "pass2": p2_b64,
-                    "pass3": p3_b64,
-                    "pass4": p4_b64,
-                    "upscaled": up_b64,
+                    "pass2": p2_url,
+                    "pass3": p3_url,
+                    "pass4": p4_url,
+                    "upscaled": final_url,
                 },
-                "log": stdout[-1500:],
+                "log": "".join(log_output)[-1500:],
             })
             return
 
@@ -800,6 +989,18 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     border-color: var(--accent-cyan);
     box-shadow: 0 0 20px rgba(0, 229, 255, 0.25);
   }
+  @keyframes pulseGlow {
+    0% { box-shadow: 0 0 10px rgba(0, 229, 255, 0.2); border-color: rgba(0, 229, 255, 0.4); }
+    50% { box-shadow: 0 0 24px rgba(0, 229, 255, 0.6); border-color: var(--accent-cyan); }
+    100% { box-shadow: 0 0 10px rgba(0, 229, 255, 0.2); border-color: rgba(0, 229, 255, 0.4); }
+  }
+  .stage-card.processing {
+    border-color: var(--accent-cyan);
+    animation: pulseGlow 1.6s infinite ease-in-out;
+  }
+  .stage-card.processing .stage-tag {
+    color: var(--accent-cyan);
+  }
   .stage-tag {
     font-size: 0.72rem;
     font-weight: 700;
@@ -1051,7 +1252,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
     <div class="stages-track">
       <!-- Stage 1: User 16x16 -->
-      <div class="stage-card">
+      <div class="stage-card" id="cardStage1">
         <div class="stage-tag">Manual Input (Pass 2)</div>
         <div class="stage-frame">
           <img id="imgStage1" src="" alt="" style="display:none;"/>
@@ -1064,7 +1265,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       </div>
 
       <!-- Stage 2: Pass 3 (32x32) -->
-      <div class="stage-card">
+      <div class="stage-card" id="cardStage2">
         <div class="stage-tag">Pass 3: Anatomy & Features</div>
         <div class="stage-frame">
           <img id="imgStage2" src="" alt="" style="display:none;"/>
@@ -1077,7 +1278,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       </div>
 
       <!-- Stage 3: Pass 4 (64x64) -->
-      <div class="stage-card">
+      <div class="stage-card" id="cardStage3">
         <div class="stage-tag">Pass 4: Fine Color Details</div>
         <div class="stage-frame">
           <img id="imgStage3" src="" alt="" style="display:none;"/>
@@ -1090,7 +1291,7 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       </div>
 
       <!-- Stage 4: Neural Super-Resolution (256x256) -->
-      <div class="stage-card highlight">
+      <div class="stage-card" id="cardStage4">
         <div class="stage-tag">Pass 5: Neural Upscaler</div>
         <div class="stage-frame">
           <img id="imgStage4" src="" alt="" style="display:none;"/>
@@ -1676,10 +1877,30 @@ btnGenerate.addEventListener("click", async () => {
 
   btnGenerate.disabled = true;
   document.getElementById("btnIcon").innerText = "⏳";
-  document.getElementById("btnText").innerText = "Cascading Passes 3, 4 & Super-Resolution...";
-  document.getElementById("statusText").innerText = "Generating...";
+  document.getElementById("btnText").innerText = "Initializing Yumon Paint...";
+  document.getElementById("statusText").innerText = "Starting...";
   document.getElementById("statusDot").classList.add("busy");
-  document.getElementById("durationBadge").innerText = "Processing on GPU...";
+  document.getElementById("durationBadge").innerText = "Cascading passes on GPU...";
+
+  // Reset stage cards state
+  ["cardStage1", "cardStage2", "cardStage3", "cardStage4"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove("processing", "highlight");
+  });
+  const c1 = document.getElementById("cardStage1");
+  if (c1) c1.classList.add("processing");
+
+  document.getElementById("hintStage2").style.display = "block";
+  document.getElementById("hintStage2").innerText = "Waiting for Pass 3...";
+  document.getElementById("imgStage2").style.display = "none";
+
+  document.getElementById("hintStage3").style.display = "block";
+  document.getElementById("hintStage3").innerText = "Waiting for Pass 4...";
+  document.getElementById("imgStage3").style.display = "none";
+
+  document.getElementById("hintStage4").style.display = "block";
+  document.getElementById("hintStage4").innerText = "Waiting for Super-Res...";
+  document.getElementById("imgStage4").style.display = "none";
 
   const payload = {
     prompt: prompt,
@@ -1697,51 +1918,120 @@ btnGenerate.addEventListener("click", async () => {
       body: JSON.stringify(payload)
     });
 
-    const data = await res.json();
-    if (!res.ok || data.error) {
-      alert("Generation error: " + (data.error || "Unknown error"));
-      document.getElementById("durationBadge").innerText = "Failed";
-      return;
+    if (!res.ok) {
+      throw new Error(`Server returned HTTP ${res.status}`);
     }
 
-    // Populate stage images
-    if (data.images.pass2) {
-      document.getElementById("imgStage1").src = data.images.pass2;
-      document.getElementById("imgStage1").style.display = "block";
-      document.getElementById("hintStage1").style.display = "none";
-    }
-    if (data.images.pass3) {
-      document.getElementById("imgStage2").src = data.images.pass3;
-      document.getElementById("imgStage2").style.display = "block";
-      document.getElementById("hintStage2").style.display = "none";
-    }
-    if (data.images.pass4) {
-      document.getElementById("imgStage3").src = data.images.pass4;
-      document.getElementById("imgStage3").style.display = "block";
-      document.getElementById("hintStage3").style.display = "none";
-    }
-    if (data.images.upscaled) {
-      document.getElementById("imgStage4").src = data.images.upscaled;
-      document.getElementById("imgStage4").style.display = "block";
-      document.getElementById("hintStage4").style.display = "none";
-    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    let lastUrls = { pass2: "", pass3: "", pass4: "", upscaled: "" };
 
-    document.getElementById("durationBadge").innerText = `Completed in ${data.duration_seconds}s`;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
 
-    addHistoryItem(
-      data.run_id,
-      prompt,
-      data.images.upscaled,
-      data.images.pass2,
-      data.images.pass3,
-      data.images.pass4,
-      data.duration_seconds
-    );
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop();
 
+      for (const part of parts) {
+        if (!part.trim()) continue;
+        const evMatch = part.match(/^event:\s*(\w+)/m);
+        const dataMatch = part.match(/^data:\s*(.+)$/m);
+        if (!evMatch || !dataMatch) continue;
+
+        const ev = evMatch[1];
+        let data = {};
+        try { data = JSON.parse(dataMatch[1]); } catch(e) { continue; }
+
+        if (ev === "pass") {
+          if (data.pass === "pass2") {
+            lastUrls.pass2 = data.url;
+            const img = document.getElementById("imgStage1");
+            img.src = data.url;
+            img.style.display = "block";
+            document.getElementById("hintStage1").style.display = "none";
+            document.getElementById("cardStage1").classList.remove("processing");
+            document.getElementById("cardStage2").classList.add("processing");
+            document.getElementById("hintStage2").innerText = "Synthesizing Pass 3 (32×32)...";
+            document.getElementById("btnText").innerText = "Pass 3: Anatomy & Features...";
+            document.getElementById("statusText").innerText = "Synthesizing Pass 3...";
+          } else if (data.pass === "pass3") {
+            lastUrls.pass3 = data.url;
+            const img = document.getElementById("imgStage2");
+            img.src = data.url;
+            img.style.display = "block";
+            document.getElementById("hintStage2").style.display = "none";
+            document.getElementById("cardStage2").classList.remove("processing");
+            document.getElementById("cardStage3").classList.add("processing");
+            document.getElementById("hintStage3").innerText = "Cascading Pass 4 (64×64)...";
+            document.getElementById("btnText").innerText = "Pass 4: Fine Details...";
+            document.getElementById("statusText").innerText = "Cascading Pass 4...";
+          } else if (data.pass === "pass4") {
+            lastUrls.pass4 = data.url;
+            const img = document.getElementById("imgStage3");
+            img.src = data.url;
+            img.style.display = "block";
+            document.getElementById("hintStage3").style.display = "none";
+            document.getElementById("cardStage3").classList.remove("processing");
+            document.getElementById("cardStage4").classList.add("processing");
+            document.getElementById("hintStage4").innerText = "Synthesizing 256×256 Super-Res...";
+            document.getElementById("btnText").innerText = "Pass 5: Super-Resolution...";
+            document.getElementById("statusText").innerText = "Super-Resolution...";
+          } else if (data.pass === "upscaled") {
+            lastUrls.upscaled = data.url;
+            const img = document.getElementById("imgStage4");
+            img.src = data.url;
+            img.style.display = "block";
+            document.getElementById("hintStage4").style.display = "none";
+            document.getElementById("cardStage4").classList.remove("processing");
+            document.getElementById("cardStage4").classList.add("highlight");
+          }
+        } else if (ev === "error") {
+          alert("Generation error: " + (data.error || "Unknown error"));
+          document.getElementById("durationBadge").innerText = "Failed";
+          ["cardStage1", "cardStage2", "cardStage3", "cardStage4"].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.classList.remove("processing");
+          });
+          return;
+        } else if (ev === "complete") {
+          ["cardStage1", "cardStage2", "cardStage3", "cardStage4"].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.classList.remove("processing");
+          });
+          document.getElementById("cardStage4").classList.add("highlight");
+
+          if (data.images) {
+            if (data.images.pass2) { document.getElementById("imgStage1").src = data.images.pass2; document.getElementById("imgStage1").style.display = "block"; document.getElementById("hintStage1").style.display = "none"; }
+            if (data.images.pass3) { document.getElementById("imgStage2").src = data.images.pass3; document.getElementById("imgStage2").style.display = "block"; document.getElementById("hintStage2").style.display = "none"; }
+            if (data.images.pass4) { document.getElementById("imgStage3").src = data.images.pass4; document.getElementById("imgStage3").style.display = "block"; document.getElementById("hintStage3").style.display = "none"; }
+            if (data.images.upscaled) { document.getElementById("imgStage4").src = data.images.upscaled; document.getElementById("imgStage4").style.display = "block"; document.getElementById("hintStage4").style.display = "none"; }
+          }
+
+          document.getElementById("durationBadge").innerText = `Completed in ${data.duration_seconds}s`;
+
+          addHistoryItem(
+            data.run_id,
+            prompt,
+            data.images ? data.images.upscaled : lastUrls.upscaled,
+            data.images ? data.images.pass2 : lastUrls.pass2,
+            data.images ? data.images.pass3 : lastUrls.pass3,
+            data.images ? data.images.pass4 : lastUrls.pass4,
+            data.duration_seconds
+          );
+        }
+      }
+    }
   } catch (err) {
     alert("Connection error: " + err.message);
     document.getElementById("durationBadge").innerText = "Error";
   } finally {
+    ["cardStage1", "cardStage2", "cardStage3", "cardStage4"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.remove("processing");
+    });
     btnGenerate.disabled = false;
     document.getElementById("btnIcon").innerText = "🎨";
     document.getElementById("btnText").innerText = "Synthesize Artwork with Yumon";

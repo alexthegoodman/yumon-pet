@@ -15,7 +15,7 @@ use {
         tensor::{Int, TensorData},
     },
     clap::Parser,
-    std::{path::{Path, PathBuf}, time::Instant},
+    std::{io::Write, path::{Path, PathBuf}, time::Instant},
     yumon_pet::brain::{
         kilo_vocab::KiloVocab,
         moe_model::{YumonMoeBrain, YumonMoeBrainConfig},
@@ -181,6 +181,20 @@ fn upscale_nn(src: &[u8], width: usize, height: usize, scale: usize) -> Vec<u8> 
         }
     }
     out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn save_intermediate_pass(output_path: &Path, pass_suffix: &str, pass_label: &str, canvas: &[u8]) {
+    let parent = output_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = output_path.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = output_path.extension().and_then(|s| s.to_str()).unwrap_or("png");
+    let p_path = parent.join(format!("{}_{}.{}", stem, pass_suffix, ext));
+    if let Some(buf) = image::RgbImage::from_raw(CANVAS_SIZE as u32, CANVAS_SIZE as u32, canvas.to_vec()) {
+        if let Ok(_) = buf.save(&p_path) {
+            println!("   - {} (64x64):  {}", pass_label, p_path.display());
+            let _ = std::io::stdout().flush();
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -702,9 +716,13 @@ fn main() -> Result<()> {
                 shared_p2_colors = Some(pass2_colors.clone());
                 shared_p2_canvas = Some(canvas_hwc.clone());
             }
+            if args.save_intermediate {
+                save_intermediate_pass(&args.output, "pass2", "Pass 2", &canvas_hwc);
+            }
             let stats2 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
             println!("  ✓ Manual 16x16 Drawing Loaded: ({} colors, V/H ratio: {:.2}).", stats2.0, stats2.3);
             print_terminal_canvas(&canvas_hwc);
+            let _ = std::io::stdout().flush();
         } else {
             if copy_idx == 0 || reuse_level == 0 {
                 println!("\n🖼  Initial Canvas State (Blank):");
@@ -814,9 +832,13 @@ fn main() -> Result<()> {
                     let c = shared_p2_canvas.as_ref().unwrap().clone();
                     canvas_hwc = c.clone();
                     pass2_canvas = Some(c);
+                    if args.save_intermediate {
+                        save_intermediate_pass(&args.output, "pass2", "Pass 2", &canvas_hwc);
+                    }
                     let stats2 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
                     println!("  ✓ Pass 2 Reused: Shapes and silhouettes cached ({} colors, V/H ratio: {:.2}).", stats2.0, stats2.3);
                     print_terminal_canvas(&canvas_hwc);
+                    let _ = std::io::stdout().flush();
                 } else {
                     println!("\n═══════════════════════════════════════════════════════");
                     println!("  🎨 Pass 2 / {}: Shapes & Silhouettes (256 Patches, Temp: {:.2})", args.passes, temp_p2);
@@ -892,9 +914,13 @@ fn main() -> Result<()> {
                         shared_p2_colors = Some(pass2_colors.clone());
                         shared_p2_canvas = Some(canvas_hwc.clone());
                     }
+                    if args.save_intermediate {
+                        save_intermediate_pass(&args.output, "pass2", "Pass 2", &canvas_hwc);
+                    }
                     let stats2 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
                     println!("  ✓ Pass 2 Complete ({:.2?}): Subject shapes and silhouettes refined ({} colors, V/H ratio: {:.2}).", t_pass2.elapsed(), stats2.0, stats2.3);
                     print_terminal_canvas(&canvas_hwc);
+                    let _ = std::io::stdout().flush();
                 }
             }
         }
@@ -910,9 +936,13 @@ fn main() -> Result<()> {
             let c = shared_p3_canvas.as_ref().unwrap().clone();
             canvas_hwc = c.clone();
             pass3_canvas = Some(c);
+            if args.save_intermediate {
+                save_intermediate_pass(&args.output, "pass3", "Pass 3", &canvas_hwc);
+            }
             let stats3 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
             println!("  ✓ Pass 3 Reused: Subject anatomy and contours cached ({} colors, V/H ratio: {:.2}).", stats3.0, stats3.3);
             print_terminal_canvas(&canvas_hwc);
+            let _ = std::io::stdout().flush();
         } else {
             println!("\n═══════════════════════════════════════════════════════");
             println!("  🎨 Pass 3 / {}: Anatomy & Features (1,024 Sub-Patches, Temp: {:.2}, Guidance: {:.2})", args.passes, temp_p3, args.shape_guidance);
@@ -1006,9 +1036,13 @@ fn main() -> Result<()> {
                 shared_p3_colors = Some(pass3_colors.clone());
                 shared_p3_canvas = Some(canvas_hwc.clone());
             }
+            if args.save_intermediate {
+                save_intermediate_pass(&args.output, "pass3", "Pass 3", &canvas_hwc);
+            }
             let stats3 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
             println!("  ✓ Pass 3 Complete ({:.2?}): Subject anatomy, features, and contours established ({} colors, V/H ratio: {:.2}).", t_pass3.elapsed(), stats3.0, stats3.3);
             print_terminal_canvas(&canvas_hwc);
+            let _ = std::io::stdout().flush();
         }
     }
 
@@ -1023,9 +1057,13 @@ fn main() -> Result<()> {
             let c = shared_p4_canvas.as_ref().unwrap().clone();
             canvas_hwc = c.clone();
             pass4_canvas = Some(c);
+            if args.save_intermediate {
+                save_intermediate_pass(&args.output, "pass4", "Pass 4", &canvas_hwc);
+            }
             let stats4 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
             println!("  ✓ Pass 4 Reused: High-resolution details cached ({} colors, V/H ratio: {:.2}).", stats4.0, stats4.3);
             print_terminal_canvas(&canvas_hwc);
+            let _ = std::io::stdout().flush();
         } else {
             println!("\n═══════════════════════════════════════════════════════");
             println!("  🎨 Pass 4 / {}: Fine Color Details (4,096 Pixels, Temp: {:.2}, Guidance: {:.2})", args.passes, temp_p4, args.shape_guidance_pass4);
@@ -1119,9 +1157,13 @@ fn main() -> Result<()> {
                 shared_p4_colors = Some(pass4_colors.clone());
                 shared_p4_canvas = Some(canvas_hwc.clone());
             }
+            if args.save_intermediate {
+                save_intermediate_pass(&args.output, "pass4", "Pass 4", &canvas_hwc);
+            }
             let stats4 = compute_canvas_stats(&canvas_hwc, CANVAS_SIZE, CANVAS_SIZE);
             println!("  ✓ Pass 4 Complete ({:.2?}): High-resolution 64x64 color details established ({} colors, V/H ratio: {:.2}).", t_pass4.elapsed(), stats4.0, stats4.3);
             print_terminal_canvas(&canvas_hwc);
+            let _ = std::io::stdout().flush();
         }
     }
 
@@ -1183,8 +1225,10 @@ fn main() -> Result<()> {
                     }
                 }
                 println!("  ✓ Pass 5 Complete ({:.2?}): Neural super-resolution synthesized 256x256 color art.", t_pass5.elapsed());
+                let _ = std::io::stdout().flush();
                 println!("\n🎨 Final 256x256 TrueColor Terminal Canvas:");
                 print_terminal_rgb(&rgb_256, 256, 256);
+                let _ = std::io::stdout().flush();
                 final_neural_256 = Some(rgb_256);
             } else {
                 let mut flat = vec![0.0f32; plane];
@@ -1398,25 +1442,32 @@ fn main() -> Result<()> {
         if args.save_intermediate {
             if let Some(ref p2) = pass2_canvas {
                 let p2_path = parent.join(format!("{}_pass2.{}", stem, ext));
-                if let Some(buf) = image::RgbImage::from_raw(CANVAS_SIZE as u32, CANVAS_SIZE as u32, p2.clone()) {
-                    let _ = buf.save(&p2_path);
-                    println!("   - Pass 2 (64x64):  {}", p2_path.display());
+                if !p2_path.exists() {
+                    if let Some(buf) = image::RgbImage::from_raw(CANVAS_SIZE as u32, CANVAS_SIZE as u32, p2.clone()) {
+                        let _ = buf.save(&p2_path);
+                        println!("   - Pass 2 (64x64):  {}", p2_path.display());
+                    }
                 }
             }
             if let Some(ref p3) = pass3_canvas {
                 let p3_path = parent.join(format!("{}_pass3.{}", stem, ext));
-                if let Some(buf) = image::RgbImage::from_raw(CANVAS_SIZE as u32, CANVAS_SIZE as u32, p3.clone()) {
-                    let _ = buf.save(&p3_path);
-                    println!("   - Pass 3 (64x64):  {}", p3_path.display());
+                if !p3_path.exists() {
+                    if let Some(buf) = image::RgbImage::from_raw(CANVAS_SIZE as u32, CANVAS_SIZE as u32, p3.clone()) {
+                        let _ = buf.save(&p3_path);
+                        println!("   - Pass 3 (64x64):  {}", p3_path.display());
+                    }
                 }
             }
             if let Some(ref p4) = pass4_canvas {
                 let p4_path = parent.join(format!("{}_pass4.{}", stem, ext));
-                if let Some(buf) = image::RgbImage::from_raw(CANVAS_SIZE as u32, CANVAS_SIZE as u32, p4.clone()) {
-                    let _ = buf.save(&p4_path);
-                    println!("   - Pass 4 (64x64):  {}", p4_path.display());
+                if !p4_path.exists() {
+                    if let Some(buf) = image::RgbImage::from_raw(CANVAS_SIZE as u32, CANVAS_SIZE as u32, p4.clone()) {
+                        let _ = buf.save(&p4_path);
+                        println!("   - Pass 4 (64x64):  {}", p4_path.display());
+                    }
                 }
             }
+            let _ = std::io::stdout().flush();
         }
 
         if total_copies > 1 {
