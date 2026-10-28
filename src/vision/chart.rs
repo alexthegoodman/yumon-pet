@@ -1026,6 +1026,43 @@ impl DcganTrainingState {
         Ok(())
     }
 
+    /// Load previous metrics history from CSV to seamlessly resume plotting.
+    pub fn load_csv(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        use std::io::BufRead;
+        for (line_idx, line) in reader.lines().enumerate() {
+            let line = line?;
+            if line_idx == 0 || line.trim().is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.split(',').collect();
+            if parts.len() >= 3 {
+                if let (Ok(step), Ok(g), Ok(d)) = (
+                    parts[0].trim().parse::<f64>(),
+                    parts[1].trim().parse::<f64>(),
+                    parts[2].trim().parse::<f64>(),
+                ) {
+                    let lr = parts
+                        .get(3)
+                        .and_then(|s| s.trim().parse::<f64>().ok())
+                        .unwrap_or(self.current_lr);
+                    self.global_step = step as usize;
+                    self.current_g_loss = g as f32;
+                    self.current_d_loss = d as f32;
+                    self.current_lr = lr;
+                    self.g_loss_history.push((step, g));
+                    self.d_loss_history.push((step, d));
+                    self.lr_history.push((step, lr));
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_chart_image(&self, path: &std::path::Path) -> anyhow::Result<()> {
         use crate::brain::chart::plot::{dim, text, Panel, Series, BACKGROUND};

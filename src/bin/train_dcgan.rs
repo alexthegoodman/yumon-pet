@@ -9,7 +9,7 @@
 //! it does *not* tokenize images: raw RGB pixels are fed straight into the
 //! discriminator as the "real" distribution.
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use burn::{
     backend::Autodiff,
     module::AutodiffModule,
@@ -97,6 +97,18 @@ struct Args {
     /// Disable inline interactive terminal TUI dashboard.
     #[arg(long, default_value_t = false)]
     no_tui: bool,
+
+    /// Resume training from checkpoint in out-dir if present (or explicitly pass --resume).
+    #[arg(long, default_value_t = false)]
+    resume: bool,
+
+    /// Explicit checkpoint directory to resume from (defaults to out-dir).
+    #[arg(long)]
+    resume_from: Option<PathBuf>,
+
+    /// Start fresh even if existing checkpoints exist in out-dir.
+    #[arg(long, default_value_t = false)]
+    fresh: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -327,6 +339,86 @@ fn main() -> Result<()> {
 
     let mut tui_state = DcganTrainingState::new(args.epochs, num_batches, args.lr);
 
+    // --- Resume checkpoint support ---
+    let resume_dir = args.resume_from.as_ref().unwrap_or(&args.out_dir);
+    let gen_checkpoint = resume_dir.join("generator.bin");
+    let disc_checkpoint = resume_dir.join("discriminator.bin");
+    let has_checkpoint = gen_checkpoint.exists() && disc_checkpoint.exists();
+
+    let should_resume = if args.fresh {
+        false
+    } else if args.resume || args.resume_from.is_some() {
+        ensure!(
+            has_checkpoint,
+            "Cannot resume: checkpoint not found in {} (expected generator.bin and discriminator.bin)",
+            resume_dir.display()
+        );
+        true
+    } else {
+        has_checkpoint
+    };
+
+    let mut start_epoch = 1usize;
+    if should_resume {
+        let meta_file = resume_dir.join("metadata.json");
+        if meta_file.exists() {
+            if let Ok(content) = fs::read_to_string(&meta_file) {
+                if let Ok(meta) = serde_json::from_str::<DcganMetadata>(&content) {
+                    start_epoch = meta.epoch + 1;
+                    last_g_loss = meta.g_loss;
+                    last_d_loss = meta.d_loss;
+                    println!(
+                        "  ↻ Resuming from epoch {}/{} (checkpoint: {})",
+                        start_epoch,
+                        args.epochs,
+                        resume_dir.display()
+                    );
+                }
+            }
+        } else {
+            println!(
+                "  ↻ Resuming model weights from checkpoint: {}",
+                resume_dir.display()
+            );
+        }
+
+        if start_epoch > args.epochs {
+            println!(
+                "  Checkpoint in {} already completed all {} epochs! Set --epochs > {} to train further.",
+                resume_dir.display(),
+                args.epochs,
+                start_epoch - 1
+            );
+            return Ok(());
+        }
+
+        print!("  Loading generator weights... ");
+        generator = generator
+            .load_file(resume_dir.join("generator"), &recorder, &device)
+            .with_context(|| format!("Failed to load generator from {}", resume_dir.display()))?;
+        println!("done");
+
+        print!("  Loading discriminator weights... ");
+        discriminator = discriminator
+            .load_file(resume_dir.join("discriminator"), &recorder, &device)
+            .with_context(|| format!("Failed to load discriminator from {}", resume_dir.display()))?;
+        println!("done");
+
+        let csv_path = resume_dir.join("loss_history.csv");
+        if csv_path.exists() {
+            if let Err(e) = tui_state.load_csv(&csv_path) {
+                eprintln!("Warning: Failed to load previous loss_history.csv: {e}");
+            } else {
+                println!(
+                    "  Loaded {} historical training steps from {}",
+                    tui_state.g_loss_history.len(),
+                    csv_path.display()
+                );
+            }
+        }
+        tui_state.epoch = start_epoch;
+    }
+
     let mut terminal = if !args.no_tui && stdout().is_terminal() {
         let backend = CrosstermBackend::new(stdout());
         match Terminal::with_options(
@@ -345,7 +437,7 @@ fn main() -> Result<()> {
         None
     };
 
-    for epoch in 1..=args.epochs {
+    for epoch in start_epoch..=args.epochs {
         indices.shuffle(&mut rng);
         let t_epoch = Instant::now();
         tui_state.epoch = epoch;
