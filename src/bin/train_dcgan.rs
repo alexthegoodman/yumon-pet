@@ -21,7 +21,7 @@ use burn::{
 use clap::Parser;
 use image::imageops::FilterType;
 use indicatif::{ProgressBar, ProgressStyle};
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -32,8 +32,9 @@ use std::{
 };
 
 use yumon_pet::vision::dcgan_model::{
+    discriminator_loss, generator_loss, sample_noise, sample_noise_vec,
     DcganDiscriminator, DcganDiscriminatorConfig, DcganGenerator, DcganGeneratorConfig,
-    DCGAN_CHANNELS, DCGAN_IMAGE_SIZE, DCGAN_NOISE_DIM, discriminator_loss, generator_loss,
+    DCGAN_CHANNELS, DCGAN_IMAGE_SIZE, DCGAN_NOISE_DIM,
 };
 
 pub type InnerBackend = burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>;
@@ -211,15 +212,6 @@ impl ImageDataset {
     }
 }
 
-fn sample_noise<B: Backend>(
-    batch: usize,
-    dim: usize,
-    device: &B::Device,
-    rng: &mut impl Rng,
-) -> Tensor<B, 2> {
-    let flat: Vec<f32> = (0..batch * dim).map(|_| rng.gen_range(-1.0f32..1.0)).collect();
-    Tensor::from_floats(TensorData::new(flat, [batch, dim]), device)
-}
 
 /// Save a square grid of generated samples (default 8x8 = 64 images).
 fn save_sample_grid(
@@ -317,9 +309,7 @@ fn main() -> Result<()> {
 
     // Fixed latent vector for consistent visual comparison across epochs.
     let fixed_grid = 64usize;
-    let fixed_noise: Vec<f32> = (0..fixed_grid * args.latent_dim)
-        .map(|_| rng.gen_range(-1.0f32..1.0))
-        .collect();
+    let fixed_noise = sample_noise_vec(fixed_grid * args.latent_dim, &mut rng);
 
     let num_batches = num_images / args.batch_size;
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
@@ -353,8 +343,8 @@ fn main() -> Result<()> {
             // --- Discriminator step ---
             let z = sample_noise(args.batch_size, args.latent_dim, &device, &mut rng);
             let fake = generator.forward(z);
-            let d_real = discriminator.forward(real);
-            let d_fake = discriminator.forward(fake.detach());
+            let d_real = discriminator.forward_logits(real);
+            let d_fake = discriminator.forward_logits(fake.detach());
             let d_loss = discriminator_loss(d_real, d_fake);
             let d_loss_val: f32 = d_loss.clone().into_data().convert::<f32>().to_vec().unwrap()[0];
 
@@ -364,7 +354,7 @@ fn main() -> Result<()> {
             // --- Generator step (fresh noise) ---
             let z2 = sample_noise(args.batch_size, args.latent_dim, &device, &mut rng);
             let fake2 = generator.forward(z2);
-            let d_fake2 = discriminator.forward(fake2);
+            let d_fake2 = discriminator.forward_logits(fake2);
             let g_loss = generator_loss(d_fake2);
             let g_loss_val: f32 = g_loss.clone().into_data().convert::<f32>().to_vec().unwrap()[0];
 

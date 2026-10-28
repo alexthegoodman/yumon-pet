@@ -11,7 +11,7 @@
 //!
 //! Generator:
 //! ```text
-//! z [B, 100] -> ConvT(100 -> 512, k4, s1, p0) + ReLU                  -> [B, 512, 4, 4]
+//! z [B, 100] -> ConvT(100 -> 512, k4, s1, p0) + BN + ReLU              -> [B, 512, 4, 4]
 //!            -> ConvT(512 -> 256, k4, s2, p1) + BN + ReLU              -> [B, 256, 8, 8]
 //!            -> ConvT(256 -> 128, k4, s2, p1) + BN + ReLU              -> [B, 128, 16, 16]
 //!            -> ConvT(128 ->  64, k4, s2, p1) + BN + ReLU              -> [B, 64, 32, 32]
@@ -24,7 +24,7 @@
 //!                   -> Conv(64 -> 128, k4, s2, p1) + BN + LeakyReLU(0.2)    -> [B, 128, 16, 16]
 //!                   -> Conv(128 -> 256, k4, s2, p1) + BN + LeakyReLU(0.2)   -> [B, 256, 8, 8]
 //!                   -> Conv(256 -> 512, k4, s2, p1) + BN + LeakyReLU(0.2)   -> [B, 512, 4, 4]
-//!                   -> Conv(512 -> 1, k4, s1, p0) + Sigmoid                 -> [B, 1, 1, 1]
+//!                   -> Conv(512 -> 1, k4, s1, p0) [Logits / Sigmoid]        -> [B, 1, 1, 1]
 //! ```
 //!
 //! Recipe details preserved from the original paper:
@@ -33,7 +33,7 @@
 //! - BatchNorm everywhere in both nets except the generator output and the
 //!   discriminator's first and last layers.
 //! - ReLU in the generator (tanh output), LeakyReLU(0.2) in the discriminator.
-//! - Binary cross-entropy objective with the non-saturating generator loss.
+//! - Binary cross-entropy with logits objective using the non-saturating generator loss.
 
 use burn::{
     module::{Ignored, Module},
@@ -44,7 +44,7 @@ use burn::{
     prelude::*,
     tensor::{
         activation::{leaky_relu, relu, sigmoid, tanh},
-        Tensor,
+        Tensor, TensorData,
     },
 };
 
@@ -98,13 +98,14 @@ impl DcganGeneratorConfig {
         let ngf = self.ngf;
         let nc = self.out_channels;
 
-        // Project + reshape latent to a 4x4 feature grid (no BatchNorm here).
+        // Project + reshape latent to a 4x4 feature grid with BatchNorm.
         let project = ConvTranspose2dConfig::new([nz, ngf * 8], [4, 4])
             .with_stride([1, 1])
             .with_padding([0, 0])
             .with_bias(false)
             .with_initializer(dcgan_init())
             .init(device);
+        let bn0 = BatchNormConfig::new(ngf * 8).init(device);
 
         // 4x4 -> 8x8
         let deconv1 = ConvTranspose2dConfig::new([ngf * 8, ngf * 4], [4, 4])
@@ -143,6 +144,7 @@ impl DcganGeneratorConfig {
 
         DcganGenerator {
             project,
+            bn0,
             deconv1,
             bn1,
             deconv2,
@@ -159,6 +161,7 @@ impl DcganGeneratorConfig {
 #[derive(Module, Debug)]
 pub struct DcganGenerator<B: Backend> {
     project: ConvTranspose2d<B>,
+    bn0: BatchNorm<B>,
     deconv1: ConvTranspose2d<B>,
     bn1: BatchNorm<B>,
     deconv2: ConvTranspose2d<B>,
@@ -178,7 +181,7 @@ impl<B: Backend> DcganGenerator<B> {
         let [batch, _] = z.dims();
         let z4 = z.reshape([batch, self.config.noise_dim, 1, 1]);
 
-        let mut f = relu(self.project.forward(z4)); // [B, ngf*8, 4, 4]
+        let mut f = relu(self.bn0.forward(self.project.forward(z4))); // [B, ngf*8, 4, 4]
 
         f = relu(self.bn1.forward(self.deconv1.forward(f))); // [B, ngf*4, 8, 8]
         f = relu(self.bn2.forward(self.deconv2.forward(f))); // [B, ngf*2, 16, 16]
@@ -287,11 +290,8 @@ pub struct DcganDiscriminator<B: Backend> {
 }
 
 impl<B: Backend> DcganDiscriminator<B> {
-    /// Forward pass.
-    ///
-    /// Input:  `[batch, in_channels, image_size, image_size]`.
-    /// Output: `[batch, 1, 1, 1]` sigmoid probability of being real.
-    pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+    /// Forward pass returning raw unactivated logits: `[batch, 1, 1, 1]`.
+    pub fn forward_logits(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
         let mut f = leaky_relu(self.conv1.forward(x), DCGAN_LRELU_SLOPE); // [B, ndf, 32, 32]
 
         f = leaky_relu(
@@ -307,41 +307,81 @@ impl<B: Backend> DcganDiscriminator<B> {
             DCGAN_LRELU_SLOPE,
         ); // [B, ndf*8, 4, 4]
 
-        sigmoid(self.out.forward(f)) // [B, 1, 1, 1]
+        self.out.forward(f) // [B, 1, 1, 1] raw logits
     }
+
+    /// Forward pass returning sigmoid probability of being real: `[batch, 1, 1, 1]` in `[0, 1]`.
+    pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+        sigmoid(self.forward_logits(x))
+    }
+}
+
+/// Numerically stable binary cross-entropy with logits for target = 1:
+/// `-log(sigmoid(x)) = softplus(-x) = max(-x, 0) + log(1 + exp(-|x|))`.
+fn bce_with_logits_target_1<B: Backend>(logits: Tensor<B, 1>) -> Tensor<B, 1> {
+    let neg_x = logits.clone().neg();
+    let abs_x = logits.abs();
+    (neg_x.clamp_min(0.0) + (abs_x.neg().exp().add_scalar(1.0)).log()).mean()
+}
+
+/// Numerically stable binary cross-entropy with logits for target = 0:
+/// `-log(1 - sigmoid(x)) = softplus(x) = max(x, 0) + log(1 + exp(-|x|))`.
+fn bce_with_logits_target_0<B: Backend>(logits: Tensor<B, 1>) -> Tensor<B, 1> {
+    let abs_x = logits.clone().abs();
+    (logits.clamp_min(0.0) + (abs_x.neg().exp().add_scalar(1.0)).log()).mean()
 }
 
 /// DCGAN discriminator loss: `-E[log D(x)] - E[log(1 - D(G(z)))]`.
 ///
-/// Inputs are already-sigmoid discriminator outputs of shape `[batch, 1, 1, 1]`.
-/// Returns a scalar loss tensor.
+/// Inputs are raw discriminator logits of shape `[batch, 1, 1, 1]`.
+/// Uses numerically stable softplus computation to prevent vanishing or exploding gradients.
 pub fn discriminator_loss<B: Backend>(
-    real_out: Tensor<B, 4>,
-    fake_out: Tensor<B, 4>,
+    real_logits: Tensor<B, 4>,
+    fake_logits: Tensor<B, 4>,
 ) -> Tensor<B, 1> {
-    let batch = real_out.dims()[0];
-    let real = real_out.reshape([batch]);
-    let fake = fake_out.reshape([batch]);
+    let batch_real = real_logits.dims()[0];
+    let batch_fake = fake_logits.dims()[0];
+    let real = real_logits.reshape([batch_real]);
+    let fake = fake_logits.reshape([batch_fake]);
 
-    let eps = 1e-8f32;
-    let log_real = real.clamp_min(eps).log().mean();
-    let log_inv_fake = fake
-        .neg()
-        .add_scalar(1.0)
-        .clamp_min(eps)
-        .log()
-        .mean();
-
-    (log_real + log_inv_fake).neg()
+    bce_with_logits_target_1(real) + bce_with_logits_target_0(fake)
 }
 
 /// DCGAN generator loss (non-saturating): `-E[log D(G(z))]`.
 ///
-/// Inputs are already-sigmoid discriminator outputs of shape `[batch, 1, 1, 1]`.
-/// Returns a scalar loss tensor.
-pub fn generator_loss<B: Backend>(fake_out: Tensor<B, 4>) -> Tensor<B, 1> {
-    let batch = fake_out.dims()[0];
-    fake_out.reshape([batch]).clamp_min(1e-8).log().mean().neg()
+/// Inputs are raw discriminator logits of shape `[batch, 1, 1, 1]`.
+/// Uses numerically stable softplus computation: gradient magnitude never collapses to zero.
+pub fn generator_loss<B: Backend>(fake_logits: Tensor<B, 4>) -> Tensor<B, 1> {
+    let batch = fake_logits.dims()[0];
+    let fake = fake_logits.reshape([batch]);
+    bce_with_logits_target_1(fake)
+}
+
+/// Sample standard normal Gaussian vector `z ~ N(0, 1)` using Box-Muller transform.
+pub fn sample_noise_vec(count: usize, rng: &mut impl rand::Rng) -> Vec<f32> {
+    let mut flat = Vec::with_capacity(count);
+    for _ in 0..(count + 1) / 2 {
+        let u1: f32 = rng.gen_range(1e-7f32..1.0);
+        let u2: f32 = rng.gen_range(0.0f32..1.0);
+        let r = (-2.0 * u1.ln()).sqrt();
+        let theta = 2.0 * std::f32::consts::PI * u2;
+        flat.push(r * theta.cos());
+        if flat.len() < count {
+            flat.push(r * theta.sin());
+        }
+    }
+    flat
+}
+
+/// Sample a batch of latent vectors `z ~ N(0, 1)` of shape `[batch, dim]`.
+pub fn sample_noise<B: Backend>(
+    batch: usize,
+    dim: usize,
+    device: &B::Device,
+    rng: &mut impl rand::Rng,
+) -> Tensor<B, 2> {
+    let flat = sample_noise_vec(batch * dim, rng);
+    Tensor::from_floats(TensorData::new(flat, [batch, dim]), device)
 }
 
 #[cfg(test)]
@@ -381,8 +421,10 @@ mod tests {
 
         let x: Tensor<TestBackend, 4> =
             Tensor::zeros([4, DCGAN_CHANNELS, DCGAN_IMAGE_SIZE, DCGAN_IMAGE_SIZE], &device);
-        let out = disc.forward(x);
+        let out = disc.forward(x.clone());
         assert_eq!(out.dims(), [4, 1, 1, 1]);
+        let logits = disc.forward_logits(x);
+        assert_eq!(logits.dims(), [4, 1, 1, 1]);
     }
 
     #[test]
@@ -395,5 +437,40 @@ mod tests {
         let z: Tensor<TestBackend, 2> = Tensor::zeros([1, DCGAN_NOISE_DIM], &device);
         let out = generator.forward(z);
         assert_eq!(out.dims(), [1, 1, DCGAN_IMAGE_SIZE, DCGAN_IMAGE_SIZE]);
+    }
+
+    #[test]
+    fn test_loss_numerical_stability() {
+        let device = Default::default();
+        // Test with extreme logits that would previously underflow/overflow sigmoid & log
+        let real_logits: Tensor<TestBackend, 4> = Tensor::from_floats([[[[50.0f32]]], [[[-50.0f32]]]], &device);
+        let fake_logits: Tensor<TestBackend, 4> = Tensor::from_floats([[[[-50.0f32]]], [[[50.0f32]]]], &device);
+
+        let d_loss = discriminator_loss(real_logits, fake_logits.clone());
+        let g_loss = generator_loss(fake_logits);
+
+        let d_val: f32 = d_loss.into_data().convert::<f32>().to_vec().unwrap()[0];
+        let g_val: f32 = g_loss.into_data().convert::<f32>().to_vec().unwrap()[0];
+
+        assert!(d_val.is_finite(), "Discriminator loss must be finite even on extreme logits: {d_val}");
+        assert!(g_val.is_finite(), "Generator loss must be finite even on extreme logits: {g_val}");
+        assert!(d_val >= 0.0, "Discriminator loss must be non-negative");
+        assert!(g_val >= 0.0, "Generator loss must be non-negative");
+    }
+
+    #[test]
+    fn test_gaussian_noise_sampling() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(12345);
+        let n = 10_000;
+        let samples = sample_noise_vec(n, &mut rng);
+        assert_eq!(samples.len(), n);
+
+        let mean: f32 = samples.iter().sum::<f32>() / n as f32;
+        let variance: f32 = samples.iter().map(|&x| (x - mean).powi(2)).sum::<f32>() / n as f32;
+
+        // Standard normal should have mean ~ 0.0 and variance ~ 1.0
+        assert!((mean.abs()) < 0.05, "Mean should be close to 0: {mean}");
+        assert!((variance - 1.0).abs() < 0.08, "Variance should be close to 1: {variance}");
     }
 }

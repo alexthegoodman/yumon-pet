@@ -4,14 +4,14 @@ use anyhow::{Context, Result};
 use burn::{
     prelude::*,
     record::{BinFileRecorder, FullPrecisionSettings},
-    tensor::{Tensor, TensorData},
 };
 use clap::Parser;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use std::path::PathBuf;
 
 use yumon_pet::vision::dcgan_model::{
-    DcganGenerator, DcganGeneratorConfig, DCGAN_CHANNELS, DCGAN_IMAGE_SIZE, DCGAN_NOISE_DIM,
+    sample_noise, DcganGenerator, DcganGeneratorConfig, DCGAN_CHANNELS, DCGAN_IMAGE_SIZE,
+    DCGAN_NOISE_DIM,
 };
 
 pub type EvalBackend = burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>;
@@ -64,8 +64,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("failed to load generator from {}", args.checkpoint.display()))?;
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(args.seed);
-    let flat: Vec<f32> = (0..args.count * latent_dim).map(|_| rng.gen_range(-1.0f32..1.0)).collect();
-    let z: Tensor<EvalBackend, 2> = Tensor::from_floats(TensorData::new(flat, [args.count, latent_dim]), &device);
+    let z = sample_noise::<EvalBackend>(args.count, latent_dim, &device, &mut rng);
 
     let fake = generator.forward(z);
     let data: Vec<f32> = fake.into_data().convert::<f32>().to_vec().unwrap();

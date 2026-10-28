@@ -31,6 +31,7 @@ pub use dcgan_model::{
     DcganGenerator, DcganGeneratorConfig,
     DcganDiscriminator, DcganDiscriminatorConfig,
     discriminator_loss, generator_loss,
+    sample_noise, sample_noise_vec,
     DCGAN_NOISE_DIM, DCGAN_CHANNELS, DCGAN_IMAGE_SIZE,
 };
 pub use colorizer::{
