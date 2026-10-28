@@ -337,7 +337,7 @@ pub struct CodebookUpscalerModelConfig {
     #[config(default = 64)]
     pub channels: usize,
 
-    #[config(default = 4)]
+    #[config(default = 3)]
     pub num_res_blocks: usize,
 
     #[config(default = 1)]
