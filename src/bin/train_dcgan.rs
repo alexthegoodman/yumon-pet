@@ -62,9 +62,37 @@ struct Args {
     #[arg(long, default_value_t = 64)]
     batch_size: usize,
 
-    /// Learning rate for both generator and discriminator (Adam).
+    /// Base learning rate for both generator and discriminator (Adam).
     #[arg(long, default_value_t = 2e-4)]
     lr: f64,
+
+    /// Generator initial learning rate (defaults to --lr).
+    #[arg(long)]
+    lr_g: Option<f64>,
+
+    /// Discriminator initial learning rate (defaults to --lr).
+    #[arg(long)]
+    lr_d: Option<f64>,
+
+    /// Minimum learning rate floor for schedules (defaults to 1e-5).
+    #[arg(long, default_value_t = 1e-5)]
+    min_lr: f64,
+
+    /// Generator minimum learning rate floor (defaults to --min-lr).
+    #[arg(long)]
+    min_lr_g: Option<f64>,
+
+    /// Discriminator minimum learning rate floor (defaults to --min-lr).
+    #[arg(long)]
+    min_lr_d: Option<f64>,
+
+    /// Learning rate schedule: cosine, linear, half-decay, constant.
+    #[arg(long, default_value = "cosine")]
+    lr_schedule: String,
+
+    /// Epoch to start decay (for half-decay or custom schedule).
+    #[arg(long)]
+    decay_start_epoch: Option<usize>,
 
     /// Adam beta1 (DCGAN uses 0.5 instead of the usual 0.9).
     #[arg(long, default_value_t = 0.5)]
@@ -118,6 +146,10 @@ struct DcganMetadata {
     g_loss: f32,
     d_loss: f32,
     lr: f64,
+    #[serde(default)]
+    lr_g: Option<f64>,
+    #[serde(default)]
+    lr_d: Option<f64>,
     beta1: f32,
     latent_dim: usize,
     ngf: usize,
@@ -125,6 +157,51 @@ struct DcganMetadata {
     image_size: usize,
     num_images: usize,
     timestamp: String,
+}
+
+/// Compute scheduled learning rate based on current epoch and policy.
+fn compute_scheduled_lr(
+    base_lr: f64,
+    min_lr: f64,
+    epoch: usize,
+    total_epochs: usize,
+    schedule: &str,
+    decay_start: usize,
+) -> f64 {
+    if total_epochs <= 1 || base_lr <= min_lr {
+        return base_lr;
+    }
+    match schedule.to_ascii_lowercase().as_str() {
+        "cosine" => {
+            let progress = (epoch.saturating_sub(1)) as f64 / (total_epochs - 1) as f64;
+            let factor = 0.5 * (1.0 + (progress * std::f64::consts::PI).cos());
+            min_lr + (base_lr - min_lr) * factor
+        }
+        "linear" => {
+            let progress = (epoch.saturating_sub(1)) as f64 / (total_epochs - 1) as f64;
+            (base_lr + (min_lr - base_lr) * progress).max(min_lr)
+        }
+        "half-decay" | "half_decay" | "half" => {
+            let start = if decay_start > 0 {
+                decay_start
+            } else {
+                (total_epochs / 2).max(1)
+            };
+            if epoch <= start {
+                base_lr
+            } else {
+                let remaining = total_epochs.saturating_sub(start).max(1);
+                let progress = (epoch - start) as f64 / remaining as f64;
+                (base_lr + (min_lr - base_lr) * progress.clamp(0.0, 1.0)).max(min_lr)
+            }
+        }
+        "constant" | "none" => base_lr,
+        _ => {
+            let progress = (epoch.saturating_sub(1)) as f64 / (total_epochs - 1) as f64;
+            let factor = 0.5 * (1.0 + (progress * std::f64::consts::PI).cos());
+            min_lr + (base_lr - min_lr) * factor
+        }
+    }
 }
 
 /// In-memory dataset of normalized `[C, H, W]` planar `[-1, 1]` pixels.
@@ -291,7 +368,16 @@ fn main() -> Result<()> {
     println!("  Output dir  : {}", args.out_dir.display());
     println!("  Epochs      : {}", args.epochs);
     println!("  Batch size  : {}", args.batch_size);
-    println!("  LR          : {:.2e} (Adam beta1 = {:.2})", args.lr, args.beta1);
+
+    let base_lr_g = args.lr_g.unwrap_or(args.lr);
+    let base_lr_d = args.lr_d.unwrap_or(args.lr);
+    let min_lr_g = args.min_lr_g.unwrap_or(args.min_lr);
+    let min_lr_d = args.min_lr_d.unwrap_or(args.min_lr);
+    let decay_start = args.decay_start_epoch.unwrap_or(args.epochs / 2);
+
+    println!("  LR (G)      : {:.2e} -> {:.2e} (schedule: {})", base_lr_g, min_lr_g, args.lr_schedule);
+    println!("  LR (D)      : {:.2e} -> {:.2e} (schedule: {})", base_lr_d, min_lr_d, args.lr_schedule);
+    println!("  Adam beta1  : {:.2}", args.beta1);
     println!("  Latent dim  : {}", args.latent_dim);
     println!("  ngf / ndf   : {} / {}", args.ngf, args.ndf);
     println!("  Image size  : {}x{}", args.image_size, args.image_size);
@@ -337,7 +423,7 @@ fn main() -> Result<()> {
     let mut last_g_loss = 0.0f32;
     let mut last_d_loss = 0.0f32;
 
-    let mut tui_state = DcganTrainingState::new(args.epochs, num_batches, args.lr);
+    let mut tui_state = DcganTrainingState::with_lrs(args.epochs, num_batches, base_lr_g, base_lr_d);
 
     // --- Resume checkpoint support ---
     let resume_dir = args.resume_from.as_ref().unwrap_or(&args.out_dir);
@@ -442,6 +528,25 @@ fn main() -> Result<()> {
         let t_epoch = Instant::now();
         tui_state.epoch = epoch;
 
+        let lr_g = compute_scheduled_lr(
+            base_lr_g,
+            min_lr_g,
+            epoch,
+            args.epochs,
+            &args.lr_schedule,
+            decay_start,
+        );
+        let lr_d = compute_scheduled_lr(
+            base_lr_d,
+            min_lr_d,
+            epoch,
+            args.epochs,
+            &args.lr_schedule,
+            decay_start,
+        );
+        tui_state.current_lr = lr_g;
+        tui_state.current_lr_d = lr_d;
+
         let pb = if terminal.is_none() {
             let bar = ProgressBar::new(num_batches as u64);
             bar.set_style(
@@ -450,7 +555,10 @@ fn main() -> Result<()> {
                     .unwrap()
                     .progress_chars("#>-"),
             );
-            bar.set_message(format!("{}/{}", epoch, args.epochs));
+            bar.set_message(format!(
+                "{}/{} [LR G:{:.1e} D:{:.1e}]",
+                epoch, args.epochs, lr_g, lr_d
+            ));
             Some(bar)
         } else {
             None
@@ -475,7 +583,7 @@ fn main() -> Result<()> {
             let d_loss_val: f32 = d_loss.clone().into_data().convert::<f32>().to_vec().unwrap()[0];
 
             let grads_d = GradientsParams::from_grads(d_loss.backward(), &discriminator);
-            discriminator = opt_d.step(args.lr, discriminator, grads_d);
+            discriminator = opt_d.step(lr_d, discriminator, grads_d);
 
             // --- Generator step (fresh noise) ---
             let z2 = sample_noise(args.batch_size, args.latent_dim, &device, &mut rng);
@@ -485,7 +593,7 @@ fn main() -> Result<()> {
             let g_loss_val: f32 = g_loss.clone().into_data().convert::<f32>().to_vec().unwrap()[0];
 
             let grads_g = GradientsParams::from_grads(g_loss.backward(), &generator);
-            generator = opt_g.step(args.lr, generator, grads_g);
+            generator = opt_g.step(lr_g, generator, grads_g);
 
             epoch_g += g_loss_val;
             epoch_d += d_loss_val;
@@ -500,7 +608,8 @@ fn main() -> Result<()> {
             tui_state.current_d_loss = d_loss_val;
             tui_state.g_loss_history.push((global_step as f64, g_loss_val as f64));
             tui_state.d_loss_history.push((global_step as f64, d_loss_val as f64));
-            tui_state.lr_history.push((global_step as f64, args.lr));
+            tui_state.lr_history.push((global_step as f64, lr_g));
+            tui_state.lr_d_history.push((global_step as f64, lr_d));
 
             if let Some(term) = terminal.as_mut() {
                 let _ = term.draw(|f| render_dcgan_chart(f, &tui_state));
@@ -562,7 +671,9 @@ fn main() -> Result<()> {
             epochs: args.epochs,
             g_loss: last_g_loss,
             d_loss: last_d_loss,
-            lr: args.lr,
+            lr: lr_g,
+            lr_g: Some(lr_g),
+            lr_d: Some(lr_d),
             beta1: args.beta1,
             latent_dim: args.latent_dim,
             ngf: args.ngf,
@@ -578,12 +689,14 @@ fn main() -> Result<()> {
 
         if terminal.is_none() {
             println!(
-                "  Epoch {:>3}/{} ({:.1?}): avg G:{:.4} avg D:{:.4} | saved {}",
+                "  Epoch {:>3}/{} ({:.1?}): avg G:{:.4} avg D:{:.4} | LR G:{:.2e} D:{:.2e} | saved {}",
                 epoch,
                 args.epochs,
                 t_epoch.elapsed(),
                 epoch_g / steps.max(1) as f32,
                 epoch_d / steps.max(1) as f32,
+                lr_g,
+                lr_d,
                 args.out_dir.display()
             );
         }

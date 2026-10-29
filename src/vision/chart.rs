@@ -981,12 +981,14 @@ pub struct DcganTrainingState {
     pub global_step: usize,
 
     pub current_lr: f64,
+    pub current_lr_d: f64,
     pub current_g_loss: f32,
     pub current_d_loss: f32,
 
     pub g_loss_history: Vec<(f64, f64)>,
     pub d_loss_history: Vec<(f64, f64)>,
     pub lr_history: Vec<(f64, f64)>,
+    pub lr_d_history: Vec<(f64, f64)>,
 
     pub start_time: Instant,
     pub last_preview_path: Option<String>,
@@ -994,18 +996,24 @@ pub struct DcganTrainingState {
 
 impl DcganTrainingState {
     pub fn new(total_epochs: usize, total_batches: usize, lr: f64) -> Self {
+        Self::with_lrs(total_epochs, total_batches, lr, lr)
+    }
+
+    pub fn with_lrs(total_epochs: usize, total_batches: usize, lr_g: f64, lr_d: f64) -> Self {
         Self {
             epoch: 1,
             total_epochs,
             batch: 0,
             total_batches,
             global_step: 0,
-            current_lr: lr,
+            current_lr: lr_g,
+            current_lr_d: lr_d,
             current_g_loss: 0.0,
             current_d_loss: 0.0,
             g_loss_history: Vec::new(),
             d_loss_history: Vec::new(),
             lr_history: Vec::new(),
+            lr_d_history: Vec::new(),
             start_time: Instant::now(),
             last_preview_path: None,
         }
@@ -1016,11 +1024,12 @@ impl DcganTrainingState {
         let file = std::fs::File::create(path)?;
         let mut writer = std::io::BufWriter::new(file);
 
-        writeln!(writer, "step,g_loss,d_loss,lr")?;
+        writeln!(writer, "step,g_loss,d_loss,lr,lr_d")?;
         for (i, &(step, g)) in self.g_loss_history.iter().enumerate() {
             let d = self.d_loss_history.get(i).map_or(0.0, |p| p.1);
             let lr = self.lr_history.get(i).map_or(0.0, |p| p.1);
-            writeln!(writer, "{},{},{},{}", step, g, d, lr)?;
+            let lr_d = self.lr_d_history.get(i).map_or(lr, |p| p.1);
+            writeln!(writer, "{},{},{},{},{}", step, g, d, lr, lr_d)?;
         }
         writer.flush()?;
         Ok(())
@@ -1050,13 +1059,19 @@ impl DcganTrainingState {
                         .get(3)
                         .and_then(|s| s.trim().parse::<f64>().ok())
                         .unwrap_or(self.current_lr);
+                    let lr_d = parts
+                        .get(4)
+                        .and_then(|s| s.trim().parse::<f64>().ok())
+                        .unwrap_or(lr);
                     self.global_step = step as usize;
                     self.current_g_loss = g as f32;
                     self.current_d_loss = d as f32;
                     self.current_lr = lr;
+                    self.current_lr_d = lr_d;
                     self.g_loss_history.push((step, g));
                     self.d_loss_history.push((step, d));
                     self.lr_history.push((step, lr));
+                    self.lr_d_history.push((step, lr_d));
                 }
             }
         }
@@ -1096,13 +1111,17 @@ impl DcganTrainingState {
         text(&mut img, "Cyan: G Loss (EMA)", left + 10, 50, cyan);
         text(&mut img, "Orange: D Loss (EMA)", left + 200, 50, orange);
 
-        // Panel 2: Learning rate
+        // Panel 2: Learning rate (Generator in Green, Discriminator in Amber)
         let lr_color = Rgb([0, 255, 128]);
-        let lr_series: [Series; 1] = [(&self.lr_history, lr_color)];
+        let lr_d_color = Rgb([255, 180, 50]);
+        let lr_series: Vec<Series> = vec![
+            (&self.lr_history, lr_color),
+            (&self.lr_d_history, lr_d_color),
+        ];
         Panel::new(left, 590, panel_w, 160, false, false)
             .fit(&lr_series, true)
             .draw(&mut img, &lr_series);
-        text(&mut img, "Learning Rate", left + 10, 600, lr_color);
+        text(&mut img, "Green: LR (G)  Amber: LR (D)", left + 10, 600, lr_color);
 
         img.save(path)?;
         Ok(())
@@ -1124,17 +1143,32 @@ pub fn render_dcgan_chart(frame: &mut ratatui::Frame, state: &DcganTrainingState
     let elapsed = state.start_time.elapsed();
     let elapsed_str = format!("{:02}:{:02}", elapsed.as_secs() / 60, elapsed.as_secs() % 60);
 
-    let stats_text = format!(
-        " Epoch {}/{} │ Batch {}/{} │ LR {:.2e} │ G: {:.4} │ D: {:.4} │ ⏱ {}",
-        state.epoch,
-        state.total_epochs,
-        state.batch,
-        state.total_batches,
-        state.current_lr,
-        state.current_g_loss,
-        state.current_d_loss,
-        elapsed_str,
-    );
+    let stats_text = if (state.current_lr - state.current_lr_d).abs() < 1e-12 {
+        format!(
+            " Epoch {}/{} │ Batch {}/{} │ LR {:.2e} │ G: {:.4} │ D: {:.4} │ ⏱ {}",
+            state.epoch,
+            state.total_epochs,
+            state.batch,
+            state.total_batches,
+            state.current_lr,
+            state.current_g_loss,
+            state.current_d_loss,
+            elapsed_str,
+        )
+    } else {
+        format!(
+            " Epoch {}/{} │ Batch {}/{} │ LR G:{:.2e} D:{:.2e} │ G: {:.4} │ D: {:.4} │ ⏱ {}",
+            state.epoch,
+            state.total_epochs,
+            state.batch,
+            state.total_batches,
+            state.current_lr,
+            state.current_lr_d,
+            state.current_g_loss,
+            state.current_d_loss,
+            elapsed_str,
+        )
+    };
 
     let header = Paragraph::new(stats_text)
         .style(Style::default().fg(Color::White))
