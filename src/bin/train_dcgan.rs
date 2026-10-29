@@ -59,7 +59,9 @@ struct Args {
     epochs: usize,
 
     /// Batch size.
-    #[arg(long, default_value_t = 64)]
+    // #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = 8)]
+    // #[arg(long, default_value_t = 32)]
     batch_size: usize,
 
     /// Base learning rate for both generator and discriminator (Adam).
@@ -103,11 +105,17 @@ struct Args {
     latent_dim: usize,
 
     /// Generator feature-map width (ngf).
+    // #[arg(long, default_value_t = 48)]
     #[arg(long, default_value_t = 64)]
+    // #[arg(long, default_value_t = 96)]
+    // #[arg(long, default_value_t = 128)]
     ngf: usize,
 
     /// Discriminator feature-map width (ndf).
+    // #[arg(long, default_value_t = 48)]
     #[arg(long, default_value_t = 64)]
+    // #[arg(long, default_value_t = 96)]
+    // #[arg(long, default_value_t = 128)]
     ndf: usize,
 
     /// Output image resolution (square). 64 is the DCGAN standard.

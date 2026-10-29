@@ -49,11 +49,20 @@ use burn::{
 };
 
 /// DCGAN default latent (noise) vector length.
+// pub const DCGAN_NOISE_DIM: usize = 64;
 pub const DCGAN_NOISE_DIM: usize = 100;
+// pub const DCGAN_NOISE_DIM: usize = 128;
+// pub const DCGAN_NOISE_DIM: usize = 256;
 /// DCGAN default generator feature-map width.
+// pub const DCGAN_GEN_FEATURES: usize = 48;
 pub const DCGAN_GEN_FEATURES: usize = 64;
+// pub const DCGAN_GEN_FEATURES: usize = 96;
+// pub const DCGAN_GEN_FEATURES: usize = 128;
 /// DCGAN default discriminator feature-map width.
+// pub const DCGAN_DISC_FEATURES: usize = 48;
 pub const DCGAN_DISC_FEATURES: usize = 64;
+// pub const DCGAN_DISC_FEATURES: usize = 96;
+// pub const DCGAN_DISC_FEATURES: usize = 128;
 /// DCGAN default output image resolution (square).
 pub const DCGAN_IMAGE_SIZE: usize = 64;
 /// DCGAN default number of output image channels.
