@@ -32,6 +32,7 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
 };
+use walkdir::WalkDir;
 
 use yumon_pet::vision::chart::{render_dcgan_chart, DcganTrainingState};
 use yumon_pet::vision::dcgan_model::{
@@ -47,11 +48,12 @@ pub type TrainBackend = Autodiff<InnerBackend>;
 #[command(about = "Train a vanilla DCGAN (64x64 RGB)")]
 struct Args {
     /// Directory containing 64x64 training images (PNG/JPG/JPEG/WebP).
-    #[arg(long, default_value = "data/animals_images/images-64")]
+    // #[arg(long, default_value = "data/animals_images/images-64")]
+    #[arg(long, default_value = "data/faces-64")]
     images_dir: PathBuf,
 
     /// Output checkpoint directory.
-    #[arg(long, default_value = "checkpoints/yumon-dcgan")]
+    #[arg(long, default_value = "checkpoints/yumon-dcgan-faces")]
     out_dir: PathBuf,
 
     /// Number of training epochs.
@@ -230,9 +232,11 @@ impl ImageDataset {
             args.images_dir.display()
         );
 
-        let mut files: Vec<PathBuf> = fs::read_dir(&args.images_dir)?
+        let mut files: Vec<PathBuf> = WalkDir::new(&args.images_dir)
+            .into_iter()
             .filter_map(|e| e.ok())
-            .map(|e| e.path())
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.into_path())
             .filter(|p| {
                 p.extension()
                     .and_then(|s| s.to_str())
@@ -240,6 +244,7 @@ impl ImageDataset {
                     .unwrap_or(false)
             })
             .collect();
+
         files.sort();
 
         if args.limit > 0 && args.limit < files.len() {
