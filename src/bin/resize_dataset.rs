@@ -9,20 +9,21 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
+use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
 #[command(about = "Resize dataset images in parallel")]
 struct Args {
     /// Input directory containing full-sized images.
-    #[arg(long, default_value = "D:/DiffusionDb/images")]
+    #[arg(long, default_value = "D:/projects/common/yumon-pet/data/faces")]
     input_dir: PathBuf,
 
     /// Output directory for resized images.
-    #[arg(long, default_value = "D:/DiffusionDb/images-256")]
+    #[arg(long, default_value = "D:/projects/common/yumon-pet/data/faces-64")]
     output_dir: PathBuf,
 
     /// Target width and height in pixels.
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = 64)]
     size: u32,
 
     /// Maximum images to process (0 = all).
@@ -46,10 +47,12 @@ fn main() -> Result<()> {
     fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("Failed to create output directory: {}", args.output_dir.display()))?;
 
-    // Collect all valid image files
-    let mut image_files: Vec<PathBuf> = fs::read_dir(&args.input_dir)?
+    // Collect all valid image files recursively
+    let mut image_files: Vec<PathBuf> = WalkDir::new(&args.input_dir)
+        .into_iter()
         .filter_map(|e| e.ok())
-        .map(|e| e.path())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.into_path())
         .filter(|p| {
             if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
                 let ext_lower = ext.to_lowercase();
@@ -87,11 +90,19 @@ fn main() -> Result<()> {
     let t_start = Instant::now();
 
     image_files.par_iter().for_each(|src_path| {
-        let file_name = match src_path.file_name() {
-            Some(name) => name,
-            None => return,
+        // Compute relative path to mirror folder structure in output_dir
+        let rel_path = match src_path.strip_prefix(&args.input_dir) {
+            Ok(rel) => rel,
+            Err(_) => return,
         };
-        let out_path = args.output_dir.join(file_name);
+        let out_path = args.output_dir.join(rel_path);
+
+        // Ensure parent directory in destination exists
+        if let Some(parent) = out_path.parent() {
+            if !parent.exists() {
+                let _ = fs::create_dir_all(parent);
+            }
+        }
 
         // Skip if already exists and is non-empty
         if out_path.exists() {
@@ -106,7 +117,6 @@ fn main() -> Result<()> {
 
         match image::open(src_path) {
             Ok(img) => {
-                // High-quality Lanczos3 filter
                 let resized = img.resize_exact(args.size, args.size, FilterType::Lanczos3);
                 if let Err(e) = resized.save(&out_path) {
                     eprintln!("Failed to save {:?}: {}", out_path, e);
