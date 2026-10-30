@@ -1,9 +1,6 @@
 # Yumon v0.2 — Model-by-Model Plan (draft for review)
 
 This expands the architecture in `YUMON_v02.md` into a concrete, per-model plan.
-Each model maps to what already exists in the repo, what is missing, and what
-needs research before we build. Treat this as a living document: revise it, then
-split it into issues.
 
 > Note: most model *code* already exists. The bulk of the work is **synthetic
 > data** (new `gen_synthetic_*` Rust scripts) and **verification** — a small
