@@ -5,6 +5,34 @@ Each model maps to what already exists in the repo, what is missing, and what
 needs research before we build. Treat this as a living document: revise it, then
 split it into issues.
 
+> Note: most model *code* already exists. The bulk of the work is **synthetic
+> data** (new `gen_synthetic_*` Rust scripts) and **verification** — a small
+> validation script we build only as far as each model needs to be tested objectively.
+
+## High-level tasks
+
+1. **Shared state + memory API** — `SharedState`, episode store, consolidation
+   tick.
+2. **`gen_synthetic` script scaffold** — one reusable Qwen-endpoint harness
+   (seeded prompts, resume, Kilo-Talk output, held-out split) so each model's
+   data script is a thin wrapper.
+3. **CNS** — a learned action classifier.
+4. **Execution** — unified `Executor` trait + validation layer.
+5. **Perception** — unify `VisionModel` + scene classifier behind a `Perception`
+   trait. We need to expand our vision identification capability, likely through
+   new image/prompt pairs beyond the old CIFAR. We will use our DiffusionDb, and potentially new synethetic,
+   as the DiffusionDb can be a bit more creative than our simulation world will be.
+6. **Memory** — episode store + retrieval, then salience + consolidation.
+7. **Temporal** — event log in `SharedState`.
+8. **Language** — Mostly already complete, may need some tuning, mimics "conversation"
+9. **Reasoning** — Can be a distinct model, mimics "thought"
+10. **Behavior** — A learned policy that makes room for emergent choices in new situations
+11. **Generation** — TBD (this is deferred for now)
+12. **Verification sim** — a minimal world (2 Yumon, a few toys, identifiable
+    objects) to score each model's results as they land.
+
+*Deferred:* audio, video (event tracking covers motion for v0.2).
+
 Ground rules from the vision doc that every model must respect:
 
 - **Small models orchestrated, not one big model.** No single model carries broad
@@ -19,6 +47,7 @@ Ground rules from the vision doc that every model must respect:
   stateful decisions; GAN for images; MoE for text+.
 - **Data:** free Kaggle/HF datasets first, Qwen-via-HF-Inference-Endpoints
   synthetic data as the primary source, seeded with handcrafted/real data.
+- **No fall back behaviors or placeholders** this creates false behavior in the final result.
 
 ---
 
@@ -65,10 +94,6 @@ hard requirements (mirror the `infer_reply`/`Realm` test style already in
   this scale?
 - Consolidation policy: time-based, importance-based, or both?
 
-**Milestone**
-- M0: `SharedState` + memory API + consolidation tick, all CPU, fully unit
-  tested. No neural models yet.
-
 ---
 
 ## 1. Central Nervous Model (CNS) — orchestrator
@@ -91,10 +116,7 @@ coordination, decision making.
 - A **number-mapped / classification controller**, not a generative model:
   - Input: `state_embed` + a one-hot "last actor/result" + resource budget.
   - Output: `(subsystem, priority, params)` — a small categorical head.
-- Fall back to a **deterministic priority scheduler** first (handwritten rules +
-  scores), then replace the score function with the learned controller only when
-  behavior proves insufficient. This matches the `infer_reply` philosophy:
-  conservative, never invents an action.
+- No fall backs
 - Text it emits (rare, e.g. "what should I do?") goes through Kilo Talk.
 
 **Data**
@@ -109,10 +131,6 @@ coordination, decision making.
   scorer?
 - Is the CNS even neural, or should it stay a rules engine? (Recommend: rules
   first, learn later.)
-
-**Milestones**
-- M1: deterministic scheduler + priority queue, wired to one front-end.
-- M2: learned action classifier, A/B'd against the scheduler.
 
 ---
 
@@ -144,6 +162,7 @@ Responsibilities: vision, audio, scene recognition.
   pixels/samples cross into the CNS.
 - Explore M-RoPE for a *sequence* of perception observations (time-stamped scene
   snapshots), giving the memory/reasoning layers positional structure.
+- Of course, input images will be resized to a reasonable size for inference
 
 **Data**
 - FER2013, CIFAR-100 (already used). Add ESC-50/UrbanSound8K, a Places365 or
@@ -155,11 +174,6 @@ Responsibilities: vision, audio, scene recognition.
   design.)
 - Do we need object *detection*, or is classification + the MoE's canvas patch
   tokens sufficient for rich world understanding?
-
-**Milestones**
-- M3: unify `VisionModel` + a scene classifier behind a `Perception` trait that
-  writes a fixed perception vector.
-- M4 (stretch): audio classifier.
 
 ---
 
@@ -238,10 +252,6 @@ Responsibilities: interpretation, planning, evaluation.
 - Structured plans via constrained decoding (the `outlines_core` import in
   `model.rs`) vs. the current `fix_json_syntax` repair path?
 
-**Milestones**
-- M7: planning-mode schema + constrained generation on the Language model.
-- M8 (stretch): dedicated small reasoning head.
-
 ---
 
 ## 5. Language
@@ -257,37 +267,15 @@ Responsibilities: conversation and communication.
 - Training infra: `train.rs`, `train_code.rs`, `train_bpe.rs`, curriculum and
   adaptive-loss/depth machinery, `sentiment.rs`, `chats.rs`, `keywords.rs`.
 
-**Gaps**
-- Vocabulary "still has some semantic redundancy" (README) — dedup unfinished.
-- No runtime wiring of the decompressor into chat (talk → Kilo → decompress) as
-  a single conversational loop, beyond what `chat_ui`/`yumon_portal` do.
-
 **Proposed design**
 - **Keep the MoE decoder as the primary talk brain.** Continue the adaptive
   depth/adaptive loss lines; they directly serve "lightweight" goals.
-- **Finish vocabulary dedup** so more of the 4,096 budget goes to rich
-  distinctions; re-run `build_kilo_vocab` → `cache_yumon_talk` →
-  `build_decompressor`.
-- Make the **decompressor a first-class part of generation** so Kilo Talk →
-  fluent English is one pipeline, and measure BLEU/exact-match (per
-  `kilo-compressor.md` FR-4).
 - Condition Language on the shared `state_embed` (a token/prefix), so
   conversation reflects world state.
 
 **Data**
 - Existing synthetic corpora (`archive/synthetic/*`, distilled chats) + Qwen
   synthetic dialogue seeded with Yumon's personality and current world.
-
-**Research questions**
-- Dense vs MoE vs xLSTM for the talk model at these sizes — is MoE actually
-  winning, or is dense+KV-cache enough? (There is already timing data to lean on.)
-- M-RoPE for multi-turn/role conditioning vs. plain RoPE + a role token.
-- Where does the Kilo-decompress step best live (inside the model as learnable
-  expansion, or as the statistical `NGramDecompressor`)?
-
-**Milestones**
-- M9: vocab dedup + rebuild + decompress-in-loop.
-- M10: state-conditioned conversation, A/B vs. current chat.
 
 ---
 
@@ -324,11 +312,6 @@ Responsibilities: play, social, discovery, invention.
 - Is "invention" just Behavior::Build + a Generation/Language output, or a
   distinct mechanism?
 
-**Milestones**
-- M11: learned policy head over the existing enum, replacing `infer_reply` in one
-  sim.
-- M12: curiosity/novelty drive.
-
 ---
 
 ## 7. Execution
@@ -364,9 +347,6 @@ Responsibilities: tools, code, physical actions.
   model.)
 - Sandboxing/safety for tool calls on a local desktop companion.
 
-**Milestones**
-- M13: unified `Executor` trait + validation layer.
-
 ---
 
 ## 8. Generation
@@ -399,15 +379,6 @@ Responsibilities: images, ideas, creative output.
 - DiffusionDB / animals (already used), upscaled to the colorizer/upscaler
   pipeline; Qwen synthetic prompt→image traces.
 
-**Research questions**
-- For "ideas," is Generation just Language with a creative prompt, or a distinct
-  sampling mode?
-- GAN vs AR-MoE for textures/backgrounds — where does DCGAN actually win?
-
-**Milestones**
-- M14: unify art pipeline behind a generation facade.
-- M15: implement spatial/frequency losses + causal Conv2D edge expert.
-
 ---
 
 ## 9. Temporal
@@ -439,31 +410,3 @@ Responsibilities: video, motion, event tracking.
 - Does the companion need actual video/motion, or is discrete event tracking +
   the paint-time axis sufficient? (Recommend: event tracking only for v0.2.)
 - Should M-RoPE's temporal axis be reused for memory ordering?
-
-**Milestones**
-- M16: temporal event log in `SharedState`. Video deferred.
-
----
-
-## Cross-cutting research backlog
-
-- **M-RoPE depth:** how many head-dim pairs to give to (t, y, x) at these
-  embeddings (the `new_mrope` split is currently heuristic).
-- **Kilo Talk fidelity:** quantify decompression BLEU; decide learnable
-  expansion vs. `NGramDecompressor`.
-- **Adaptive depth / adaptive loss:** are the experimental wins
-  (`adaptive_depth.rs`, `adaptive_loss.rs`) worth folding into the default talk
-  and reasoning models?
-- **Model-class selection table:** write down a decision rule (LSTM vs
-  classification vs MoE vs GAN) and stick to it across subsystems.
-
-## Suggested build order
-
-1. M0 Shared state + memory API (foundation).
-2. M1/M2 CNS scheduler, then learned controller.
-3. M13 Execution trait (so actions are testable early).
-4. M5/M6 Memory, M16 temporal log.
-5. M3 Perception unification.
-6. M9/M10 Language (vocab + state-conditioning) and M7 Reasoning-as-mode.
-7. M11/M12 Behavior, M14/M15 Generation.
-8. M4 audio and video deferred.
