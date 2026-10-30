@@ -417,17 +417,7 @@ TARGET: Reply: "I am feeling too drowsy for obstacles right now."
 ## 8. Unified Generator Script Specification (`src/bin/gen_synthetic_v2.rs`)
 
 ### Architecture
-A single, robust binary driving the Qwen endpoint:
-
-```bash
-cargo run --release --bin gen_synthetic_v2 -- \
-  --domain <cnm | behavior | memory | reasoning | conversation | all> \
-  --endpoint https://<hf-endpoint-id>.endpoints.huggingface.cloud \
-  --model Qwen/Qwen2.5-72B-Instruct \
-  --token $HF_TOKEN \
-  --count 1000 \
-  --output data/synthetic/
-```
+A single, robust binary driving the Qwen3.8-27B endpoint, similar to the other `gen_synthetic_` files.
 
 ### Key Technical Properties
 1. **Zero JSON in Model Output**: Prompts strictly enforce plain natural language outputs according to the schemas above.
