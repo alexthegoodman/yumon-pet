@@ -21,3 +21,5 @@ inference-cache
 *.npy
 
 starters/*
+
+.env

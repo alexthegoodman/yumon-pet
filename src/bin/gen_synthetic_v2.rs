@@ -837,8 +837,11 @@ No commentary, no explanations, no markdown fences."#,
         let resp = match req.send_json(&body) {
             Ok(r) => r,
             Err(ureq::Error::Status(status, _)) => {
+                if status == 401 {
+                    bail!("non-retryable HTTP 401 Unauthorized: please supply your Hugging Face token via `--token <token>` or set the HF_TOKEN environment variable");
+                }
                 ensure!(
-                    !matches!(status, 400 | 401 | 403 | 422),
+                    !matches!(status, 400 | 403 | 422),
                     "endpoint returned non-retryable HTTP {status}"
                 );
                 bail!("endpoint HTTP {status}");
@@ -882,8 +885,9 @@ No commentary, no explanations, no markdown fences."#,
             match call_endpoint(url, model, token, system, user, temperature, timeout_secs) {
                 Ok(content) => return Ok(content),
                 Err(e) => {
-                    if attempt + 1 >= max_retries {
-                        return Err(e).context(format!("endpoint request failed after {max_retries} attempts"));
+                    let err_str = format!("{e:#}");
+                    if err_str.contains("non-retryable") || attempt + 1 >= max_retries {
+                        return Err(e).context("endpoint request failed");
                     }
                     eprintln!("  ! request attempt {}/{} failed ({e}); retrying in {backoff:.1}s...", attempt + 1, max_retries);
                     std::thread::sleep(Duration::from_secs_f64(backoff));
