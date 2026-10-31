@@ -69,8 +69,8 @@ mod native {
         #[arg(long, default_value = "data/synthetic_v2")]
         pub out_dir: PathBuf,
 
-        /// Number of samples to request per prompt batch (1 to 5).
-        #[arg(long, default_value_t = 3)]
+        /// Number of samples to request per prompt batch (typically 4 to 8).
+        #[arg(long, default_value_t = 8)]
         pub batch_size: usize,
 
         /// Sampling temperature.
@@ -92,6 +92,10 @@ mod native {
         /// Dry run: run generators, parsers, and sample tests without calling the remote endpoint.
         #[arg(long)]
         pub dry_run: bool,
+
+        /// Reset existing dataset files and resume state for targeted domains and generate from scratch.
+        #[arg(long)]
+        pub reset: bool,
     }
 
     // ── Supported Domains ─────────────────────────────────────────────────────────
@@ -230,6 +234,36 @@ mod native {
         RE.get_or_init(|| {
             Regex::new(r"(?i)Emote:\s*\[\s*having:\s*(yes|no)\s*,\s*knowing:\s*(yes|no)\s*,\s*empathizing:\s*(yes|no)\s*\]\s*([A-Za-z\-]+)").unwrap()
         })
+    }
+
+    fn input_emote_with_label_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            Regex::new(r"(?i)\bEmote:\s*\[\s*having:\s*(yes|no)\s*,\s*knowing:\s*(yes|no)\s*,\s*empathizing:\s*(yes|no)\s*\]\s*([A-Za-z\-]+)").unwrap()
+        })
+    }
+
+    fn input_current_emote_regex() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| {
+            Regex::new(r"(?i)\bCurrent\s+Emote:\s*\[\s*having:\s*(yes|no)\s*,\s*knowing:\s*(yes|no)\s*,\s*empathizing:\s*(yes|no)\s*\]").unwrap()
+        })
+    }
+
+    pub fn validate_input_grounded_emote(input: &str) -> Result<()> {
+        if input_emote_with_label_regex().is_match(input) {
+            Ok(())
+        } else {
+            bail!("input missing or malformed 'Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <Label>'")
+        }
+    }
+
+    pub fn validate_input_current_emote(input: &str) -> Result<()> {
+        if input_current_emote_regex().is_match(input) {
+            Ok(())
+        } else {
+            bail!("input missing or malformed 'Current Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>]'")
+        }
     }
 
     fn route_regex() -> &'static Regex {
@@ -597,8 +631,14 @@ Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <EmoteName>.
 Route: send to <Memory|Reasoning|Behavior> with <context description>.
 
 Rules:
-- EmoteName must match the 3 dimensions (e.g. Content, Needy, Perplexed, Curious, Sleepy, Proud, Eager, Startled).
-- Route Target: Memory (for session logs or storing key events), Reasoning (for obstacles, puzzles, or plans), or Behavior (to execute action).
+- EmoteName is open-ended: freely choose ANY natural emotion, mood, or psychological state fitting the 3 existential dimensions:
+  * having: yes|no (having/satisfied vs wanting/lacking)
+  * knowing: yes|no (understanding/certainty vs uncertainty/surprise)
+  * empathizing: yes|no (social connection vs detached/self-absorbed)
+- Routing Architecture:
+  * Behavior (~45-50%): Everyday direct reactions, biological drives (eating, resting), immediate play, social greetings, and executing received plans.
+  * Memory (~25-30%): Significant milestone moments, learned tricks, owner bonding, frights comforted by owner, or session consolidation.
+  * Reasoning (~20-25%): Reserved strictly for situations with an active physical blocker, complex puzzle, navigation impediment, or multi-step obstacle requiring micro-planning. Do NOT default everything to Reasoning!
 - Plain natural language only. No JSON, no markdown fences, no explanations.
 Output each sample as:
 INPUT:  <input text>
@@ -607,14 +647,14 @@ TARGET: <target text>
             }
             Domain::Behavior => {
                 r#"You generate training data for Yumon's Behavior Model.
-The Behavior Model selects Yumon's concrete physical, exploratory, social, creative, or resting action across hundreds of diverse variations.
+The Behavior Model selects Yumon's concrete physical, exploratory, social, creative, or resting action across open-ended natural situations.
 When the action involves vocalizing, asking, or greeting, it also triggers speech in pet voice.
 
 Input Format:
 Vitals: Hunger <0-100>, Energy <0-100>, Cleanliness <0-100>, Boredom <0-100>.
-Emote: [<having>, <knowing>, <empathizing>] <EmoteName>.
+Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <EmoteName>.
 Environment: <location>, nearby: <objects, places, people>.
-Memory: <relevant remembered fact or habit>.
+Memory: <relevant remembered fact or habit, or "none">.
 Plan: <reasoning plan, or "none">.
 
 Target Output Format:
@@ -622,9 +662,11 @@ Action: <expressive natural language action description starting with an active 
 Speak: <"spoken utterance in pet voice", or "none">.
 
 Rules:
-- If Speak is not "none", the utterance must be enclosed in quotes and contain 4 to 16 warm, natural English words.
+- Emote in INPUT must strictly follow the boolean bracket structure: [having: yes|no, knowing: yes|no, empathizing: yes|no] <EmoteName>.
+- EmoteName is open-ended: freely choose ANY emotion, mood, or psychological state that matches the having/knowing/empathizing dimensions (e.g. Content, Mischievous, Sullen, Euphoric, Vigilant, Bashful, Yearning, Serene, Fretful, Proud, Playful, Drowsy, etc.). Do NOT repeat the same emotion or default to 'Curious'.
+- Environments, actions, and settings are completely open-ended. Pet actions can range across playing, sleeping, grooming, tinkering, exploring, eating, socializing, building, seeking warmth, or hiding.
+- If Speak is not "none", the utterance must be enclosed in quotes and contain 4 to 16 warm, natural English words. Use "Speak: none" appropriately for quiet or non-vocal actions.
 - If Plan is provided, Action should follow the first step.
-- Actions should span: Play & Games, Investigation & Discovery, Tending & Care, Building & Tinkering, Resting & Comfort, Social & Connection.
 Output each sample as:
 INPUT:  <input text>
 TARGET: <target text>
@@ -635,7 +677,7 @@ TARGET: <target text>
 The model decides whether an incoming event has high/medium emotional/social importance to keep in episodic memory, or should be discarded as routine reflex.
 
 Input Format:
-Event: <happening>. Emote: [<having>, <knowing>, <empathizing>] <EmoteName>. Vitals: Hunger <H>, Energy <E>, Cleanliness <C>, Boredom <B>.
+Event: <happening>. Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <EmoteName>. Vitals: Hunger <H>, Energy <E>, Cleanliness <C>, Boredom <B>.
 
 Target Output Format:
 Keep: <high|medium> importance because <grounded reason>.
@@ -643,8 +685,11 @@ OR
 Discard: low importance because <grounded reason>.
 
 Rules:
-- Keep: learning new tricks, scary sounds comforted by owner, treats rewarded for good behavior, novel objects discovered.
-- Discard: routine biological reflexes (drinking water dish, ordinary walking across rug, routine stretching).
+- Emote in INPUT must strictly follow: [having: yes|no, knowing: yes|no, empathizing: yes|no] <EmoteName>. Any emotion name can be used.
+- Equal Balance: Training requires a balanced 50/50 mix of KEEP and DISCARD decisions.
+- Discard (low importance): Routine biological reflexes and mundane background occurrences (e.g. drinking water from dish, routine stretching after nap, walking across carpet, yawning, idle ear twitch, routine grooming, shifting resting position).
+- Keep (high/medium importance): Meaningful emotional, social, or learning events (e.g. learning a new skill, receiving praise/treat, owner comforting after a fright, solving a puzzle, discovering something novel).
+- Open-ended events: Freely invent diverse life situations. Do NOT repeat the same trope (such as repetitive thunderclaps).
 Output each sample as:
 INPUT:  <input text>
 TARGET: <target text>
@@ -711,8 +756,9 @@ Target Output Format (for impossible/blocked goals):
 Evaluation: Blocked because <physical or logical constraint>.
 
 Rules:
-- Solvable plans must be between 1 and 4 steps maximum.
-- Blocked evaluation must explain the physical constraint (e.g. latch too high and heavy, wall impassable).
+- Produce a realistic mix: ~70% solvable micro-plans (1 to 4 steps) and ~30% blocked evaluations.
+- Blocked evaluation must explain the physical constraint (e.g. latch too high and heavy, glass pane impassable, cabinet door locked from outside).
+- Plans must be pet-scale (using cushions, nudging rulers, tipping over small wastebaskets, climbing low chairs).
 Output each sample as:
 INPUT:  <input text>
 TARGET: <target text>
@@ -724,7 +770,7 @@ The model generates warm, short pet spoken replies (4 to 16 words) perfectly gro
 
 Input Format:
 Vitals: Hunger <H>, Energy <E>, Cleanliness <C>, Boredom <B>.
-Emote: [<having>, <knowing>, <empathizing>] <EmoteName>.
+Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <EmoteName>.
 Intent: <what behavior wants to communicate>.
 Owner Prompt: <owner question or remark, or "none">.
 
@@ -732,9 +778,10 @@ Target Output Format:
 Reply: "<spoken sentence>"
 
 Rules:
-- Exactly ONE short sentence in quotation marks.
-- 4 to 16 words in warm, curious pet voice.
-- Natural English. No meta-commentary, no emojis.
+- Emote in INPUT must strictly use the boolean bracket syntax: [having: yes|no, knowing: yes|no, empathizing: yes|no] <EmoteName>.
+- Exactly ONE short sentence in quotation marks (4 to 16 words).
+- Warm, expressive pet voice matching the grounded emote and intent. Natural English.
+- Vary intents across greetings, requesting food/treats, asking to play, expressing sleepy contentment, reacting to praise, or declining active games.
 Output each sample as:
 INPUT:  <input text>
 TARGET: <target text>
@@ -744,22 +791,133 @@ TARGET: <target text>
     }
 
     pub fn build_user_prompt(domain: Domain, batch_size: usize) -> String {
-        format!(
-            r#"Generate exactly {batch_size} completely distinct, creative, and varied training sample(s) for the {} schema.
+        match domain {
+            Domain::Cnm => {
+                format!(
+                    r#"Generate exactly {batch_size} completely distinct, creative, and open-ended training sample(s) for the cnm schema.
 
-Ensure maximum open-ended diversity across all samples:
-- Freely invent diverse simulated scenarios, locations, environments, rooms, outdoor landscapes, novel structures, or tabletop worlds.
-- Feature varied objects, obstacles, tools, entities, puzzles, or unexpected happenings.
-- Vary the pet's vitals (Hunger, Energy, Cleanliness, Boredom across the full 0 to 100 spectrum), emotional states, and interpersonal dynamics.
-- Make each sample distinct in situation, challenge, and context, avoiding repetition or stock cliches.
+Structural Routing & Emote Rules:
+- Emote in TARGET must match the 3 existential dimensions:
+  Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <EmoteName>.
+  EmoteName is open-ended: freely choose ANY nuanced emotion, mood, or psychological state matching the dimensions (e.g. Content, Vigilant, Yearning, Sullen, Euphoric, Startled, Mischievous, Serene, Fretful, Proud, Cautious, etc.).
+- Critical Routing Balance:
+  * In everyday life, the pet routes primarily to Behavior (~45-50%) for direct actions/urges and Memory (~25-30%) for logging milestones and experiences.
+  * Route to Reasoning ONLY when facing a true physical blocker, puzzle, or multi-step obstacle requiring planning.
+  * In this batch, ensure at least one sample routes to Behavior and do NOT send everything to Reasoning!
+- Scenarios, environments, objects, and perception must be completely open-ended and varied across all samples.
 
 Return ONLY the samples formatted as:
 INPUT:  ...
 TARGET: ...
 
-No commentary, no explanations, no markdown fences."#,
-            domain.as_str()
-        )
+No commentary, no explanations, no markdown fences."#
+                )
+            }
+            Domain::Behavior => {
+                format!(
+                    r#"Generate exactly {batch_size} completely distinct, creative, and open-ended training sample(s) for the behavior schema.
+
+Open-Ended Diversity & Emote Rules:
+- Emote in INPUT must strictly use: Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <EmoteName>.
+- Do NOT use placeholder brackets like [<having>]! Use actual yes/no values.
+- EmoteName is open-ended: choose a completely DIFFERENT emotion and 3D dimension combination for each sample. Freely draw from any feeling or temperament (e.g. playful, defiant, drowsy, affectionate, bashful, mischievous, weary, startled, relaxed, proud, hungry, stubborn). Do NOT default to "Curious"!
+- Scenarios and environments are completely open-ended: invent any room, landscape, outdoor space, miniature terrain, or cozy nook.
+- Actions must be varied and emergent across play, resting, grooming, building, communicating, foraging, cuddling, nesting, or observing.
+- Target Action must start with an active verb or "I will <verb>".
+- Target Speak must be either a warm spoken pet utterance enclosed in quotes (4-16 words) or "none". Use "none" naturally for non-vocal actions.
+
+Return ONLY the samples formatted as:
+INPUT:  ...
+TARGET: ...
+
+No commentary, no explanations, no markdown fences."#
+                )
+            }
+            Domain::MemorySalience => {
+                format!(
+                    r#"Generate exactly {batch_size} completely distinct, creative, and open-ended training sample(s) for the memory_salience schema.
+
+Balance & Diversity Rules:
+- CRITICAL: Generate an approximately equal 50/50 mix of KEEP and DISCARD decisions across the samples in this batch.
+- For DISCARD samples: invent realistic routine biological reflexes and unremarkable everyday actions (e.g. taking a sip of water, shifting sleeping posture, routine walking across the room, yawning, idle tail flick, licking a paw) that have low salience and should be discarded.
+- For KEEP samples: invent novel learning, emotional bonding, or memorable milestones that have high or medium importance to keep.
+- Do NOT repeat thunderclaps or sudden loud window vibrations. Freely explore open-ended everyday life situations.
+- Emote in INPUT must strictly use: Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <EmoteName>.
+  EmoteName is open-ended: choose any fitting natural emotion.
+
+Return ONLY the samples formatted as:
+INPUT:  ...
+TARGET: ...
+
+No commentary, no explanations, no markdown fences."#
+                )
+            }
+            Domain::Conversation => {
+                format!(
+                    r#"Generate exactly {batch_size} completely distinct, creative, and open-ended training sample(s) for the conversation schema.
+
+Requirements:
+- Emote in INPUT must strictly use: Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <EmoteName>.
+  EmoteName is open-ended: choose ANY natural emotion or mood.
+- Reply must be exactly ONE sentence in quotation marks (4 to 16 words) in warm, expressive pet voice.
+- Freely invent varied conversation situations and intents (greeting, asking for food, declining an activity, sharing excitement, bedtime murmur).
+
+Return ONLY the samples formatted as:
+INPUT:  ...
+TARGET: ...
+
+No commentary, no explanations, no markdown fences."#
+                )
+            }
+            Domain::Reasoning => {
+                format!(
+                    r#"Generate exactly {batch_size} completely distinct, creative, and open-ended training sample(s) for the reasoning schema.
+
+Requirements:
+- Freely invent diverse pet-scale obstacles, goals, and environments.
+- Provide a realistic mix of solvable micro-plans (Plan: Step 1: ... Step 2: ... Step 3: ...) and impossible/blocked goals (Evaluation: Blocked because <physical or logical constraint>).
+- Plans must be 1 to 4 steps maximum.
+
+Return ONLY the samples formatted as:
+INPUT:  ...
+TARGET: ...
+
+No commentary, no explanations, no markdown fences."#
+                )
+            }
+            Domain::MemorySession => {
+                format!(
+                    r#"Generate exactly {batch_size} completely distinct, creative, and open-ended training sample(s) for the memory_session schema.
+
+Requirements:
+- Session Log contains 3 to 5 open-ended sequential events from any pet activity or daily happening.
+- Target Consolidated: exactly 1 or 2 sentences in warm, simple pet voice (12 to 25 words total).
+- Avoid repetition; freely explore diverse scenarios and environments.
+
+Return ONLY the samples formatted as:
+INPUT:  ...
+TARGET: ...
+
+No commentary, no explanations, no markdown fences."#
+                )
+            }
+            Domain::MemoryTrait => {
+                format!(
+                    r#"Generate exactly {batch_size} completely distinct, creative, and open-ended training sample(s) for the memory_trait schema.
+
+Requirements:
+- Past Memories contains 3 distinct past session memories illustrating a consistent pet preference, personality trait, or attachment bond.
+- Target Core Trait: one clear sentence (8 to 30 words) synthesizing the enduring trait or preference.
+- Freely invent varied personality traits, preferences, quirks, and bonds.
+
+Return ONLY the samples formatted as:
+INPUT:  ...
+TARGET: ...
+
+No commentary, no explanations, no markdown fences."#
+                )
+            }
+        }
     }
 
     // ── Endpoint Client & URL Normalization ───────────────────────────────────────
@@ -974,12 +1132,15 @@ No commentary, no explanations, no markdown fences."#,
     pub fn validate_sample(domain: Domain, sample: &RawSample) -> Result<()> {
         match domain {
             Domain::Cnm => {
+                validate_input_current_emote(&sample.input)?;
                 parse_cnm_target(&sample.target)?;
             }
             Domain::Behavior => {
+                validate_input_grounded_emote(&sample.input)?;
                 parse_behavior_target(&sample.target, &sample.input)?;
             }
             Domain::MemorySalience => {
+                validate_input_grounded_emote(&sample.input)?;
                 parse_memory_salience_target(&sample.target)?;
             }
             Domain::MemorySession => {
@@ -992,6 +1153,7 @@ No commentary, no explanations, no markdown fences."#,
                 parse_reasoning_target(&sample.target)?;
             }
             Domain::Conversation => {
+                validate_input_grounded_emote(&sample.input)?;
                 parse_conversation_target(&sample.target)?;
             }
         }
@@ -1069,10 +1231,17 @@ No commentary, no explanations, no markdown fences."#,
         fs::create_dir_all(&state_dir)?;
 
         let state_file = state_dir.join(format!("{}.json", domain.as_str()));
-        let mut state = DomainState::load(&state_file, domain);
-
         let train_file_path = args.out_dir.join(format!("{}_train.txt", domain.as_str()));
         let val_file_path = args.out_dir.join(format!("{}_val.txt", domain.as_str()));
+
+        if args.reset {
+            println!("Resetting state and dataset files for domain '{}'...", domain.as_str());
+            let _ = fs::remove_file(&state_file);
+            let _ = fs::remove_file(&train_file_path);
+            let _ = fs::remove_file(&val_file_path);
+        }
+
+        let mut state = DomainState::load(&state_file, domain);
 
         let mut train_writer = OpenOptions::new()
             .create(true)
@@ -1209,7 +1378,13 @@ No commentary, no explanations, no markdown fences."#,
     }
 
     pub fn main() -> Result<()> {
-        let args = Args::parse();
+        let mut args = Args::parse();
+        if args.out_dir == Path::new("data/synthetic_v2")
+            && !args.out_dir.exists()
+            && Path::new("yumon-pet/data/synthetic_v2").exists()
+        {
+            args.out_dir = PathBuf::from("yumon-pet/data/synthetic_v2");
+        }
         println!("=== Yumon v0.2 Synthetic Data Generator ===");
         println!("Endpoint: {}", args.endpoint);
         println!("Model:    {}", args.model);
@@ -1440,6 +1615,81 @@ Route: send to Behavior with execute plan to place blue block.
             // Verify split logic produces a boolean deterministically
             let _ = is_validation_sample(&h1);
             let _ = is_validation_sample(&h3);
+        }
+
+        #[test]
+        fn test_validate_input_grounded_emote_formatting() {
+            // Valid boolean bracketed emotes with diverse names
+            assert!(validate_input_grounded_emote("Emote: [having: yes, knowing: no, empathizing: yes] Playful.").is_ok());
+            assert!(validate_input_grounded_emote("Emote: [having: no, knowing: yes, empathizing: no] Needy").is_ok());
+            assert!(validate_input_grounded_emote("Emote: [having: yes, knowing: yes, empathizing: yes] Loving.").is_ok());
+            assert!(validate_input_grounded_emote("Vitals: Hunger 20.\nEmote: [having: no, knowing: no, empathizing: yes] Startled.\nEnvironment: room").is_ok());
+
+            // Invalid formats that were generated previously:
+            assert!(validate_input_grounded_emote("Emote: [<having>, <knowing>, <empathizing>] Curious.").is_err());
+            assert!(validate_input_grounded_emote("Emote: [having, knowing, empathizing] Curiosity.").is_err());
+            assert!(validate_input_grounded_emote("Emote: [fear, relief, bonding] WhiskerShiver.").is_err());
+            assert!(validate_input_grounded_emote("Emote: [<curious>, <focused>, <excited>] Sparkle.").is_err());
+        }
+
+        #[test]
+        fn test_validate_input_current_emote_formatting() {
+            assert!(validate_input_current_emote("Current Emote: [having: yes, knowing: no, empathizing: no].").is_ok());
+            assert!(validate_input_current_emote("Current Emote: [having: no, knowing: yes, empathizing: yes]").is_ok());
+            assert!(validate_input_current_emote("Current Emote: [having: maybe, knowing: no, empathizing: no]").is_err());
+        }
+
+        #[test]
+        fn test_validate_sample_behavior_and_cnm() {
+            let valid_behavior = RawSample {
+                input: "Vitals: Hunger 20, Energy 80, Cleanliness 90, Boredom 70.\nEmote: [having: yes, knowing: yes, empathizing: yes] Playful.\nEnvironment: living room, nearby: squeaky rubber mouse, sofa.\nMemory: none.\nPlan: none.".to_string(),
+                target: "Action: I will pick up the squeaky rubber mouse and toss it toward owner.\nSpeak: \"Play with me!\"".to_string(),
+            };
+            assert!(validate_sample(Domain::Behavior, &valid_behavior).is_ok());
+
+            let invalid_behavior_emote = RawSample {
+                input: "Vitals: Hunger 20, Energy 80, Cleanliness 90, Boredom 70.\nEmote: [<having>, <knowing>, <empathizing>] Curious.\nEnvironment: room, nearby: box.\nMemory: none.\nPlan: none.".to_string(),
+                target: "Action: I will sniff the box.\nSpeak: none".to_string(),
+            };
+            assert!(validate_sample(Domain::Behavior, &invalid_behavior_emote).is_err());
+
+            let valid_cnm = RawSample {
+                input: "Vitals: Hunger 20, Energy 80, Cleanliness 90, Boredom 50.\nPerception: sees food bowl.\nEvent: owner poured kibble.\nCurrent Emote: [having: no, knowing: yes, empathizing: yes].".to_string(),
+                target: "Emote: [having: yes, knowing: yes, empathizing: yes] Content.\nRoute: send to Behavior with eat kibble from bowl.".to_string(),
+            };
+            assert!(validate_sample(Domain::Cnm, &valid_cnm).is_ok());
+        }
+
+        #[test]
+        fn test_validate_sample_memory_salience_balanced() {
+            let discard_sample = RawSample {
+                input: "Event: Yumon walked across the carpet and drank water from the ceramic dish. Emote: [having: yes, knowing: yes, empathizing: no] Neutral. Vitals: Hunger 20, Energy 60, Cleanliness 90, Boredom 40.".to_string(),
+                target: "Discard: low importance because drinking routine water is an ordinary biological reflex.".to_string(),
+            };
+            assert!(validate_sample(Domain::MemorySalience, &discard_sample).is_ok());
+
+            let keep_sample = RawSample {
+                input: "Event: Owner taught Yumon a new roll-over trick and rewarded with a sweet blueberry. Emote: [having: yes, knowing: yes, empathizing: yes] Proud. Vitals: Hunger 10, Energy 80, Cleanliness 90, Boredom 20.".to_string(),
+                target: "Keep: high importance because owner rewarded a new learned skill with affection.".to_string(),
+            };
+            assert!(validate_sample(Domain::MemorySalience, &keep_sample).is_ok());
+        }
+
+        #[test]
+        fn test_build_user_prompt_open_ended_and_guides_balance() {
+            let beh_p = build_user_prompt(Domain::Behavior, 8);
+            assert!(beh_p.contains("DIFFERENT emotion"));
+            assert!(beh_p.contains("Do NOT default to \"Curious\""));
+            assert!(beh_p.contains("Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <EmoteName>"));
+
+            let cnm_p = build_user_prompt(Domain::Cnm, 8);
+            assert!(cnm_p.contains("Behavior (~45-50%)"));
+            assert!(cnm_p.contains("do NOT send everything to Reasoning"));
+
+            let sal_p = build_user_prompt(Domain::MemorySalience, 8);
+            assert!(sal_p.contains("50/50"));
+            assert!(sal_p.contains("DISCARD"));
+            assert!(sal_p.contains("KEEP"));
         }
     }
 }
