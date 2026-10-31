@@ -1,0 +1,23 @@
+{
+  "architecture": "moe",
+  "num_experts": 8,
+  "top_k": 2,
+  "num_shared_experts": 1,
+  "source": "../rust-code",
+  "cache": "training-cache/kilo_talk_samples.bin",
+  "tokenizer": "training-cache/kilo_talk_tokenizer",
+  "max_seq_len": 512,
+  "exclude_dirs": [".git", "target", "node_modules"],
+  "seed": 4815162342,
+  "vocab_size": 4096,
+  "embed_dim": 128,
+  "n_layers": 6,
+  "attn_heads": 4,
+  "ff_dim": 256,
+  "batch_size": 1,
+  "epochs": 10,
+  "first_lr": 0.0003,
+  "last_lr": 0.00003,
+  "validation_fraction": 0.01,
+  "out_dir": "checkpoints/yumon-pet-kilo-shine-1"
+}

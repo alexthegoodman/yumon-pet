@@ -8,7 +8,7 @@ with and without doc comments.
 If you are retraining Yumon Talk MoE:
 
 > [!NOTE]
-> Update your data sources in `src/brain/train.rs` first if needed.
+> Update your data sources in `src/brain/train.rs` (function `stage_data_loader`) first if needed.
 
 #### 1. Regenerate base samples with turn 0 and "Human: " prefix
 ```sh
