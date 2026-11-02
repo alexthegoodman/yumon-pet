@@ -243,6 +243,8 @@ pub struct RunConfig {
     pub adaptive_depth: Option<crate::brain::adaptive_depth::AdaptiveDepthConfig>,
     /// MoE grouped-query attention KV heads; None = attn_heads.
     pub kv_heads: Option<usize>,
+    /// DeepSeek-style shared experts running unconditionally on all tokens.
+    pub num_shared_experts: usize,
 }
 
 /// Number of held-out prompts run through the model every time we do a
@@ -331,7 +333,13 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
         };
         let arch_tag = match architecture {
             Architecture::Moe { .. } if config.adaptive_depth.is_some() => config.adaptive_depth.as_ref().unwrap().tag(),
-            Architecture::Moe { num_experts, top_k } => format!("Moe_e{num_experts}_k{top_k}"),
+            Architecture::Moe { num_experts, top_k } => {
+                if config.num_shared_experts > 0 {
+                    format!("Moe_e{num_experts}_k{top_k}_se{}", config.num_shared_experts)
+                } else {
+                    format!("Moe_e{num_experts}_k{top_k}")
+                }
+            }
             Architecture::DecoderOnly => "DecoderOnly".to_string(),
             Architecture::XLstm => "XLstm".to_string(),
             Architecture::EncoderDecoder => "EncoderDecoder".to_string(),
@@ -365,6 +373,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             adaptive_loss: config.adaptive_loss.clone(),
             adaptive_depth: config.adaptive_depth.clone(),
             kv_heads: config.kv_heads.filter(|&kv| kv != config.attn_heads),
+            num_shared_experts: config.num_shared_experts,
         };
         let run_dir = config.out_dir.join(&run.name);
         std::fs::create_dir_all(&run_dir)?;
@@ -986,7 +995,8 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             .with_dropout_rate(run_cfg.dropout_rate)
             .with_num_experts(num_experts).with_top_k(top_k)
             .with_adaptive_depth(run_cfg.adaptive_depth.clone())
-            .with_kv_heads(run_cfg.kv_heads);
+            .with_kv_heads(run_cfg.kv_heads)
+            .with_num_shared_experts(run_cfg.num_shared_experts);
         if let Some(kv) = run_cfg.kv_heads {
             println!("Grouped-query attention: {kv} KV heads for {} query heads.", run_cfg.attn_heads);
         }
@@ -998,9 +1008,15 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
                     tier.name, tier.layers, tier.num_experts(), tier.expert_widths(), tier.top_k, 100.0 * tier.capacity);
             }
         } else {
-            println!("MoE: {} experts, top-{}; Flash Attention, BalancedCheckpointing; FFN parameters/layer: {} total, {} active/token (excluding router).",
-                num_experts, top_k, 3 * run_cfg.embed_dim * run_cfg.ff_dim * num_experts,
-                3 * run_cfg.embed_dim * run_cfg.ff_dim * top_k);
+            let shared_desc = if run_cfg.num_shared_experts > 0 {
+                format!(", {} shared", run_cfg.num_shared_experts)
+            } else {
+                String::new()
+            };
+            println!("MoE: {} experts, top-{}{}; Flash Attention, BalancedCheckpointing; FFN parameters/layer: {} total, {} active/token (excluding router).",
+                num_experts, top_k, shared_desc,
+                3 * run_cfg.embed_dim * run_cfg.ff_dim * (num_experts + run_cfg.num_shared_experts),
+                3 * run_cfg.embed_dim * run_cfg.ff_dim * (top_k + run_cfg.num_shared_experts));
         }
         if !run_dir.join("model.bin").exists() {
             return Ok((config.init(device), 0));
@@ -1011,7 +1027,8 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
             && saved.num_experts == num_experts && saved.top_k == top_k
             && saved.adaptive_depth == config.adaptive_depth
-            && saved.effective_kv_heads() == config.effective_kv_heads(),
+            && saved.effective_kv_heads() == config.effective_kv_heads()
+            && saved.num_shared_experts == config.num_shared_experts,
             "MoE checkpoint configuration differs from requested run");
         ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
         let meta: MoeMetadata = serde_json::from_str(&std::fs::read_to_string(run_dir.join("metadata.json"))?)?;
@@ -1887,6 +1904,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     adaptive_loss: None,
                                     adaptive_depth: None,
                                     kv_heads: None,
+                                    num_shared_experts: 0,
                                 });
                             }
                         }
@@ -1947,8 +1965,8 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
         .add("archive/synthetic/world_basics.txt", FileKind::Chats, None)
         .add("archive/synthetic/daily_life.txt", FileKind::Chats, None)
         .add("archive/synthetic/social_life.txt", FileKind::Chats, None)
-        .add("archive/synthetic/puzzles.txt", FileKind::Chats, None)
-        .add("archive/synthetic/commands.txt", FileKind::Chats, None)
+        // .add("archive/synthetic/puzzles.txt", FileKind::Chats, None) // too short answers in data
+        // .add("archive/synthetic/commands.txt", FileKind::Chats, None) // too short answers in data
         .add("archive/synthetic/memory.txt", FileKind::Chats, None)
         // // .add("data/creative_stories.txt", FileKind::Stories, None)
         // // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
@@ -1966,11 +1984,11 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
         // // // .add("archive/clean_chats.txt", FileKind::Chats, None)
         // // // .add("archive/clean_chats.txt", FileKind::Chats, None)
         // // // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        .add("archive/clean_chats.txt", FileKind::Chats, None);
+        .add("archive/clean_chats.txt", FileKind::Chats, None)
         // UltraChat conversations: multi-turn dialogue dataset in data/ultrachat/
         // Point to a specific split or the whole folder (with optional per-file limit).
         // .add("data/ultrachat/train_sft.csv", FileKind::UltrachatCsv, None)
-        // .add("data/ultrachat/train_gen.csv", FileKind::UltrachatCsv, None); // downloaded from kaggle :)
+        .add("data/ultrachat/train_gen.csv", FileKind::UltrachatCsv, None); // downloaded from kaggle :)
         // .add("data/ultrachat", FileKind::UltrachatCsv, None);
         // .add(vec![
         //         "data/ebooks/faa-h-8083-25c.pdf".to_string(),

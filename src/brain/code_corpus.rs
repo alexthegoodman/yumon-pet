@@ -33,6 +33,9 @@ pub struct CodeConfig {
     pub architecture: CodeArchitecture,
     pub num_experts: usize,
     pub top_k: usize,
+    /// Number of shared experts per block that run unconditionally on all tokens (DeepSeek-style).
+    #[serde(default)]
+    pub num_shared_experts: usize,
     pub source: PathBuf,
     pub cache: PathBuf,
     /// Optional data directory (`training-cache`) holding `documented/` and
@@ -96,7 +99,7 @@ pub struct CodeConfig {
 impl Default for CodeConfig {
     fn default() -> Self {
         Self {
-            architecture: CodeArchitecture::DecoderOnly, num_experts: 4, top_k: 1,
+            architecture: CodeArchitecture::DecoderOnly, num_experts: 4, top_k: 1, num_shared_experts: 0,
             source: "../rust-code".into(), cache: "training-cache/code.bin".into(), curriculum: None, docs: None,
             pretrain_code: false, pretrain_cache: None, pretrain_min_tokens: 0, pretrain_epochs: 1, pretrain_share: 0.0,
             tokenizer: "yumon_code_bpe".into(), max_seq_len: 512,
@@ -154,6 +157,9 @@ impl CodeConfig {
             ensure!(self.architecture == CodeArchitecture::Moe, "adaptive_depth requires architecture \"moe\"");
             ensure!(depth.total_layers() == self.n_layers,
                 "adaptive_depth tier layers add up to {}, but n_layers is {}", depth.total_layers(), self.n_layers);
+        }
+        if self.num_shared_experts > 0 {
+            ensure!(self.architecture == CodeArchitecture::Moe, "num_shared_experts requires architecture \"moe\"");
         }
         Ok(())
     }

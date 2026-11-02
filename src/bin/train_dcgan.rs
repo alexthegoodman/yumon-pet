@@ -38,7 +38,7 @@ use yumon_pet::vision::chart::{render_dcgan_chart, DcganTrainingState};
 use yumon_pet::vision::dcgan_model::{
     discriminator_loss, generator_loss, sample_noise, sample_noise_vec,
     DcganDiscriminator, DcganDiscriminatorConfig, DcganGenerator, DcganGeneratorConfig,
-    DCGAN_CHANNELS, DCGAN_IMAGE_SIZE, DCGAN_NOISE_DIM,
+    DCGAN_CHANNELS, DCGAN_IMAGE_SIZE, DCGAN_NOISE_DIM, DCGAN_GEN_FEATURES, DCGAN_DISC_FEATURES,
 };
 
 pub type InnerBackend = burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>;
@@ -108,16 +108,16 @@ struct Args {
 
     /// Generator feature-map width (ngf).
     // #[arg(long, default_value_t = 48)]
-    #[arg(long, default_value_t = 64)]
+    // #[arg(long, default_value_t = 64)]
     // #[arg(long, default_value_t = 96)]
-    // #[arg(long, default_value_t = 128)]
+    #[arg(long, default_value_t = DCGAN_GEN_FEATURES)]
     ngf: usize,
 
     /// Discriminator feature-map width (ndf).
     // #[arg(long, default_value_t = 48)]
-    #[arg(long, default_value_t = 64)]
+    // #[arg(long, default_value_t = 64)]
     // #[arg(long, default_value_t = 96)]
-    // #[arg(long, default_value_t = 128)]
+    #[arg(long, default_value_t = DCGAN_DISC_FEATURES)]
     ndf: usize,
 
     /// Output image resolution (square). 64 is the DCGAN standard.

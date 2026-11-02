@@ -55,16 +55,17 @@ pub const DCGAN_NOISE_DIM: usize = 100;
 // pub const DCGAN_NOISE_DIM: usize = 256;
 /// DCGAN default generator feature-map width.
 // pub const DCGAN_GEN_FEATURES: usize = 48;
-pub const DCGAN_GEN_FEATURES: usize = 64;
-// pub const DCGAN_GEN_FEATURES: usize = 96;
+// pub const DCGAN_GEN_FEATURES: usize = 128;
+pub const DCGAN_GEN_FEATURES: usize = 96;
 // pub const DCGAN_GEN_FEATURES: usize = 128;
 /// DCGAN default discriminator feature-map width.
 // pub const DCGAN_DISC_FEATURES: usize = 48;
-pub const DCGAN_DISC_FEATURES: usize = 64;
-// pub const DCGAN_DISC_FEATURES: usize = 96;
+// pub const DCGAN_DISC_FEATURES: usize = 128;
+pub const DCGAN_DISC_FEATURES: usize = 96;
 // pub const DCGAN_DISC_FEATURES: usize = 128;
 /// DCGAN default output image resolution (square).
-pub const DCGAN_IMAGE_SIZE: usize = 64;
+// pub const DCGAN_IMAGE_SIZE: usize = 64;
+pub const DCGAN_IMAGE_SIZE: usize = 128;
 /// DCGAN default number of output image channels.
 pub const DCGAN_CHANNELS: usize = 3;
 /// DCGAN default discriminator LeakyReLU slope.
@@ -80,7 +81,7 @@ fn dcgan_init() -> Initializer {
     }
 }
 
-/// Configuration for the DCGAN generator.
+// /// Configuration for the DCGAN generator.
 #[derive(Config, Debug)]
 pub struct DcganGeneratorConfig {
     /// Length of the latent noise vector `z`.
@@ -100,50 +101,149 @@ pub struct DcganGeneratorConfig {
     pub image_size: usize,
 }
 
+// impl DcganGeneratorConfig {
+//     /// Build the generator with the DCGAN `N(0, 0.02)` init and bias-free convolutions.
+//     pub fn init<B: Backend>(&self, device: &B::Device) -> DcganGenerator<B> {
+//         let nz = self.noise_dim;
+//         let ngf = self.ngf;
+//         let nc = self.out_channels;
+
+//         // Project + reshape latent to a 4x4 feature grid with BatchNorm.
+//         let project = ConvTranspose2dConfig::new([nz, ngf * 8], [4, 4])
+//             .with_stride([1, 1])
+//             .with_padding([0, 0])
+//             .with_bias(false)
+//             .with_initializer(dcgan_init())
+//             .init(device);
+//         let bn0 = BatchNormConfig::new(ngf * 8).init(device);
+
+//         // 4x4 -> 8x8
+//         let deconv1 = ConvTranspose2dConfig::new([ngf * 8, ngf * 4], [4, 4])
+//             .with_stride([2, 2])
+//             .with_padding([1, 1])
+//             .with_bias(false)
+//             .with_initializer(dcgan_init())
+//             .init(device);
+//         let bn1 = BatchNormConfig::new(ngf * 4).init(device);
+
+//         // 8x8 -> 16x16
+//         let deconv2 = ConvTranspose2dConfig::new([ngf * 4, ngf * 2], [4, 4])
+//             .with_stride([2, 2])
+//             .with_padding([1, 1])
+//             .with_bias(false)
+//             .with_initializer(dcgan_init())
+//             .init(device);
+//         let bn2 = BatchNormConfig::new(ngf * 2).init(device);
+
+//         // 16x16 -> 32x32
+//         let deconv3 = ConvTranspose2dConfig::new([ngf * 2, ngf], [4, 4])
+//             .with_stride([2, 2])
+//             .with_padding([1, 1])
+//             .with_bias(false)
+//             .with_initializer(dcgan_init())
+//             .init(device);
+//         let bn3 = BatchNormConfig::new(ngf).init(device);
+
+//         // 32x32 -> 64x64 (Tanh output, no BatchNorm)
+//         let out = ConvTranspose2dConfig::new([ngf, nc], [4, 4])
+//             .with_stride([2, 2])
+//             .with_padding([1, 1])
+//             .with_bias(false)
+//             .with_initializer(dcgan_init())
+//             .init(device);
+
+//         DcganGenerator {
+//             project,
+//             bn0,
+//             deconv1,
+//             bn1,
+//             deconv2,
+//             bn2,
+//             deconv3,
+//             bn3,
+//             out,
+//             config: Ignored(self.clone()),
+//         }
+//     }
+// }
+
+// /// The DCGAN generator: maps latent `z` to a `[batch, 3, 64, 64]` image in `[-1, 1]`.
+// #[derive(Module, Debug)]
+// pub struct DcganGenerator<B: Backend> {
+//     project: ConvTranspose2d<B>,
+//     bn0: BatchNorm<B>,
+//     deconv1: ConvTranspose2d<B>,
+//     bn1: BatchNorm<B>,
+//     deconv2: ConvTranspose2d<B>,
+//     bn2: BatchNorm<B>,
+//     deconv3: ConvTranspose2d<B>,
+//     bn3: BatchNorm<B>,
+//     out: ConvTranspose2d<B>,
+//     pub config: Ignored<DcganGeneratorConfig>,
+// }
+
+// impl<B: Backend> DcganGenerator<B> {
+//     /// Forward pass.
+//     ///
+//     /// Input:  `[batch, noise_dim]` latent vectors.
+//     /// Output: `[batch, out_channels, image_size, image_size]` pixels in `[-1, 1]`.
+//     pub fn forward(&self, z: Tensor<B, 2>) -> Tensor<B, 4> {
+//         let [batch, _] = z.dims();
+//         let z4 = z.reshape([batch, self.config.noise_dim, 1, 1]);
+
+//         let mut f = relu(self.bn0.forward(self.project.forward(z4))); // [B, ngf*8, 4, 4]
+
+//         f = relu(self.bn1.forward(self.deconv1.forward(f))); // [B, ngf*4, 8, 8]
+//         f = relu(self.bn2.forward(self.deconv2.forward(f))); // [B, ngf*2, 16, 16]
+//         f = relu(self.bn3.forward(self.deconv3.forward(f))); // [B, ngf, 32, 32]
+
+//         tanh(self.out.forward(f)) // [B, 3, 64, 64]
+//     }
+
+//     /// Length of the latent noise vector this generator expects.
+//     pub fn noise_dim(&self) -> usize {
+//         self.config.noise_dim
+//     }
+// }
+
 impl DcganGeneratorConfig {
-    /// Build the generator with the DCGAN `N(0, 0.02)` init and bias-free convolutions.
     pub fn init<B: Backend>(&self, device: &B::Device) -> DcganGenerator<B> {
         let nz = self.noise_dim;
         let ngf = self.ngf;
         let nc = self.out_channels;
+        let stages = num_stages(self.image_size); // number of x2 upsamples after the 4x4 projection
 
-        // Project + reshape latent to a 4x4 feature grid with BatchNorm.
-        let project = ConvTranspose2dConfig::new([nz, ngf * 8], [4, 4])
+        // z -> 4x4. Channel width at 4x4 is ngf * 2^(stages-1) (ngf*8 for 64, ngf*16 for 128).
+        let top_mult = 1usize << (stages - 1);
+        let project = ConvTranspose2dConfig::new([nz, ngf * top_mult], [4, 4])
             .with_stride([1, 1])
             .with_padding([0, 0])
             .with_bias(false)
             .with_initializer(dcgan_init())
             .init(device);
-        let bn0 = BatchNormConfig::new(ngf * 8).init(device);
+        let bn0 = BatchNormConfig::new(ngf * top_mult).init(device);
 
-        // 4x4 -> 8x8
-        let deconv1 = ConvTranspose2dConfig::new([ngf * 8, ngf * 4], [4, 4])
-            .with_stride([2, 2])
-            .with_padding([1, 1])
-            .with_bias(false)
-            .with_initializer(dcgan_init())
-            .init(device);
-        let bn1 = BatchNormConfig::new(ngf * 4).init(device);
+        // Intermediate upsampling blocks: (stages - 1) of them, halving channels each time.
+        let mut deconvs = Vec::new();
+        let mut bns = Vec::new();
+        let mut mult = top_mult;
+        for _ in 0..(stages - 1) {
+            let in_ch = ngf * mult;
+            let out_ch = ngf * (mult / 2);
+            deconvs.push(
+                ConvTranspose2dConfig::new([in_ch, out_ch], [4, 4])
+                    .with_stride([2, 2])
+                    .with_padding([1, 1])
+                    .with_bias(false)
+                    .with_initializer(dcgan_init())
+                    .init(device),
+            );
+            bns.push(BatchNormConfig::new(out_ch).init(device));
+            mult /= 2;
+        }
+        debug_assert_eq!(mult, 1);
 
-        // 8x8 -> 16x16
-        let deconv2 = ConvTranspose2dConfig::new([ngf * 4, ngf * 2], [4, 4])
-            .with_stride([2, 2])
-            .with_padding([1, 1])
-            .with_bias(false)
-            .with_initializer(dcgan_init())
-            .init(device);
-        let bn2 = BatchNormConfig::new(ngf * 2).init(device);
-
-        // 16x16 -> 32x32
-        let deconv3 = ConvTranspose2dConfig::new([ngf * 2, ngf], [4, 4])
-            .with_stride([2, 2])
-            .with_padding([1, 1])
-            .with_bias(false)
-            .with_initializer(dcgan_init())
-            .init(device);
-        let bn3 = BatchNormConfig::new(ngf).init(device);
-
-        // 32x32 -> 64x64 (Tanh output, no BatchNorm)
+        // Final layer: ngf -> nc, x2 upsample, tanh.
         let out = ConvTranspose2dConfig::new([ngf, nc], [4, 4])
             .with_stride([2, 2])
             .with_padding([1, 1])
@@ -154,58 +254,42 @@ impl DcganGeneratorConfig {
         DcganGenerator {
             project,
             bn0,
-            deconv1,
-            bn1,
-            deconv2,
-            bn2,
-            deconv3,
-            bn3,
+            deconvs,
+            bns,
             out,
             config: Ignored(self.clone()),
         }
     }
 }
 
-/// The DCGAN generator: maps latent `z` to a `[batch, 3, 64, 64]` image in `[-1, 1]`.
 #[derive(Module, Debug)]
 pub struct DcganGenerator<B: Backend> {
     project: ConvTranspose2d<B>,
     bn0: BatchNorm<B>,
-    deconv1: ConvTranspose2d<B>,
-    bn1: BatchNorm<B>,
-    deconv2: ConvTranspose2d<B>,
-    bn2: BatchNorm<B>,
-    deconv3: ConvTranspose2d<B>,
-    bn3: BatchNorm<B>,
+    deconvs: Vec<ConvTranspose2d<B>>,
+    bns: Vec<BatchNorm<B>>,
     out: ConvTranspose2d<B>,
     pub config: Ignored<DcganGeneratorConfig>,
 }
 
 impl<B: Backend> DcganGenerator<B> {
-    /// Forward pass.
-    ///
-    /// Input:  `[batch, noise_dim]` latent vectors.
-    /// Output: `[batch, out_channels, image_size, image_size]` pixels in `[-1, 1]`.
     pub fn forward(&self, z: Tensor<B, 2>) -> Tensor<B, 4> {
         let [batch, _] = z.dims();
         let z4 = z.reshape([batch, self.config.noise_dim, 1, 1]);
 
-        let mut f = relu(self.bn0.forward(self.project.forward(z4))); // [B, ngf*8, 4, 4]
-
-        f = relu(self.bn1.forward(self.deconv1.forward(f))); // [B, ngf*4, 8, 8]
-        f = relu(self.bn2.forward(self.deconv2.forward(f))); // [B, ngf*2, 16, 16]
-        f = relu(self.bn3.forward(self.deconv3.forward(f))); // [B, ngf, 32, 32]
-
-        tanh(self.out.forward(f)) // [B, 3, 64, 64]
+        let mut f = relu(self.bn0.forward(self.project.forward(z4)));
+        for (deconv, bn) in self.deconvs.iter().zip(self.bns.iter()) {
+            f = relu(bn.forward(deconv.forward(f)));
+        }
+        tanh(self.out.forward(f))
     }
 
-    /// Length of the latent noise vector this generator expects.
     pub fn noise_dim(&self) -> usize {
         self.config.noise_dim
     }
 }
 
-/// Configuration for the DCGAN discriminator.
+// /// Configuration for the DCGAN discriminator.
 #[derive(Config, Debug)]
 pub struct DcganDiscriminatorConfig {
     /// Number of input image channels (`nc`, 3 for RGB).
@@ -221,13 +305,117 @@ pub struct DcganDiscriminatorConfig {
     pub image_size: usize,
 }
 
+// impl DcganDiscriminatorConfig {
+//     /// Build the discriminator with the DCGAN `N(0, 0.02)` init and bias-free convolutions.
+//     pub fn init<B: Backend>(&self, device: &B::Device) -> DcganDiscriminator<B> {
+//         let nc = self.in_channels;
+//         let ndf = self.ndf;
+
+//         // 64x64 -> 32x32 (no BatchNorm on the input layer).
+//         let conv1 = Conv2dConfig::new([nc, ndf], [4, 4])
+//             .with_stride([2, 2])
+//             .with_padding(PaddingConfig2d::Explicit(1, 1))
+//             .with_bias(false)
+//             .with_initializer(dcgan_init())
+//             .init(device);
+
+//         // 32x32 -> 16x16
+//         let conv2 = Conv2dConfig::new([ndf, ndf * 2], [4, 4])
+//             .with_stride([2, 2])
+//             .with_padding(PaddingConfig2d::Explicit(1, 1))
+//             .with_bias(false)
+//             .with_initializer(dcgan_init())
+//             .init(device);
+//         let bn1 = BatchNormConfig::new(ndf * 2).init(device);
+
+//         // 16x16 -> 8x8
+//         let conv3 = Conv2dConfig::new([ndf * 2, ndf * 4], [4, 4])
+//             .with_stride([2, 2])
+//             .with_padding(PaddingConfig2d::Explicit(1, 1))
+//             .with_bias(false)
+//             .with_initializer(dcgan_init())
+//             .init(device);
+//         let bn2 = BatchNormConfig::new(ndf * 4).init(device);
+
+//         // 8x8 -> 4x4
+//         let conv4 = Conv2dConfig::new([ndf * 4, ndf * 8], [4, 4])
+//             .with_stride([2, 2])
+//             .with_padding(PaddingConfig2d::Explicit(1, 1))
+//             .with_bias(false)
+//             .with_initializer(dcgan_init())
+//             .init(device);
+//         let bn3 = BatchNormConfig::new(ndf * 8).init(device);
+
+//         // 4x4 -> 1x1 (Sigmoid probability, no BatchNorm).
+//         let out = Conv2dConfig::new([ndf * 8, 1], [4, 4])
+//             .with_stride([1, 1])
+//             .with_padding(PaddingConfig2d::Valid)
+//             .with_bias(false)
+//             .with_initializer(dcgan_init())
+//             .init(device);
+
+//         DcganDiscriminator {
+//             conv1,
+//             conv2,
+//             bn1,
+//             conv3,
+//             bn2,
+//             conv4,
+//             bn3,
+//             out,
+//             config: Ignored(self.clone()),
+//         }
+//     }
+// }
+
+// /// The DCGAN discriminator: a binary classifier outputting a single sigmoid probability.
+// #[derive(Module, Debug)]
+// pub struct DcganDiscriminator<B: Backend> {
+//     conv1: Conv2d<B>,
+//     conv2: Conv2d<B>,
+//     bn1: BatchNorm<B>,
+//     conv3: Conv2d<B>,
+//     bn2: BatchNorm<B>,
+//     conv4: Conv2d<B>,
+//     bn3: BatchNorm<B>,
+//     out: Conv2d<B>,
+//     pub config: Ignored<DcganDiscriminatorConfig>,
+// }
+
+// impl<B: Backend> DcganDiscriminator<B> {
+//     /// Forward pass returning raw unactivated logits: `[batch, 1, 1, 1]`.
+//     pub fn forward_logits(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+//         let mut f = leaky_relu(self.conv1.forward(x), DCGAN_LRELU_SLOPE); // [B, ndf, 32, 32]
+
+//         f = leaky_relu(
+//             self.bn1.forward(self.conv2.forward(f)),
+//             DCGAN_LRELU_SLOPE,
+//         ); // [B, ndf*2, 16, 16]
+//         f = leaky_relu(
+//             self.bn2.forward(self.conv3.forward(f)),
+//             DCGAN_LRELU_SLOPE,
+//         ); // [B, ndf*4, 8, 8]
+//         f = leaky_relu(
+//             self.bn3.forward(self.conv4.forward(f)),
+//             DCGAN_LRELU_SLOPE,
+//         ); // [B, ndf*8, 4, 4]
+
+//         self.out.forward(f) // [B, 1, 1, 1] raw logits
+//     }
+
+//     /// Forward pass returning sigmoid probability of being real: `[batch, 1, 1, 1]` in `[0, 1]`.
+//     pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+//         sigmoid(self.forward_logits(x))
+//     }
+// }
+
 impl DcganDiscriminatorConfig {
-    /// Build the discriminator with the DCGAN `N(0, 0.02)` init and bias-free convolutions.
     pub fn init<B: Backend>(&self, device: &B::Device) -> DcganDiscriminator<B> {
         let nc = self.in_channels;
         let ndf = self.ndf;
+        let stages = num_stages(self.image_size); // 64 -> 4, 128 -> 5
 
-        // 64x64 -> 32x32 (no BatchNorm on the input layer).
+        // image_size -> image_size/2, no BatchNorm.
         let conv1 = Conv2dConfig::new([nc, ndf], [4, 4])
             .with_stride([2, 2])
             .with_padding(PaddingConfig2d::Explicit(1, 1))
@@ -235,35 +423,27 @@ impl DcganDiscriminatorConfig {
             .with_initializer(dcgan_init())
             .init(device);
 
-        // 32x32 -> 16x16
-        let conv2 = Conv2dConfig::new([ndf, ndf * 2], [4, 4])
-            .with_stride([2, 2])
-            .with_padding(PaddingConfig2d::Explicit(1, 1))
-            .with_bias(false)
-            .with_initializer(dcgan_init())
-            .init(device);
-        let bn1 = BatchNormConfig::new(ndf * 2).init(device);
+        // (stages - 1) more stride-2 blocks with BN, doubling channels each time.
+        let mut convs = Vec::new();
+        let mut bns = Vec::new();
+        let mut mult = 1usize;
+        for _ in 0..(stages - 1) {
+            let in_ch = ndf * mult;
+            let out_ch = ndf * mult * 2;
+            convs.push(
+                Conv2dConfig::new([in_ch, out_ch], [4, 4])
+                    .with_stride([2, 2])
+                    .with_padding(PaddingConfig2d::Explicit(1, 1))
+                    .with_bias(false)
+                    .with_initializer(dcgan_init())
+                    .init(device),
+            );
+            bns.push(BatchNormConfig::new(out_ch).init(device));
+            mult *= 2;
+        }
 
-        // 16x16 -> 8x8
-        let conv3 = Conv2dConfig::new([ndf * 2, ndf * 4], [4, 4])
-            .with_stride([2, 2])
-            .with_padding(PaddingConfig2d::Explicit(1, 1))
-            .with_bias(false)
-            .with_initializer(dcgan_init())
-            .init(device);
-        let bn2 = BatchNormConfig::new(ndf * 4).init(device);
-
-        // 8x8 -> 4x4
-        let conv4 = Conv2dConfig::new([ndf * 4, ndf * 8], [4, 4])
-            .with_stride([2, 2])
-            .with_padding(PaddingConfig2d::Explicit(1, 1))
-            .with_bias(false)
-            .with_initializer(dcgan_init())
-            .init(device);
-        let bn3 = BatchNormConfig::new(ndf * 8).init(device);
-
-        // 4x4 -> 1x1 (Sigmoid probability, no BatchNorm).
-        let out = Conv2dConfig::new([ndf * 8, 1], [4, 4])
+        // 4x4 -> 1x1
+        let out = Conv2dConfig::new([ndf * mult, 1], [4, 4])
             .with_stride([1, 1])
             .with_padding(PaddingConfig2d::Valid)
             .with_bias(false)
@@ -272,54 +452,32 @@ impl DcganDiscriminatorConfig {
 
         DcganDiscriminator {
             conv1,
-            conv2,
-            bn1,
-            conv3,
-            bn2,
-            conv4,
-            bn3,
+            convs,
+            bns,
             out,
             config: Ignored(self.clone()),
         }
     }
 }
 
-/// The DCGAN discriminator: a binary classifier outputting a single sigmoid probability.
 #[derive(Module, Debug)]
 pub struct DcganDiscriminator<B: Backend> {
     conv1: Conv2d<B>,
-    conv2: Conv2d<B>,
-    bn1: BatchNorm<B>,
-    conv3: Conv2d<B>,
-    bn2: BatchNorm<B>,
-    conv4: Conv2d<B>,
-    bn3: BatchNorm<B>,
+    convs: Vec<Conv2d<B>>,
+    bns: Vec<BatchNorm<B>>,
     out: Conv2d<B>,
     pub config: Ignored<DcganDiscriminatorConfig>,
 }
 
 impl<B: Backend> DcganDiscriminator<B> {
-    /// Forward pass returning raw unactivated logits: `[batch, 1, 1, 1]`.
     pub fn forward_logits(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
-        let mut f = leaky_relu(self.conv1.forward(x), DCGAN_LRELU_SLOPE); // [B, ndf, 32, 32]
-
-        f = leaky_relu(
-            self.bn1.forward(self.conv2.forward(f)),
-            DCGAN_LRELU_SLOPE,
-        ); // [B, ndf*2, 16, 16]
-        f = leaky_relu(
-            self.bn2.forward(self.conv3.forward(f)),
-            DCGAN_LRELU_SLOPE,
-        ); // [B, ndf*4, 8, 8]
-        f = leaky_relu(
-            self.bn3.forward(self.conv4.forward(f)),
-            DCGAN_LRELU_SLOPE,
-        ); // [B, ndf*8, 4, 4]
-
-        self.out.forward(f) // [B, 1, 1, 1] raw logits
+        let mut f = leaky_relu(self.conv1.forward(x), DCGAN_LRELU_SLOPE);
+        for (conv, bn) in self.convs.iter().zip(self.bns.iter()) {
+            f = leaky_relu(bn.forward(conv.forward(f)), DCGAN_LRELU_SLOPE);
+        }
+        self.out.forward(f) // [B, 1, 1, 1]
     }
 
-    /// Forward pass returning sigmoid probability of being real: `[batch, 1, 1, 1]` in `[0, 1]`.
     pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
         sigmoid(self.forward_logits(x))
     }
@@ -391,6 +549,15 @@ pub fn sample_noise<B: Backend>(
 ) -> Tensor<B, 2> {
     let flat = sample_noise_vec(batch * dim, rng);
     Tensor::from_floats(TensorData::new(flat, [batch, dim]), device)
+}
+
+/// Number of stride-2 upsampling stages needed to go from 4x4 to `image_size`.
+fn num_stages(image_size: usize) -> usize {
+    assert!(
+        image_size >= 8 && image_size.is_power_of_two(),
+        "image_size must be a power of two >= 8, got {image_size}"
+    );
+    (image_size / 4).trailing_zeros() as usize // 64 -> 4, 128 -> 5
 }
 
 #[cfg(test)]

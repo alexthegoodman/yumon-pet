@@ -11,6 +11,7 @@ fn architecture_config_is_backward_compatible_and_validates_routing() {
     use code_corpus::CodeArchitecture;
     let old: CodeConfig = serde_json::from_str("{}").unwrap();
     assert_eq!(old.architecture, CodeArchitecture::DecoderOnly);
+    assert_eq!(old.num_shared_experts, 0);
     let h100 = CodeConfig::load(std::path::Path::new("configs/yumon-code-moe.json")).unwrap();
     assert_eq!(h100.architecture, CodeArchitecture::Moe);
     let explicit: CodeConfig = serde_json::from_str(
@@ -22,6 +23,14 @@ fn architecture_config_is_backward_compatible_and_validates_routing() {
         assert!(invalid.validate().is_err());
     }
     assert!(serde_json::from_str::<CodeConfig>(r#"{"architecture":"unknown"}"#).is_err());
+    let shared: CodeConfig = serde_json::from_str(
+        r#"{"architecture":"moe","num_experts":16,"top_k":2,"num_shared_experts":2}"#).unwrap();
+    shared.validate().unwrap();
+    assert_eq!(shared.num_shared_experts, 2);
+    let invalid_shared = CodeConfig { architecture: CodeArchitecture::DecoderOnly, num_shared_experts: 1, ..old.clone() };
+    assert!(invalid_shared.validate().is_err());
+    let shine = CodeConfig::load(std::path::Path::new("configs/yumon-talk-moe-shine.json")).unwrap();
+    assert_eq!(shine.num_shared_experts, 1);
 }
 
 struct Fixture(PathBuf);

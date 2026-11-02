@@ -14,10 +14,10 @@
   "n_layers": 6,
   "attn_heads": 4,
   "ff_dim": 256,
-  "batch_size": 1,
+  "batch_size": 32,
   "epochs": 10,
   "first_lr": 0.0003,
   "last_lr": 0.00003,
   "validation_fraction": 0.01,
-  "out_dir": "checkpoints/yumon-pet-kilo-shine-1"
+  "out_dir": "checkpoints/yumon-pet-kilo-shine-3"
 }

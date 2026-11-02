@@ -20,12 +20,18 @@ fn main() -> anyhow::Result<()> {
         /// frequency) so experiment arms share one config file.
         #[arg(long)]
         adaptive_mode: Option<String>,
+        /// Number of shared experts per block (DeepSeek-style) that run unconditionally on all tokens.
+        #[arg(long)]
+        num_shared_experts: Option<usize>,
     }
     let args = Args::parse();
     if args.smoke_test {
         return yumon_pet::brain::train::cuda_moe_smoke_test();
     }
     let mut config = CodeConfig::load(&args.config)?;
+    if let Some(shared) = args.num_shared_experts {
+        config.num_shared_experts = shared;
+    }
     if let Some(mode) = &args.adaptive_mode {
         let adaptive = config.adaptive_loss.as_mut()
             .ok_or_else(|| anyhow::anyhow!("--adaptive-mode needs an adaptive_loss section in the config"))?;
