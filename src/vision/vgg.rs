@@ -43,7 +43,7 @@ pub const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 /// Intermediate VGG-19 feature activations across 5 stages.
 pub struct Vgg19Activations<B: Backend> {
-    pub relu1_2: Tensor<B, 4>,
+    // pub relu1_2: Tensor<B, 4>,
     pub relu2_2: Tensor<B, 4>,
     pub relu3_4: Tensor<B, 4>,
     pub relu4_4: Tensor<B, 4>,
@@ -239,8 +239,8 @@ impl<B: Backend> Vgg19Features<B> {
 
         // Stage 1
         let f = relu(self.conv1_1.forward(norm));
-        let relu1_2 = relu(self.conv1_2.forward(f));
-        let f = self.pool.forward(relu1_2.clone());
+        // let relu1_2 = relu(self.conv1_2.forward(f));
+        let f = self.pool.forward(f);
 
         // Stage 2
         let f = relu(self.conv2_1.forward(f));
@@ -268,7 +268,7 @@ impl<B: Backend> Vgg19Features<B> {
         let relu5_4 = relu(self.conv5_4.forward(f));
 
         Vgg19Activations {
-            relu1_2,
+            // relu1_2,
             relu2_2,
             relu3_4,
             relu4_4,
@@ -283,7 +283,7 @@ impl<B: Backend> Vgg19Features<B> {
 
         // Stage 1
         let f = relu(self.conv1_1.forward(norm));
-        let f = relu(self.conv1_2.forward(f));
+        // let f = relu(self.conv1_2.forward(f)); // NOTE: causes hanging. very strange.
         let f = self.pool.forward(f);
 
         // Stage 2
@@ -310,21 +310,28 @@ impl<B: Backend> Vgg19Features<B> {
         let f = relu(self.conv5_2.forward(f));
         let f = relu(self.conv5_3.forward(f));
         relu(self.conv5_4.forward(f))
+
+        // f
     }
 
     /// Canonical SRGAN-VGG22 feature representation (layer 8 in torchvision).
     /// Extracts fine local edge and color texture features.
     pub fn forward_vgg22(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
         let norm = self.preprocess(x);
+        // let norm = x;
 
-        // Stage 1
+        // // Stage 1
         let f = relu(self.conv1_1.forward(norm));
-        let f = relu(self.conv1_2.forward(f));
+        // let f = relu(self.conv1_2.forward(f));
         let f = self.pool.forward(f);
 
-        // Stage 2
+        // f
+
+        // // Stage 2
         let f = relu(self.conv2_1.forward(f));
-        relu(self.conv2_2.forward(f))
+        // relu(self.conv2_2.forward(f))
+
+        f
     }
 
     /// Compute composite SRGAN perceptual loss between generated output and ground truth.
@@ -413,9 +420,9 @@ mod tests {
     {
         let device = Default::default();
         let (b, hw) = (1, 256);
-        let input = Tensor::<AdBackend, 4>::random([b, 1, hw, hw], Distribution::Default, &device)
+        let input = Tensor::<AdBackend, 4>::random([b, 3, hw, hw], Distribution::Default, &device)
             .require_grad();
-        let target = Tensor::<AdBackend, 4>::random([b, 1, hw, hw], Distribution::Default, &device);
+        let target = Tensor::<AdBackend, 4>::random([b, 3, hw, hw], Distribution::Default, &device);
 
         let t = std::time::Instant::now();
         let loss = f(vgg, input.clone(), target);

@@ -860,29 +860,29 @@ fn run_training<M: TrainableUpscaler>(
                 (g_loss, d_val, adv_val)
             } else {
                 // standard
-                // let pixel_loss = loss_fn.forward(
-                //     pred.clone(),
-                //     target_tensor.clone(),
-                //     Reduction::Mean,
-                // );
-                // let edge_loss = gradient_loss(
-                //     pred.clone(),
-                //     target_tensor.clone(),
-                // );
-                // let texture_loss = patch_variance_loss(
-                //     pred.clone(),
-                //     target_tensor.clone(),
-                // );
-                // let vgg_loss = if let Some(ref vgg_net) = vgg_features {
-                //     vgg_net.perceptual_loss(pred, target_tensor)
-                // } else {
-                //     Tensor::zeros([1], device)
-                // };
-                // let total_loss = pixel_loss * (args.pixel_weight as f32)
-                //     + edge_loss * 0.1
-                //     + texture_loss * 0.2
-                //     + vgg_loss * (args.vgg_weight as f32);
-                // (total_loss, 0.0, 0.0)
+                let pixel_loss = loss_fn.forward(
+                    pred.clone(),
+                    target_tensor.clone(),
+                    Reduction::Mean,
+                );
+                let edge_loss = gradient_loss(
+                    pred.clone(),
+                    target_tensor.clone(),
+                );
+                let texture_loss = patch_variance_loss(
+                    pred.clone(),
+                    target_tensor.clone(),
+                );
+                let vgg_loss = if let Some(ref vgg_net) = vgg_features {
+                    vgg_net.perceptual_loss(pred, target_tensor)
+                } else {
+                    Tensor::zeros([1], device)
+                };
+                let total_loss = pixel_loss * (args.pixel_weight as f32)
+                    + edge_loss * 0.1
+                    + texture_loss * 0.2
+                    + vgg_loss * (args.vgg_weight as f32);
+                (total_loss, 0.0, 0.0)
 
                 // test
                 // let pixel_loss = loss_fn.forward(
@@ -893,12 +893,12 @@ fn run_training<M: TrainableUpscaler>(
                 // (pixel_loss, 0.0, 0.0)
 
                 // test
-                let vgg_loss = if let Some(ref vgg_net) = vgg_features {
-                    vgg_net.perceptual_loss(pred, target_tensor)
-                } else {
-                    Tensor::zeros([1], device)
-                };
-                (vgg_loss, 0.0, 0.0)
+                // let vgg_loss = if let Some(ref vgg_net) = vgg_features {
+                //     vgg_net.perceptual_loss(pred, target_tensor)
+                // } else {
+                //     Tensor::zeros([1], device)
+                // };
+                // (vgg_loss, 0.0, 0.0)
             };
 
             batch_count += 1;
