@@ -18,6 +18,7 @@ pub mod dcgan_model;
 pub mod colorizer;
 pub mod paint_studio;
 pub mod chart;
+pub mod vgg;
 
 pub use paint_action::{
     PaintAction, CANVAS_SIZE, PATCH_SIZE, GRID_SIZE, NUM_PATCHES, ART_VOCAB_SIZE,
@@ -27,6 +28,7 @@ pub use paint_action::{
 };
 pub use patch_encoder::{VisionPatchEncoder, VisionPatchEncoderConfig};
 pub use upscaler::{UpscalerModel, UpscalerModelConfig, UpscalerDiscriminator, UpscalerDiscriminatorConfig};
+pub use vgg::{Vgg19Features, Vgg19Activations};
 pub use dcgan_model::{
     DcganGenerator, DcganGeneratorConfig,
     DcganDiscriminator, DcganDiscriminatorConfig,

@@ -38,6 +38,7 @@ use yumon_pet::vision::{
         default_fsq_levels, patch_variance_loss, CodebookUpscalerModel, CodebookUpscalerModelConfig,
         UpscalerDiscriminator, UpscalerDiscriminatorConfig, UpscalerModel, UpscalerModelConfig,
     },
+    vgg::Vgg19Features,
 };
 
 pub type TrainBackend = Autodiff<
@@ -169,6 +170,22 @@ struct Args {
     /// Target label for real images in Discriminator (one-sided label smoothing, e.g. 0.9).
     #[arg(long, default_value_t = 0.9)]
     real_label: f32,
+
+    /// Enable Pretrained VGG-19 Perceptual Loss (SRGAN-VGG54 + VGG22).
+    #[arg(long, default_value_t = false)]
+    vgg: bool,
+
+    /// Weight of VGG-19 perceptual loss for Generator.
+    #[arg(long, default_value_t = 1.0)]
+    vgg_weight: f64,
+
+    /// Path to VGG-19 features binary weights.
+    #[arg(long, default_value = "training-cache/vgg19_features.bin")]
+    vgg_path: PathBuf,
+
+    /// Weight of pixel Huber regression loss for Generator (e.g. 0.05 or 1.0).
+    #[arg(long, default_value_t = 1.0)]
+    pixel_weight: f64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -209,6 +226,14 @@ struct UpscalerConfigFile {
     no_tui: bool,
     #[serde(default = "default_real_label")]
     real_label: f32,
+    #[serde(default)]
+    vgg: bool,
+    #[serde(default = "default_vgg_weight")]
+    vgg_weight: f64,
+    #[serde(default = "default_vgg_path")]
+    vgg_path: String,
+    #[serde(default = "default_pixel_weight")]
+    pixel_weight: f64,
 }
 
 fn default_cache() -> String { "training-cache/upscaler_64_gray.bin".into() }
@@ -226,6 +251,9 @@ fn default_feat_weight() -> f64 { 0.05 }
 fn default_d_lr() -> f64 { 3e-5 }
 fn default_d_channels() -> usize { 32 }
 fn default_real_label() -> f32 { 0.9 }
+fn default_vgg_weight() -> f64 { 1.0 }
+fn default_vgg_path() -> String { "training-cache/vgg19_features.bin".into() }
+fn default_pixel_weight() -> f64 { 1.0 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct UpscalerMetadata {
@@ -248,6 +276,10 @@ struct UpscalerMetadata {
     codebook: bool,
     #[serde(default)]
     fsq_levels: Option<Vec<usize>>,
+    #[serde(default)]
+    vgg: bool,
+    #[serde(default)]
+    vgg_weight: Option<f64>,
     timestamp: String,
 }
 
@@ -541,6 +573,10 @@ fn main() -> Result<()> {
         args.d_channels = cfg.d_channels;
         args.no_tui = cfg.no_tui;
         args.real_label = cfg.real_label;
+        args.vgg = cfg.vgg;
+        args.vgg_weight = cfg.vgg_weight;
+        args.vgg_path = PathBuf::from(cfg.vgg_path);
+        args.pixel_weight = cfg.pixel_weight;
     }
 
     let device: <TrainBackend as Backend>::Device = Default::default();
@@ -556,6 +592,14 @@ fn main() -> Result<()> {
     println!("  Res blocks      : {}", args.res_blocks);
     println!("  Architecture    : {}", if args.codebook { "FSQ Codebook Quantized (Zero-Blur)" } else { "Continuous ResNet" });
     println!("  Learning rate   : {:.2e} -> {:.2e}", args.lr, args.min_lr);
+    if args.vgg {
+        println!("  VGG Perceptual  : ENABLED (SRGAN-VGG54 + VGG22)");
+        println!("  VGG weights path: {}", args.vgg_path.display());
+        println!("  VGG loss weight : {:.4}", args.vgg_weight);
+        println!("  Pixel Huber wt  : {:.4}", args.pixel_weight);
+    } else {
+        println!("  VGG Perceptual  : DISABLED");
+    }
     if args.gan {
         println!("  GAN Training    : ENABLED (PatchGAN LSGAN + Feature-Matching)");
         println!("  D base channels : {}", args.d_channels);
@@ -563,7 +607,7 @@ fn main() -> Result<()> {
         println!("  Adversarial wt  : {:.4}", args.adv_weight);
         println!("  Feature match wt: {:.4}", args.feat_weight);
     } else {
-        println!("  GAN Training    : DISABLED (pure regression)");
+        println!("  GAN Training    : DISABLED");
     }
 
     fs::create_dir_all(&args.out_dir)?;
@@ -643,6 +687,17 @@ fn run_training<M: TrainableUpscaler>(
         (Some(disc), Some(opt_d))
     } else {
         (None, None)
+    };
+
+    let vgg_features = if args.vgg {
+        let p = &args.vgg_path;
+        ensure!(p.exists(), "VGG-19 features binary not found at {}. Run scripts/export_vgg19.py first.", p.display());
+        println!("  Loading Pretrained VGG-19 features from {}...", p.display());
+        let vgg = Vgg19Features::<TrainBackend>::load_from_binary(p, device)?;
+        println!("  ✓ VGG-19 perceptual backbone loaded.");
+        Some(vgg)
+    } else {
+        None
     };
 
     let num_batches = train_indices.len() / args.batch_size;
@@ -782,8 +837,16 @@ fn run_training<M: TrainableUpscaler>(
                     target_tensor.clone(),
                 );
 
-                let g_loss = pixel_loss + edge_loss * 0.1
+                let vgg_loss = if let Some(ref vgg_net) = vgg_features {
+                    vgg_net.perceptual_loss(pred.clone(), target_tensor.clone())
+                } else {
+                    Tensor::zeros([1], device)
+                };
+
+                let g_loss = pixel_loss * (args.pixel_weight as f32)
+                    + edge_loss * 0.1
                     + texture_loss * 0.2
+                    + vgg_loss * (args.vgg_weight as f32)
                     + adv_loss * (args.adv_weight as f32)
                     + feat_loss * (args.feat_weight as f32);
 
@@ -801,10 +864,19 @@ fn run_training<M: TrainableUpscaler>(
                     target_tensor.clone(),
                 );
                 let texture_loss = patch_variance_loss(
-                    pred,
-                    target_tensor,
+                    pred.clone(),
+                    target_tensor.clone(),
                 );
-                (pixel_loss + edge_loss * 0.1 + texture_loss * 0.2, 0.0, 0.0)
+                let vgg_loss = if let Some(ref vgg_net) = vgg_features {
+                    vgg_net.perceptual_loss(pred, target_tensor)
+                } else {
+                    Tensor::zeros([1], device)
+                };
+                let total_loss = pixel_loss * (args.pixel_weight as f32)
+                    + edge_loss * 0.1
+                    + texture_loss * 0.2
+                    + vgg_loss * (args.vgg_weight as f32);
+                (total_loss, 0.0, 0.0)
             };
 
             batch_count += 1;
@@ -936,6 +1008,8 @@ fn run_training<M: TrainableUpscaler>(
             gan: args.gan,
             codebook: is_codebook,
             fsq_levels: if is_codebook { Some(default_fsq_levels()) } else { None },
+            vgg: args.vgg,
+            vgg_weight: if args.vgg { Some(args.vgg_weight) } else { None },
             timestamp: chrono::Local::now().to_rfc3339(),
         };
         let meta_json = serde_json::to_string_pretty(&meta)?;
