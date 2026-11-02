@@ -694,7 +694,7 @@ fn run_training<M: TrainableUpscaler>(
         let p = &args.vgg_path;
         ensure!(p.exists(), "VGG-19 features binary not found at {}. Run scripts/export_vgg19.py first.", p.display());
         println!("  Loading Pretrained VGG-19 features from {}...", p.display());
-        let vgg = Vgg19Features::<TrainBackend>::load_from_binary(p, device)?;
+        let vgg = Vgg19Features::<TrainBackend>::load_from_binary(p, device)?.no_grad();
         println!("  ✓ VGG-19 perceptual backbone loaded.");
         Some(vgg)
     } else {
@@ -767,17 +767,15 @@ fn run_training<M: TrainableUpscaler>(
             if chunk.len() < args.batch_size {
                 continue;
             }
-            // eprintln!("[DEBUG] Batch {}: starting forward pass...", batch_count + 1);
 
-            // let should_inspect = (batch_count + 1) % 10 == 0 || (batch_count + 1) == num_batches;
+            // let should_inspect = (batch_count + 1) % 5 == 0 || (batch_count + 1) == num_batches;
             let should_inspect = true;
-
+            
             // High-speed RAM batch slicing (Zero Disk I/O)
             let (input_tensor, target_tensor) = dataset.make_batch_tensors(chunk, device);
 
             // Forward pass: Generator produces 1x256x256 grayscale image
             let pred = model.forward_train(input_tensor);
-            // eprintln!("[DEBUG] Batch {}: forward pass done. Computing loss...", batch_count + 1);
 
             let (loss, d_loss_item, adv_loss_item) = if discriminator.is_some() {
                 let mut disc = discriminator.take().unwrap();
@@ -815,7 +813,11 @@ fn run_training<M: TrainableUpscaler>(
                     target_tensor.clone(),
                 );
 
-                let (d_fake_for_g, d_fake_feats) = disc.forward_with_features(pred.clone());
+                // let (d_fake_for_g, d_fake_feats) = disc.forward_with_features(pred.clone());
+
+                let disc_frozen = disc.clone().no_grad();
+                let (d_fake_for_g, d_fake_feats) = disc_frozen.forward_with_features(pred.clone());
+
                 let adv_err = d_fake_for_g - 1.0;
                 let adv_loss = (adv_err.clone() * adv_err).mean();
 
@@ -857,36 +859,46 @@ fn run_training<M: TrainableUpscaler>(
 
                 (g_loss, d_val, adv_val)
             } else {
-                let pixel_loss = loss_fn.forward(
-                    pred.clone(),
-                    target_tensor.clone(),
-                    Reduction::Mean,
-                );
-                let edge_loss = gradient_loss(
-                    pred.clone(),
-                    target_tensor.clone(),
-                );
-                let texture_loss = patch_variance_loss(
-                    pred.clone(),
-                    target_tensor.clone(),
-                );
-                let vgg_loss = if let Some(ref vgg_net) = vgg_features {
-                    vgg_net.perceptual_loss(pred, target_tensor)
-                } else {
-                    Tensor::zeros([1], device)
-                };
-                let total_loss = pixel_loss * (args.pixel_weight as f32)
-                    + edge_loss * 0.1
-                    + texture_loss * 0.2
-                    + vgg_loss * (args.vgg_weight as f32);
-                (total_loss, 0.0, 0.0)
+                // standard
+                // let pixel_loss = loss_fn.forward(
+                //     pred.clone(),
+                //     target_tensor.clone(),
+                //     Reduction::Mean,
+                // );
+                // let edge_loss = gradient_loss(
+                //     pred.clone(),
+                //     target_tensor.clone(),
+                // );
+                // let texture_loss = patch_variance_loss(
+                //     pred.clone(),
+                //     target_tensor.clone(),
+                // );
+                // let vgg_loss = if let Some(ref vgg_net) = vgg_features {
+                //     vgg_net.perceptual_loss(pred, target_tensor)
+                // } else {
+                //     Tensor::zeros([1], device)
+                // };
+                // let total_loss = pixel_loss * (args.pixel_weight as f32)
+                //     + edge_loss * 0.1
+                //     + texture_loss * 0.2
+                //     + vgg_loss * (args.vgg_weight as f32);
+                // (total_loss, 0.0, 0.0)
 
+                // test
                 // let pixel_loss = loss_fn.forward(
                 //     pred.clone(),
                 //     target_tensor.clone(),
                 //     Reduction::Mean,
                 // );
                 // (pixel_loss, 0.0, 0.0)
+
+                // test
+                let vgg_loss = if let Some(ref vgg_net) = vgg_features {
+                    vgg_net.perceptual_loss(pred, target_tensor)
+                } else {
+                    Tensor::zeros([1], device)
+                };
+                (vgg_loss, 0.0, 0.0)
             };
 
             batch_count += 1;
@@ -926,13 +938,9 @@ fn run_training<M: TrainableUpscaler>(
                 }
             }
 
-            // eprintln!("[DEBUG] Batch {}: starting backward...", batch_count);
             let grads = loss.backward();
-            // eprintln!("[DEBUG] Batch {}: backward done. GradientsParams::from_grads...", batch_count);
             let grads = GradientsParams::from_grads(grads, &model);
-            // eprintln!("[DEBUG] Batch {}: optimizer.step...", batch_count);
             model = optimizer.step(lr, model, grads);
-            // eprintln!("[DEBUG] Batch {}: optimizer.step finished successfully!", batch_count);
 
             if let Some(ref p) = pb {
                 p.inc(1);
