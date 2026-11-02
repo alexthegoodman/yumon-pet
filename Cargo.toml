@@ -105,6 +105,7 @@ path = "src/bin/train_dcgan.rs"
 name = "eval_dcgan"
 path = "src/bin/eval_dcgan.rs"
 
+
 [[bin]]
 name = "gen_synthetic_v2"
 path = "src/bin/gen_synthetic_v2.rs"

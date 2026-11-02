@@ -43,6 +43,7 @@ use yumon_pet::vision::{
 
 pub type TrainBackend = Autodiff<
     burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>,
+    burn::backend::autodiff::checkpoint::strategy::BalancedCheckpointing,
 >;
 pub type InnerBackend = <TrainBackend as burn::tensor::backend::AutodiffBackend>::InnerBackend;
 
@@ -766,6 +767,7 @@ fn run_training<M: TrainableUpscaler>(
             if chunk.len() < args.batch_size {
                 continue;
             }
+            // eprintln!("[DEBUG] Batch {}: starting forward pass...", batch_count + 1);
 
             // let should_inspect = (batch_count + 1) % 10 == 0 || (batch_count + 1) == num_batches;
             let should_inspect = true;
@@ -775,6 +777,7 @@ fn run_training<M: TrainableUpscaler>(
 
             // Forward pass: Generator produces 1x256x256 grayscale image
             let pred = model.forward_train(input_tensor);
+            // eprintln!("[DEBUG] Batch {}: forward pass done. Computing loss...", batch_count + 1);
 
             let (loss, d_loss_item, adv_loss_item) = if discriminator.is_some() {
                 let mut disc = discriminator.take().unwrap();
@@ -877,6 +880,13 @@ fn run_training<M: TrainableUpscaler>(
                     + texture_loss * 0.2
                     + vgg_loss * (args.vgg_weight as f32);
                 (total_loss, 0.0, 0.0)
+
+                // let pixel_loss = loss_fn.forward(
+                //     pred.clone(),
+                //     target_tensor.clone(),
+                //     Reduction::Mean,
+                // );
+                // (pixel_loss, 0.0, 0.0)
             };
 
             batch_count += 1;
@@ -916,9 +926,13 @@ fn run_training<M: TrainableUpscaler>(
                 }
             }
 
+            // eprintln!("[DEBUG] Batch {}: starting backward...", batch_count);
             let grads = loss.backward();
+            // eprintln!("[DEBUG] Batch {}: backward done. GradientsParams::from_grads...", batch_count);
             let grads = GradientsParams::from_grads(grads, &model);
+            // eprintln!("[DEBUG] Batch {}: optimizer.step...", batch_count);
             model = optimizer.step(lr, model, grads);
+            // eprintln!("[DEBUG] Batch {}: optimizer.step finished successfully!", batch_count);
 
             if let Some(ref p) = pb {
                 p.inc(1);

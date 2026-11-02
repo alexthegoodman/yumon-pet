@@ -173,24 +173,27 @@ impl<B: Backend> Vgg19Features<B> {
                 device,
             );
 
+            let weight_param = Param::from_tensor(weight_tensor).set_require_grad(false);
+            let bias_param = Param::from_tensor(bias_tensor).set_require_grad(false);
+
             // Assign into corresponding layer
             match idx {
-                0 => { model.conv1_1.weight = Param::from_tensor(weight_tensor); model.conv1_1.bias = Some(Param::from_tensor(bias_tensor)); }
-                1 => { model.conv1_2.weight = Param::from_tensor(weight_tensor); model.conv1_2.bias = Some(Param::from_tensor(bias_tensor)); }
-                2 => { model.conv2_1.weight = Param::from_tensor(weight_tensor); model.conv2_1.bias = Some(Param::from_tensor(bias_tensor)); }
-                3 => { model.conv2_2.weight = Param::from_tensor(weight_tensor); model.conv2_2.bias = Some(Param::from_tensor(bias_tensor)); }
-                4 => { model.conv3_1.weight = Param::from_tensor(weight_tensor); model.conv3_1.bias = Some(Param::from_tensor(bias_tensor)); }
-                5 => { model.conv3_2.weight = Param::from_tensor(weight_tensor); model.conv3_2.bias = Some(Param::from_tensor(bias_tensor)); }
-                6 => { model.conv3_3.weight = Param::from_tensor(weight_tensor); model.conv3_3.bias = Some(Param::from_tensor(bias_tensor)); }
-                7 => { model.conv3_4.weight = Param::from_tensor(weight_tensor); model.conv3_4.bias = Some(Param::from_tensor(bias_tensor)); }
-                8 => { model.conv4_1.weight = Param::from_tensor(weight_tensor); model.conv4_1.bias = Some(Param::from_tensor(bias_tensor)); }
-                9 => { model.conv4_2.weight = Param::from_tensor(weight_tensor); model.conv4_2.bias = Some(Param::from_tensor(bias_tensor)); }
-                10 => { model.conv4_3.weight = Param::from_tensor(weight_tensor); model.conv4_3.bias = Some(Param::from_tensor(bias_tensor)); }
-                11 => { model.conv4_4.weight = Param::from_tensor(weight_tensor); model.conv4_4.bias = Some(Param::from_tensor(bias_tensor)); }
-                12 => { model.conv5_1.weight = Param::from_tensor(weight_tensor); model.conv5_1.bias = Some(Param::from_tensor(bias_tensor)); }
-                13 => { model.conv5_2.weight = Param::from_tensor(weight_tensor); model.conv5_2.bias = Some(Param::from_tensor(bias_tensor)); }
-                14 => { model.conv5_3.weight = Param::from_tensor(weight_tensor); model.conv5_3.bias = Some(Param::from_tensor(bias_tensor)); }
-                15 => { model.conv5_4.weight = Param::from_tensor(weight_tensor); model.conv5_4.bias = Some(Param::from_tensor(bias_tensor)); }
+                0 => { model.conv1_1.weight = weight_param; model.conv1_1.bias = Some(bias_param); }
+                1 => { model.conv1_2.weight = weight_param; model.conv1_2.bias = Some(bias_param); }
+                2 => { model.conv2_1.weight = weight_param; model.conv2_1.bias = Some(bias_param); }
+                3 => { model.conv2_2.weight = weight_param; model.conv2_2.bias = Some(bias_param); }
+                4 => { model.conv3_1.weight = weight_param; model.conv3_1.bias = Some(bias_param); }
+                5 => { model.conv3_2.weight = weight_param; model.conv3_2.bias = Some(bias_param); }
+                6 => { model.conv3_3.weight = weight_param; model.conv3_3.bias = Some(bias_param); }
+                7 => { model.conv3_4.weight = weight_param; model.conv3_4.bias = Some(bias_param); }
+                8 => { model.conv4_1.weight = weight_param; model.conv4_1.bias = Some(bias_param); }
+                9 => { model.conv4_2.weight = weight_param; model.conv4_2.bias = Some(bias_param); }
+                10 => { model.conv4_3.weight = weight_param; model.conv4_3.bias = Some(bias_param); }
+                11 => { model.conv4_4.weight = weight_param; model.conv4_4.bias = Some(bias_param); }
+                12 => { model.conv5_1.weight = weight_param; model.conv5_1.bias = Some(bias_param); }
+                13 => { model.conv5_2.weight = weight_param; model.conv5_2.bias = Some(bias_param); }
+                14 => { model.conv5_3.weight = weight_param; model.conv5_3.bias = Some(bias_param); }
+                15 => { model.conv5_4.weight = weight_param; model.conv5_4.bias = Some(bias_param); }
                 _ => bail!("Unexpected conv index: {idx}"),
             }
         }
@@ -334,7 +337,7 @@ impl<B: Backend> Vgg19Features<B> {
         target: Tensor<B, 4>,
     ) -> Tensor<B, 1> {
         let acts_pred = self.forward_all(pred);
-        let acts_target = self.forward_all(target);
+        let acts_target = self.forward_all(target.detach());
 
         let loss_22 = (acts_pred.relu2_2 - acts_target.relu2_2.detach()).abs().mean();
         let loss_54 = (acts_pred.relu5_4 - acts_target.relu5_4.detach()).abs().mean();
