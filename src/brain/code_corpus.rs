@@ -94,6 +94,9 @@ pub struct CodeConfig {
     /// MoE grouped-query attention: key/value heads shared by attn_heads / kv_heads
     /// query heads each. Absent = one per query head (MHA). Shrinks the KV cache.
     pub kv_heads: Option<usize>,
+
+    pub aux_loss_weight: f64,
+    pub z_loss_weight: f64,
 }
 
 impl Default for CodeConfig {
@@ -109,6 +112,8 @@ impl Default for CodeConfig {
             first_lr: 2e-4, last_lr: 2e-5, validation_fraction: 0.01,
             out_dir: "/workspace/checkpoints/yumon-code".into(),
             overfit_samples: None, heatmap_every: 250, adaptive_loss: None, adaptive_depth: None, kv_heads: None,
+            aux_loss_weight: 0.01,
+            z_loss_weight: 0.001,
         }
     }
 }

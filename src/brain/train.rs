@@ -245,6 +245,9 @@ pub struct RunConfig {
     pub kv_heads: Option<usize>,
     /// DeepSeek-style shared experts running unconditionally on all tokens.
     pub num_shared_experts: usize,
+
+    pub aux_loss_weight: f64,
+    pub z_loss_weight: f64,
 }
 
 /// Number of held-out prompts run through the model every time we do a
@@ -374,6 +377,8 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             adaptive_depth: config.adaptive_depth.clone(),
             kv_heads: config.kv_heads.filter(|&kv| kv != config.attn_heads),
             num_shared_experts: config.num_shared_experts,
+            aux_loss_weight: config.aux_loss_weight,
+            z_loss_weight: config.z_loss_weight,
         };
         let run_dir = config.out_dir.join(&run.name);
         std::fs::create_dir_all(&run_dir)?;
@@ -996,7 +1001,9 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             .with_num_experts(num_experts).with_top_k(top_k)
             .with_adaptive_depth(run_cfg.adaptive_depth.clone())
             .with_kv_heads(run_cfg.kv_heads)
-            .with_num_shared_experts(run_cfg.num_shared_experts);
+            .with_num_shared_experts(run_cfg.num_shared_experts)
+            .with_aux_loss_weight(run_cfg.aux_loss_weight)
+            .with_z_loss_weight(run_cfg.z_loss_weight);
         if let Some(kv) = run_cfg.kv_heads {
             println!("Grouped-query attention: {kv} KV heads for {} query heads.", run_cfg.attn_heads);
         }
@@ -1905,6 +1912,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     adaptive_depth: None,
                                     kv_heads: None,
                                     num_shared_experts: 0,
+                                    aux_loss_weight: 0.01,
+                                    z_loss_weight: 0.001,
                                 });
                             }
                         }

@@ -105,6 +105,7 @@ impl<B: Backend> SparseMoe<B> {
         assert!(top_k > 0 && top_k <= experts);
         Self {
             router: LinearConfig::new(width, experts)
+                .with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 0.02 })
                 .with_bias(false)
                 .init(device),
             experts: hidden.iter()
@@ -489,11 +490,12 @@ impl YumonMoeBrainConfig {
         assert!(self.z_loss_weight.is_finite() && self.z_loss_weight >= 0.0);
         let linear = || {
             LinearConfig::new(self.embed_dim, self.embed_dim)
+                .with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 0.02 })
                 .with_bias(false)
                 .init(device)
         };
         let kv_width = self.effective_kv_heads() * (self.embed_dim / self.attn_heads);
-        let kv_linear = || LinearConfig::new(self.embed_dim, kv_width).with_bias(false).init(device);
+        let kv_linear = || LinearConfig::new(self.embed_dim, kv_width).with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 0.02 }).with_bias(false).init(device);
         let tiers = self.adaptive_depth.as_ref().map(|d| d.layer_tiers());
         let vision_encoders = if self.is_multimodal {
             vec![VisionPatchEncoderConfig::new(self.embed_dim).init(device)]
@@ -551,7 +553,7 @@ impl YumonMoeBrainConfig {
                 .collect(),
             norm: RMSNormConfig::new(self.embed_dim).init(device),
             dropout: DropoutConfig::new(self.dropout_rate).init(),
-            token_head: LinearConfig::new(self.embed_dim, self.vocab_size).init(device),
+            token_head: LinearConfig::new(self.embed_dim, self.vocab_size).with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 0.02 }).init(device),
             // Zero bias: about half the tokens continue at first; the budget loss
             // then pulls each tier toward its capacity.
             exit_gates: self.adaptive_depth.iter().flat_map(|d| d.tiers.iter().skip(1)).map(|_| ExitGate {
