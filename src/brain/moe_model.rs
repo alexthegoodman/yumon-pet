@@ -473,7 +473,7 @@ pub struct YumonMoeBrainConfig {
     #[config(default = 0)]
     pub num_shared_experts: usize,
     /// Whether this model uses tied embeddings (tied lm_head).
-    #[serde(default)]
+    #[config(default = false)]
     pub tie_embeddings: bool,
 }
 impl YumonMoeBrainConfig {
