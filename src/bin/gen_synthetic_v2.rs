@@ -1891,7 +1891,7 @@ No commentary, no explanations, no markdown fences."#
                     }
 
                     if let Err(e) = validate_preference_sample(domain, &sample) {
-                        eprintln!("  ! Rejected preference sample for {}: {e:#}", domain.as_str());
+                        eprintln!("  ! Rejected preference sample for {}: {e:#} with response: {:?}", domain.as_str(), response);
                         continue;
                     }
 
@@ -1935,7 +1935,7 @@ No commentary, no explanations, no markdown fences."#
                     }
 
                     if let Err(e) = validate_sample(domain, &sample) {
-                        eprintln!("  ! Rejected sample for {}: {e:#}", domain.as_str());
+                        eprintln!("  ! Rejected sample for {}: {e:#} with response: {:?}", domain.as_str(), response);
                         continue;
                     }
 
