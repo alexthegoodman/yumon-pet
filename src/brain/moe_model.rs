@@ -472,6 +472,9 @@ pub struct YumonMoeBrainConfig {
     /// Number of shared experts per block that run unconditionally on all tokens (DeepSeek-style).
     #[config(default = 0)]
     pub num_shared_experts: usize,
+    /// Whether this model uses tied embeddings (tied lm_head).
+    #[serde(default)]
+    pub tie_embeddings: bool,
 }
 impl YumonMoeBrainConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> YumonMoeBrain<B> {
@@ -510,7 +513,9 @@ impl YumonMoeBrainConfig {
             Vec::new()
         };
         let subpixel_embeds = if self.is_multimodal {
-            vec![EmbeddingConfig::new(16, self.embed_dim).init(device)]
+            vec![EmbeddingConfig::new(16, self.embed_dim)
+                .with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 0.02 })
+                .init(device)]
         } else {
             Vec::new()
         };
@@ -530,7 +535,9 @@ impl YumonMoeBrainConfig {
         };
         YumonMoeBrain {
             config: Ignored(self.clone()),
-            embedding: EmbeddingConfig::new(self.vocab_size, self.embed_dim).init(device),
+            embedding: EmbeddingConfig::new(self.vocab_size, self.embed_dim)
+                .with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 0.02 })
+                .init(device),
             rope: RotaryEncodingConfig::new(self.max_seq_len, self.embed_dim / self.attn_heads)
                 .init(device),
             blocks: (0..self.n_layers)
@@ -553,7 +560,11 @@ impl YumonMoeBrainConfig {
                 .collect(),
             norm: RMSNormConfig::new(self.embed_dim).init(device),
             dropout: DropoutConfig::new(self.dropout_rate).init(),
-            token_head: LinearConfig::new(self.embed_dim, self.vocab_size).with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 0.02 }).init(device),
+            token_head: if self.tie_embeddings {
+                LinearConfig::new(1, 1).init(device)
+            } else {
+                LinearConfig::new(self.embed_dim, self.vocab_size).with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 0.02 }).init(device)
+            },
             // Zero bias: about half the tokens continue at first; the budget loss
             // then pulls each tier toward its capacity.
             exit_gates: self.adaptive_depth.iter().flat_map(|d| d.tiers.iter().skip(1)).map(|_| ExitGate {
@@ -577,6 +588,16 @@ impl YumonMoeBrainConfig {
 }
 
 impl<B: FlashAttention> YumonMoeBrain<B> {
+    pub fn project_logits(&self, normed_x: Tensor<B, 3>) -> Tensor<B, 3> {
+        if self.config.tie_embeddings {
+            let [batch, seq, embed_dim] = normed_x.dims();
+            let flat = normed_x.reshape([batch * seq, embed_dim]);
+            let logits_flat = flat.matmul(self.embedding.weight.val().transpose());
+            logits_flat.reshape([batch, seq, self.config.vocab_size])
+        } else {
+            self.token_head.forward(normed_x)
+        }
+    }
     pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         self.forward_with_aux(tokens).0
     }
@@ -641,7 +662,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         let mut deepest = vec![0u8; rows];
         if active_count == 0 {
             return (
-                self.token_head.forward(self.norm.forward(x)),
+                self.project_logits(self.norm.forward(x)),
                 auxiliary,
                 self.blocks.iter().map(|b| vec![0; b.moe.num_experts()]).collect(),
                 deepest,
@@ -746,7 +767,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         }
         let budget_weight = self.config.adaptive_depth.as_ref().map_or(0.0, |d| d.budget_loss_weight);
         (
-            self.token_head.forward(self.norm.forward(x)),
+            self.project_logits(self.norm.forward(x)),
             auxiliary / self.blocks.len() as f64 + budget * budget_weight,
             counts,
             deepest,
@@ -893,7 +914,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                 Tensor::zeros([batch, total_seq, 1], &device)
             };
             return (
-                self.token_head.forward(normed),
+                self.project_logits(normed),
                 edge_preds,
                 auxiliary,
                 self.blocks.iter().map(|b| vec![0; b.moe.num_experts()]).collect(),
@@ -1082,7 +1103,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             Tensor::zeros([batch, total_seq, 1], &device)
         };
         (
-            self.token_head.forward(normed),
+            self.project_logits(normed),
             edge_preds,
             auxiliary / self.blocks.len() as f64 + budget * budget_weight,
             counts,
@@ -1158,7 +1179,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             };
         }
         cache.advance(t);
-        self.token_head.forward(self.norm.forward(x))
+        self.project_logits(self.norm.forward(x))
     }
 
     pub fn generate_unmasked_parsed(
@@ -1304,6 +1325,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             use_mrope: metadata.use_mrope,
             use_coord_router: metadata.use_coord_router,
             num_shared_experts: metadata.num_shared_experts,
+            tie_embeddings: metadata.tie_embeddings,
         };
 
         let model = config.init::<B>(device).load_record(record);
@@ -1434,6 +1456,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             use_mrope: metadata.use_mrope,
             use_coord_router: metadata.use_coord_router,
             num_shared_experts: metadata.num_shared_experts,
+            tie_embeddings: metadata.tie_embeddings,
         };
 
         let model = config.init::<B>(device).load_record(record);
@@ -1487,6 +1510,9 @@ pub struct MoeMetadata {
     /// Number of shared experts per block.
     #[serde(default)]
     pub num_shared_experts: usize,
+    /// Whether this model uses tied embeddings (tied lm_head).
+    #[serde(default)]
+    pub tie_embeddings: bool,
 }
 
 fn default_true() -> bool {

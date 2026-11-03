@@ -245,6 +245,7 @@ pub struct RunConfig {
     pub kv_heads: Option<usize>,
     /// DeepSeek-style shared experts running unconditionally on all tokens.
     pub num_shared_experts: usize,
+    pub tie_embeddings: bool,
 
     pub aux_loss_weight: f64,
     pub z_loss_weight: f64,
@@ -363,7 +364,8 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 + &config.overfit_samples.map_or(String::new(), |n| format!("_overfit{n}"))
                 // Separate directories so A/B/C/D experiments never resume each other.
                 + &config.adaptive_loss.as_ref().map_or(String::new(), |a| format!("_alw_{}", a.effective_mode().tag()))
-                + &config.kv_heads.filter(|&kv| kv != config.attn_heads).map_or(String::new(), |kv| format!("_gqa{kv}")),
+                + &config.kv_heads.filter(|&kv| kv != config.attn_heads).map_or(String::new(), |kv| format!("_gqa{kv}"))
+                + if config.tie_embeddings { "_tied" } else { "" },
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
             n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
             max_seq_len: config.max_seq_len, architecture,
@@ -377,6 +379,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             adaptive_depth: config.adaptive_depth.clone(),
             kv_heads: config.kv_heads.filter(|&kv| kv != config.attn_heads),
             num_shared_experts: config.num_shared_experts,
+            tie_embeddings: config.tie_embeddings,
             aux_loss_weight: config.aux_loss_weight,
             z_loss_weight: config.z_loss_weight,
         };
@@ -1003,6 +1006,7 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             .with_kv_heads(run_cfg.kv_heads)
             .with_num_shared_experts(run_cfg.num_shared_experts)
             .with_aux_loss_weight(run_cfg.aux_loss_weight)
+            .with_tie_embeddings(run_cfg.tie_embeddings)
             .with_z_loss_weight(run_cfg.z_loss_weight);
         if let Some(kv) = run_cfg.kv_heads {
             println!("Grouped-query attention: {kv} KV heads for {} query heads.", run_cfg.attn_heads);
@@ -1035,7 +1039,8 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             && saved.num_experts == num_experts && saved.top_k == top_k
             && saved.adaptive_depth == config.adaptive_depth
             && saved.effective_kv_heads() == config.effective_kv_heads()
-            && saved.num_shared_experts == config.num_shared_experts,
+            && saved.num_shared_experts == config.num_shared_experts
+            && saved.tie_embeddings == config.tie_embeddings,
             "MoE checkpoint configuration differs from requested run");
         ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
         let meta: MoeMetadata = serde_json::from_str(&std::fs::read_to_string(run_dir.join("metadata.json"))?)?;
@@ -1080,6 +1085,7 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             use_mrope:       self.config.use_mrope,
             use_coord_router: self.config.use_coord_router,
             num_shared_experts: self.config.num_shared_experts,
+            tie_embeddings: self.config.tie_embeddings,
         };
         self.save(dir, tokenizer, &meta)
     }
@@ -1912,6 +1918,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     adaptive_depth: None,
                                     kv_heads: None,
                                     num_shared_experts: 0,
+                                    tie_embeddings: false,
                                     aux_loss_weight: 0.01,
                                     z_loss_weight: 0.001,
                                 });

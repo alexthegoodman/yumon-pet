@@ -19,7 +19,7 @@
   "first_lr": 0.0003,
   "last_lr": 0.00003,
   "validation_fraction": 0.01,
-  "out_dir": "checkpoints/yumon-pet-kilo-balance-3",
+  "out_dir": "checkpoints/yumon-pet-kilo-balance-lite",
   "aux_loss_weight": 0.25,
   "z_loss_weight": 0.1
 }

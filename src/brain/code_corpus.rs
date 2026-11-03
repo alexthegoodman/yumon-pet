@@ -36,6 +36,9 @@ pub struct CodeConfig {
     /// Number of shared experts per block that run unconditionally on all tokens (DeepSeek-style).
     #[serde(default)]
     pub num_shared_experts: usize,
+    /// Whether to tie input embeddings to the output token head (weight tying).
+    #[serde(default)]
+    pub tie_embeddings: bool,
     pub source: PathBuf,
     pub cache: PathBuf,
     /// Optional data directory (`training-cache`) holding `documented/` and
@@ -102,7 +105,7 @@ pub struct CodeConfig {
 impl Default for CodeConfig {
     fn default() -> Self {
         Self {
-            architecture: CodeArchitecture::DecoderOnly, num_experts: 4, top_k: 1, num_shared_experts: 0,
+            architecture: CodeArchitecture::DecoderOnly, num_experts: 4, top_k: 1, num_shared_experts: 0, tie_embeddings: false,
             source: "../rust-code".into(), cache: "training-cache/code.bin".into(), curriculum: None, docs: None,
             pretrain_code: false, pretrain_cache: None, pretrain_min_tokens: 0, pretrain_epochs: 1, pretrain_share: 0.0,
             tokenizer: "yumon_code_bpe".into(), max_seq_len: 512,

@@ -23,6 +23,9 @@ fn main() -> anyhow::Result<()> {
         /// Number of shared experts per block (DeepSeek-style) that run unconditionally on all tokens.
         #[arg(long)]
         num_shared_experts: Option<usize>,
+        /// Tie input embeddings to the output token head (weight tying).
+        #[arg(long)]
+        tie_embeddings: Option<bool>,
     }
     let args = Args::parse();
     if args.smoke_test {
@@ -31,6 +34,9 @@ fn main() -> anyhow::Result<()> {
     let mut config = CodeConfig::load(&args.config)?;
     if let Some(shared) = args.num_shared_experts {
         config.num_shared_experts = shared;
+    }
+    if let Some(tie) = args.tie_embeddings {
+        config.tie_embeddings = tie;
     }
     if let Some(mode) = &args.adaptive_mode {
         let adaptive = config.adaptive_loss.as_mut()

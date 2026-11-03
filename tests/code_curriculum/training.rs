@@ -64,6 +64,9 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
             adaptive_depth: None,
             kv_heads: None,
             num_shared_experts: 0,
+            tie_embeddings: false,
+            aux_loss_weight: 0.01,
+            z_loss_weight: 0.001,
         };
         let path = directory.join(&run.name);
         std::fs::create_dir_all(&path)?;
