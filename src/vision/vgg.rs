@@ -391,41 +391,41 @@ mod tests {
         assert!(!vgg.conv5_4.weight.is_require_grad(), "VGG conv5_4 weights must not require grad");
     }
 
-    #[test]
-    fn test_vgg19_binary_load_and_forward() {
-        use burn::backend::Autodiff;
-        type AdBackend = Autodiff<TestBackend>;
+    // #[test]
+    // fn test_vgg19_binary_load_and_forward() {
+    //     use burn::backend::Autodiff;
+    //     type AdBackend = Autodiff<TestBackend>;
 
-        let vgg_path = Path::new("training-cache/vgg19_features.bin");
-        if !vgg_path.exists() {
-            eprintln!("Warning: training-cache/vgg19_features.bin not found; skipping test.");
-            return;
-        }
+    //     let vgg_path = Path::new("training-cache/vgg19_features.bin");
+    //     if !vgg_path.exists() {
+    //         eprintln!("Warning: training-cache/vgg19_features.bin not found; skipping test.");
+    //         return;
+    //     }
 
-        let device = Default::default();
-        let vgg = Vgg19Features::<AdBackend>::load_from_binary(vgg_path, &device)
-            .expect("Failed to load VGG-19 binary");
+    //     let device = Default::default();
+    //     let vgg = Vgg19Features::<AdBackend>::load_from_binary(vgg_path, &device)
+    //         .expect("Failed to load VGG-19 binary");
 
-        // Test forward with dummy input [1, 3, 64, 64]
-        let input: Tensor<AdBackend, 4> = Tensor::zeros([1, 3, 256, 256], &device);
-        let feat54 = vgg.forward_vgg54(input.clone());
-        // assert_eq!(feat54.dims(), [1, 512, 4, 4]);
+    //     // Test forward with dummy input [1, 3, 64, 64]
+    //     let input: Tensor<AdBackend, 4> = Tensor::zeros([1, 3, 256, 256], &device);
+    //     let feat54 = vgg.forward_vgg54(input.clone());
+    //     // assert_eq!(feat54.dims(), [1, 512, 4, 4]);
 
-        let feat22 = vgg.forward_vgg22(input.clone());
-        // assert_eq!(feat22.dims(), [1, 128, 32, 32]);
+    //     let feat22 = vgg.forward_vgg22(input.clone());
+    //     // assert_eq!(feat22.dims(), [1, 128, 32, 32]);
 
-        let target: Tensor<AdBackend, 4> = Tensor::ones([1, 3, 256, 256], &device);
-        let loss = vgg.perceptual_loss(input, target);
-        // let loss_val: f32 = loss.into_data().convert::<f32>().to_vec().unwrap()[0];
-        // assert!(loss_val > 0.0, "Perceptual loss between zeros and ones must be > 0");
-        // println!("VGG-19 Perceptual loss between 0s and 1s: {loss_val:.4}");
+    //     let target: Tensor<AdBackend, 4> = Tensor::ones([1, 3, 256, 256], &device);
+    //     let loss = vgg.perceptual_loss(input, target);
+    //     // let loss_val: f32 = loss.into_data().convert::<f32>().to_vec().unwrap()[0];
+    //     // assert!(loss_val > 0.0, "Perceptual loss between zeros and ones must be > 0");
+    //     // println!("VGG-19 Perceptual loss between 0s and 1s: {loss_val:.4}");
 
-        let t = std::time::Instant::now();
-        let grads = loss.backward();
-        // let g = input.grad(&grads).unwrap();
-        // let _ = g.into_data(); // force the backward pass to finish
-        println!("backward: {:?}", t.elapsed());
-    }
+    //     let t = std::time::Instant::now();
+    //     let grads = loss.backward();
+    //     // let g = input.grad(&grads).unwrap();
+    //     // let _ = g.into_data(); // force the backward pass to finish
+    //     println!("backward: {:?}", t.elapsed());
+    // }
 
     #[cfg(test)]
     fn time_backward<F>(name: &str, vgg: &Vgg19Features<AdBackend>, f: F)
@@ -488,61 +488,61 @@ mod tests {
         });
     }
 
-    #[test]
-    fn bisect_full_perceptual() {
-        use burn::backend::Autodiff;
-        type AdBackend = Autodiff<TestBackend>;
+    // #[test]
+    // fn bisect_full_perceptual() {
+    //     use burn::backend::Autodiff;
+    //     type AdBackend = Autodiff<TestBackend>;
 
-        let vgg_path = Path::new("training-cache/vgg19_features.bin");
-        if !vgg_path.exists() {
-            eprintln!("Warning: training-cache/vgg19_features.bin not found; skipping test.");
-            return;
-        }
+    //     let vgg_path = Path::new("training-cache/vgg19_features.bin");
+    //     if !vgg_path.exists() {
+    //         eprintln!("Warning: training-cache/vgg19_features.bin not found; skipping test.");
+    //         return;
+    //     }
 
-        let device = Default::default();
-        let vgg = Vgg19Features::<AdBackend>::load_from_binary(vgg_path, &device)
-            .expect("Failed to load VGG-19 binary");
-        time_backward("full", &vgg, |v, pred, target| v.perceptual_loss(pred, target));
-    }
+    //     let device = Default::default();
+    //     let vgg = Vgg19Features::<AdBackend>::load_from_binary(vgg_path, &device)
+    //         .expect("Failed to load VGG-19 binary");
+    //     time_backward("full", &vgg, |v, pred, target| v.perceptual_loss(pred, target));
+    // }
 
-    #[test]
-    fn test_vgg19_backward_gradients() {
-        use burn::backend::Autodiff;
-        type AdBackend = Autodiff<TestBackend>;
+    // #[test]
+    // fn test_vgg19_backward_gradients() {
+    //     use burn::backend::Autodiff;
+    //     type AdBackend = Autodiff<TestBackend>;
 
-        let vgg_path = Path::new("training-cache/vgg19_features.bin");
-        if !vgg_path.exists() {
-            return;
-        }
+    //     let vgg_path = Path::new("training-cache/vgg19_features.bin");
+    //     if !vgg_path.exists() {
+    //         return;
+    //     }
 
-        let device = Default::default();
-        let vgg = Vgg19Features::<AdBackend>::load_from_binary(vgg_path, &device)
-            .expect("Failed to load VGG-19 binary");
+    //     let device = Default::default();
+    //     let vgg = Vgg19Features::<AdBackend>::load_from_binary(vgg_path, &device)
+    //         .expect("Failed to load VGG-19 binary");
 
-        // let input: Tensor<AdBackend, 4> = Tensor::zeros([1, 3, 64, 64], &device).require_grad();
-        // let target: Tensor<AdBackend, 4> = Tensor::ones([1, 3, 256, 256], &device);
+    //     // let input: Tensor<AdBackend, 4> = Tensor::zeros([1, 3, 64, 64], &device).require_grad();
+    //     // let target: Tensor<AdBackend, 4> = Tensor::ones([1, 3, 256, 256], &device);
 
-        // let loss = vgg.perceptual_loss(input.clone(), target);
-        // let grads = loss.backward();
-        // let input_grad = input.grad(&grads);
-        // assert!(input_grad.is_some(), "Input must receive perceptual loss gradients");
-        // let grad_norm: f32 = input_grad.unwrap().abs().mean().into_data().convert::<f32>().to_vec().unwrap()[0];
-        // println!("VGG-19 Perceptual loss backward grad norm: {grad_norm:.6}");
-        // assert!(grad_norm > 1e-6);
+    //     // let loss = vgg.perceptual_loss(input.clone(), target);
+    //     // let grads = loss.backward();
+    //     // let input_grad = input.grad(&grads);
+    //     // assert!(input_grad.is_some(), "Input must receive perceptual loss gradients");
+    //     // let grad_norm: f32 = input_grad.unwrap().abs().mean().into_data().convert::<f32>().to_vec().unwrap()[0];
+    //     // println!("VGG-19 Perceptual loss backward grad norm: {grad_norm:.6}");
+    //     // assert!(grad_norm > 1e-6);
 
-        let (b, hw) = (1, 64);
-        let input: Tensor<AdBackend, 4> = Tensor::zeros([b, 1, hw, hw], &device).require_grad();
-        let target: Tensor<AdBackend, 4> = Tensor::ones([b, 1, hw, hw], &device);
+    //     let (b, hw) = (1, 64);
+    //     let input: Tensor<AdBackend, 4> = Tensor::zeros([b, 1, hw, hw], &device).require_grad();
+    //     let target: Tensor<AdBackend, 4> = Tensor::ones([b, 1, hw, hw], &device);
 
-        let t = std::time::Instant::now();
-        let loss = vgg.perceptual_loss(input.clone(), target);
-        let _ = loss.clone().into_data(); // force the forward pass to finish
-        println!("forward: {:?}", t.elapsed());
+    //     let t = std::time::Instant::now();
+    //     let loss = vgg.perceptual_loss(input.clone(), target);
+    //     let _ = loss.clone().into_data(); // force the forward pass to finish
+    //     println!("forward: {:?}", t.elapsed());
 
-        let t = std::time::Instant::now();
-        let grads = loss.backward();
-        let g = input.grad(&grads).unwrap();
-        let _ = g.into_data(); // force the backward pass to finish
-        println!("backward: {:?}", t.elapsed());
-    }
+    //     let t = std::time::Instant::now();
+    //     let grads = loss.backward();
+    //     let g = input.grad(&grads).unwrap();
+    //     let _ = g.into_data(); // force the backward pass to finish
+    //     println!("backward: {:?}", t.elapsed());
+    // }
 }

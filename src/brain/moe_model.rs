@@ -1862,6 +1862,7 @@ mod tests {
             use_mrope: false,
             use_coord_router: false,
             num_shared_experts: 0,
+            tie_embeddings: false,
             batch_size: 1,
             training_stage: config.training_stage,
             embed_dim: config.embed_dim,
@@ -2005,7 +2006,7 @@ mod tests {
                 embed_dim: config.embed_dim, hidden_units: config.hidden_units, n_layers: config.n_layers,
                 attn_heads: config.attn_heads, ff_dim: config.ff_dim, max_seq_len: config.max_seq_len,
                 adaptive_depth: config.adaptive_depth.clone(), kv_heads: config.kv_heads, is_multimodal: false, has_edge_head: false, use_mrope: false,
-                use_coord_router: false, num_shared_experts: 0 };
+                use_coord_router: false, num_shared_experts: 0, tie_embeddings: false };
             model.save(path.to_str().unwrap(), &tokenizer, &meta).unwrap();
             if !depth {
                 // Rewrite the weights in the pre-adaptive-depth record layout.
@@ -2352,5 +2353,35 @@ mod tests {
         // Verify gradient backward pass succeeds and produces gradients for token head and model weights
         let head_grad = grads.get::<Wgpu, 2>(model.token_head.weight.id);
         assert!(head_grad.is_some(), "Gradients must flow through blocks with shared experts");
+    }
+
+    #[test]
+    fn test_tied_embeddings_forward_and_backward() {
+        let device = Default::default();
+        let config = tiny_config()
+            .with_max_seq_len(16)
+            .with_tie_embeddings(true);
+        let model: YumonMoeBrain<B> = config.init(&device);
+
+        let before = values(model.embedding.weight.val());
+
+        let tensor = Tensor::<B, 2, Int>::from_ints(
+            TensorData::new(vec![1, 4, 5, 6], [1, 4]),
+            &device,
+        );
+
+        let (logits, aux, counts) = model.forward_with_aux(tensor);
+        assert_eq!(logits.dims(), [1, 4, config.vocab_size]);
+        assert_eq!(counts.len(), config.n_layers);
+
+        let loss = logits.powf_scalar(2.0).mean() + aux;
+        let grads = GradientsParams::from_grads(loss.backward(), &model);
+
+        // Verify gradient backward pass succeeds and produces dense gradients for the tied embedding table
+        let emb_grad = grads.get::<Wgpu, 2>(model.embedding.weight.id);
+        assert!(emb_grad.is_some(), "Gradients must flow into the tied embedding weights");
+
+        let updated = AdamWConfig::new().init().step(0.01, model, grads);
+        assert_ne!(before, values(updated.embedding.weight.val()), "Tied embedding weights must update");
     }
 }

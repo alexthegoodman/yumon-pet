@@ -833,6 +833,7 @@ fn main() -> Result<()> {
                 use_mrope: true,
                 use_coord_router,
                 num_shared_experts,
+                tie_embeddings: false,
             };
 
             let meta_json = serde_json::to_string_pretty(&meta)?;
