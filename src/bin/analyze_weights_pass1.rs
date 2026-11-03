@@ -1,11 +1,222 @@
 use std::env;
 use std::fs::File;
 use std::io::{BufReader, Read};
+use std::path::{Path, PathBuf};
 
-const VOCAB_SIZE: usize = 4096;
-const EMBED_DIM: usize = 64;
-const FF_DIM: usize = 256;
-const NUM_EXPERTS: usize = 4;
+#[derive(Debug, Clone)]
+pub struct ModelConfig {
+    pub vocab_size: usize,
+    pub embed_dim: usize,
+    pub ff_dim: usize,
+    pub num_experts: usize,
+    pub num_shared_experts: usize,
+    pub n_layers: usize,
+    pub attn_heads: usize,
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            vocab_size: 4096,
+            embed_dim: 64,
+            ff_dim: 256,
+            num_experts: 4,
+            num_shared_experts: 0,
+            n_layers: 4,
+            attn_heads: 4,
+        }
+    }
+}
+
+impl ModelConfig {
+    pub fn update_from_json(&mut self, val: &serde_json::Value) {
+        let extract = |k: &str| -> Option<usize> {
+            val.get(k)
+                .and_then(|x| x.as_u64())
+                .map(|x| x as usize)
+                .or_else(|| {
+                    val.get("config")
+                        .and_then(|c| c.get(k))
+                        .and_then(|x| x.as_u64())
+                        .map(|x| x as usize)
+                })
+        };
+        if let Some(v) = extract("vocab_size") { self.vocab_size = v; }
+        if let Some(v) = extract("embed_dim") { self.embed_dim = v; }
+        if let Some(v) = extract("ff_dim") { self.ff_dim = v; }
+        if let Some(v) = extract("num_experts") { self.num_experts = v; }
+        if let Some(v) = extract("num_shared_experts") { self.num_shared_experts = v; }
+        if let Some(v) = extract("n_layers") { self.n_layers = v; }
+        if let Some(v) = extract("attn_heads") { self.attn_heads = v; }
+    }
+}
+
+fn try_load_dir_config(dir: &Path, config: &mut ModelConfig) {
+    for name in &["metadata.json", "code-config.json"] {
+        let path = dir.join(name);
+        if path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    config.update_from_json(&val);
+                    return;
+                }
+            }
+        }
+    }
+    // Search 1 level of subdirectories
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                for name in &["metadata.json", "code-config.json"] {
+                    let sub = p.join(name);
+                    if sub.is_file() {
+                        if let Ok(content) = std::fs::read_to_string(&sub) {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                                config.update_from_json(&val);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Also check parent directory
+    if let Some(parent) = dir.parent() {
+        for name in &["metadata.json", "code-config.json"] {
+            let path = parent.join(name);
+            if path.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                        config.update_from_json(&val);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn find_model_bin_in_dir(dir: &Path) -> Option<PathBuf> {
+    let direct = dir.join("model.bin");
+    if direct.is_file() {
+        return Some(direct);
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                let sub = p.join("model.bin");
+                if sub.is_file() {
+                    return Some(sub);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn resolve_model_and_config(args: &[String]) -> std::io::Result<(PathBuf, ModelConfig)> {
+    let mut config = ModelConfig::default();
+    let mut model_path: Option<PathBuf> = None;
+    let mut explicit_config_path: Option<PathBuf> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--config" && i + 1 < args.len() {
+            explicit_config_path = Some(PathBuf::from(&args[i + 1]));
+            i += 2;
+            continue;
+        } else if arg == "--embed-dim" && i + 1 < args.len() {
+            if let Ok(v) = args[i + 1].parse() { config.embed_dim = v; }
+            i += 2;
+            continue;
+        } else if arg == "--ff-dim" && i + 1 < args.len() {
+            if let Ok(v) = args[i + 1].parse() { config.ff_dim = v; }
+            i += 2;
+            continue;
+        } else if (arg == "--experts" || arg == "--num-experts") && i + 1 < args.len() {
+            if let Ok(v) = args[i + 1].parse() { config.num_experts = v; }
+            i += 2;
+            continue;
+        } else if (arg == "--layers" || arg == "--n-layers") && i + 1 < args.len() {
+            if let Ok(v) = args[i + 1].parse() { config.n_layers = v; }
+            i += 2;
+            continue;
+        } else if arg == "--vocab" && i + 1 < args.len() {
+            if let Ok(v) = args[i + 1].parse() { config.vocab_size = v; }
+            i += 2;
+            continue;
+        } else if (arg == "--shared-experts" || arg == "--num-shared-experts") && i + 1 < args.len() {
+            if let Ok(v) = args[i + 1].parse() { config.num_shared_experts = v; }
+            i += 2;
+            continue;
+        } else if !arg.starts_with("--") && model_path.is_none() {
+            model_path = Some(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+
+    if let Some(ref cp) = explicit_config_path {
+        if let Ok(content) = std::fs::read_to_string(cp) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                config.update_from_json(&val);
+            }
+        }
+    }
+
+    let final_model_path = match model_path {
+        Some(p) => {
+            if p.is_file() {
+                if p.extension().map_or(false, |ext| ext == "json") {
+                    if let Ok(content) = std::fs::read_to_string(&p) {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                            config.update_from_json(&val);
+                            let out_dir = val.get("out_dir")
+                                .and_then(|s| s.as_str())
+                                .or_else(|| val.get("config").and_then(|c| c.get("out_dir")).and_then(|s| s.as_str()));
+                            if let Some(dir_str) = out_dir {
+                                let dir = PathBuf::from(dir_str);
+                                find_model_bin_in_dir(&dir).unwrap_or(p)
+                            } else {
+                                p
+                            }
+                        } else {
+                            p
+                        }
+                    } else {
+                        p
+                    }
+                } else {
+                    if explicit_config_path.is_none() {
+                        if let Some(parent) = p.parent() {
+                            try_load_dir_config(parent, &mut config);
+                        }
+                    }
+                    p
+                }
+            } else if p.is_dir() {
+                if explicit_config_path.is_none() {
+                    try_load_dir_config(&p, &mut config);
+                }
+                find_model_bin_in_dir(&p).unwrap_or_else(|| p.join("model.bin"))
+            } else {
+                p
+            }
+        }
+        None => {
+            let default_path = PathBuf::from("model.bin");
+            if explicit_config_path.is_none() {
+                try_load_dir_config(&PathBuf::from("."), &mut config);
+            }
+            default_path
+        }
+    };
+
+    Ok((final_model_path, config))
+}
 
 fn is_plausible_weight(val: f32) -> bool {
     val.is_finite() && val.abs() < 50.0
@@ -208,37 +419,49 @@ fn norm_vec(v: &mut [f32]) {
     }
 }
 
-fn guess_shape(len: usize) -> String {
-    if len == VOCAB_SIZE * EMBED_DIM {
-        return format!("{}x{} (Embedding/LM_Head)", VOCAB_SIZE, EMBED_DIM);
+fn guess_shape(len: usize, config: &ModelConfig) -> String {
+    if len == config.vocab_size * config.embed_dim {
+        return format!("{}x{} (Embedding/LM_Head)", config.vocab_size, config.embed_dim);
     }
-    if len == EMBED_DIM * EMBED_DIM {
-        return "64x64 (Attn Proj)".to_string();
+    if len == config.embed_dim * config.embed_dim {
+        return format!("{}x{} (Attn Proj)", config.embed_dim, config.embed_dim);
     }
-    if len == 3 * EMBED_DIM * EMBED_DIM {
-        return "192x64 (Fused QKV)".to_string();
+    if len == 3 * config.embed_dim * config.embed_dim {
+        return format!("{}x{} (Fused QKV)", 3 * config.embed_dim, config.embed_dim);
     }
-    if len == EMBED_DIM * FF_DIM {
-        return "64x256 (Expert FFN)".to_string();
+    if len == config.embed_dim * config.ff_dim {
+        return format!("{}x{} (Expert FFN)", config.embed_dim, config.ff_dim);
     }
-    if len == NUM_EXPERTS * EMBED_DIM {
-        return "4x64 (MoE Router)".to_string();
+    if len == config.num_experts * config.embed_dim {
+        return format!("{}x{} (MoE Router)", config.num_experts, config.embed_dim);
     }
-    if len == EMBED_DIM {
-        return "64 (LayerNorm/Bias)".to_string();
+    if len == config.embed_dim {
+        return format!("{} (LayerNorm/Bias)", config.embed_dim);
     }
-    if len == FF_DIM {
-        return "256 (FFN Bias)".to_string();
+    if len == config.ff_dim {
+        return format!("{} (FFN Bias)", config.ff_dim);
     }
-    if len % EMBED_DIM == 0 {
-        return format!("{}x{}", len / EMBED_DIM, EMBED_DIM);
+    if len % config.embed_dim == 0 {
+        return format!("{}x{}", len / config.embed_dim, config.embed_dim);
     }
     format!("{} floats", len)
 }
 
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
-    let path = args.get(1).map(|s| s.as_str()).unwrap_or("model.bin");
+    let (path_buf, config) = resolve_model_and_config(&args)?;
+    let path = path_buf.to_str().unwrap_or("model.bin");
+
+    println!("==================================================================");
+    println!(" PASS 1: MODEL WEIGHT FORENSICS & RAW SCANNER");
+    println!("   Model File:         {}", path);
+    println!("   Vocab Size:         {}", config.vocab_size);
+    println!("   Embedding Dim:      {}", config.embed_dim);
+    println!("   FFN Dim:            {}", config.ff_dim);
+    println!("   Num Experts:        {} routed{}", config.num_experts, if config.num_shared_experts > 0 { format!(" (+ {} shared)", config.num_shared_experts) } else { "".to_string() });
+    println!("   Num Layers:         {}", config.n_layers);
+    println!("   Attention Heads:    {}", config.attn_heads);
+    println!("==================================================================");
 
     let mut reader = BufReader::new(File::open(path)?);
     let mut raw_bytes = Vec::new();
@@ -257,22 +480,20 @@ fn main() -> std::io::Result<()> {
         (total_extracted_floats * 4) as f64 * 100.0 / raw_bytes.len() as f64
     );
 
-    // Group or display major tensors (>= 256 floats) and small vectors summary
     let mut small_vec_count = 0;
-    let mut row_64_count = 0;
+    let mut row_norm_count = 0;
 
     for (i, t) in tensors.iter().enumerate() {
         let len = t.floats.len();
-        if len == 64 {
-            row_64_count += 1;
+        if len == config.embed_dim {
+            row_norm_count += 1;
             continue;
         }
-        if len < 256 {
+        if len < config.embed_dim * 4 {
             small_vec_count += 1;
             continue;
         }
 
-        // Check if there is a u64 right before `t.byte_offset`
         let prefix_u64 = if t.byte_offset >= 8 {
             u64::from_le_bytes(raw_bytes[t.byte_offset - 8..t.byte_offset].try_into().unwrap())
         } else {
@@ -280,8 +501,8 @@ fn main() -> std::io::Result<()> {
         };
 
         // Determine matrix dimensions for SVD
-        let (rows, cols) = if len % EMBED_DIM == 0 && len >= EMBED_DIM * 4 {
-            (len / EMBED_DIM, EMBED_DIM)
+        let (rows, cols) = if len % config.embed_dim == 0 && len >= config.embed_dim * 4 {
+            (len / config.embed_dim, config.embed_dim)
         } else {
             (1, len)
         };
@@ -300,7 +521,6 @@ fn main() -> std::io::Result<()> {
         };
         let s1_s2_ratio = if s2 > 1e-6 { s1 / s2 } else { 0.0 };
 
-        // Diagnose whether the matrix looks like untrained random noise (s1/s2 ~ 1.02) vs learned structure
         let status = if rows > 1 && s1_s2_ratio < 1.08 && rank1_pct < 8.0 {
             "[UNLEARNED / RANDOM SPECTRUM]"
         } else if rank1_pct > 25.0 {
@@ -315,7 +535,7 @@ fn main() -> std::io::Result<()> {
             t.byte_offset,
             t.alignment,
             prefix_u64,
-            guess_shape(len),
+            guess_shape(len, &config),
             l2,
             s1,
             s2,
@@ -325,17 +545,11 @@ fn main() -> std::io::Result<()> {
         );
     }
 
-    if row_64_count > 0 || small_vec_count > 0 {
+    if row_norm_count > 0 || small_vec_count > 0 {
         println!(
-            "\n  [+] Also found {} standalone 64-float rows and {} small vectors (<256 floats).",
-            row_64_count, small_vec_count
+            "\n  [+] Also found {} standalone {}-float rows/norms and {} small vectors (<{} floats).",
+            row_norm_count, config.embed_dim, small_vec_count, config.embed_dim * 4
         );
-        if row_64_count > 500 {
-            println!(
-                "      NOTE: Having {} separate 64-float rows means your matrices are serialized as `Vec<Vec<f32>>` (nested Vecs with 8-byte length headers per row)!",
-                row_64_count
-            );
-        }
     }
 
     Ok(())
