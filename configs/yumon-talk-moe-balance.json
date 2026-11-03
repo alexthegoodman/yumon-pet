@@ -2,7 +2,7 @@
   "architecture": "moe",
   "num_experts": 8,
   "top_k": 2,
-  "num_shared_experts": 1,
+  "num_shared_experts": 0,
   "source": "../rust-code",
   "cache": "training-cache/kilo_talk_samples.bin",
   "tokenizer": "training-cache/kilo_talk_tokenizer",
@@ -11,7 +11,7 @@
   "seed": 4815162342,
   "vocab_size": 4096,
   "embed_dim": 256,
-  "n_layers": 6,
+  "n_layers": 16,
   "attn_heads": 8,
   "ff_dim": 512,
   "batch_size": 2,
@@ -19,7 +19,8 @@
   "first_lr": 0.0003,
   "last_lr": 0.00003,
   "validation_fraction": 0.01,
-  "out_dir": "checkpoints/yumon-pet-kilo-balance-lite",
-  "aux_loss_weight": 0.25,
-  "z_loss_weight": 0.1
+  "out_dir": "checkpoints/yumon-pet-kilo-deep-light",
+  "aux_loss_weight": 0.025,
+  "z_loss_weight": 0.01,
+  "tie_embeddings": true
 }

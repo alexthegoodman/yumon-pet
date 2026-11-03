@@ -224,6 +224,53 @@ impl<B: Backend> LinearForce<B> {
 // SwiGLU MLP  (same gated structure as Llama)
 // ═════════════════════════════════════════════════════════════════════════════
 
+// #[derive(Config, Debug)]
+// pub struct MLPConfig {
+//     d_model:    usize,
+//     d_hidden:   usize,
+// }
+
+// impl MLPConfig {
+//     pub fn init<B: Backend>(&self, device: &B::Device) -> MLP<B> {
+//         MLP {
+//             w1:   LinearConfig::new(self.d_model, self.d_hidden)
+//                 .with_initializer(Initializer::KaimingUniform {
+//                     gain: 1.0 / f64::sqrt(3.0),
+//                     fan_out_only: false,
+//                 })
+//                 .with_bias(false).init(device),
+//             w2:   LinearConfig::new(self.d_hidden, self.d_model)
+//                 .with_initializer(Initializer::KaimingUniform {
+//                     gain: 1.0 / f64::sqrt(3.0),
+//                     fan_out_only: false,
+//                 })
+//                 .with_bias(false).init(device),
+//             w3:   LinearConfig::new(self.d_model, self.d_hidden)
+//                 .with_initializer(Initializer::KaimingUniform {
+//                     gain: 1.0 / f64::sqrt(3.0),
+//                     fan_out_only: false,
+//                 })
+//                 .with_bias(false).init(device),
+//             silu: SiLU::new(),
+//         }
+//     }
+// }
+
+// #[derive(Module, Debug)]
+// pub struct MLP<B: Backend> {
+//     w1:   Linear<B>,
+//     w2:   Linear<B>,
+//     w3:   Linear<B>,
+//     silu: SiLU,
+// }
+
+// impl<B: Backend> MLP<B> {
+//     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+//         // SwiGLU: w2( silu(w1(x)) * w3(x) )
+//         self.w2.forward(self.silu.forward(self.w1.forward(x.clone())) * self.w3.forward(x))
+//     }
+// }
+
 #[derive(Config, Debug)]
 pub struct MLPConfig {
     d_model:    usize,
@@ -232,25 +279,23 @@ pub struct MLPConfig {
 
 impl MLPConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> MLP<B> {
+        // GPT-2-style init: N(0, 0.02) on every projection.
+        // Simple, fan-in-independent, and well-validated at this scale.
+        let init = Initializer::Normal { mean: 0.0, std: 0.02 };
+
         MLP {
-            w1:   LinearConfig::new(self.d_model, self.d_hidden)
-                .with_initializer(Initializer::KaimingUniform {
-                    gain: 1.0 / f64::sqrt(3.0),
-                    fan_out_only: false,
-                })
-                .with_bias(false).init(device),
-            w2:   LinearConfig::new(self.d_hidden, self.d_model)
-                .with_initializer(Initializer::KaimingUniform {
-                    gain: 1.0 / f64::sqrt(3.0),
-                    fan_out_only: false,
-                })
-                .with_bias(false).init(device),
-            w3:   LinearConfig::new(self.d_model, self.d_hidden)
-                .with_initializer(Initializer::KaimingUniform {
-                    gain: 1.0 / f64::sqrt(3.0),
-                    fan_out_only: false,
-                })
-                .with_bias(false).init(device),
+            w1: LinearConfig::new(self.d_model, self.d_hidden)
+                .with_initializer(init.clone())
+                .with_bias(false)
+                .init(device),
+            w2: LinearConfig::new(self.d_hidden, self.d_model)
+                .with_initializer(init.clone())
+                .with_bias(false)
+                .init(device),
+            w3: LinearConfig::new(self.d_model, self.d_hidden)
+                .with_initializer(init.clone())
+                .with_bias(false)
+                .init(device),
             silu: SiLU::new(),
         }
     }
@@ -267,7 +312,17 @@ pub struct MLP<B: Backend> {
 impl<B: Backend> MLP<B> {
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         // SwiGLU: w2( silu(w1(x)) * w3(x) )
-        self.w2.forward(self.silu.forward(self.w1.forward(x.clone())) * self.w3.forward(x))
+        let gate = self.silu.forward(self.w1.forward(x.clone()));
+        let up   = self.w3.forward(x);
+        let hidden = gate * up;
+
+        // Optional: rescale the gated product. The elementwise product of two
+        // ~unit-variance terms roughly doubles the variance entering w2, so a
+        // 1/sqrt(2) scale keeps the residual-stream scale consistent. Enable
+        // this *after* confirming experts wake up — don't stack changes.
+        // let hidden = hidden / std::f64::consts::SQRT_2;
+
+        self.w2.forward(hidden)
     }
 }
 

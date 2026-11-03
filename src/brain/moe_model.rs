@@ -138,13 +138,25 @@ impl<B: Backend> SparseMoe<B> {
         // Keep routing probabilities and auxiliary reductions in FP32 under BF16.
         let logits = self.router.forward(r_in).cast(FloatDType::F32);
         let probabilities = softmax(logits.clone(), 1);
+        
         // Read selected expert indices; expert activations and gates stay on device.
-        let ids = router_choices(logits.clone(), self.top_k)
-            .unwrap_or_else(|error| panic!("MoE routing failed: {error}"));
+        // let ids = router_choices(logits.clone(), self.top_k)
+        //     .unwrap_or_else(|error| panic!("MoE routing failed: {error}"));
+        // let mut rows = vec![Vec::<i32>::new(); n];
+        // for (slot, expert) in ids.into_iter().enumerate() {
+        //     rows[expert as usize].push((slot / self.top_k) as i32);
+        // }
+
+        // ONE top-k. Everything downstream reads from this pair.
+        let (topk_probs, topk_indices) = probabilities.clone().topk_with_indices(self.top_k, 1);
+
+        // 1. host dispatch rows
+        let ids: Vec<i32> = topk_indices.clone().into_data().convert::<i32>().to_vec().unwrap_or_else(|error| panic!("MoE routing failed: {error}"));
         let mut rows = vec![Vec::<i32>::new(); n];
-        for (slot, expert) in ids.into_iter().enumerate() {
-            rows[expert as usize].push((slot / self.top_k) as i32);
+        for (slot, &e) in ids.iter().enumerate() {
+            rows[e as usize].push((slot / self.top_k) as i32);
         }
+
         let counts: Vec<usize> = rows.iter().map(Vec::len).collect();
         let fractions = Tensor::<B, 2>::from_data_dtype(
             TensorData::new(
@@ -167,11 +179,21 @@ impl<B: Backend> SparseMoe<B> {
         // per token equals 1.0, preserving token activation energy and preventing
         // gate attenuation when multiple experts attend to a token.
         // For top-1, full-softmax gate preserves language-loss router gradients.
+        // let dispatch_probabilities = if self.top_k > 1 {
+        //     let (_, topk_indices) = logits.clone().detach().topk_with_indices(self.top_k, 1);
+        //     let selected_probs = probabilities.clone().gather(1, topk_indices);
+        //     let topk_sum = selected_probs.sum_dim(1).clamp_min(1e-8);
+        //     probabilities.clone() / topk_sum
+        // } else {
+        //     probabilities.clone()
+        // };
+
+        // 2. gate matrix (sparse, renormalized on-support)
         let dispatch_probabilities = if self.top_k > 1 {
-            let (_, topk_indices) = logits.clone().detach().topk_with_indices(self.top_k, 1);
-            let selected_probs = probabilities.clone().gather(1, topk_indices);
-            let topk_sum = selected_probs.sum_dim(1).clamp_min(1e-8);
-            probabilities.clone() / topk_sum
+            let renorm = topk_probs.clone().sum_dim(1).clamp_min(1e-8);
+            let renormed = topk_probs / renorm;                       // [tokens, k]
+            Tensor::zeros([tokens, n], &device)
+                .scatter(1, topk_indices, renormed, IndexingUpdateOp::Add)
         } else {
             probabilities.clone()
         };
