@@ -843,7 +843,7 @@ fn run_training<M: TrainableUpscaler>(
                 );
 
                 let vgg_loss = if let Some(ref vgg_net) = vgg_features {
-                    vgg_net.perceptual_loss(pred.clone(), target_tensor.clone())
+                    vgg_net.perceptual_loss34(pred.clone(), target_tensor.clone())
                 } else {
                     Tensor::zeros([1], device)
                 };
@@ -874,7 +874,7 @@ fn run_training<M: TrainableUpscaler>(
                     target_tensor.clone(),
                 );
                 let vgg_loss = if let Some(ref vgg_net) = vgg_features {
-                    vgg_net.perceptual_loss(pred, target_tensor)
+                    vgg_net.perceptual_loss34(pred, target_tensor)
                 } else {
                     Tensor::zeros([1], device)
                 };

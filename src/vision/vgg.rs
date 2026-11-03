@@ -46,8 +46,8 @@ pub struct Vgg19Activations<B: Backend> {
     // pub relu1_2: Tensor<B, 4>,
     pub relu2_2: Tensor<B, 4>,
     pub relu3_4: Tensor<B, 4>,
-    pub relu4_4: Tensor<B, 4>,
-    pub relu5_4: Tensor<B, 4>,
+    // pub relu4_4: Tensor<B, 4>,
+    // pub relu5_4: Tensor<B, 4>,
 }
 
 /// Frozen VGG-19 Convolutional Feature Extractor (up to `relu5_4`).
@@ -254,25 +254,25 @@ impl<B: Backend> Vgg19Features<B> {
         let relu3_4 = relu(self.conv3_4.forward(f));
         let f = self.pool.forward(relu3_4.clone());
 
-        // Stage 4
-        let f = relu(self.conv4_1.forward(f));
-        let f = relu(self.conv4_2.forward(f));
-        let f = relu(self.conv4_3.forward(f));
-        let relu4_4 = relu(self.conv4_4.forward(f));
-        let f = self.pool.forward(relu4_4.clone());
+        // // Stage 4
+        // let f = relu(self.conv4_1.forward(f));
+        // let f = relu(self.conv4_2.forward(f));
+        // let f = relu(self.conv4_3.forward(f));
+        // let relu4_4 = relu(self.conv4_4.forward(f));
+        // let f = self.pool.forward(relu4_4.clone());
 
-        // Stage 5
-        let f = relu(self.conv5_1.forward(f));
-        let f = relu(self.conv5_2.forward(f));
-        let f = relu(self.conv5_3.forward(f));
-        let relu5_4 = relu(self.conv5_4.forward(f));
+        // // Stage 5
+        // let f = relu(self.conv5_1.forward(f));
+        // let f = relu(self.conv5_2.forward(f));
+        // let f = relu(self.conv5_3.forward(f));
+        // let relu5_4 = relu(self.conv5_4.forward(f));
 
         Vgg19Activations {
             // relu1_2,
             relu2_2,
             relu3_4,
-            relu4_4,
-            relu5_4,
+            // relu4_4,
+            // relu5_4,
         }
     }
 
@@ -339,7 +339,21 @@ impl<B: Backend> Vgg19Features<B> {
     /// By default, evaluates L1 distance on both:
     /// - `relu2_2` (weight 0.5) for crisp low-level edges and color consistency
     /// - `relu5_4` (weight 1.0) for high-level semantic texture and natural sharpness
-    pub fn perceptual_loss(
+    // pub fn perceptual_loss(
+    //     &self,
+    //     pred: Tensor<B, 4>,
+    //     target: Tensor<B, 4>,
+    // ) -> Tensor<B, 1> {
+    //     let acts_pred = self.forward_all(pred);
+    //     let acts_target = self.forward_all(target.detach());
+
+    //     let loss_22 = (acts_pred.relu2_2 - acts_target.relu2_2.detach()).abs().mean();
+    //     let loss_54 = (acts_pred.relu5_4 - acts_target.relu5_4.detach()).abs().mean();
+
+    //     loss_54 + loss_22 * 0.5
+    // }
+
+    pub fn perceptual_loss34(
         &self,
         pred: Tensor<B, 4>,
         target: Tensor<B, 4>,
@@ -348,9 +362,9 @@ impl<B: Backend> Vgg19Features<B> {
         let acts_target = self.forward_all(target.detach());
 
         let loss_22 = (acts_pred.relu2_2 - acts_target.relu2_2.detach()).abs().mean();
-        let loss_54 = (acts_pred.relu5_4 - acts_target.relu5_4.detach()).abs().mean();
+        let loss_34 = (acts_pred.relu3_4 - acts_target.relu3_4.detach()).abs().mean();
 
-        loss_54 + loss_22 * 0.5
+        loss_34 + loss_22 * 0.5
     }
 }
 
