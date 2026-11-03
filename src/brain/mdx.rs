@@ -672,6 +672,79 @@ pub fn load_arena_chats(path: &str) -> Result<HandcraftedChats> {
 }
 
 fn parse_block(lines: &[String]) -> ChatBlock {
+    // If block uses INPUT: ... CHOSEN: ... REJECTED: ... preference triplet syntax
+    if lines.iter().any(|l| l.trim().starts_with("INPUT:"))
+        && lines.iter().any(|l| l.trim().starts_with("CHOSEN:"))
+        && lines.iter().any(|l| l.trim().starts_with("REJECTED:"))
+    {
+        let mut human_lines = Vec::new();
+        let mut chosen_lines = Vec::new();
+        let mut rejected_lines = Vec::new();
+        let mut section = 0; // 0 = input, 1 = chosen, 2 = rejected
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with("INPUT:") {
+                let rest = trimmed.strip_prefix("INPUT:").unwrap().trim();
+                if !rest.is_empty() { human_lines.push(rest.to_string()); }
+                section = 0;
+            } else if trimmed.starts_with("CHOSEN:") {
+                let rest = trimmed.strip_prefix("CHOSEN:").unwrap().trim();
+                if !rest.is_empty() { chosen_lines.push(rest.to_string()); }
+                section = 1;
+            } else if trimmed.starts_with("REJECTED:") {
+                let rest = trimmed.strip_prefix("REJECTED:").unwrap().trim();
+                if !rest.is_empty() { rejected_lines.push(rest.to_string()); }
+                section = 2;
+            } else {
+                match section {
+                    0 => human_lines.push(trimmed.to_string()),
+                    1 => chosen_lines.push(trimmed.to_string()),
+                    2 => rejected_lines.push(trimmed.to_string()),
+                    _ => {}
+                }
+            }
+        }
+        let human = human_lines.into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
+        let chosen = chosen_lines.into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
+        let rejected = rejected_lines.into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
+        if !human.is_empty() && !chosen.is_empty() && !rejected.is_empty() {
+            return ChatBlock {
+                memories: vec![
+                    Memory { human: human.clone(), bot: chosen },
+                    Memory { human, bot: rejected },
+                ],
+            };
+        }
+    }
+
+    // If block uses INPUT: ... TARGET: ... syntax from gen_synthetic_v2
+    if lines.iter().any(|l| l.trim().starts_with("INPUT:")) && lines.iter().any(|l| l.trim().starts_with("TARGET:")) {
+        let mut human_lines = Vec::new();
+        let mut bot_lines = Vec::new();
+        let mut in_target = false;
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with("INPUT:") {
+                let rest = trimmed.strip_prefix("INPUT:").unwrap().trim();
+                if !rest.is_empty() { human_lines.push(rest.to_string()); }
+                in_target = false;
+            } else if trimmed.starts_with("TARGET:") {
+                let rest = trimmed.strip_prefix("TARGET:").unwrap().trim();
+                if !rest.is_empty() { bot_lines.push(rest.to_string()); }
+                in_target = true;
+            } else if in_target {
+                bot_lines.push(trimmed.to_string());
+            } else {
+                human_lines.push(trimmed.to_string());
+            }
+        }
+        let human = human_lines.join("\n");
+        let bot = bot_lines.join("\n");
+        if !human.is_empty() && !bot.is_empty() {
+            return ChatBlock { memories: vec![Memory { human, bot }] };
+        }
+    }
+
     let mut memories = Vec::new();
     let mut i = 0;
 
@@ -1313,5 +1386,47 @@ mod language_chat_source_tests {
         assert!(first.human.contains("be yourself"), "{:?}", first.human);
         assert_eq!(first.bot, "Be yourself; everyone else is already taken.");
         assert_eq!(chats.blocks[1].memories[0].human, "share a quote");
+    }
+
+    #[test]
+    fn parse_block_synthetic_input_target_format() {
+        let block_lines = vec![
+            "INPUT: Vitals: Hunger 80, Energy 60, Cleanliness 70, Boredom 40.".to_string(),
+            "Perception: sees a crumpled piece of foil near the kitchen island.".to_string(),
+            "Event: Owner drops a piece of chicken on the floor.".to_string(),
+            "Current Emote: [having: no, knowing: yes, empathizing: no].".to_string(),
+            "TARGET: Emote: [having: no, knowing: yes, empathizing: no] Eager.".to_string(),
+            "Route: send to Behavior with urgent biological drive to consume the dropped food item.".to_string(),
+        ];
+        let chat_block = parse_block(&block_lines);
+        assert_eq!(chat_block.memories.len(), 1);
+        assert!(chat_block.memories[0].human.starts_with("Vitals: Hunger 80"));
+        assert!(chat_block.memories[0].human.contains("Current Emote:"));
+        assert!(chat_block.memories[0].bot.starts_with("Emote: [having: no"));
+        assert!(chat_block.memories[0].bot.contains("Route: send to Behavior"));
+    }
+
+    #[test]
+    fn parse_block_preference_triplet_format() {
+        let block_lines = vec![
+            "INPUT: Vitals: Hunger 80, Energy 60, Cleanliness 70, Boredom 40.".to_string(),
+            "Perception: sees food bowl.".to_string(),
+            "Event: Owner drops kibble.".to_string(),
+            "Current Emote: [having: no, knowing: yes, empathizing: no].".to_string(),
+            "CHOSEN: Emote: [having: yes, knowing: yes, empathizing: yes] Content.".to_string(),
+            "Route: send to Behavior with eat kibble from bowl.".to_string(),
+            "REJECTED: Emote: [having: no, knowing: no, empathizing: no] Confused.".to_string(),
+            "Route: send to Reasoning with solve mystery.".to_string(),
+        ];
+        let chat_block = parse_block(&block_lines);
+        assert_eq!(chat_block.memories.len(), 2);
+        // Memory 0 is Chosen
+        assert!(chat_block.memories[0].human.starts_with("Vitals: Hunger 80"));
+        assert!(chat_block.memories[0].bot.starts_with("Emote: [having: yes"));
+        assert!(chat_block.memories[0].bot.contains("Route: send to Behavior"));
+        // Memory 1 is Rejected
+        assert_eq!(chat_block.memories[1].human, chat_block.memories[0].human);
+        assert!(chat_block.memories[1].bot.starts_with("Emote: [having: no"));
+        assert!(chat_block.memories[1].bot.contains("Route: send to Reasoning"));
     }
 }

@@ -27,6 +27,9 @@ pub enum CacheObjective {
     #[default]
     PromptReply,
     RawCode,
+    PretrainCausal,
+    SftInstruction,
+    DpoPreference,
 }
 
 /// Current sample preparation per objective. Pet `plain-text-v1`: ideas, Bible
@@ -35,6 +38,9 @@ fn preparation_tag(objective: CacheObjective) -> &'static str {
     match objective {
         CacheObjective::RawCode => "rust-items-v1",
         CacheObjective::PromptReply => "plain-text-v1",
+        CacheObjective::PretrainCausal => "pretrain-causal-v1",
+        CacheObjective::SftInstruction => "sft-instruction-v1",
+        CacheObjective::DpoPreference => "dpo-preference-v1",
     }
 }
 
@@ -329,6 +335,9 @@ pub fn load_cache_with_objective(
     ensure!(metadata.preparation.as_deref() == Some(preparation_tag(objective)), match objective {
         CacheObjective::RawCode => "code cache uses old chunking; rebuild with cache_samples to use complete Rust items",
         CacheObjective::PromptReply => "Pet cache splits plain text into prompt and reply; rebuild with cache_samples",
+        CacheObjective::PretrainCausal => "Pretraining cache requires whole-sequence causal objective; rebuild with cache_samples",
+        CacheObjective::SftInstruction => "SFT cache requires prompt-masked instruction objective; rebuild with cache_samples",
+        CacheObjective::DpoPreference => "DPO cache requires preference pairs objective; rebuild with cache_samples",
     });
     ensure!(
         metadata.stage == stage,

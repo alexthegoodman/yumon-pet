@@ -249,6 +249,8 @@ pub struct RunConfig {
 
     pub aux_loss_weight: f64,
     pub z_loss_weight: f64,
+    pub init_checkpoint: Option<std::path::PathBuf>,
+    pub dpo_beta: Option<f64>,
 }
 
 /// Number of held-out prompts run through the model every time we do a
@@ -382,6 +384,8 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             tie_embeddings: config.tie_embeddings,
             aux_loss_weight: config.aux_loss_weight,
             z_loss_weight: config.z_loss_weight,
+            init_checkpoint: config.init_checkpoint.clone(),
+            dpo_beta: config.dpo_beta,
         };
         let run_dir = config.out_dir.join(&run.name);
         std::fs::create_dir_all(&run_dir)?;
@@ -822,6 +826,37 @@ fn weighted_token_ce<B: Backend>(
     (per_token * mask).cast(burn::tensor::FloatDType::F32).sum() / supervised.max(1) as f64
 }
 
+/// Direct Preference Optimization (DPO) loss for a batch of preference pairs.
+/// For each pair (chosen, rejected):
+///   pi_ratio_w = pi_chosen - ref_chosen
+///   pi_ratio_l = pi_rejected - ref_rejected
+///   h = beta * (pi_ratio_w - pi_ratio_l)
+///   L_dpo = softplus(-h)
+/// Returns (mean_loss, num_accurate_pairs)
+fn dpo_loss_stable<B: Backend>(
+    pi_chosen_log_prob: Tensor<B, 1>,
+    pi_rejected_log_prob: Tensor<B, 1>,
+    ref_chosen_log_prob: Tensor<B, 1>,
+    ref_rejected_log_prob: Tensor<B, 1>,
+    beta: f64,
+) -> (Tensor<B, 1>, usize) {
+    let pi_ratio_w = pi_chosen_log_prob - ref_chosen_log_prob;
+    let pi_ratio_l = pi_rejected_log_prob - ref_rejected_log_prob;
+    let h = (pi_ratio_w - pi_ratio_l) * beta;
+    let z = h.clone().neg();
+
+    // Numerically stable softplus(z) = max(z, 0) + log(1 + exp(-|z|))
+    let abs_z = z.clone().abs();
+    let neg_abs_z = abs_z.neg();
+    let log_one_plus_exp = (neg_abs_z.exp().add_scalar(1.0)).log();
+    let relu_z = z.clamp_min(0.0);
+    let pair_losses = relu_z + log_one_plus_exp;
+
+    let accurate_count = h.greater_elem(0.0).int().sum().into_scalar().elem::<i64>() as usize;
+
+    (pair_losses.mean().cast(burn::tensor::FloatDType::F32), accurate_count)
+}
+
 /// Global L2 norm of all parameter gradients before clipping, with one readback.
 #[cfg(not(target_arch = "wasm32"))]
 fn global_grad_norm<M: AutodiffModule<TrainBackend>>(model: &M, grads: &GradientsParams) -> f32 {
@@ -927,6 +962,77 @@ fn causal_validation_loss<B: Backend, M: CausalLm<B>>(
     (tokens > 0).then(|| ((total / tokens as f64) as f32, correct as f64 / tokens as f64, tokens))
 }
 
+fn dpo_validation_loss<B: Backend, M: CausalLm<B>>(
+    model:       &M,
+    ref_model:   &M,
+    samples:     &[crate::brain::samples::Sample],
+    sep_tokens:  &[usize],
+    max_seq_len: usize,
+    batch_size:  usize,
+    vocab:       usize,
+    device:      &B::Device,
+    raw_code:    bool,
+    beta:        f64,
+) -> Option<(f32, f64, usize)> {
+    let mut total_loss = 0.0f64;
+    let mut total_accurate = 0usize;
+    let mut total_pairs = 0usize;
+
+    let num_pairs = samples.len() / 2;
+    if num_pairs == 0 { return None; }
+
+    let pair_batch_size = (batch_size / 2).max(1);
+
+    for p in (0..num_pairs).step_by(pair_batch_size) {
+        let pairs_in_batch = pair_batch_size.min(num_pairs - p);
+        let sample_indices: Vec<usize> = (p..p + pairs_in_batch).flat_map(|i| [2 * i, 2 * i + 1]).collect();
+        let (seq_ids, targets, supervised) = build_moe_batch(samples, &sample_indices, sep_tokens, max_seq_len, raw_code);
+        if supervised == 0 { continue; }
+        let n = sample_indices.len();
+        let (seq_ids, targets, cur_len) = trim_batch(seq_ids, targets, n, max_seq_len);
+
+        let tokens_t = Tensor::<B, 2, Int>::from_ints(TensorData::new(seq_ids, [n, cur_len]), device);
+        let targets_t = Tensor::<B, 1, Int>::from_ints(TensorData::new(targets, [n * cur_len]), device);
+
+        let logits = model.logits(tokens_t.clone()).reshape([n * cur_len, vocab]);
+        let ref_logits = ref_model.logits(tokens_t).reshape([n * cur_len, vocab]);
+
+        let log_probs = burn::tensor::activation::log_softmax(logits.cast(burn::tensor::FloatDType::F32), 1);
+        let ref_log_probs = burn::tensor::activation::log_softmax(ref_logits.cast(burn::tensor::FloatDType::F32), 1);
+
+        let target_2d = targets_t.clone().reshape([n * cur_len, 1]);
+        let token_lp = log_probs.gather(1, target_2d.clone()).reshape([n, cur_len]);
+        let ref_token_lp = ref_log_probs.gather(1, target_2d).reshape([n, cur_len]);
+        let mask = targets_t.not_equal_elem(PAD_TOKEN as i32).float().reshape([n, cur_len]);
+
+        let seq_lp = (token_lp * mask.clone()).sum_dim(1).reshape([n]);
+        let ref_seq_lp = (ref_token_lp * mask).sum_dim(1).reshape([n]);
+
+        let seq_lp_2d = seq_lp.reshape([pairs_in_batch, 2]);
+        let pi_chosen = seq_lp_2d.clone().slice([0..pairs_in_batch, 0..1]).reshape([pairs_in_batch]);
+        let pi_rejected = seq_lp_2d.slice([0..pairs_in_batch, 1..2]).reshape([pairs_in_batch]);
+
+        let ref_seq_lp_2d = ref_seq_lp.reshape([pairs_in_batch, 2]);
+        let ref_chosen = ref_seq_lp_2d.clone().slice([0..pairs_in_batch, 0..1]).reshape([pairs_in_batch]);
+        let ref_rejected = ref_seq_lp_2d.slice([0..pairs_in_batch, 1..2]).reshape([pairs_in_batch]);
+
+        let (loss_t, accurate) = dpo_loss_stable(pi_chosen, pi_rejected, ref_chosen, ref_rejected, beta);
+        let loss_val = loss_t.into_data().convert::<f32>().to_vec::<f32>().ok()?[0];
+
+        total_loss += loss_val as f64 * pairs_in_batch as f64;
+        total_accurate += accurate;
+        total_pairs += pairs_in_batch;
+    }
+
+    (total_pairs > 0).then(|| {
+        (
+            (total_loss / total_pairs as f64) as f32,
+            total_accurate as f64 / total_pairs as f64,
+            total_pairs,
+        )
+    })
+}
+
 // ─── Shared causal-LM training loop (MoE and dense decoder-only) ─────────────
 
 type InnerBackend = <TrainBackend as AutodiffBackend>::InnerBackend;
@@ -1030,6 +1136,21 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
                 3 * run_cfg.embed_dim * run_cfg.ff_dim * (top_k + run_cfg.num_shared_experts));
         }
         if !run_dir.join("model.bin").exists() {
+            if let Some(init_path) = &run_cfg.init_checkpoint {
+                println!("Initializing MoE weights from base checkpoint: {}", init_path.display());
+                let (m, checkpoint_tokenizer, saved) = Self::load(init_path.to_str().unwrap(), device)?;
+                anyhow::ensure!(saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
+                    && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
+                    && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
+                    && saved.num_experts == num_experts && saved.top_k == top_k
+                    && saved.adaptive_depth == config.adaptive_depth
+                    && saved.effective_kv_heads() == config.effective_kv_heads()
+                    && saved.num_shared_experts == config.num_shared_experts
+                    && saved.tie_embeddings == config.tie_embeddings,
+                    "Base MoE checkpoint configuration differs from requested fine-tuning run");
+                ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
+                return Ok((m, 0));
+            }
             return Ok((config.init(device), 0));
         }
         let (m, checkpoint_tokenizer, saved) = Self::load(run_dir.to_str().unwrap(), device)?;
@@ -1108,6 +1229,16 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
         println!("Decoder-only: {:.1}M parameters, flash attention, BalancedCheckpointing.",
             config.param_count() as f64 / 1e6);
         if !run_dir.join("model.bin").exists() {
+            if let Some(init_path) = &run_cfg.init_checkpoint {
+                println!("Initializing decoder weights from base checkpoint: {}", init_path.display());
+                let (m, checkpoint_tokenizer, saved) = Self::load(init_path.to_str().unwrap(), device)?;
+                anyhow::ensure!(saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
+                    && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
+                    && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len,
+                    "Base decoder checkpoint configuration differs from requested fine-tuning run");
+                ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
+                return Ok((m, 0));
+            }
             return Ok((config.init(device), 0));
         }
         let (m, checkpoint_tokenizer, saved) = Self::load(run_dir.to_str().unwrap(), device)?;
@@ -1159,6 +1290,16 @@ impl CausalLmTrain for YumonReferenceBrain<TrainBackend> {
             .with_max_seq_len(run_cfg.max_seq_len).with_dropout_rate(run_cfg.dropout_rate);
         println!("Reference: stock burn::nn::transformer, learned positions, LayerNorm; no flash attention or RoPE.");
         if !run_dir.join("model.bin").exists() {
+            if let Some(init_path) = &run_cfg.init_checkpoint {
+                println!("Initializing decoder weights from base checkpoint: {}", init_path.display());
+                let (m, checkpoint_tokenizer, saved) = Self::load(init_path.to_str().unwrap(), device)?;
+                anyhow::ensure!(saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
+                    && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
+                    && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len,
+                    "Base decoder checkpoint configuration differs from requested fine-tuning run");
+                ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
+                return Ok((m, 0));
+            }
             return Ok((config.init(device), 0));
         }
         let (m, checkpoint_tokenizer, saved) = Self::load(run_dir.to_str().unwrap(), device)?;
@@ -1303,12 +1444,19 @@ where
 {
     let is_prepared = prepared_code.is_some();
     let raw_code = prepared_code.as_ref().map_or(false, |p| p.objective == crate::brain::sample_cache::CacheObjective::RawCode);
+    let is_dpo = prepared_code.as_ref().map_or(false, |p| p.objective == crate::brain::sample_cache::CacheObjective::DpoPreference);
 
-    println!("raw_code: {:?}", raw_code);
+    println!("raw_code: {:?}, is_dpo: {:?}", raw_code, is_dpo);
 
     let is_yumon_talk = is_yumon_talk_run(&run_cfg.name, tokenizer, raw_code);
     let run_dir_str = run_dir.to_str().unwrap();
     let (mut model, mut epochs_already_done) = M::init_or_resume(run_cfg, tokenizer, run_dir, device)?;
+    let ref_model: Option<M> = if is_dpo {
+        println!("Cloning frozen reference model for DPO preference optimization...");
+        Some(model.clone())
+    } else {
+        None
+    };
     if is_prepared && epochs_already_done >= run_cfg.stages[0].epochs {
         println!("Epoch budget already completed: {epochs_already_done}");
         return Ok(());
@@ -1317,6 +1465,10 @@ where
     'stage_loop: for (stage_idx, stage_cfg) in run_cfg.stages.iter().enumerate() {
         model.set_stage(stage_cfg.stage);
         println!("\n🔨 Stage {}: {:?}", stage_idx + 1, stage_cfg.stage);
+
+        if is_dpo {
+            anyhow::ensure!(stage_cfg.batch_size % 2 == 0, "DPO training requires an even batch size (pairs of chosen/rejected)");
+        }
 
         let epoch_indices = prepared_code.as_ref().map(|p| (0..stage_cfg.epochs).map(|e| p.epoch_indices(e)).collect::<Vec<_>>());
         let epoch_seed = prepared_code.as_ref().map(|p| p.seed);
@@ -1330,6 +1482,9 @@ where
             let validation = samples.split_off(samples.len() - count);
             (samples, validation)
         };
+        if is_dpo {
+            anyhow::ensure!(training_samples.len() % 2 == 0, "DPO training requires an even number of training samples (chosen/rejected pairs)");
+        }
         println!("Training samples: {}, validation samples: {}", training_samples.len(), val_samples.len());
 
         for (i, sample) in training_samples.iter().enumerate() {
@@ -1428,6 +1583,22 @@ where
         // Held-out loss; with adaptive loss also unweighted CE by training frequency
         // and by occurrence context, appended to adaptive_loss.jsonl.
         let validate = |model: &M::InnerModule, epoch: usize, step: usize, print: bool| -> Result<Option<(f32, f64, usize)>> {
+            if is_dpo {
+                let ref_valid = ref_model.as_ref().unwrap().valid();
+                let beta = run_cfg.dpo_beta.unwrap_or(0.1);
+                return Ok(dpo_validation_loss(
+                    model,
+                    &ref_valid,
+                    &val_samples,
+                    &sep_tokens,
+                    run_cfg.max_seq_len,
+                    stage_cfg.batch_size,
+                    vocab,
+                    device,
+                    raw_code,
+                    beta,
+                ));
+            }
             let (Some(buckets), Some(labeler)) = (frequency_buckets.as_ref(), labeler.as_ref()) else {
                 return Ok(causal_validation_loss(model, &val_samples, &sep_tokens, run_cfg.max_seq_len,
                     stage_cfg.batch_size, vocab, device, raw_code, None));
@@ -1454,12 +1625,24 @@ where
         let epoch_offset = if is_prepared { 0 } else { epochs_already_done };
         'epoch_loop: for epoch in start_epoch..stage_cfg.epochs {
             state.epoch = epoch + 1;
-            let mut idx: Vec<usize> = epoch_indices.as_ref()
-                .map_or_else(|| (0..training_samples.len()).collect(), |all| all[epoch].clone());
+            let mut idx: Vec<usize> = if is_dpo {
+                let num_pairs = training_samples.len() / 2;
+                let mut pair_idx: Vec<usize> = (0..num_pairs).collect();
+                if let Some(seed) = epoch_seed {
+                    pair_idx.shuffle(&mut StdRng::seed_from_u64(seed.wrapping_add(epoch as u64)));
+                } else {
+                    pair_idx.shuffle(&mut rng);
+                }
+                pair_idx.into_iter().flat_map(|p| [2 * p, 2 * p + 1]).collect()
+            } else {
+                let mut idx_list: Vec<usize> = epoch_indices.as_ref()
+                    .map_or_else(|| (0..training_samples.len()).collect(), |all| all[epoch].clone());
+                if let Some(seed) = epoch_seed {
+                    idx_list.shuffle(&mut StdRng::seed_from_u64(seed.wrapping_add(epoch as u64)));
+                } else { idx_list.shuffle(&mut rng); }
+                idx_list
+            };
             let epoch_samples = idx.len();
-            if let Some(seed) = epoch_seed {
-                idx.shuffle(&mut StdRng::seed_from_u64(seed.wrapping_add(epoch as u64)));
-            } else { idx.shuffle(&mut rng); }
             let num_batches = idx.len().div_ceil(stage_cfg.batch_size);
             state.total_batches = num_batches;
             
@@ -1497,14 +1680,6 @@ where
                     depth_window.0.iter_mut().zip(&reach).for_each(|(sum, r)| *sum += r);
                     depth_window.1 += 1;
                 }
-                let correct = top3_correct(
-                    token_logits.clone().inner().reshape([current_batch_size * seq_len, vocab]),
-                    lang_target_t.clone().inner(),
-                );
-                epoch_top3_correct += correct;
-                epoch_supervised += supervised;
-                let top3 = correct as f64 / supervised as f64;
-
                 // Entropy, on detached logits so none of its [batch, seq, vocab]
                 // intermediates join the autodiff graph.
                 let log_probs = burn::tensor::activation::log_softmax(token_logits.clone().detach(), 2);
@@ -1519,9 +1694,6 @@ where
                     .into_data().convert::<f32>().to_vec::<f32>().unwrap()[0];
 
                 // Loss
-                let logits_2d = token_logits.reshape([current_batch_size * seq_len, vocab]);
-                // Weights come only from completed windows; lambda 0 (warm-up or
-                // disabled) keeps the plain masked CE path exactly.
                 let bookkeeping = std::time::Instant::now();
                 let lambda = adaptive.as_ref().map_or(0.0, |a| a.config.lambda_at(step, total_steps));
                 let labels = labeler.as_ref().map(|l| l.label(&targets_cpu, seq_len));
@@ -1535,7 +1707,52 @@ where
                 let rows = current_batch_size * seq_len;
                 let row_weights_t = row_weights.map(|w| Tensor::<TrainBackend, 1>::from_floats(TensorData::new(w, [rows]), device));
                 window.overhead += bookkeeping.elapsed();
-                let lang_loss = weighted_token_ce(logits_2d, lang_target_t, row_weights_t, supervised, stage_cfg.smoothing);
+
+                let (lang_loss, accurate_pairs) = if is_dpo {
+                    let (ref_token_logits, _) = ref_model.as_ref().unwrap().forward_train(tokens_t.clone());
+                    let ref_token_logits = ref_token_logits.detach();
+
+                    let log_probs = burn::tensor::activation::log_softmax(token_logits.clone().reshape([current_batch_size * seq_len, vocab]), 1);
+                    let target_2d = lang_target_t.clone().reshape([current_batch_size * seq_len, 1]);
+                    let token_lp = log_probs.gather(1, target_2d.clone()).reshape([current_batch_size, seq_len]);
+                    let mask = lang_target_t.clone().not_equal_elem(PAD_TOKEN as i32).float().reshape([current_batch_size, seq_len]);
+                    let policy_seq_lp = (token_lp * mask.clone()).sum_dim(1).reshape([current_batch_size]);
+
+                    let ref_log_probs = burn::tensor::activation::log_softmax(ref_token_logits.reshape([current_batch_size * seq_len, vocab]), 1);
+                    let ref_token_lp = ref_log_probs.gather(1, target_2d).reshape([current_batch_size, seq_len]);
+                    let ref_seq_lp = (ref_token_lp * mask).sum_dim(1).reshape([current_batch_size]);
+
+                    let pairs_in_batch = (current_batch_size / 2).max(1);
+                    let seq_lp_2d = policy_seq_lp.reshape([pairs_in_batch, 2]);
+                    let pi_chosen = seq_lp_2d.clone().slice([0..pairs_in_batch, 0..1]).reshape([pairs_in_batch]);
+                    let pi_rejected = seq_lp_2d.slice([0..pairs_in_batch, 1..2]).reshape([pairs_in_batch]);
+
+                    let ref_seq_lp_2d = ref_seq_lp.reshape([pairs_in_batch, 2]);
+                    let ref_chosen = ref_seq_lp_2d.clone().slice([0..pairs_in_batch, 0..1]).reshape([pairs_in_batch]);
+                    let ref_rejected = ref_seq_lp_2d.slice([0..pairs_in_batch, 1..2]).reshape([pairs_in_batch]);
+
+                    let beta = run_cfg.dpo_beta.unwrap_or(0.1);
+                    dpo_loss_stable(pi_chosen, pi_rejected, ref_chosen, ref_rejected, beta)
+                } else {
+                    let logits_2d = token_logits.clone().reshape([current_batch_size * seq_len, vocab]);
+                    let loss = weighted_token_ce(logits_2d, lang_target_t.clone(), row_weights_t, supervised, stage_cfg.smoothing);
+                    (loss, 0)
+                };
+
+                let top3 = if is_dpo {
+                    let pairs_in_batch = (current_batch_size / 2).max(1);
+                    epoch_top3_correct += accurate_pairs;
+                    epoch_supervised += pairs_in_batch;
+                    accurate_pairs as f64 / pairs_in_batch as f64
+                } else {
+                    let correct = top3_correct(
+                        token_logits.clone().inner().reshape([current_batch_size * seq_len, vocab]),
+                        lang_target_t.clone().inner(),
+                    );
+                    epoch_top3_correct += correct;
+                    epoch_supervised += supervised;
+                    correct as f64 / supervised as f64
+                };
 
                 let total_loss = lang_loss.clone() + aux_loss.cast(burn::tensor::FloatDType::F32);
                 let grads = GradientsParams::from_grads(total_loss.backward(), &model);
@@ -1547,7 +1764,13 @@ where
                 // Charts, epoch loss and metadata stay on unweighted CE for comparability.
                 let ce_sum: f64 = targets_cpu.iter().zip(&token_nll)
                     .filter(|(t, _)| **t != PAD_TOKEN as i32).map(|(_, &l)| l as f64).sum();
-                let loss_val = if lambda > 0.0 { (ce_sum / supervised as f64) as f32 } else { lang_val };
+                let loss_val = if is_dpo {
+                    lang_val
+                } else if lambda > 0.0 {
+                    (ce_sum / supervised as f64) as f32
+                } else {
+                    lang_val
+                };
                 if let Some(a) = adaptive.as_mut() {
                     let bookkeeping = std::time::Instant::now();
                     window.ce += ce_sum;
@@ -1921,6 +2144,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     tie_embeddings: false,
                                     aux_loss_weight: 0.01,
                                     z_loss_weight: 0.001,
+                                    init_checkpoint: None,
+                                    dpo_beta: None,
                                 });
                             }
                         }
@@ -3057,6 +3282,38 @@ mod moe_loss_tests {
             .forward(logits, targets)
             .into_scalar();
         assert!((burn * 4.0 / 2.0 - expected).abs() < 1e-5, "{burn} vs {expected}");
+    }
+
+    #[test]
+    fn dpo_loss_preference_direction_and_accuracy() {
+        let device = Default::default();
+        // Case 1: Policy prefers chosen much more than ref (good preference alignment)
+        let pi_chosen = Tensor::<B, 1>::from_floats([-1.0], &device);
+        let pi_rejected = Tensor::<B, 1>::from_floats([-4.0], &device);
+        let ref_chosen = Tensor::<B, 1>::from_floats([-3.0], &device);
+        let ref_rejected = Tensor::<B, 1>::from_floats([-2.0], &device);
+        let (loss_good, acc_good) = dpo_loss_stable(pi_chosen, pi_rejected, ref_chosen, ref_rejected, 1.0);
+        let val_good: f32 = loss_good.into_scalar();
+        assert_eq!(acc_good, 1);
+        assert!(val_good < 0.05, "expected low loss for aligned policy: {val_good}");
+
+        // Case 2: Policy prefers rejected (misaligned preference)
+        let pi_chosen_bad = Tensor::<B, 1>::from_floats([-4.0], &device);
+        let pi_rejected_bad = Tensor::<B, 1>::from_floats([-1.0], &device);
+        let ref_chosen_bad = Tensor::<B, 1>::from_floats([-2.0], &device);
+        let ref_rejected_bad = Tensor::<B, 1>::from_floats([-3.0], &device);
+        let (loss_bad, acc_bad) = dpo_loss_stable(pi_chosen_bad, pi_rejected_bad, ref_chosen_bad, ref_rejected_bad, 1.0);
+        let val_bad: f32 = loss_bad.into_scalar();
+        assert_eq!(acc_bad, 0);
+        assert!(val_bad > 3.9, "expected high loss for misaligned policy: {val_bad}");
+        assert!(val_bad > val_good);
+
+        // Case 3: Policy matches reference exactly -> loss = ln(2) ≈ 0.693147
+        let pi_same = Tensor::<B, 1>::from_floats([-2.0], &device);
+        let ref_same = Tensor::<B, 1>::from_floats([-2.0], &device);
+        let (loss_neutral, _) = dpo_loss_stable(pi_same.clone(), pi_same.clone(), ref_same.clone(), ref_same, 1.0);
+        let val_neutral: f32 = loss_neutral.into_scalar();
+        assert!((val_neutral - 0.693147).abs() < 1e-4, "expected ln(2) for neutral policy: {val_neutral}");
     }
 
     /// Adaptive loss: sum(a * CE) / supervised, PAD ignored, unit weights equal

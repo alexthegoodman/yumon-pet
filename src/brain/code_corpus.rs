@@ -100,6 +100,13 @@ pub struct CodeConfig {
 
     pub aux_loss_weight: f64,
     pub z_loss_weight: f64,
+    /// Path to a pretrained base checkpoint directory or model to initialize weights from
+    /// for SFT or post-training without requiring cache identity match.
+    #[serde(default)]
+    pub init_checkpoint: Option<PathBuf>,
+    /// Temperature hyperparameter beta for Direct Preference Optimization (DPO). Default is 0.1.
+    #[serde(default)]
+    pub dpo_beta: Option<f64>,
 }
 
 impl Default for CodeConfig {
@@ -117,6 +124,8 @@ impl Default for CodeConfig {
             overfit_samples: None, heatmap_every: 250, adaptive_loss: None, adaptive_depth: None, kv_heads: None,
             aux_loss_weight: 0.01,
             z_loss_weight: 0.001,
+            init_checkpoint: None,
+            dpo_beta: None,
         }
     }
 }
@@ -168,6 +177,9 @@ impl CodeConfig {
         }
         if self.num_shared_experts > 0 {
             ensure!(self.architecture == CodeArchitecture::Moe, "num_shared_experts requires architecture \"moe\"");
+        }
+        if let Some(init) = &self.init_checkpoint {
+            ensure!(init.exists(), "init_checkpoint path does not exist: {}", init.display());
         }
         Ok(())
     }

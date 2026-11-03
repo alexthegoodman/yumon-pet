@@ -64,6 +64,18 @@ struct Args {
     /// Print metadata for an existing output file without loading corpora or a tokenizer.
     #[arg(long)]
     inspect: bool,
+    /// Comma-separated list of text/chat files to cache.
+    #[arg(long, value_delimiter = ',')]
+    files: Option<Vec<std::path::PathBuf>>,
+    /// Source file or directory of text files to cache.
+    #[arg(long, alias = "data-dir")]
+    dataset: Option<std::path::PathBuf>,
+    /// Cache objective: "prompt_reply" (default), "pretrain", "sft", "dpo".
+    #[arg(long, default_value = "prompt_reply")]
+    objective: String,
+    /// Overwrite existing output cache.
+    #[arg(long, short = 'f')]
+    force: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -126,18 +138,51 @@ fn main() -> Result<()> {
         return Ok(());
     }
     anyhow::ensure!(args.max_seq_len >= 2, "--max-seq-len must be at least 2");
-    anyhow::ensure!(
-        !args.output.exists(),
-        "{} already exists; choose a new --output",
-        args.output.display()
-    );
+    if args.output.exists() {
+        if args.force {
+            std::fs::remove_file(&args.output)?;
+        } else {
+            anyhow::bail!("{} already exists; pass --force to overwrite", args.output.display());
+        }
+    }
     let stage = match args.stage {
         Stage::Language => TrainingStage::Language,
         Stage::Structured => TrainingStage::Structured,
     };
+    let objective = match args.objective.to_lowercase().as_str() {
+        "prompt_reply" | "prompt-reply" => sample_cache::CacheObjective::PromptReply,
+        "pretrain" | "pretrain_causal" | "pretrain-causal" => sample_cache::CacheObjective::PretrainCausal,
+        "sft" | "sft_instruction" | "sft-instruction" => sample_cache::CacheObjective::SftInstruction,
+        "dpo" | "dpo_preference" | "dpo-preference" => sample_cache::CacheObjective::DpoPreference,
+        "code" | "raw_code" | "raw-code" => sample_cache::CacheObjective::RawCode,
+        other => anyhow::bail!("unknown objective '{other}'; choose prompt_reply, pretrain, sft, dpo"),
+    };
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load(&args.tokenizer)?);
     let keyword_index = build_keyword_index(&build_label_keywords());
-    let mut loader = stage_data_loader(stage).seed(args.seed);
+    let mut loader = if let Some(files) = &args.files {
+        let mut l = yumon_pet::brain::loader::DataLoader::new(stage).seed(args.seed);
+        for f in files {
+            anyhow::ensure!(f.exists(), "input file does not exist: {}", f.display());
+            l = l.add(f.to_string_lossy().to_string(), yumon_pet::brain::loader::FileKind::Chats, None);
+        }
+        l
+    } else if let Some(source) = &args.dataset {
+        let mut l = yumon_pet::brain::loader::DataLoader::new(stage).seed(args.seed);
+        if source.is_dir() {
+            for entry in std::fs::read_dir(source)? {
+                let path = entry?.path();
+                if path.extension().map_or(false, |ext| ext == "txt" || ext == "csv") {
+                    l = l.add(path.to_string_lossy().to_string(), yumon_pet::brain::loader::FileKind::Chats, None);
+                }
+            }
+        } else {
+            anyhow::ensure!(source.exists(), "source file does not exist: {}", source.display());
+            l = l.add(source.to_string_lossy().to_string(), yumon_pet::brain::loader::FileKind::Chats, None);
+        }
+        l
+    } else {
+        stage_data_loader(stage).seed(args.seed)
+    };
     if let Some(limit) = args.limit {
         loader = loader.total_limit(limit);
     }
@@ -151,13 +196,14 @@ fn main() -> Result<()> {
         println!("target: {}", tokenizer.decode(&sample.target_labels));
     }
 
-    let metadata = sample_cache::write_cache(
+    let metadata = sample_cache::write_cache_with_objective(
         &args.output,
         &tokenizer,
         stage,
         args.max_seq_len,
         args.seed,
         &samples,
+        objective,
     )?;
     println!(
         "Cached {} samples to {} ({:.1} MiB) in {:.1}s",

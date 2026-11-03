@@ -257,3 +257,41 @@ You can process all images or pass --limit (e.g. --limit 10000 or omit --limit f
 Definitely adjust the settings to your liking.
 
 `cargo run --release --bin yumon_paint -- --checkpoint-pass1 checkpoints/yumon-art-pass1-db --checkpoint-pass2 checkpoints/yumon-art-pass2-db --checkpoint-pass3 checkpoints/yumon-art-pass3-db --passes 3 --prompt "a dog flying in the sky" --temperature 1.2 --top-p 0.85 --top-k 32`
+
+# DPO / RLHF
+
+Run these commands directly in your terminal to monitor live token throughput, validation steps, and Ratatui training charts.
+
+#### Step 1: Synthetic Dataset Generation (Qwen Endpoints)
+
+1. SFT Instruction Generation:
+   `cargo run --release --bin gen_synthetic_v2 -- --domain all --count 3000 --out-dir data/synthetic_v2`
+
+2. DPO Preference Pair Generation (generates contrastive INPUT:, CHOSEN:, REJECTED: triplets with domain-specific validations):
+   `cargo run --release --bin gen_synthetic_v2 -- --mode preference --domain all --count 1500 --out-dir data/dpo`
+
+──────
+#### Step 2: Multi-Stage Caching (Raw BPE → Kilo Talk)
+
+1. Cache SFT Instructions:
+   `cargo run --release --bin cache_samples -- --dataset data/synthetic_v2 --output training-cache/sft/sft_samples.bin --objective sft --max-seq-len 512 --force`
+   `cargo run --release --bin cache_yumon_talk -- --input-cache training-cache/sft/sft_samples.bin --output training-cache/sft/kilo_sft.bin --vocab training-cache/kilo_talk_vocab.json --max-seq-len 512 --force`
+
+2. Cache DPO Preferences (atomic pairwise conversion ensures chosen and rejected never desynchronize):
+   `cargo run --release --bin cache_samples -- --dataset data/dpo --output training-cache/dpo/dpo_samples.bin --objective dpo --max-seq-len 512 --force`
+   `cargo run --release --bin cache_yumon_talk -- --input-cache training-cache/dpo/dpo_samples.bin --output training-cache/dpo/kilo_dpo.bin --vocab training-cache/kilo_talk_vocab.json --max-seq-len 512 --force`
+
+──────
+#### Step 3: Model Training Execution
+
+1. Base MoE Foundation:
+   • The existing checkpoint model.bin (final loss 3.61) is already configured as the default starting weights.
+   • (Optional) To pretrain a new base MoE from scratch:
+      `cargo run --release --bin train_code -- --config configs/yumon-moe-base-pretrain.json`
+
+2. Supervised Fine-Tuning (SFT):
+   `cargo run --release --bin train_code -- --config configs/yumon-moe-sft.json`
+Output Checkpoint: checkpoints/yumon-v2-sft/model.bin
+3. Direct Preference Optimization (DPO):
+   `cargo run --release --bin train_code -- --config configs/yumon-moe-dpo.json`
+(To align directly from the newly trained SFT checkpoint, set "init_checkpoint": "checkpoints/yumon-v2-sft/..." in yumon-moe-dpo.json.)

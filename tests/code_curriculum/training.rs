@@ -67,6 +67,8 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
             tie_embeddings: false,
             aux_loss_weight: 0.01,
             z_loss_weight: 0.001,
+            init_checkpoint: None,
+            dpo_beta: None,
         };
         let path = directory.join(&run.name);
         std::fs::create_dir_all(&path)?;

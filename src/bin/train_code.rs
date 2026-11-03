@@ -26,12 +26,18 @@ fn main() -> anyhow::Result<()> {
         /// Tie input embeddings to the output token head (weight tying).
         #[arg(long)]
         tie_embeddings: Option<bool>,
+        /// Initialize weights from a base model directory or checkpoint for fine-tuning.
+        #[arg(long)]
+        init_checkpoint: Option<std::path::PathBuf>,
     }
     let args = Args::parse();
     if args.smoke_test {
         return yumon_pet::brain::train::cuda_moe_smoke_test();
     }
     let mut config = CodeConfig::load(&args.config)?;
+    if let Some(init) = args.init_checkpoint {
+        config.init_checkpoint = Some(init);
+    }
     if let Some(shared) = args.num_shared_experts {
         config.num_shared_experts = shared;
     }

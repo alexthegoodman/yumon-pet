@@ -421,22 +421,61 @@ fn main() -> Result<()> {
     let mut empty_count = 0;
     let mut roundtrip_failed_count = 0;
 
-    for res in results {
-        match res {
-            ConversionResult::Converted { sample, preview } => {
-                if let Some(prev) = preview {
-                    if preview_list.len() < args.preview_samples {
-                        preview_list.push(prev);
+    let is_dpo = input_meta.objective == sample_cache::CacheObjective::DpoPreference;
+    if is_dpo {
+        ensure!(results.len() % 2 == 0, "DPO preference input cache must contain an even number of samples (chosen/rejected pairs)");
+        for pair in results.chunks_exact(2) {
+            match (&pair[0], &pair[1]) {
+                (
+                    ConversionResult::Converted { sample: s1, preview: p1 },
+                    ConversionResult::Converted { sample: s2, preview: p2 },
+                ) => {
+                    if let Some(prev) = p1 {
+                        if preview_list.len() < args.preview_samples {
+                            preview_list.push(prev.clone());
+                        }
+                    }
+                    if let Some(prev) = p2 {
+                        if preview_list.len() < args.preview_samples {
+                            preview_list.push(prev.clone());
+                        }
+                    }
+                    yumon_samples.push(s1.clone());
+                    yumon_samples.push(s2.clone());
+                }
+                (r1, r2) => {
+                    for r in [r1, r2] {
+                        match r {
+                            ConversionResult::SkippedUnk => unk_token_count += 1,
+                            ConversionResult::SkippedTooManyNames => too_many_names_count += 1,
+                            ConversionResult::SkippedTooManySlots => too_many_slots_count += 1,
+                            ConversionResult::SkippedRoundtripFailed => roundtrip_failed_count += 1,
+                            ConversionResult::SkippedOversized => oversized_count += 1,
+                            ConversionResult::SkippedEmpty => empty_count += 1,
+                            ConversionResult::Converted { .. } => {}
+                        }
                     }
                 }
-                yumon_samples.push(sample);
             }
-            ConversionResult::SkippedUnk => unk_token_count += 1,
-            ConversionResult::SkippedTooManyNames => too_many_names_count += 1,
-            ConversionResult::SkippedTooManySlots => too_many_slots_count += 1,
-            ConversionResult::SkippedRoundtripFailed => roundtrip_failed_count += 1,
-            ConversionResult::SkippedOversized => oversized_count += 1,
-            ConversionResult::SkippedEmpty => empty_count += 1,
+        }
+    } else {
+        for res in results {
+            match res {
+                ConversionResult::Converted { sample, preview } => {
+                    if let Some(prev) = preview {
+                        if preview_list.len() < args.preview_samples {
+                            preview_list.push(prev);
+                        }
+                    }
+                    yumon_samples.push(sample);
+                }
+                ConversionResult::SkippedUnk => unk_token_count += 1,
+                ConversionResult::SkippedTooManyNames => too_many_names_count += 1,
+                ConversionResult::SkippedTooManySlots => too_many_slots_count += 1,
+                ConversionResult::SkippedRoundtripFailed => roundtrip_failed_count += 1,
+                ConversionResult::SkippedOversized => oversized_count += 1,
+                ConversionResult::SkippedEmpty => empty_count += 1,
+            }
         }
     }
 

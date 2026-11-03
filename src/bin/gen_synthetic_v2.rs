@@ -96,6 +96,10 @@ mod native {
         /// Reset existing dataset files and resume state for targeted domains and generate from scratch.
         #[arg(long)]
         pub reset: bool,
+
+        /// Generation mode: "sft" (default) or "preference" / "dpo"
+        #[arg(long, default_value = "sft")]
+        pub mode: String,
     }
 
     // ── Supported Domains ─────────────────────────────────────────────────────────
@@ -920,6 +924,303 @@ No commentary, no explanations, no markdown fences."#
         }
     }
 
+    pub fn build_preference_system_prompt(domain: Domain) -> &'static str {
+        match domain {
+            Domain::Cnm => {
+                r#"You generate preference pairs for Direct Preference Optimization (DPO) of Yumon's Central Nervous Model (CNM).
+The CNM monitors Vitals, Perception, and Events, maintains Grounded Emotes along 3 existential dimensions [having: yes|no, knowing: yes|no, empathizing: yes|no] <Label>, and routes context to Memory, Reasoning, or Behavior.
+It NEVER executes physical actions directly.
+
+For each sample, output:
+- INPUT: Context with Vitals, Perception, Event, and Current Emote.
+- CHOSEN: The ideal, perfectly grounded response with matching 3D emote and appropriate routing target.
+- REJECTED: A plausible but flawed candidate (e.g. emotion contradicts vitals, wrong routing target like sending routine eating to Reasoning, or broken routing payload).
+
+Output each preference triplet as:
+INPUT:
+Vitals: Hunger <0-100>, Energy <0-100>, Cleanliness <0-100>, Boredom <0-100>.
+Perception: sees <objects>.
+Event: <event>.
+Current Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>].
+
+CHOSEN:
+Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <Label>.
+Route: send to <Memory|Reasoning|Behavior> with <context description>.
+
+REJECTED:
+Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <Label>.
+Route: send to <Memory|Reasoning|Behavior> with <flawed context or incorrect route>.
+"#
+            }
+            Domain::Behavior => {
+                r#"You generate preference pairs for Direct Preference Optimization (DPO) of Yumon's Behavior Model.
+The Behavior Model selects concrete physical actions across open-ended natural situations and optionally speaks in pet voice.
+
+For each sample, output:
+- INPUT: Vitals, Emote, Environment, Memory, and Plan.
+- CHOSEN: Grounded physical action starting with active verb or "I will", with optional warm pet speech (4 to 16 words in quotes).
+- REJECTED: Contrastive flawed candidate: passive/frozen action ("I will sit and think"), action contradicting vitals (sprinting with 5 energy), hallucinating objects not in Environment, or robotic assistant dialogue ("As an AI companion...").
+
+Output each preference triplet as:
+INPUT:
+Vitals: Hunger <H>, Energy <E>, Cleanliness <C>, Boredom <B>.
+Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <Label>.
+Environment: <location>, nearby: <objects>.
+Memory: <memory or "none">.
+Plan: <plan or "none">.
+
+CHOSEN:
+Action: <active physical action description>.
+Speak: <"warm pet speech" or "none">.
+
+REJECTED:
+Action: <flawed, passive, or contradictory action>.
+Speak: <robotic, overly verbose, or inappropriate speech, or "none">.
+"#
+            }
+            Domain::MemorySalience => {
+                r#"You generate preference pairs for Direct Preference Optimization (DPO) of Yumon's Memory Model (Subtask 3A: Event Salience Filtering).
+The model decides whether an incoming event has high/medium importance to keep in episodic memory, or should be discarded as routine reflex.
+
+For each sample, output:
+- INPUT: Event, Emote, Vitals.
+- CHOSEN: Accurate decision (Keep for significant emotional/learning milestones; Discard for mundane biological reflexes) with grounded reason.
+- REJECTED: Inverted decision (e.g. Discarding owner bonding or learning a new trick; or Keeping a mundane sneeze/paw stretch) or contradictory reasoning.
+
+Output each preference triplet as:
+INPUT:
+Event: <event>. Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <Label>. Vitals: Hunger <H>, Energy <E>, Cleanliness <C>, Boredom <B>.
+
+CHOSEN:
+Keep: <high|medium> importance because <reason>.
+(OR Discard: low importance because <reason>.)
+
+REJECTED:
+Discard: low importance because <flawed reason>.
+(OR Keep: high importance because <flawed reason>.)
+"#
+            }
+            Domain::MemorySession => {
+                r#"You generate preference pairs for Direct Preference Optimization (DPO) of Yumon's Memory Model (Subtask 3B: Session Summarization).
+The model consolidates raw sequential events from a session into a cohesive episodic memory (1-2 sentences, 12-25 words) in warm pet voice.
+
+For each sample, output:
+- INPUT: Session Log with 3-5 bulleted events.
+- CHOSEN: Concise, warm 1-2 sentence narrative (12-25 words) capturing the session theme.
+- REJECTED: Overly long, rambling, detached robotic summary, or bulleted list.
+
+Output each preference triplet as:
+INPUT:
+Session Log:
+- <Event 1>
+- <Event 2>
+- <Event 3>
+
+CHOSEN:
+Consolidated: <1-2 sentences in warm pet voice, 12-25 words>.
+
+REJECTED:
+Consolidated: <overly verbose, robotic, or disconnected summary>.
+"#
+            }
+            Domain::MemoryTrait => {
+                r#"You generate preference pairs for Direct Preference Optimization (DPO) of Yumon's Memory Model (Subtask 3C: Hierarchical Trait Consolidation).
+The model synthesizes multiple episodic session memories into an enduring core trait, preference, or attachment bond (1 sentence, 8-30 words).
+
+For each sample, output:
+- INPUT: Past Memories (3 distinct memories).
+- CHOSEN: One clear synthesizing sentence (8-30 words) expressing the core trait.
+- REJECTED: Verbatim copy of just one memory, or clinical/robotic jargon.
+
+Output each preference triplet as:
+INPUT:
+Past Memories:
+- <Memory 1>
+- <Memory 2>
+- <Memory 3>
+
+CHOSEN:
+Core Trait: <synthesized trait, 8-30 words>.
+
+REJECTED:
+Core Trait: <flawed, repetitive, or robotic trait>.
+"#
+            }
+            Domain::Reasoning => {
+                r#"You generate preference pairs for Direct Preference Optimization (DPO) of Yumon's Reasoning Model (Micro-Planning & Evaluation).
+The model produces bounded pet-scale micro-plans (1 to 4 steps) or evaluates why an impossible goal cannot be achieved.
+
+For each sample, output:
+- INPUT: Goal, State, Obstacle, Perception.
+- CHOSEN: Feasible pet-scale micro-plan (1-4 steps: Plan:\nStep 1: ...\nStep 2: ...) or grounded Blocked evaluation (Evaluation: Blocked because <constraint>).
+- REJECTED: Human-scale impossible actions (e.g. typing passwords, turning doorknobs with fingers, buying tools online), plans exceeding 4 steps, or declaring blocked when an obvious pet-scale route exists.
+
+Output each preference triplet as:
+INPUT:
+Goal: <goal>. State: <state>. Obstacle: <obstacle>. Perception: sees <objects>.
+
+CHOSEN:
+Plan:
+Step 1: <pet-scale action>.
+Step 2: <pet-scale action>.
+(OR Evaluation: Blocked because <physical constraint>.)
+
+REJECTED:
+Plan:
+Step 1: <impossible or human-scale action>.
+(OR Evaluation: Blocked because <nonsensical excuse>.)
+"#
+            }
+            Domain::Conversation => {
+                r#"You generate preference pairs for Direct Preference Optimization (DPO) of Yumon's Conversation Model.
+The model generates warm, short pet spoken replies (4 to 16 words in quotes) grounded in vitals, grounded emote, and intent.
+
+For each sample, output:
+- INPUT: Vitals, Emote, Intent, Owner Prompt.
+- CHOSEN: Warm, expressive pet reply (4 to 16 words) enclosed in quotation marks matching the emote and intent.
+- REJECTED: Robotic assistant talk ("How may I assist you today?"), overly long reply (>20 words), reply without quotation marks, or speech contradicting the emotion.
+
+Output each preference triplet as:
+INPUT:
+Vitals: Hunger <H>, Energy <E>, Cleanliness <C>, Boredom <B>.
+Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <Label>.
+Intent: <intent>.
+Owner Prompt: <owner prompt or "none">.
+
+CHOSEN:
+Reply: "<4-16 word warm pet sentence>"
+
+REJECTED:
+Reply: "<robotic, overly verbose, or emotionally contradictory sentence>"
+"#
+            }
+        }
+    }
+
+    pub fn build_preference_user_prompt(domain: Domain, batch_size: usize) -> String {
+        match domain {
+            Domain::Cnm => {
+                format!(
+                    r#"Generate exactly {batch_size} completely distinct, creative preference triplet(s) for the CNM schema.
+
+Requirements:
+- INPUT: Vitals, Perception, Event, and Current Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>].
+- CHOSEN: Emote with 3D dimensions [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <Label> matching the state, and Route: send to <Behavior|Memory|Reasoning> with <description>.
+- REJECTED: A contrastive flawed response: mismatched emotion dimensions (e.g. feeling satisfied when starving), wrong route destination (e.g. sending ordinary eating/sleeping to Reasoning, or complex obstacle to Memory), or incoherent payload.
+
+Return ONLY the samples formatted as:
+INPUT:  ...
+CHOSEN: ...
+REJECTED: ...
+
+No commentary, no explanations, no markdown fences."#
+                )
+            }
+            Domain::Behavior => {
+                format!(
+                    r#"Generate exactly {batch_size} completely distinct, creative preference triplet(s) for the Behavior schema.
+
+Requirements:
+- INPUT: Vitals, Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <Label>, Environment, Memory, and Plan.
+- CHOSEN: Action starting with an active verb or "I will <verb>", and Speak: <"warm utterance in quotes (4-16 words)" or "none">.
+- REJECTED: A contrastive flawed response: passive/frozen action ("I will sit and think"), action contradicting vitals (bounding across room with 5 energy), hallucinating objects not in Environment, or robotic assistant dialogue ("As an AI assistant...").
+
+Return ONLY the samples formatted as:
+INPUT:  ...
+CHOSEN: ...
+REJECTED: ...
+
+No commentary, no explanations, no markdown fences."#
+                )
+            }
+            Domain::MemorySalience => {
+                format!(
+                    r#"Generate exactly {batch_size} completely distinct, creative preference triplet(s) for the memory_salience schema.
+
+Requirements:
+- INPUT: Event, Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <Label>, Vitals.
+- CHOSEN: Accurate decision (Keep for high/medium importance milestones and bonding; Discard for routine biological reflexes and mundane occurrences) with sound reason.
+- REJECTED: Inverted decision (e.g. Discarding owner bonding or learning a new trick; or Keeping a routine paw stretch) or illogical reasoning.
+
+Return ONLY the samples formatted as:
+INPUT:  ...
+CHOSEN: ...
+REJECTED: ...
+
+No commentary, no explanations, no markdown fences."#
+                )
+            }
+            Domain::Conversation => {
+                format!(
+                    r#"Generate exactly {batch_size} completely distinct, creative preference triplet(s) for the conversation schema.
+
+Requirements:
+- INPUT: Vitals, Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <Label>, Intent, Owner Prompt.
+- CHOSEN: Reply: "<warm short pet utterance, 4-16 words in quotes matching emote and intent>".
+- REJECTED: Robotic assistant talk ("How may I assist you today?"), overly long (>20 words), reply without quotation marks, or speech contradicting the emotion.
+
+Return ONLY the samples formatted as:
+INPUT:  ...
+CHOSEN: ...
+REJECTED: ...
+
+No commentary, no explanations, no markdown fences."#
+                )
+            }
+            Domain::Reasoning => {
+                format!(
+                    r#"Generate exactly {batch_size} completely distinct, creative preference triplet(s) for the reasoning schema.
+
+Requirements:
+- INPUT: Goal, State, Obstacle, Perception.
+- CHOSEN: Feasible pet-scale micro-plan (1-4 steps: Plan:\nStep 1: ...\nStep 2: ...) or grounded Blocked evaluation (Evaluation: Blocked because <constraint>).
+- REJECTED: Human-scale impossible actions (e.g. typing passwords, turning doorknobs with fingers, buying tools online), plans >4 steps, or declaring blocked when an obvious pet-scale route exists.
+
+Return ONLY the samples formatted as:
+INPUT:  ...
+CHOSEN: ...
+REJECTED: ...
+
+No commentary, no explanations, no markdown fences."#
+                )
+            }
+            Domain::MemorySession => {
+                format!(
+                    r#"Generate exactly {batch_size} completely distinct, creative preference triplet(s) for the memory_session schema.
+
+Requirements:
+- INPUT: Session Log with 3-5 sequential events.
+- CHOSEN: Consolidated: <1-2 sentences in warm pet voice, 12-25 words total summarizing the log>.
+- REJECTED: Overly long (>30 words), disjointed, detached robotic summary, or raw bulleted list.
+
+Return ONLY the samples formatted as:
+INPUT:  ...
+CHOSEN: ...
+REJECTED: ...
+
+No commentary, no explanations, no markdown fences."#
+                )
+            }
+            Domain::MemoryTrait => {
+                format!(
+                    r#"Generate exactly {batch_size} completely distinct, creative preference triplet(s) for the memory_trait schema.
+
+Requirements:
+- INPUT: Past Memories (3 distinct memories).
+- CHOSEN: Core Trait: <1 sentence, 8-30 words synthesizing the enduring trait or preference>.
+- REJECTED: Repeating a single memory verbatim, or overly verbose clinical jargon.
+
+Return ONLY the samples formatted as:
+INPUT:  ...
+CHOSEN: ...
+REJECTED: ...
+
+No commentary, no explanations, no markdown fences."#
+                )
+            }
+        }
+    }
+
     // ── Endpoint Client & URL Normalization ───────────────────────────────────────
 
     pub fn normalize_chat_url(endpoint: &str) -> String {
@@ -1160,6 +1461,122 @@ No commentary, no explanations, no markdown fences."#
         Ok(())
     }
 
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct RawPreferenceSample {
+        pub input: String,
+        pub chosen: String,
+        pub rejected: String,
+    }
+
+    pub fn extract_preference_samples_from_text(text: &str) -> Vec<RawPreferenceSample> {
+        let mut samples = Vec::new();
+        let lines: Vec<&str> = text.lines().collect();
+        let mut i = 0;
+
+        while i < lines.len() {
+            let line = lines[i].trim();
+            if line.starts_with("INPUT:") {
+                let input_first_line = line.strip_prefix("INPUT:").unwrap().trim();
+                let mut input_lines = vec![input_first_line.to_string()];
+                i += 1;
+
+                while i < lines.len() && !lines[i].trim().starts_with("CHOSEN:") && !lines[i].trim().starts_with("INPUT:") {
+                    input_lines.push(lines[i].trim().to_string());
+                    i += 1;
+                }
+
+                if i < lines.len() && lines[i].trim().starts_with("CHOSEN:") {
+                    let chosen_first_line = lines[i].trim().strip_prefix("CHOSEN:").unwrap().trim();
+                    let mut chosen_lines = vec![chosen_first_line.to_string()];
+                    i += 1;
+
+                    while i < lines.len() && !lines[i].trim().starts_with("REJECTED:") && !lines[i].trim().starts_with("INPUT:") {
+                        chosen_lines.push(lines[i].trim().to_string());
+                        i += 1;
+                    }
+
+                    if i < lines.len() && lines[i].trim().starts_with("REJECTED:") {
+                        let rejected_first_line = lines[i].trim().strip_prefix("REJECTED:").unwrap().trim();
+                        let mut rejected_lines = vec![rejected_first_line.to_string()];
+                        i += 1;
+
+                        while i < lines.len() && !lines[i].trim().starts_with("INPUT:") {
+                            let l = lines[i].trim();
+                            if l.is_empty() {
+                                let next_is_input = lines[i + 1..]
+                                    .iter()
+                                    .map(|s| s.trim())
+                                    .find(|s| !s.is_empty())
+                                    .map_or(false, |s| s.starts_with("INPUT:"));
+                                if next_is_input {
+                                    i += 1;
+                                    break;
+                                }
+                            }
+                            rejected_lines.push(l.to_string());
+                            i += 1;
+                        }
+
+                        let input = input_lines
+                            .into_iter()
+                            .filter(|l| !l.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let chosen = chosen_lines
+                            .into_iter()
+                            .filter(|l| !l.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let rejected = rejected_lines
+                            .into_iter()
+                            .filter(|l| !l.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+
+                        if !input.is_empty() && !chosen.is_empty() && !rejected.is_empty() {
+                            samples.push(RawPreferenceSample { input, chosen, rejected });
+                        }
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        samples
+    }
+
+    pub fn validate_preference_sample(domain: Domain, sample: &RawPreferenceSample) -> Result<()> {
+        match domain {
+            Domain::Cnm => {
+                validate_input_current_emote(&sample.input)?;
+            }
+            Domain::Behavior | Domain::MemorySalience | Domain::Conversation => {
+                validate_input_grounded_emote(&sample.input)?;
+            }
+            _ => {}
+        }
+        let chosen_raw = RawSample {
+            input: sample.input.clone(),
+            target: sample.chosen.clone(),
+        };
+        validate_sample(domain, &chosen_raw)?;
+        validate_clean_text(&sample.rejected)?;
+        ensure!(!sample.rejected.trim().is_empty(), "rejected candidate is empty");
+        ensure!(sample.chosen.trim() != sample.rejected.trim(), "rejected candidate is identical to chosen candidate");
+        Ok(())
+    }
+
+    pub fn preference_sample_hash(input: &str, chosen: &str, rejected: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(input.trim().as_bytes());
+        hasher.update(b"\n");
+        hasher.update(chosen.trim().as_bytes());
+        hasher.update(b"\n");
+        hasher.update(rejected.trim().as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
     // ── State & Split Management ──────────────────────────────────────────────────
 
     #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1270,15 +1687,24 @@ No commentary, no explanations, no markdown fences."#
             return Ok(());
         }
 
-        let system_prompt = build_system_prompt(domain);
+        let is_pref = args.mode.eq_ignore_ascii_case("preference") || args.mode.eq_ignore_ascii_case("dpo");
+        let system_prompt = if is_pref {
+            build_preference_system_prompt(domain)
+        } else {
+            build_system_prompt(domain)
+        };
 
         while state.total_generated < args.count {
             let needed = args.count - state.total_generated;
             let current_batch_size = args.batch_size.min(needed).max(1);
-            let user_prompt = build_user_prompt(domain, current_batch_size);
+            let user_prompt = if is_pref {
+                build_preference_user_prompt(domain, current_batch_size)
+            } else {
+                build_user_prompt(domain, current_batch_size)
+            };
 
             if args.dry_run {
-                println!("\n[DRY RUN] Generated prompt for domain '{}':", domain.as_str());
+                println!("\n[DRY RUN] Generated prompt for domain '{}' (mode: {}):", domain.as_str(), args.mode);
                 println!("--- SYSTEM ---\n{}", system_prompt);
                 println!("--- USER ---\n{}", user_prompt);
                 println!("[DRY RUN] Simulating one sample verification...");
@@ -1303,48 +1729,95 @@ No commentary, no explanations, no markdown fences."#
                 }
             };
 
-            let raw_samples = extract_samples_from_text(&response);
-            if raw_samples.is_empty() {
-                eprintln!("  ! Warning: endpoint produced no extractable INPUT/TARGET pairs; retrying...");
-                continue;
-            }
-
             let mut batch_accepted = 0;
-            for sample in raw_samples {
-                if state.total_generated >= args.count {
-                    break;
-                }
 
-                let hash = sample_hash(&sample.input, &sample.target);
-                if state.seed_hashes.contains(&hash) {
-                    continue; // Skip duplicate
-                }
-
-                if let Err(e) = validate_sample(domain, &sample) {
-                    eprintln!("  ! Rejected sample for {}: {e:#}", domain.as_str());
+            if is_pref {
+                let raw_pref_samples = extract_preference_samples_from_text(&response);
+                if raw_pref_samples.is_empty() {
+                    eprintln!("  ! Warning: endpoint produced no extractable INPUT/CHOSEN/REJECTED triplets; retrying...");
                     continue;
                 }
 
-                let is_val = is_validation_sample(&hash);
-                let target_writer = if is_val {
-                    &mut val_writer
-                } else {
-                    &mut train_writer
-                };
+                for sample in raw_pref_samples {
+                    if state.total_generated >= args.count {
+                        break;
+                    }
 
-                writeln!(target_writer, "INPUT:  {}", sample.input.trim())?;
-                writeln!(target_writer, "TARGET: {}", sample.target.trim())?;
-                writeln!(target_writer)?;
-                target_writer.flush()?;
+                    let hash = preference_sample_hash(&sample.input, &sample.chosen, &sample.rejected);
+                    if state.seed_hashes.contains(&hash) {
+                        continue; // Skip duplicate
+                    }
 
-                state.seed_hashes.insert(hash);
-                state.total_generated += 1;
-                if is_val {
-                    state.val_count += 1;
-                } else {
-                    state.train_count += 1;
+                    if let Err(e) = validate_preference_sample(domain, &sample) {
+                        eprintln!("  ! Rejected preference sample for {}: {e:#}", domain.as_str());
+                        continue;
+                    }
+
+                    let is_val = is_validation_sample(&hash);
+                    let target_writer = if is_val {
+                        &mut val_writer
+                    } else {
+                        &mut train_writer
+                    };
+
+                    writeln!(target_writer, "INPUT:  {}", sample.input.trim())?;
+                    writeln!(target_writer, "CHOSEN: {}", sample.chosen.trim())?;
+                    writeln!(target_writer, "REJECTED: {}", sample.rejected.trim())?;
+                    writeln!(target_writer)?;
+                    target_writer.flush()?;
+
+                    state.seed_hashes.insert(hash);
+                    state.total_generated += 1;
+                    if is_val {
+                        state.val_count += 1;
+                    } else {
+                        state.train_count += 1;
+                    }
+                    batch_accepted += 1;
                 }
-                batch_accepted += 1;
+            } else {
+                let raw_samples = extract_samples_from_text(&response);
+                if raw_samples.is_empty() {
+                    eprintln!("  ! Warning: endpoint produced no extractable INPUT/TARGET pairs; retrying...");
+                    continue;
+                }
+
+                for sample in raw_samples {
+                    if state.total_generated >= args.count {
+                        break;
+                    }
+
+                    let hash = sample_hash(&sample.input, &sample.target);
+                    if state.seed_hashes.contains(&hash) {
+                        continue; // Skip duplicate
+                    }
+
+                    if let Err(e) = validate_sample(domain, &sample) {
+                        eprintln!("  ! Rejected sample for {}: {e:#}", domain.as_str());
+                        continue;
+                    }
+
+                    let is_val = is_validation_sample(&hash);
+                    let target_writer = if is_val {
+                        &mut val_writer
+                    } else {
+                        &mut train_writer
+                    };
+
+                    writeln!(target_writer, "INPUT:  {}", sample.input.trim())?;
+                    writeln!(target_writer, "TARGET: {}", sample.target.trim())?;
+                    writeln!(target_writer)?;
+                    target_writer.flush()?;
+
+                    state.seed_hashes.insert(hash);
+                    state.total_generated += 1;
+                    if is_val {
+                        state.val_count += 1;
+                    } else {
+                        state.train_count += 1;
+                    }
+                    batch_accepted += 1;
+                }
             }
 
             state.save(&state_file)?;
@@ -1379,13 +1852,23 @@ No commentary, no explanations, no markdown fences."#
 
     pub fn main() -> Result<()> {
         let mut args = Args::parse();
+        let is_pref = args.mode.eq_ignore_ascii_case("preference") || args.mode.eq_ignore_ascii_case("dpo");
+        if is_pref && args.out_dir == Path::new("data/synthetic_v2") {
+            args.out_dir = PathBuf::from("data/dpo");
+        }
         if args.out_dir == Path::new("data/synthetic_v2")
             && !args.out_dir.exists()
             && Path::new("yumon-pet/data/synthetic_v2").exists()
         {
             args.out_dir = PathBuf::from("yumon-pet/data/synthetic_v2");
+        } else if args.out_dir == Path::new("data/dpo")
+            && !args.out_dir.exists()
+            && Path::new("yumon-pet/data/dpo").exists()
+        {
+            args.out_dir = PathBuf::from("yumon-pet/data/dpo");
         }
         println!("=== Yumon v0.2 Synthetic Data Generator ===");
+        println!("Mode:     {}", if is_pref { "Preference / DPO Pairs" } else { "SFT Instructions" });
         println!("Endpoint: {}", args.endpoint);
         println!("Model:    {}", args.model);
         println!("Domain:   {}", args.domain);
@@ -1690,6 +2173,62 @@ Route: send to Behavior with execute plan to place blue block.
             assert!(sal_p.contains("50/50"));
             assert!(sal_p.contains("DISCARD"));
             assert!(sal_p.contains("KEEP"));
+        }
+
+        #[test]
+        fn test_extract_and_validate_preference_samples() {
+            let pref_text = r#"
+INPUT:
+Vitals: Hunger 20, Energy 80, Cleanliness 90, Boredom 50.
+Perception: sees food bowl on tile floor.
+Event: owner poured fresh kibble.
+Current Emote: [having: no, knowing: yes, empathizing: yes].
+
+CHOSEN:
+Emote: [having: yes, knowing: yes, empathizing: yes] Content.
+Route: send to Behavior with eat kibble from bowl.
+
+REJECTED:
+Emote: [having: no, knowing: no, empathizing: no] Confused.
+Route: send to Reasoning with solve mystery of food arrival.
+"#;
+            let extracted = extract_preference_samples_from_text(pref_text);
+            assert_eq!(extracted.len(), 1);
+            let s = &extracted[0];
+            assert!(s.input.contains("Vitals: Hunger 20"));
+            assert!(s.chosen.contains("Route: send to Behavior"));
+            assert!(s.rejected.contains("Route: send to Reasoning"));
+
+            assert!(validate_preference_sample(Domain::Cnm, s).is_ok());
+
+            // Identical chosen and rejected should fail
+            let identical_sample = RawPreferenceSample {
+                input: s.input.clone(),
+                chosen: s.chosen.clone(),
+                rejected: s.chosen.clone(),
+            };
+            assert!(validate_preference_sample(Domain::Cnm, &identical_sample).is_err());
+
+            // Empty rejected should fail
+            let empty_sample = RawPreferenceSample {
+                input: s.input.clone(),
+                chosen: s.chosen.clone(),
+                rejected: "".to_string(),
+            };
+            assert!(validate_preference_sample(Domain::Cnm, &empty_sample).is_err());
+        }
+
+        #[test]
+        fn test_build_preference_user_prompt() {
+            let beh_pref = build_preference_user_prompt(Domain::Behavior, 4);
+            assert!(beh_pref.contains("CHOSEN:"));
+            assert!(beh_pref.contains("REJECTED:"));
+            assert!(beh_pref.contains("Behavior schema"));
+
+            let cnm_pref = build_preference_user_prompt(Domain::Cnm, 4);
+            assert!(cnm_pref.contains("CHOSEN:"));
+            assert!(cnm_pref.contains("REJECTED:"));
+            assert!(cnm_pref.contains("CNM schema"));
         }
     }
 }
