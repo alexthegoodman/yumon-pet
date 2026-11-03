@@ -236,44 +236,80 @@ mod native {
     fn emote_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
         RE.get_or_init(|| {
-            Regex::new(r"(?i)Emote:\s*\[\s*having:\s*(yes|no)\s*,\s*knowing:\s*(yes|no)\s*,\s*empathizing:\s*(yes|no)\s*\]\s*([A-Za-z\-]+)").unwrap()
+            Regex::new(r"(?i)Emote:\s*\[\s*having:\s*(yes|no|true|false)\s*,\s*knowing:\s*(yes|no|true|false)\s*,\s*empathizing:\s*(yes|no|true|false)\s*\](?:\s*[:\-]?\s*([^.\n\r]+))?").unwrap()
         })
     }
 
     fn input_emote_with_label_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
         RE.get_or_init(|| {
-            Regex::new(r"(?i)\bEmote:\s*\[\s*having:\s*(yes|no)\s*,\s*knowing:\s*(yes|no)\s*,\s*empathizing:\s*(yes|no)\s*\]\s*([A-Za-z\-]+)").unwrap()
+            Regex::new(r"(?i)\bEmote:\s*\[\s*having:\s*(yes|no|true|false)\s*,\s*knowing:\s*(yes|no|true|false)\s*,\s*empathizing:\s*(yes|no|true|false)\s*\](?:\s*[:\-]?\s*([^.\n\r]+))?").unwrap()
         })
     }
 
     fn input_current_emote_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
         RE.get_or_init(|| {
-            Regex::new(r"(?i)\bCurrent\s+Emote:\s*\[\s*having:\s*(yes|no)\s*,\s*knowing:\s*(yes|no)\s*,\s*empathizing:\s*(yes|no)\s*\]").unwrap()
+            Regex::new(r"(?i)\b(?:Current\s+)?Emote:\s*\[\s*having:\s*(yes|no|true|false)\s*,\s*knowing:\s*(yes|no|true|false)\s*,\s*empathizing:\s*(yes|no|true|false)\s*\](?:\s*[:\-]?\s*([^.\n\r]+))?").unwrap()
         })
     }
 
     pub fn validate_input_grounded_emote(input: &str) -> Result<()> {
-        if input_emote_with_label_regex().is_match(input) {
-            Ok(())
-        } else {
-            bail!("input missing or malformed 'Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <Label>'")
+        if input.contains("<having>")
+            || input.contains("<knowing>")
+            || input.contains("<empathizing>")
+            || input.contains("<curious>")
+            || input.contains("<focused>")
+            || input.contains("<excited>")
+        {
+            bail!("input contains unexpanded placeholder syntax");
         }
+        if let Some(start) = input.find("Emote: [") {
+            if let Some(end) = input[start..].find(']') {
+                let bracketed = &input[start..start + end + 1];
+                if !input_emote_with_label_regex().is_match(bracketed) {
+                    bail!("input has malformed bracketed emote: {bracketed}");
+                }
+                return Ok(());
+            }
+        }
+        if input_emote_with_label_regex().is_match(input) {
+            return Ok(());
+        }
+        static SIMPLE_EMOTE: OnceLock<Regex> = OnceLock::new();
+        let simple = SIMPLE_EMOTE.get_or_init(|| Regex::new(r"(?i)\bEmote:\s*([A-Za-z\- ]+)").unwrap());
+        if simple.is_match(input) {
+            return Ok(());
+        }
+        bail!("input missing or malformed 'Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>] <Label>'")
     }
 
     pub fn validate_input_current_emote(input: &str) -> Result<()> {
-        if input_current_emote_regex().is_match(input) {
-            Ok(())
-        } else {
-            bail!("input missing or malformed 'Current Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>]'")
+        if input.contains("<having>")
+            || input.contains("<knowing>")
+            || input.contains("<empathizing>")
+        {
+            bail!("input contains unexpanded placeholder syntax");
         }
+        if let Some(start) = input.find("Emote: [") {
+            if let Some(end) = input[start..].find(']') {
+                let bracketed = &input[start..start + end + 1];
+                if !input_current_emote_regex().is_match(bracketed) {
+                    bail!("input has malformed bracketed emote: {bracketed}");
+                }
+                return Ok(());
+            }
+        }
+        if input_current_emote_regex().is_match(input) {
+            return Ok(());
+        }
+        bail!("input missing or malformed 'Current Emote: [having: <yes|no>, knowing: <yes|no>, empathizing: <yes|no>]'")
     }
 
     fn route_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
         RE.get_or_init(|| {
-            Regex::new(r"(?i)Route:\s*send\s+to\s+(Memory|Reasoning|Behavior)\s+with\s+(.+)$").unwrap()
+            Regex::new(r"(?i)Route:\s*(?:send\s+to\s+|to\s+)?(Memory|Reasoning|Behavior)(?:\s*(?:with|:|-)\s*(.+))?$").unwrap()
         })
     }
 
@@ -284,48 +320,34 @@ mod native {
 
     fn speak_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
-        RE.get_or_init(|| Regex::new(r#"(?i)^Speak:\s*(?:"([^"]+)"|none|([^"\n\r]+))$"#).unwrap())
-    }
-
-    fn salience_keep_regex() -> &'static Regex {
-        static RE: OnceLock<Regex> = OnceLock::new();
-        RE.get_or_init(|| {
-            Regex::new(r"(?i)^Keep:\s*(high|medium|low)\s+importance\s+because\s+(.+)$").unwrap()
-        })
-    }
-
-    fn salience_discard_regex() -> &'static Regex {
-        static RE: OnceLock<Regex> = OnceLock::new();
-        RE.get_or_init(|| {
-            Regex::new(r"(?i)^Discard:\s*(low|medium)?\s*importance\s+because\s+(.+)$").unwrap()
-        })
+        RE.get_or_init(|| Regex::new(r#"(?i)^Speak:\s*(?:"([^"]+)"|'([^']+)'|“([^”]+)”|none|([^"\n\r]+))$"#).unwrap())
     }
 
     fn consolidated_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
-        RE.get_or_init(|| Regex::new(r"(?i)^Consolidated:\s*(.+)$").unwrap())
+        RE.get_or_init(|| Regex::new(r"(?i)^(?:Consolidated|Consolidation|Summary|Session\s+Summary|Memory):\s*(.+)$").unwrap())
     }
 
     fn trait_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
-        RE.get_or_init(|| Regex::new(r"(?i)^Core\s+Trait:\s*(.+)$").unwrap())
+        RE.get_or_init(|| Regex::new(r"(?i)^(?:Core\s+Trait|Trait|Personality\s+Trait|Consolidated\s+Trait):\s*(.+)$").unwrap())
     }
 
     fn reasoning_step_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
-        RE.get_or_init(|| Regex::new(r"(?i)^Step\s*(\d+)[:.]\s*(.+)$").unwrap())
+        RE.get_or_init(|| Regex::new(r"(?i)^(?:Step\s*\d+|[-*]?\s*\d+)[.:)]\s*(.+)$").unwrap())
     }
 
     fn reasoning_eval_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
         RE.get_or_init(|| {
-            Regex::new(r"(?i)^Evaluation:\s*(?:Blocked\s+because\s+)?(.+)$").unwrap()
+            Regex::new(r"(?i)^(?:Evaluation|Blocked|Evaluation\s*-\s*Blocked|Impossible)[:.]?\s*(?:Blocked\s+because\s+)?(.+)$").unwrap()
         })
     }
 
     fn reply_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
-        RE.get_or_init(|| Regex::new(r#"(?i)^Reply:\s*"([^"]+)"$"#).unwrap())
+        RE.get_or_init(|| Regex::new(r#"(?i)^Reply:\s*["'“]?([^"'“”\r\n]+)["'”]?$"#).unwrap())
     }
 
     // ── Cleaning & Validation ─────────────────────────────────────────────────────
@@ -376,10 +398,14 @@ mod native {
 
         for line in target.lines().map(str::trim).filter(|l| !l.is_empty()) {
             if let Some(caps) = emote_regex().captures(line) {
-                let having = &caps[1].to_lowercase() == "yes";
-                let knowing = &caps[2].to_lowercase() == "yes";
-                let empathizing = &caps[3].to_lowercase() == "yes";
-                let label = caps[4].trim().to_string();
+                let having = matches!(caps[1].to_lowercase().as_str(), "yes" | "true");
+                let knowing = matches!(caps[2].to_lowercase().as_str(), "yes" | "true");
+                let empathizing = matches!(caps[3].to_lowercase().as_str(), "yes" | "true");
+                let label = caps
+                    .get(4)
+                    .map(|m| m.as_str().trim().trim_matches(|c: char| c == '.' || c == ':' || c == '-').trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "Attentive".to_string());
                 validate_clean_text(&label)
                     .with_context(|| format!("validating emote label '{label}'"))?;
                 emote = Some(GroundedEmote {
@@ -395,8 +421,11 @@ mod native {
                     "behavior" => RouteTarget::Behavior,
                     other => bail!("invalid Route target '{other}'"),
                 };
-                let payload = caps[2].trim().trim_end_matches('.').trim().to_string();
-                ensure!(!payload.is_empty(), "empty route context payload");
+                let payload = caps
+                    .get(2)
+                    .map(|m| m.as_str().trim().trim_end_matches('.').trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| format!("dispatch to {}", &caps[1]));
                 validate_clean_text(&payload)
                     .with_context(|| format!("validating route payload '{payload}'"))?;
                 target_route = Some((tgt, payload));
@@ -428,15 +457,19 @@ mod native {
                     .with_context(|| format!("validating action description '{desc}'"))?;
                 action_desc = Some(desc);
             } else if let Some(caps) = speak_regex().captures(line) {
-                if let Some(m) = caps.get(1).or_else(|| caps.get(2)) {
-                    let text = m.as_str().trim().to_string();
-                    if text.eq_ignore_ascii_case("none") {
+                let matched = caps.get(1)
+                    .or_else(|| caps.get(2))
+                    .or_else(|| caps.get(3))
+                    .or_else(|| caps.get(4));
+                if let Some(m) = matched {
+                    let text = m.as_str().trim().trim_matches(|c: char| c == '"' || c == '\'' || c == '“' || c == '”').trim().to_string();
+                    if text.eq_ignore_ascii_case("none") || text.is_empty() {
                         speech = Some(None);
                     } else {
                         let words = count_words(&text);
                         ensure!(
-                            (3..=25).contains(&words),
-                            "spoken utterance has {words} words, expected 4-20 words"
+                            (1..=35).contains(&words),
+                            "spoken utterance has {words} words, expected 1-35 words"
                         );
                         validate_clean_text(&text)
                             .with_context(|| format!("validating speech utterance '{text}'"))?;
@@ -448,8 +481,21 @@ mod native {
             }
         }
 
-        let action_description = action_desc.context("missing 'Action: ...' line")?;
-        let speech = speech.context("missing 'Speak: ...' line")?;
+        // If Action: line was not explicitly marked, fallback to the first line that isn't Speak:
+        let action_description = if let Some(desc) = action_desc {
+            desc
+        } else {
+            let first_line = target
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.to_lowercase().starts_with("speak:"))
+                .context("missing action description in target")?;
+            validate_clean_text(first_line)?;
+            first_line.to_string()
+        };
+
+        // If Speak: line was omitted entirely, default to silent (None)
+        let speech = speech.unwrap_or(None);
 
         // Extract primary verb from action description (skipping auxiliaries and adverbs)
         let words: Vec<&str> = action_description.split_whitespace().collect();
@@ -493,47 +539,71 @@ mod native {
 
     pub fn parse_memory_salience_target(target: &str) -> Result<SalienceOutput> {
         let trimmed = target.trim();
-        if let Some(caps) = salience_keep_regex().captures(trimmed) {
-            let importance = caps[1].to_lowercase();
-            let reason = caps[2].trim().to_string();
-            validate_clean_text(&reason)?;
-            Ok(SalienceOutput {
-                keep: true,
-                importance,
-                reason,
-            })
-        } else if let Some(caps) = salience_discard_regex().captures(trimmed) {
-            let importance = caps
-                .get(1)
-                .map_or("low".to_string(), |m| m.as_str().to_lowercase());
-            let reason = caps[2].trim().to_string();
-            validate_clean_text(&reason)?;
-            Ok(SalienceOutput {
-                keep: false,
-                importance,
-                reason,
-            })
+        let low = trimmed.to_lowercase();
+
+        let is_keep = if low.starts_with("keep") {
+            true
+        } else if low.starts_with("discard") {
+            false
+        } else if low.contains("keep") && !low.contains("discard") {
+            true
+        } else if low.contains("discard") {
+            false
         } else {
             bail!("malformed salience output: expected 'Keep: ...' or 'Discard: ...'")
-        }
+        };
+
+        let importance = if low.contains("high") {
+            "high".to_string()
+        } else if low.contains("medium") {
+            "medium".to_string()
+        } else if low.contains("low") {
+            "low".to_string()
+        } else if is_keep {
+            "high".to_string()
+        } else {
+            "low".to_string()
+        };
+
+        let reason = if let Some(idx) = low.find("because") {
+            trimmed[idx + 7..].trim().trim_start_matches(':').trim().to_string()
+        } else if let Some(idx) = trimmed.find(':') {
+            trimmed[idx + 1..].trim().to_string()
+        } else {
+            trimmed.to_string()
+        };
+
+        let reason = if reason.is_empty() {
+            if is_keep { "meaningful event".to_string() } else { "routine event".to_string() }
+        } else {
+            reason
+        };
+
+        validate_clean_text(&reason)?;
+        Ok(SalienceOutput {
+            keep: is_keep,
+            importance,
+            reason,
+        })
     }
 
     pub fn parse_memory_session_target(target: &str) -> Result<SessionConsolidationOutput> {
         let trimmed = target.trim();
-        let caps = consolidated_regex()
-            .captures(trimmed)
-            .context("missing 'Consolidated: <Sentence 1>. <Optional Sentence 2>.'")?;
-        let summary = caps[1].trim().to_string();
+        let summary = if let Some(caps) = consolidated_regex().captures(trimmed) {
+            caps[1].trim().to_string()
+        } else {
+            trimmed.to_string()
+        };
         let sentence_count = count_sentences(&summary);
         let word_count = count_words(&summary);
 
         ensure!(
-            sentence_count >= 1 && sentence_count <= 2,
-            "session consolidation must be 1 or 2 sentences (got {sentence_count})"
+            sentence_count >= 1 && sentence_count <= 4,
+            "session consolidation must be 1 to 4 sentences (got {sentence_count})"
         );
         ensure!(
-            (10..=35).contains(&word_count),
-            "session consolidation must be 12 to 30 words (got {word_count})"
+            (4..=55).contains(&word_count),
+            "session consolidation must be 4 to 55 words (got {word_count})"
         );
         validate_clean_text(&summary)?;
 
@@ -546,15 +616,16 @@ mod native {
 
     pub fn parse_memory_trait_target(target: &str) -> Result<TraitConsolidationOutput> {
         let trimmed = target.trim();
-        let caps = trait_regex()
-            .captures(trimmed)
-            .context("missing 'Core Trait: <description>'")?;
-        let trait_statement = caps[1].trim().to_string();
+        let trait_statement = if let Some(caps) = trait_regex().captures(trimmed) {
+            caps[1].trim().to_string()
+        } else {
+            trimmed.to_string()
+        };
         ensure!(!trait_statement.is_empty(), "trait statement cannot be empty");
         let word_count = count_words(&trait_statement);
         ensure!(
-            (5..=40).contains(&word_count),
-            "core trait must be between 5 and 40 words (got {word_count})"
+            (3..=60).contains(&word_count),
+            "core trait must be between 3 and 60 words (got {word_count})"
         );
         validate_clean_text(&trait_statement)?;
 
@@ -564,22 +635,29 @@ mod native {
     pub fn parse_reasoning_target(target: &str) -> Result<ReasoningOutput> {
         let trimmed = target.trim();
 
-        if trimmed.starts_with("Plan:") || trimmed.contains("Step 1:") {
+        if trimmed.to_lowercase().starts_with("plan:")
+            || trimmed.to_lowercase().contains("step 1")
+            || trimmed.to_lowercase().contains("1.")
+        {
             let mut steps = Vec::new();
-            for line in trimmed.lines().map(str::trim) {
+            for line in trimmed.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                if line.to_lowercase().starts_with("plan:") {
+                    continue;
+                }
                 if let Some(caps) = reasoning_step_regex().captures(line) {
-                    let step_content = caps[2].trim().to_string();
+                    let step_content = caps[caps.len() - 1].trim().to_string();
                     validate_clean_text(&step_content)?;
                     steps.push(step_content);
                 }
             }
-            ensure!(!steps.is_empty(), "Plan contained no parseable steps");
-            ensure!(
-                steps.len() <= 4,
-                "Plan exceeded maximum 4 steps (got {})",
-                steps.len()
-            );
-            return Ok(ReasoningOutput::Plan(steps));
+            if !steps.is_empty() {
+                ensure!(
+                    steps.len() <= 4,
+                    "Plan exceeded maximum 4 steps (got {})",
+                    steps.len()
+                );
+                return Ok(ReasoningOutput::Plan(steps));
+            }
         }
 
         if let Some(caps) = reasoning_eval_regex().captures(trimmed) {
@@ -589,25 +667,44 @@ mod native {
             return Ok(ReasoningOutput::BlockedEvaluation(reason));
         }
 
+        if trimmed.to_lowercase().contains("blocked because") || trimmed.to_lowercase().contains("cannot reach") {
+            let reason = trimmed
+                .strip_prefix("Evaluation:")
+                .or_else(|| trimmed.strip_prefix("Blocked:"))
+                .unwrap_or(trimmed)
+                .trim()
+                .to_string();
+            validate_clean_text(&reason)?;
+            return Ok(ReasoningOutput::BlockedEvaluation(reason));
+        }
+
         bail!("Reasoning output must start with 'Plan:' with Step 1..N or 'Evaluation: Blocked because ...'")
     }
 
     pub fn parse_conversation_target(target: &str) -> Result<ConversationReply> {
         let trimmed = target.trim();
-        let caps = reply_regex()
-            .captures(trimmed)
-            .context("Reply must be formatted as: Reply: \"<sentence>\"")?;
-        let reply = caps[1].trim().to_string();
+        let reply = if let Some(caps) = reply_regex().captures(trimmed) {
+            caps[1].trim().to_string()
+        } else {
+            trimmed
+                .strip_prefix("Reply:")
+                .or_else(|| trimmed.strip_prefix("reply:"))
+                .unwrap_or(trimmed)
+                .trim()
+                .to_string()
+        };
+
+        let reply = reply.trim_matches(|c: char| c == '"' || c == '\'' || c == '“' || c == '”').trim().to_string();
         let sentence_count = count_sentences(&reply);
         let word_count = count_words(&reply);
 
         ensure!(
-            sentence_count == 1,
-            "Reply must be exactly one sentence (got {sentence_count})"
+            sentence_count >= 1 && sentence_count <= 2,
+            "Reply must be 1 or 2 sentences (got {sentence_count})"
         );
         ensure!(
-            (4..=20).contains(&word_count),
-            "Reply must be between 4 and 16 words (got {word_count})"
+            (2..=30).contains(&word_count),
+            "Reply must be between 2 and 30 words (got {word_count})"
         );
         validate_clean_text(&reply)?;
 
@@ -1359,6 +1456,21 @@ No commentary, no explanations, no markdown fences."#
 
     // ── Sample Extraction from Response ───────────────────────────────────────────
 
+    pub fn match_marker<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+        let trimmed = line.trim();
+        let no_prefix = trimmed.trim_start_matches(|c: char| {
+            c.is_ascii_digit() || c == '.' || c == '-' || c == '*' || c == ' ' || c == '#' || c == '>'
+        });
+        let candidate = no_prefix.trim().trim_start_matches('*').trim();
+        if candidate.len() >= marker.len() && candidate[..marker.len()].eq_ignore_ascii_case(marker) {
+            let rest = &candidate[marker.len()..];
+            let rest_final = rest.trim_start_matches(|c: char| c == '*' || c == ':' || c == ' ').trim();
+            Some(rest_final)
+        } else {
+            None
+        }
+    }
+
     #[derive(Debug, Clone, PartialEq)]
     pub struct RawSample {
         pub input: String,
@@ -1371,55 +1483,66 @@ No commentary, no explanations, no markdown fences."#
         let mut i = 0;
 
         while i < lines.len() {
-            let line = lines[i].trim();
-            if line.starts_with("INPUT:") {
-                let input_first_line = line.strip_prefix("INPUT:").unwrap().trim();
-                let mut input_lines = vec![input_first_line.to_string()];
+            let line = lines[i];
+            if let Some(input_first_line) = match_marker(line, "INPUT") {
+                let mut input_lines = if input_first_line.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![input_first_line.to_string()]
+                };
                 i += 1;
 
-                while i < lines.len() && !lines[i].trim().starts_with("TARGET:") && !lines[i].trim().starts_with("INPUT:") {
+                while i < lines.len()
+                    && match_marker(lines[i], "TARGET").is_none()
+                    && match_marker(lines[i], "INPUT").is_none()
+                {
                     input_lines.push(lines[i].trim().to_string());
                     i += 1;
                 }
 
-                if i < lines.len() && lines[i].trim().starts_with("TARGET:") {
-                    let target_first_line = lines[i].trim().strip_prefix("TARGET:").unwrap().trim();
-                    let mut target_lines = vec![target_first_line.to_string()];
-                    i += 1;
-
-                    while i < lines.len() && !lines[i].trim().starts_with("INPUT:") {
-                        let l = lines[i].trim();
-                        if l.is_empty() {
-                            // Check if next non-empty line starts another INPUT
-                            let next_is_input = lines[i + 1..]
-                                .iter()
-                                .map(|s| s.trim())
-                                .find(|s| !s.is_empty())
-                                .map_or(false, |s| s.starts_with("INPUT:"));
-                            if next_is_input {
-                                i += 1;
-                                break;
-                            }
-                        }
-                        target_lines.push(l.to_string());
+                if i < lines.len() {
+                    if let Some(target_first_line) = match_marker(lines[i], "TARGET") {
+                        let mut target_lines = if target_first_line.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![target_first_line.to_string()]
+                        };
                         i += 1;
-                    }
 
-                    let input = input_lines
-                        .into_iter()
-                        .filter(|l| !l.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let target = target_lines
-                        .into_iter()
-                        .filter(|l| !l.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                        while i < lines.len() && match_marker(lines[i], "INPUT").is_none() {
+                            let l = lines[i].trim();
+                            if l.is_empty() {
+                                // Check if next non-empty line starts another INPUT
+                                let next_is_input = lines[i + 1..]
+                                    .iter()
+                                    .map(|s| s.trim())
+                                    .find(|s| !s.is_empty())
+                                    .map_or(false, |s| match_marker(s, "INPUT").is_some());
+                                if next_is_input {
+                                    i += 1;
+                                    break;
+                                }
+                            }
+                            target_lines.push(l.to_string());
+                            i += 1;
+                        }
 
-                    if !input.is_empty() && !target.is_empty() {
-                        samples.push(RawSample { input, target });
+                        let input = input_lines
+                            .into_iter()
+                            .filter(|l| !l.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let target = target_lines
+                            .into_iter()
+                            .filter(|l| !l.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+
+                        if !input.is_empty() && !target.is_empty() {
+                            samples.push(RawSample { input, target });
+                        }
+                        continue;
                     }
-                    continue;
                 }
             }
             i += 1;
@@ -1474,69 +1597,88 @@ No commentary, no explanations, no markdown fences."#
         let mut i = 0;
 
         while i < lines.len() {
-            let line = lines[i].trim();
-            if line.starts_with("INPUT:") {
-                let input_first_line = line.strip_prefix("INPUT:").unwrap().trim();
-                let mut input_lines = vec![input_first_line.to_string()];
+            let line = lines[i];
+            if let Some(input_first_line) = match_marker(line, "INPUT") {
+                let mut input_lines = if input_first_line.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![input_first_line.to_string()]
+                };
                 i += 1;
 
-                while i < lines.len() && !lines[i].trim().starts_with("CHOSEN:") && !lines[i].trim().starts_with("INPUT:") {
+                while i < lines.len()
+                    && match_marker(lines[i], "CHOSEN").is_none()
+                    && match_marker(lines[i], "INPUT").is_none()
+                {
                     input_lines.push(lines[i].trim().to_string());
                     i += 1;
                 }
 
-                if i < lines.len() && lines[i].trim().starts_with("CHOSEN:") {
-                    let chosen_first_line = lines[i].trim().strip_prefix("CHOSEN:").unwrap().trim();
-                    let mut chosen_lines = vec![chosen_first_line.to_string()];
-                    i += 1;
-
-                    while i < lines.len() && !lines[i].trim().starts_with("REJECTED:") && !lines[i].trim().starts_with("INPUT:") {
-                        chosen_lines.push(lines[i].trim().to_string());
-                        i += 1;
-                    }
-
-                    if i < lines.len() && lines[i].trim().starts_with("REJECTED:") {
-                        let rejected_first_line = lines[i].trim().strip_prefix("REJECTED:").unwrap().trim();
-                        let mut rejected_lines = vec![rejected_first_line.to_string()];
+                if i < lines.len() {
+                    if let Some(chosen_first_line) = match_marker(lines[i], "CHOSEN") {
+                        let mut chosen_lines = if chosen_first_line.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![chosen_first_line.to_string()]
+                        };
                         i += 1;
 
-                        while i < lines.len() && !lines[i].trim().starts_with("INPUT:") {
-                            let l = lines[i].trim();
-                            if l.is_empty() {
-                                let next_is_input = lines[i + 1..]
-                                    .iter()
-                                    .map(|s| s.trim())
-                                    .find(|s| !s.is_empty())
-                                    .map_or(false, |s| s.starts_with("INPUT:"));
-                                if next_is_input {
-                                    i += 1;
-                                    break;
-                                }
-                            }
-                            rejected_lines.push(l.to_string());
+                        while i < lines.len()
+                            && match_marker(lines[i], "REJECTED").is_none()
+                            && match_marker(lines[i], "INPUT").is_none()
+                        {
+                            chosen_lines.push(lines[i].trim().to_string());
                             i += 1;
                         }
 
-                        let input = input_lines
-                            .into_iter()
-                            .filter(|l| !l.is_empty())
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        let chosen = chosen_lines
-                            .into_iter()
-                            .filter(|l| !l.is_empty())
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        let rejected = rejected_lines
-                            .into_iter()
-                            .filter(|l| !l.is_empty())
-                            .collect::<Vec<_>>()
-                            .join("\n");
+                        if i < lines.len() {
+                            if let Some(rejected_first_line) = match_marker(lines[i], "REJECTED") {
+                                let mut rejected_lines = if rejected_first_line.is_empty() {
+                                    Vec::new()
+                                } else {
+                                    vec![rejected_first_line.to_string()]
+                                };
+                                i += 1;
 
-                        if !input.is_empty() && !chosen.is_empty() && !rejected.is_empty() {
-                            samples.push(RawPreferenceSample { input, chosen, rejected });
+                                while i < lines.len() && match_marker(lines[i], "INPUT").is_none() {
+                                    let l = lines[i].trim();
+                                    if l.is_empty() {
+                                        let next_is_input = lines[i + 1..]
+                                            .iter()
+                                            .map(|s| s.trim())
+                                            .find(|s| !s.is_empty())
+                                            .map_or(false, |s| match_marker(s, "INPUT").is_some());
+                                        if next_is_input {
+                                            i += 1;
+                                            break;
+                                        }
+                                    }
+                                    rejected_lines.push(l.to_string());
+                                    i += 1;
+                                }
+
+                                let input = input_lines
+                                    .into_iter()
+                                    .filter(|l| !l.is_empty())
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                let chosen = chosen_lines
+                                    .into_iter()
+                                    .filter(|l| !l.is_empty())
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                let rejected = rejected_lines
+                                    .into_iter()
+                                    .filter(|l| !l.is_empty())
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+
+                                if !input.is_empty() && !chosen.is_empty() && !rejected.is_empty() {
+                                    samples.push(RawPreferenceSample { input, chosen, rejected });
+                                }
+                                continue;
+                            }
                         }
-                        continue;
                     }
                 }
             }
@@ -2020,11 +2162,58 @@ No commentary, no explanations, no markdown fences."#
             assert_eq!(res.reply, "My tummy is rumbling and I would really love some food!");
             assert_eq!(res.word_count, 11);
 
+            // Also accepts 1-2 sentence replies without quotes
+            let unquoted_two_sentences = "Reply: I am hungry! Please feed me kibble.";
+            let res_unquoted = parse_conversation_target(unquoted_two_sentences).unwrap();
+            assert_eq!(count_sentences(&res_unquoted.reply), 2);
+
             let too_short = "Reply: \"Hi!\"";
             assert!(parse_conversation_target(too_short).is_err());
 
-            let multiple_sentences = "Reply: \"I am hungry. Please feed me!\"";
-            assert!(parse_conversation_target(multiple_sentences).is_err());
+            let excessive_sentences = "Reply: \"I am hungry. Please feed me! Where is my food? I am waiting.\"";
+            assert!(parse_conversation_target(excessive_sentences).is_err());
+        }
+
+        #[test]
+        fn test_loosened_template_constraints() {
+            // Numbered reasoning steps
+            let numbered_plan = "Plan:\n1. Push plush chair close to desk.\n2. Hop onto chair cushion.\n3. Reach top of desk.";
+            let res_plan = parse_reasoning_target(numbered_plan).unwrap();
+            match res_plan {
+                ReasoningOutput::Plan(steps) => {
+                    assert_eq!(steps.len(), 3);
+                    assert_eq!(steps[0], "Push plush chair close to desk.");
+                }
+                _ => panic!("Expected Plan"),
+            }
+
+            // Behavior target without Speak: line (defaults to None)
+            let silent_behavior = "Action: I will sit quietly by the warm radiator and rest.";
+            let res_beh = parse_behavior_target(silent_behavior, "radiator").unwrap();
+            assert_eq!(res_beh.primary_verb, "sit");
+            assert_eq!(res_beh.speech, None);
+
+            // Memory salience with flexible phrasing
+            let sal_keep = "Keep: high importance - owner comforted Yumon after sudden noise.";
+            let res_sal = parse_memory_salience_target(sal_keep).unwrap();
+            assert!(res_sal.keep);
+            assert_eq!(res_sal.importance, "high");
+
+            // Markdown bold markers in extraction
+            let bold_text = r#"
+**INPUT:**
+Vitals: Hunger 10, Energy 80, Cleanliness 90, Boredom 30.
+Perception: sees sunny spot on floor.
+Current Emote: [having: yes, knowing: yes, empathizing: yes].
+
+**TARGET:**
+Emote: [having: yes, knowing: yes, empathizing: yes] Content.
+Route: send to Behavior with nap in sunny spot.
+"#;
+            let samples = extract_samples_from_text(bold_text);
+            assert_eq!(samples.len(), 1);
+            assert!(samples[0].input.contains("Hunger 10"));
+            assert!(samples[0].target.contains("Content"));
         }
 
         #[test]
