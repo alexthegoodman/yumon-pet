@@ -274,12 +274,12 @@ Run these commands directly in your terminal to monitor live token throughput, v
 #### Step 2: Multi-Stage Caching (Raw BPE → Kilo Talk)
 
 1. Cache SFT Instructions:
-   `cargo run --release --bin cache_samples -- --dataset data/synthetic_v2 --output training-cache/sft/sft_samples.bin --objective sft --max-seq-len 512 --force`
-   `cargo run --release --bin cache_yumon_talk -- --input-cache training-cache/sft/sft_samples.bin --output training-cache/sft/kilo_sft.bin --vocab training-cache/kilo_talk_vocab.json --max-seq-len 512 --force`
+   `cargo run --release --bin cache_samples -- --dataset data/synthetic_v2 --output training-cache/sft/sft_samples.bin --objective sft --max-seq-len 256 --force`
+   `cargo run --release --bin cache_yumon_talk -- --input-cache training-cache/sft/sft_samples.bin --output training-cache/sft/kilo_sft.bin --vocab training-cache/kilo_talk_vocab.json --max-seq-len 256 --force`
 
 2. Cache DPO Preferences (atomic pairwise conversion ensures chosen and rejected never desynchronize):
-   `cargo run --release --bin cache_samples -- --dataset data/dpo --output training-cache/dpo/dpo_samples.bin --objective dpo --max-seq-len 512 --force`
-   `cargo run --release --bin cache_yumon_talk -- --input-cache training-cache/dpo/dpo_samples.bin --output training-cache/dpo/kilo_dpo.bin --vocab training-cache/kilo_talk_vocab.json --max-seq-len 512 --force`
+   `cargo run --release --bin cache_samples -- --dataset data/dpo --output training-cache/dpo/dpo_samples.bin --objective dpo --max-seq-len 256 --force`
+   `cargo run --release --bin cache_yumon_talk -- --input-cache training-cache/dpo/dpo_samples.bin --output training-cache/dpo/kilo_dpo.bin --vocab training-cache/kilo_talk_vocab.json --max-seq-len 256 --force`
 
 ──────
 #### Step 3: Model Training Execution
