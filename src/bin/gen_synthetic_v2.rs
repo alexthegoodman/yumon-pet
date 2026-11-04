@@ -309,18 +309,18 @@ mod native {
     fn route_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
         RE.get_or_init(|| {
-            Regex::new(r"(?i)Route:\s*(?:send\s+to\s+|to\s+)?(Memory|Reasoning|Behavior)(?:\s*(?:with|:|-)\s*(.+))?$").unwrap()
+            Regex::new(r"(?im)\bRoute:\s*(?:send\s+to\s+|to\s+)?(Memory|Reasoning|Behavior)[.:]?(?:\s*(?:with(?:\s+context)?|context|:|-)\s*(.+))?$").unwrap()
         })
     }
 
     fn action_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
-        RE.get_or_init(|| Regex::new(r"(?i)^Action:\s*(.+)$").unwrap())
+        RE.get_or_init(|| Regex::new(r"(?im)\bAction:\s*(.+?)(?:\s+(?:Speak|Speech):|$)").unwrap())
     }
 
     fn speak_regex() -> &'static Regex {
         static RE: OnceLock<Regex> = OnceLock::new();
-        RE.get_or_init(|| Regex::new(r#"(?i)^Speak:\s*(?:"([^"]+)"|'([^']+)'|“([^”]+)”|none|([^"\n\r]+))$"#).unwrap())
+        RE.get_or_init(|| Regex::new(r#"(?im)\b(?:Speak|Speech):\s*(?:"([^"]+)"|'([^']+)'|“([^”]+)”|none|([^"\n\r]+))$"#).unwrap())
     }
 
     fn consolidated_regex() -> &'static Regex {
@@ -396,40 +396,44 @@ mod native {
         let mut emote: Option<GroundedEmote> = None;
         let mut target_route: Option<(RouteTarget, String)> = None;
 
-        for line in target.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            if let Some(caps) = emote_regex().captures(line) {
-                let having = matches!(caps[1].to_lowercase().as_str(), "yes" | "true");
-                let knowing = matches!(caps[2].to_lowercase().as_str(), "yes" | "true");
-                let empathizing = matches!(caps[3].to_lowercase().as_str(), "yes" | "true");
-                let label = caps
-                    .get(4)
-                    .map(|m| m.as_str().trim().trim_matches(|c: char| c == '.' || c == ':' || c == '-').trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "Attentive".to_string());
-                validate_clean_text(&label)
-                    .with_context(|| format!("validating emote label '{label}'"))?;
-                emote = Some(GroundedEmote {
-                    having,
-                    knowing,
-                    empathizing,
-                    label,
-                });
-            } else if let Some(caps) = route_regex().captures(line) {
-                let tgt = match caps[1].to_lowercase().as_str() {
-                    "memory" => RouteTarget::Memory,
-                    "reasoning" => RouteTarget::Reasoning,
-                    "behavior" => RouteTarget::Behavior,
-                    other => bail!("invalid Route target '{other}'"),
-                };
-                let payload = caps
-                    .get(2)
-                    .map(|m| m.as_str().trim().trim_end_matches('.').trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| format!("dispatch to {}", &caps[1]));
-                validate_clean_text(&payload)
-                    .with_context(|| format!("validating route payload '{payload}'"))?;
-                target_route = Some((tgt, payload));
-            }
+        if let Some(caps) = emote_regex().captures(target) {
+            let having = matches!(caps[1].to_lowercase().as_str(), "yes" | "true");
+            let knowing = matches!(caps[2].to_lowercase().as_str(), "yes" | "true");
+            let empathizing = matches!(caps[3].to_lowercase().as_str(), "yes" | "true");
+            let label = caps
+                .get(4)
+                .map(|m| m.as_str().trim().trim_matches(|c: char| c == '.' || c == ':' || c == '-').trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "Attentive".to_string());
+            validate_clean_text(&label)
+                .with_context(|| format!("validating emote label '{label}'"))?;
+            emote = Some(GroundedEmote {
+                having,
+                knowing,
+                empathizing,
+                label,
+            });
+        }
+
+        if let Some(caps) = route_regex().captures(target) {
+            let tgt = match caps[1].to_lowercase().as_str() {
+                "memory" => RouteTarget::Memory,
+                "reasoning" => RouteTarget::Reasoning,
+                "behavior" => RouteTarget::Behavior,
+                other => bail!("invalid Route target '{other}'"),
+            };
+            let payload = caps
+                .get(2)
+                .map(|m| {
+                    let s = m.as_str().trim();
+                    let s = s.strip_prefix("context:").or_else(|| s.strip_prefix("Context:")).unwrap_or(s).trim();
+                    s.trim_end_matches('.').trim().to_string()
+                })
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("dispatch to {}", &caps[1]));
+            validate_clean_text(&payload)
+                .with_context(|| format!("validating route payload '{payload}'"))?;
+            target_route = Some((tgt, payload));
         }
 
         let emote = emote.context("missing or malformed 'Emote: [having: ..., knowing: ..., empathizing: ...] <Name>'")?;
@@ -449,35 +453,35 @@ mod native {
         let mut action_desc: Option<String> = None;
         let mut speech: Option<Option<String>> = None;
 
-        for line in target.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            if let Some(caps) = action_regex().captures(line) {
-                let desc = caps[1].trim().to_string();
-                ensure!(!desc.is_empty(), "action description cannot be empty");
-                validate_clean_text(&desc)
-                    .with_context(|| format!("validating action description '{desc}'"))?;
-                action_desc = Some(desc);
-            } else if let Some(caps) = speak_regex().captures(line) {
-                let matched = caps.get(1)
-                    .or_else(|| caps.get(2))
-                    .or_else(|| caps.get(3))
-                    .or_else(|| caps.get(4));
-                if let Some(m) = matched {
-                    let text = m.as_str().trim().trim_matches(|c: char| c == '"' || c == '\'' || c == '“' || c == '”').trim().to_string();
-                    if text.eq_ignore_ascii_case("none") || text.is_empty() {
-                        speech = Some(None);
-                    } else {
-                        let words = count_words(&text);
-                        ensure!(
-                            (1..=35).contains(&words),
-                            "spoken utterance has {words} words, expected 1-35 words"
-                        );
-                        validate_clean_text(&text)
-                            .with_context(|| format!("validating speech utterance '{text}'"))?;
-                        speech = Some(Some(text));
-                    }
-                } else {
+        if let Some(caps) = action_regex().captures(target) {
+            let desc = caps[1].trim().to_string();
+            ensure!(!desc.is_empty(), "action description cannot be empty");
+            validate_clean_text(&desc)
+                .with_context(|| format!("validating action description '{desc}'"))?;
+            action_desc = Some(desc);
+        }
+
+        if let Some(caps) = speak_regex().captures(target) {
+            let matched = caps.get(1)
+                .or_else(|| caps.get(2))
+                .or_else(|| caps.get(3))
+                .or_else(|| caps.get(4));
+            if let Some(m) = matched {
+                let text = m.as_str().trim().trim_matches(|c: char| c == '"' || c == '\'' || c == '“' || c == '”').trim().to_string();
+                if text.eq_ignore_ascii_case("none") || text.is_empty() {
                     speech = Some(None);
+                } else {
+                    let words = count_words(&text);
+                    ensure!(
+                        (1..=35).contains(&words),
+                        "spoken utterance has {words} words, expected 1-35 words"
+                    );
+                    validate_clean_text(&text)
+                        .with_context(|| format!("validating speech utterance '{text}'"))?;
+                    speech = Some(Some(text));
                 }
+            } else {
+                speech = Some(None);
             }
         }
 
@@ -2198,6 +2202,25 @@ No commentary, no explanations, no markdown fences."#
             let res_sal = parse_memory_salience_target(sal_keep).unwrap();
             assert!(res_sal.keep);
             assert_eq!(res_sal.importance, "high");
+
+            // User's exact CNM single-line target with "with context:"
+            let cnm_single_line = "Emote: [having: no, knowing: yes, empathizing: yes] Anticipatory Hunger. Route: send to Behavior with context: Immediate urge to beg for food based on high hunger levels and recognition of the owner's return with food items.";
+            let res_cnm = parse_cnm_target(cnm_single_line).unwrap();
+            assert_eq!(res_cnm.target, RouteTarget::Behavior);
+            assert_eq!(res_cnm.emote.label, "Anticipatory Hunger");
+            assert!(res_cnm.context_payload.contains("Immediate urge to beg for food"));
+
+            // Verify reasoning route with "with context:"
+            let cnm_reasoning = "Emote: [having: yes, knowing: yes, empathizing: no] Focused Determination. Route: send to Reasoning with context: Need to figure out how to retrieve the toy from under the low table leg, potentially requiring paw manipulation or nudging the table.";
+            let res_cnm_r = parse_cnm_target(cnm_reasoning).unwrap();
+            assert_eq!(res_cnm_r.target, RouteTarget::Reasoning);
+            assert_eq!(res_cnm_r.emote.label, "Focused Determination");
+
+            // Verify memory route with "with context:"
+            let cnm_memory = "Emote: [having: yes, knowing: no, empathizing: yes] Concerned Compassion. Route: send to Memory with context: Log instance of owner distress and associate with the specific sighing sound for future comfort responses.";
+            let res_cnm_m = parse_cnm_target(cnm_memory).unwrap();
+            assert_eq!(res_cnm_m.target, RouteTarget::Memory);
+            assert_eq!(res_cnm_m.emote.label, "Concerned Compassion");
 
             // Markdown bold markers in extraction
             let bold_text = r#"
