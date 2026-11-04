@@ -122,16 +122,141 @@ mod desktop {
         paint_busy: bool,
     }
 
-    #[derive(Clone, Serialize)]
+    #[derive(Clone, Serialize, Deserialize)]
     struct ChatMessage {
         role: &'static str,
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        citizen_name: Option<String>,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct VitalsData {
+        pub hunger: u32,
+        pub energy: u32,
+        pub cleanliness: u32,
+        pub boredom: u32,
+    }
+
+    impl Default for VitalsData {
+        fn default() -> Self {
+            Self {
+                hunger: 20,
+                energy: 85,
+                cleanliness: 90,
+                boredom: 25,
+            }
+        }
+    }
+
+    impl VitalsData {
+        pub fn compute_grounded_emote(&self) -> EmoteData {
+            let having = self.hunger < 60 && self.energy > 20;
+            let knowing = self.boredom < 70;
+            let empathizing = self.cleanliness > 30;
+
+            let name = match (having, knowing, empathizing) {
+                (true, true, true) => {
+                    if self.energy > 75 && self.boredom > 40 {
+                        "Playful"
+                    } else if self.energy < 40 {
+                        "Sleepy"
+                    } else {
+                        "Content"
+                    }
+                }
+                (true, true, false) => {
+                    if self.energy < 30 {
+                        "Fatigue"
+                    } else {
+                        "Focused"
+                    }
+                }
+                (true, false, true) => "Curious",
+                (true, false, false) => "Intrigued",
+                (false, true, true) => {
+                    if self.hunger >= 70 {
+                        "Hungry"
+                    } else {
+                        "Needy"
+                    }
+                }
+                (false, true, false) => {
+                    if self.hunger >= 70 {
+                        "Hungry"
+                    } else if self.cleanliness <= 30 {
+                        "Uncomfortable"
+                    } else {
+                        "Distressed"
+                    }
+                }
+                (false, false, true) => "Startled",
+                (false, false, false) => {
+                    if self.hunger >= 80 {
+                        "Starving"
+                    } else if self.energy <= 20 {
+                        "Exhausted"
+                    } else {
+                        "Perplexed"
+                    }
+                }
+            };
+
+            EmoteData {
+                having,
+                knowing,
+                empathizing,
+                name: name.to_string(),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct EmoteData {
+        pub having: bool,
+        pub knowing: bool,
+        pub empathizing: bool,
+        pub name: String,
+    }
+
+    impl Default for EmoteData {
+        fn default() -> Self {
+            Self {
+                having: true,
+                knowing: true,
+                empathizing: true,
+                name: "Content".to_string(),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct BehaviorAction {
+        pub action: String,
+        pub primary_verb: String,
+        pub target: Option<String>,
+        pub speech: Option<String>,
     }
 
     enum WorkerRequest {
         Refresh,
-        Chat(String),
+        Chat {
+            message: String,
+            citizen_id: usize,
+            citizen_name: String,
+            vitals: Option<VitalsData>,
+            emote: Option<EmoteData>,
+        },
         ClearChat,
+        SimDecide {
+            citizen_id: usize,
+            citizen_name: String,
+            vitals: VitalsData,
+            emote: EmoteData,
+            environment: String,
+            memory: Option<String>,
+            plan: Option<String>,
+        },
     }
 
     #[derive(Debug, Deserialize)]
@@ -142,8 +267,23 @@ mod desktop {
         Drag,
         Close,
         Open { link: String },
-        Chat { message: String },
+        Chat {
+            message: String,
+            citizen_id: Option<usize>,
+            citizen_name: Option<String>,
+            vitals: Option<VitalsData>,
+            emote: Option<EmoteData>,
+        },
         ClearChat,
+        SimDecide {
+            citizen_id: usize,
+            citizen_name: Option<String>,
+            vitals: VitalsData,
+            emote: EmoteData,
+            environment: String,
+            memory: Option<String>,
+            plan: Option<String>,
+        },
         Paint {
             prompt: String,
             passes: Option<usize>,
@@ -157,6 +297,18 @@ mod desktop {
     enum RssEvent {
         State(ViewState),
         Ui(Ipc),
+        SimAction {
+            citizen_id: usize,
+            action: String,
+            primary_verb: String,
+            target: Option<String>,
+            speech: Option<String>,
+        },
+        ChatReply {
+            citizen_id: usize,
+            citizen_name: String,
+            text: String,
+        },
         PaintProgress(PassProgress),
         PaintComplete {
             item: GalleryItem,
@@ -176,9 +328,21 @@ mod desktop {
         GetFullImage { path: String },
     }
 
+    #[derive(Clone, Debug)]
     enum PromptKind {
         Product,
-        Chat,
+        Chat {
+            vitals: Option<VitalsData>,
+            emote: Option<EmoteData>,
+            intent: Option<String>,
+        },
+        Simulation {
+            vitals: VitalsData,
+            emote: EmoteData,
+            environment: String,
+            memory: Option<String>,
+            plan: Option<String>,
+        },
     }
 
     type Responder = Box<dyn Fn(&str, PromptKind, &[ChatMessage]) -> Result<String>>;
@@ -234,27 +398,213 @@ mod desktop {
         Ok(prompt)
     }
 
-    fn answer_chat(state: &mut ViewState, message: String, responder: &Responder) {
-        match responder(&message, PromptKind::Chat, &state.chat) {
+    pub fn strip_outer_quotes(s: &str) -> &str {
+        let trimmed = s.trim();
+        let trimmed = trimmed.strip_prefix('"').unwrap_or(trimmed);
+        let trimmed = trimmed.strip_suffix('"').unwrap_or(trimmed);
+        let trimmed = trimmed.strip_prefix('“').unwrap_or(trimmed);
+        let trimmed = trimmed.strip_suffix('”').unwrap_or(trimmed);
+        let trimmed = trimmed.strip_prefix('\'').unwrap_or(trimmed);
+        let trimmed = trimmed.strip_suffix('\'').unwrap_or(trimmed);
+        trimmed.trim()
+    }
+
+    pub fn parse_chat_response_loose(raw: &str) -> String {
+        let trimmed = raw.trim();
+        let stripped = if let Some(idx) = trimmed.to_lowercase().find("reply:") {
+            &trimmed[idx + 6..]
+        } else if let Some(idx) = trimmed.to_lowercase().find("speak:") {
+            &trimmed[idx + 6..]
+        } else if let Some(idx) = trimmed.to_lowercase().find("yumon:") {
+            &trimmed[idx + 6..]
+        } else {
+            trimmed
+        };
+        let stripped = stripped.trim();
+        let first_turn = stripped.split("\nHuman:")
+            .next().unwrap_or(stripped)
+            .split("\nperson:")
+            .next().unwrap_or(stripped)
+            .split("\nINPUT:")
+            .next().unwrap_or(stripped)
+            .split("\nREJECTED:")
+            .next().unwrap_or(stripped)
+            .split("\nCHOSEN:")
+            .next().unwrap_or(stripped)
+            .trim();
+
+        let unquoted = strip_outer_quotes(first_turn);
+        if unquoted.is_empty() {
+            first_turn.to_string()
+        } else {
+            unquoted.to_string()
+        }
+    }
+
+    const ACTION_VERBS: &[&str] = &[
+        "eat", "feed", "graze", "snack", "drink", "taste",
+        "play", "chase", "bounce", "catch", "toss", "bat", "roll", "tumble",
+        "pick", "grab", "carry",
+        "swim", "glide", "dive", "paddle", "dash", "sprint", "run", "hop", "jump",
+        "rest", "sleep", "nap", "curl", "relax", "doze", "sprawl", "sit", "lie",
+        "explore", "inspect", "sniff", "look", "peer", "watch", "track", "peek",
+        "tend", "groom", "clean", "wash", "brush", "shake", "wipe",
+        "build", "stack", "arrange", "gather", "dig",
+        "visit", "nudge", "approach", "crouch", "rub",
+    ];
+
+    const TARGET_KEYWORDS: &[&str] = &[
+        "flake", "flakes", "food", "feed", "treat", "snack",
+        "ball", "toy", "mouse", "blocks", "block", "pebble",
+        "castle", "caves", "cave", "stone", "stones", "rock", "rocks", "kelp", "plant", "plants", "coral", "driftwood", "water", "current",
+        "tree", "bench", "fountain", "garden", "flower", "flowers", "house", "cafe", "bakery", "shop", "telescope", "sofa", "rug", "bed", "door", "porch", "window", "cushion",
+    ];
+
+    pub fn extract_action_verb(action_text: &str) -> String {
+        let lower = action_text.to_lowercase();
+        let words: Vec<&str> = lower.split(|c: char| !c.is_alphabetic()).filter(|s| !s.is_empty()).collect();
+        for word in words {
+            if ACTION_VERBS.contains(&word) {
+                return word.to_string();
+            }
+        }
+        if lower.contains("swim") { return "swim".into(); }
+        if lower.contains("eat") { return "eat".into(); }
+        if lower.contains("play") { return "play".into(); }
+        if lower.contains("rest") || lower.contains("sleep") { return "rest".into(); }
+        if lower.contains("build") || lower.contains("stack") { return "build".into(); }
+        if lower.contains("clean") || lower.contains("groom") { return "tend".into(); }
+        "explore".into()
+    }
+
+    pub fn extract_target_entity(action_text: &str) -> Option<String> {
+        let lower = action_text.to_lowercase();
+        let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()).collect();
+        for word in words {
+            if TARGET_KEYWORDS.contains(&word) {
+                return Some(word.to_string());
+            }
+        }
+        None
+    }
+
+    pub fn parse_behavior_response_loose(raw: &str) -> BehaviorAction {
+        let mut action_desc = String::new();
+        let mut speech_str = None;
+
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let lower = trimmed.to_lowercase();
+            if lower.starts_with("action:") {
+                action_desc = trimmed["action:".len()..].trim().to_string();
+            } else if lower.starts_with("speak:") {
+                let s = trimmed["speak:".len()..].trim();
+                let s_clean = strip_outer_quotes(s).trim();
+                if !s_clean.eq_ignore_ascii_case("none") && !s_clean.is_empty() {
+                    speech_str = Some(s_clean.to_string());
+                }
+            } else if action_desc.is_empty()
+                && !lower.starts_with("vitals:")
+                && !lower.starts_with("emote:")
+                && !lower.starts_with("environment:")
+                && !lower.starts_with("memory:")
+                && !lower.starts_with("plan:")
+            {
+                action_desc = trimmed.to_string();
+            }
+        }
+
+        if action_desc.is_empty() {
+            action_desc = raw.trim().lines().next().unwrap_or("I will explore the world.").trim().to_string();
+        }
+        action_desc = strip_outer_quotes(&action_desc).to_string();
+        if action_desc.is_empty() {
+            action_desc = "I will explore the surroundings.".to_string();
+        }
+
+        let verb = extract_action_verb(&action_desc);
+        let target = extract_target_entity(&action_desc);
+
+        BehaviorAction {
+            action: action_desc,
+            primary_verb: verb,
+            target,
+            speech: speech_str,
+        }
+    }
+
+    pub fn resolve_default_checkpoint(explicit: Option<&str>) -> Option<String> {
+        if let Some(path) = explicit {
+            return Some(path.to_string());
+        }
+        let candidates = [
+            "checkpoints/yumon-v2-dpo/code_256h_16l_8a_512ff_256len_b2_Moe_e8_k2_f32_tied",
+            "checkpoints/yumon-v2-dpo",
+            "checkpoints/yumon-v2-sft/code_256h_16l_8a_512ff_256len_b2_Moe_e8_k2_f32_tied",
+            "checkpoints/yumon-v2-sft",
+        ];
+        for candidate in candidates {
+            let p = PathBuf::from(candidate);
+            if p.join("model.bin").exists() && p.join("metadata.json").exists() {
+                return Some(candidate.to_string());
+            }
+            if p.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&p) {
+                    for entry in entries.flatten() {
+                        let sub = entry.path();
+                        if sub.is_dir() && sub.join("model.bin").exists() && sub.join("metadata.json").exists() {
+                            return Some(sub.to_str().unwrap().to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn answer_chat(
+        state: &mut ViewState,
+        message: String,
+        _citizen_id: usize,
+        citizen_name: String,
+        vitals: Option<VitalsData>,
+        emote: Option<EmoteData>,
+        responder: &Responder,
+    ) -> Option<String> {
+        let kind = PromptKind::Chat {
+            vitals,
+            emote,
+            intent: Some("Chat".to_string()),
+        };
+        let res = match responder(&message, kind, &state.chat) {
             Ok(reply) => {
+                let text = reply.clone();
                 state.chat.push(ChatMessage {
                     role: "yumon",
                     text: reply,
+                    citizen_name: Some(citizen_name),
                 });
                 state.chat_status = "Say hello or share an idea.".into();
+                Some(text)
             }
             Err(error) => {
                 state.chat.push(ChatMessage {
                     role: "error",
                     text: format!("Could not reply: {error:#}"),
+                    citizen_name: None,
                 });
                 state.chat_status = "Try sending your message again.".into();
+                None
             }
-        }
+        };
         if state.chat.len() > HISTORY_LIMIT {
             state.chat.drain(..state.chat.len() - HISTORY_LIMIT);
         }
         state.chat_busy = false;
+        res
     }
 
     fn chat_prompt(
@@ -312,6 +662,7 @@ mod desktop {
             ChatMessage {
                 role,
                 text: text.into(),
+                citizen_name: None,
             }
         }
 
@@ -415,24 +766,108 @@ mod desktop {
                 paint_busy: false,
             };
             let responder: Responder = Box::new(|text, kind, history| {
-                assert!(matches!(kind, PromptKind::Chat));
+                assert!(matches!(kind, PromptKind::Chat { .. }));
                 assert_eq!(text, "Hello Yumon!");
                 assert_eq!(history[0].text, "Hello Yumon!");
                 Ok("Hello friend!".into())
             });
-            answer_chat(&mut state, "Hello Yumon!".into(), &responder);
+            answer_chat(&mut state, "Hello Yumon!".into(), 0, "Yumon".into(), None, None, &responder);
             assert_eq!(state.chat[1].text, "Hello friend!");
             assert_eq!(state.chat[1].role, "yumon");
+            assert_eq!(state.chat[1].citizen_name.as_deref(), Some("Yumon"));
             assert!(!state.chat_busy);
             let failed: Responder = Box::new(|_, _, _| anyhow::bail!("GPU unavailable"));
             state.chat_busy = true;
-            answer_chat(&mut state, "Try again".into(), &failed);
+            answer_chat(&mut state, "Try again".into(), 0, "Yumon".into(), None, None, &failed);
             assert_eq!(state.chat[2].role, "error");
             assert!(state.chat[2].text.contains("GPU unavailable"));
             assert!(!state.chat_busy);
             assert_eq!(state.next_check, next_check);
             assert_eq!(state.status, "Products waiting");
             assert!(state.entries.is_empty());
+        }
+
+        #[test]
+        fn test_loose_response_parsing_chat() {
+            // Standard format with prefix
+            assert_eq!(
+                parse_chat_response_loose("Reply: \"My tummy rumbles loud! Please feed me now.\""),
+                "My tummy rumbles loud! Please feed me now."
+            );
+            // Lowercase prefix
+            assert_eq!(
+                parse_chat_response_loose("reply: \"Rest your head, I'll stay right here with you.\""),
+                "Rest your head, I'll stay right here with you."
+            );
+            // Without quotes
+            assert_eq!(
+                parse_chat_response_loose("Reply: Yes! I am ready to sprint right now!"),
+                "Yes! I am ready to sprint right now!"
+            );
+            // Bare sentence without prefix
+            assert_eq!(
+                parse_chat_response_loose("\"I would love a delicious snack!\""),
+                "I would love a delicious snack!"
+            );
+            // Truncates hallucinated follow-up turns
+            let multi_turn = "Reply: \"I am ready to play!\"\nperson: what game?\nyumon: fetch!";
+            assert_eq!(
+                parse_chat_response_loose(multi_turn),
+                "I am ready to play!"
+            );
+        }
+
+        #[test]
+        fn test_loose_response_parsing_behavior() {
+            // Standard two-line format
+            let standard = "Action: I will pick up the squeaky rubber mouse and toss it toward owner's feet.\nSpeak: \"Look at my squeaky mouse!\"";
+            let parsed = parse_behavior_response_loose(standard);
+            assert_eq!(parsed.action, "I will pick up the squeaky rubber mouse and toss it toward owner's feet.");
+            assert_eq!(parsed.primary_verb, "pick");
+            assert_eq!(parsed.target.as_deref(), Some("mouse"));
+            assert_eq!(parsed.speech.as_deref(), Some("Look at my squeaky mouse!"));
+
+            // Speak: none
+            let no_speak = "Action: I will curl up tightly in the warm patch of sunlight and close my eyes.\nSpeak: none";
+            let parsed2 = parse_behavior_response_loose(no_speak);
+            assert_eq!(parsed2.primary_verb, "curl");
+            assert_eq!(parsed2.speech, None);
+
+            // Missing Action: prefix (loose parsing)
+            let no_prefix = "I will swim over to the glowing kelp.\nSpeak: \"So pretty!\"";
+            let parsed3 = parse_behavior_response_loose(no_prefix);
+            assert_eq!(parsed3.action, "I will swim over to the glowing kelp.");
+            assert_eq!(parsed3.primary_verb, "swim");
+            assert_eq!(parsed3.target.as_deref(), Some("kelp"));
+            assert_eq!(parsed3.speech.as_deref(), Some("So pretty!"));
+        }
+
+        #[test]
+        fn test_dpo_vitals_grounded_emote_and_format() {
+            let v = VitalsData {
+                hunger: 80,
+                energy: 40,
+                cleanliness: 90,
+                boredom: 20,
+            };
+            let e = v.compute_grounded_emote();
+            assert_eq!(e.name, "Hungry");
+            assert_eq!(e.having, false);
+            assert_eq!(e.knowing, true);
+            assert_eq!(e.empathizing, true);
+
+            let header = format!(
+                "Vitals: Hunger {}, Energy {}, Cleanliness {}, Boredom {}.\nEmote: [having: {}, knowing: {}, empathizing: {}] {}.",
+                v.hunger, v.energy, v.cleanliness, v.boredom,
+                if e.having { "yes" } else { "no" },
+                if e.knowing { "yes" } else { "no" },
+                if e.empathizing { "yes" } else { "no" },
+                e.name
+            );
+            assert_eq!(
+                header,
+                "Vitals: Hunger 80, Energy 40, Cleanliness 90, Boredom 20.\nEmote: [having: no, knowing: yes, empathizing: yes] Hungry."
+            );
         }
 
         #[test]
@@ -481,8 +916,65 @@ mod desktop {
                 paint_vocab: None,
             };
             let responder = load_responder(&args).expect("load_responder with embedded model should succeed");
-            let reply = responder("Hello", PromptKind::Chat, &[]).expect("inference with embedded model should succeed");
+            let reply = responder("Hello", PromptKind::Chat { vitals: None, emote: None, intent: None }, &[]).expect("inference with embedded model should succeed");
             assert!(!reply.trim().is_empty());
+        }
+
+        #[test]
+        fn test_dpo_chat_and_simulation_inference() {
+            let dpo_path = resolve_default_checkpoint(None);
+            if let Some(ckpt) = dpo_path {
+                let args = Args {
+                    checkpoint: Some(ckpt),
+                    architecture: Architecture::Moe,
+                    history: None,
+                    cache: None,
+                    check_feeds: false,
+                    yumon_talk: true,
+                    yumon_talk_vocab: None,
+                    decompressor: Some(PathBuf::from("training-cache/ngram_decompressor.bin")),
+                    no_decompressor: false,
+                    paint_pass1: None,
+                    paint_pass2: None,
+                    paint_pass3: None,
+                    paint_pass4: None,
+                    paint_upscaler: None,
+                    paint_colorizer: None,
+                    paint_vocab: None,
+                };
+                let responder = load_responder(&args).expect("load DPO responder should succeed");
+
+                // 1. Chat with vitals
+                let vitals = VitalsData {
+                    hunger: 80,
+                    energy: 40,
+                    cleanliness: 90,
+                    boredom: 20,
+                };
+                let emote = vitals.compute_grounded_emote();
+                let chat_kind = PromptKind::Chat {
+                    vitals: Some(vitals.clone()),
+                    emote: Some(emote.clone()),
+                    intent: Some("Chat".into()),
+                };
+                let reply = responder("Is it dinner time yet?", chat_kind, &[]).expect("DPO chat inference");
+                println!("[DPO Chat Output] {}", reply);
+                assert!(!reply.trim().is_empty());
+
+                // 2. Simulation behavior
+                let sim_kind = PromptKind::Simulation {
+                    vitals,
+                    emote,
+                    environment: "Suburban Park, nearby: Oak Tree, Park Bench, Flower Bed".into(),
+                    memory: Some("Owner fed a crunchy snack earlier".into()),
+                    plan: None,
+                };
+                let action_json = responder("", sim_kind, &[]).expect("DPO simulation inference");
+                println!("[DPO Simulation Output JSON] {}", action_json);
+                let action: BehaviorAction = serde_json::from_str(&action_json).expect("valid action json");
+                assert!(!action.action.is_empty());
+                assert!(!action.primary_verb.is_empty());
+            }
         }
 
         #[test]
@@ -500,11 +992,14 @@ mod desktop {
     }
 
     fn load_responder(args: &Args) -> Result<Responder> {
-        let metadata: serde_json::Value = if let Some(ckpt) = &args.checkpoint {
+        let resolved_ckpt = resolve_default_checkpoint(args.checkpoint.as_deref());
+        let metadata: serde_json::Value = if let Some(ckpt) = &resolved_ckpt {
+            println!("[Yumon Portal] Found checkpoint at {ckpt}");
             serde_json::from_str(&std::fs::read_to_string(
                 PathBuf::from(ckpt).join("metadata.json"),
             )?)?
         } else {
+            println!("[Yumon Portal] No custom checkpoint found; using embedded model.");
             serde_json::from_str(EMBEDDED_METADATA_STR)?
         };
         anyhow::ensure!(
@@ -581,33 +1076,101 @@ mod desktop {
                 comment_prompt("idea", config.max_seq_len, &tokenizer)?;
                 let dec_clone = decompressor.clone();
                 Ok(Box::new(
-                    move |text: &str, kind: PromptKind, history: &[ChatMessage]| {
-                        let (prompt_text, ctx) = if use_yumon_talk {
-                            match yumon_talk::english_to_yumon_with_map(text) {
-                                Ok((talk, context)) => (talk, context),
-                                Err(e) => {
-                                    eprintln!("[Yumon Portal] English -> Yumon Talk translation fallback: {e}");
+                    move |text: &str, kind: PromptKind, _history: &[ChatMessage]| {
+                        let is_structured = yumon_pet::brain::train::is_structured_or_instruction_prompt(text);
+                        let (prompt_to_encode, ctx) = match &kind {
+                            PromptKind::Product => {
+                                let (prompt_text, ctx) = if use_yumon_talk {
+                                    match yumon_talk::english_to_yumon_with_map(text) {
+                                        Ok((talk, context)) => (talk, context),
+                                        Err(e) => {
+                                            eprintln!("[Yumon Portal] English -> Yumon Talk translation fallback: {e}");
+                                            (text.to_string(), yumon_talk::TranslationContext::new())
+                                        }
+                                    }
+                                } else {
                                     (text.to_string(), yumon_talk::TranslationContext::new())
+                                };
+                                let p = comment_prompt(&prompt_text, config.max_seq_len, &tokenizer)?;
+                                (p, ctx)
+                            }
+                            PromptKind::Chat { vitals, emote, intent } => {
+                                let formatted_prompt = if is_structured {
+                                    text.to_string()
+                                } else if let (Some(v), Some(e)) = (vitals, emote) {
+                                    format!(
+                                        "Vitals: Hunger {}, Energy {}, Cleanliness {}, Boredom {}.\nEmote: [having: {}, knowing: {}, empathizing: {}] {}.\nIntent: {}.\nOwner Prompt: \"{}\"",
+                                        v.hunger, v.energy, v.cleanliness, v.boredom,
+                                        if e.having { "yes" } else { "no" },
+                                        if e.knowing { "yes" } else { "no" },
+                                        if e.empathizing { "yes" } else { "no" },
+                                        e.name,
+                                        intent.as_deref().unwrap_or("Chat"),
+                                        text
+                                    )
+                                } else {
+                                    let def_v = VitalsData::default();
+                                    let def_e = def_v.compute_grounded_emote();
+                                    format!(
+                                        "Vitals: Hunger {}, Energy {}, Cleanliness {}, Boredom {}.\nEmote: [having: {}, knowing: {}, empathizing: {}] {}.\nIntent: Chat.\nOwner Prompt: \"{}\"",
+                                        def_v.hunger, def_v.energy, def_v.cleanliness, def_v.boredom,
+                                        if def_e.having { "yes" } else { "no" },
+                                        if def_e.knowing { "yes" } else { "no" },
+                                        if def_e.empathizing { "yes" } else { "no" },
+                                        def_e.name,
+                                        text
+                                    )
+                                };
+
+                                if use_yumon_talk {
+                                    match yumon_talk::english_to_yumon_with_map(&formatted_prompt) {
+                                        Ok((talk, context)) => (talk, context),
+                                        Err(e) => {
+                                            eprintln!("[Yumon Portal] English -> Yumon Talk translation fallback: {e}");
+                                            (formatted_prompt, yumon_talk::TranslationContext::new())
+                                        }
+                                    }
+                                } else {
+                                    (formatted_prompt, yumon_talk::TranslationContext::new())
                                 }
                             }
-                        } else {
-                            (text.to_string(), yumon_talk::TranslationContext::new())
+                            PromptKind::Simulation { vitals, emote, environment, memory, plan } => {
+                                let formatted_prompt = if is_structured {
+                                    text.to_string()
+                                } else {
+                                    format!(
+                                        "Vitals: Hunger {}, Energy {}, Cleanliness {}, Boredom {}.\nEmote: [having: {}, knowing: {}, empathizing: {}] {}.\nEnvironment: {}.\nMemory: {}.\nPlan: {}.",
+                                        vitals.hunger, vitals.energy, vitals.cleanliness, vitals.boredom,
+                                        if emote.having { "yes" } else { "no" },
+                                        if emote.knowing { "yes" } else { "no" },
+                                        if emote.empathizing { "yes" } else { "no" },
+                                        emote.name,
+                                        environment,
+                                        memory.as_deref().unwrap_or("none"),
+                                        plan.as_deref().unwrap_or("none")
+                                    )
+                                };
+
+                                if use_yumon_talk {
+                                    match yumon_talk::english_to_yumon_with_map(&formatted_prompt) {
+                                        Ok((talk, context)) => (talk, context),
+                                        Err(e) => {
+                                            eprintln!("[Yumon Portal] English -> Yumon Talk translation fallback: {e}");
+                                            (formatted_prompt, yumon_talk::TranslationContext::new())
+                                        }
+                                    }
+                                } else {
+                                    (formatted_prompt, yumon_talk::TranslationContext::new())
+                                }
+                            }
                         };
 
-                        let prompt = match kind {
-                            PromptKind::Product => {
-                                comment_prompt(&prompt_text, config.max_seq_len, &tokenizer)?
-                            }
-                            PromptKind::Chat => {
-                                chat_prompt(&prompt_text, history, config.max_seq_len, &tokenizer, use_yumon_talk)?
-                            }
-                        };
                         let generate: fn(&$model_ty, &TokenizerKind, &str, usize, &_) -> String =
                             $generate;
                         let reply = generate(
                             &brain,
                             &tokenizer,
-                            &prompt,
+                            &prompt_to_encode,
                             config.max_seq_len.min(256),
                             &device,
                         );
@@ -620,7 +1183,7 @@ mod desktop {
                         };
                         anyhow::ensure!(!reply.is_empty(), "Yumon returned an empty reply");
 
-                        let final_reply = if use_yumon_talk {
+                        let decompressed_reply = if use_yumon_talk {
                             if let Some(dec) = &dec_clone {
                                 let vocab = yumon_talk::get_global_vocab();
                                 match dec.decompress_with_context(&reply, &vocab, &ctx) {
@@ -637,13 +1200,24 @@ mod desktop {
                             reply
                         };
 
+                        println!("[DEBUG decompressed_reply] {:?}", decompressed_reply);
+
+                        let final_reply = match &kind {
+                            PromptKind::Product => decompressed_reply,
+                            PromptKind::Chat { .. } => parse_chat_response_loose(&decompressed_reply),
+                            PromptKind::Simulation { .. } => {
+                                let action = parse_behavior_response_loose(&decompressed_reply);
+                                serde_json::to_string(&action)?
+                            }
+                        };
+
                         Ok(final_reply)
                     },
                 ) as Responder)
             }};
         }
 
-        if let Some(ckpt) = &args.checkpoint {
+        if let Some(ckpt) = &resolved_ckpt {
             let arch = if metadata.get("num_experts").is_some() && matches!(args.architecture, Architecture::DecoderOnly) {
                 println!("[Yumon Portal] Auto-detected MoE checkpoint metadata; using MoE architecture.");
                 Architecture::Moe
@@ -717,7 +1291,8 @@ mod desktop {
                         state.chat_status = "Say hello or share an idea.".into();
                     }
                     WorkerRequest::Refresh => *refresh = true,
-                    WorkerRequest::Chat(_) => {}
+                    WorkerRequest::Chat { .. } => {}
+                    WorkerRequest::SimDecide { .. } => {}
                 }
             }
         };
@@ -822,24 +1397,77 @@ mod desktop {
                         refresh = true;
                         break;
                     }
-                    Ok(WorkerRequest::Chat(message)) => {
+                    Ok(WorkerRequest::Chat {
+                        message,
+                        citizen_id,
+                        citizen_name,
+                        vitals,
+                        emote,
+                    }) => {
                         state.chat_busy = true;
-                        state.chat_status = "Yumon is thinking...".into();
+                        state.chat_status = format!("{citizen_name} is thinking...");
                         state.chat.push(ChatMessage {
                             role: "user",
                             text: message.clone(),
+                            citizen_name: None,
                         });
                         if !publish(&state) {
                             return;
                         }
-                        answer_chat(&mut state, message, &responder);
+                        if let Some(reply_text) = answer_chat(
+                            &mut state,
+                            message,
+                            citizen_id,
+                            citizen_name.clone(),
+                            vitals,
+                            emote,
+                            &responder,
+                        ) {
+                            let _ = proxy.send_event(RssEvent::ChatReply {
+                                citizen_id,
+                                citizen_name,
+                                text: reply_text,
+                            });
+                        }
                         drain_pending(&mut state, &mut refresh);
                         if !publish(&state) {
                             return;
                         }
-                        // Chat uses the same model but leaves the product deadline intact.
                         if Instant::now() >= deadline {
                             break;
+                        }
+                    }
+                    Ok(WorkerRequest::SimDecide {
+                        citizen_id,
+                        citizen_name,
+                        vitals,
+                        emote,
+                        environment,
+                        memory,
+                        plan,
+                    }) => {
+                        let kind = PromptKind::Simulation {
+                            vitals,
+                            emote,
+                            environment,
+                            memory,
+                            plan,
+                        };
+                        match responder("", kind, &[]) {
+                            Ok(action_json) => {
+                                if let Ok(action) = serde_json::from_str::<BehaviorAction>(&action_json) {
+                                    let _ = proxy.send_event(RssEvent::SimAction {
+                                        citizen_id,
+                                        action: action.action,
+                                        primary_verb: action.primary_verb,
+                                        target: action.target,
+                                        speech: action.speech,
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[Yumon Portal] Simulation decision error for citizen {citizen_id} ({citizen_name}): {e:#}");
+                            }
                         }
                     }
                     Ok(WorkerRequest::ClearChat) => {
@@ -1261,6 +1889,55 @@ mod desktop {
                     }
                     return;
                 }
+                Event::UserEvent(RssEvent::SimAction { citizen_id, action, primary_verb, target, speech }) => {
+                    if ready {
+                        let payload = serde_json::json!({
+                            "citizen_id": citizen_id,
+                            "action": action,
+                            "primary_verb": primary_verb,
+                            "target": target,
+                            "speech": speech,
+                        });
+                        if let Ok(json) = serde_json::to_string(&payload) {
+                            let _ = webview.evaluate_script(&format!("window.__yumon_sim_action({json})"));
+                        }
+                    }
+                    return;
+                }
+                Event::UserEvent(RssEvent::ChatReply { citizen_id, citizen_name, text }) => {
+                    if ready {
+                        let payload = serde_json::json!({
+                            "citizen_id": citizen_id,
+                            "citizen_name": citizen_name,
+                            "text": text,
+                        });
+                        if let Ok(json) = serde_json::to_string(&payload) {
+                            let _ = webview.evaluate_script(&format!("window.__yumon_chat_reply({json})"));
+                        }
+                    }
+                    return;
+                }
+                Event::UserEvent(RssEvent::Ui(Ipc::SimDecide {
+                    citizen_id,
+                    citizen_name,
+                    vitals,
+                    emote,
+                    environment,
+                    memory,
+                    plan,
+                })) => {
+                    let name = citizen_name.unwrap_or_else(|| "Yumon".into());
+                    let _ = tx.send(WorkerRequest::SimDecide {
+                        citizen_id,
+                        citizen_name: name,
+                        vitals,
+                        emote,
+                        environment,
+                        memory,
+                        plan,
+                    });
+                    return;
+                }
                 Event::UserEvent(RssEvent::Ui(Ipc::Refresh))
                     if state.can_refresh && !state.busy && !state.chat_busy =>
                 {
@@ -1270,12 +1947,20 @@ mod desktop {
                         state_changed = true;
                     }
                 }
-                Event::UserEvent(RssEvent::Ui(Ipc::Chat { message }))
+                Event::UserEvent(RssEvent::Ui(Ipc::Chat { message, citizen_id, citizen_name, vitals, emote }))
                     if state.can_refresh && !state.busy && !state.chat_busy =>
                 {
                     let message = message.trim();
                     if !message.is_empty() && message.chars().count() <= 4096 {
-                        if tx.send(WorkerRequest::Chat(message.to_owned())).is_ok() {
+                        let cid = citizen_id.unwrap_or(0);
+                        let cname = citizen_name.unwrap_or_else(|| "Yumon".into());
+                        if tx.send(WorkerRequest::Chat {
+                            message: message.to_owned(),
+                            citizen_id: cid,
+                            citizen_name: cname,
+                            vitals,
+                            emote,
+                        }).is_ok() {
                             state.chat_busy = true;
                             state.chat_status = "Yumon is thinking...".into();
                             state_changed = true;

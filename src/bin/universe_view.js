@@ -134,6 +134,114 @@
     },
   };
 
+  // Grounded Emote Computation (matches Rust existential taxonomy)
+  function computeGroundedEmote(vitals) {
+    const hunger = Math.round(vitals.hunger || 0);
+    const energy = Math.round(vitals.energy || 0);
+    const cleanliness = Math.round(vitals.cleanliness || 0);
+    const boredom = Math.round(vitals.boredom || 0);
+
+    const having = hunger < 65 && cleanliness > 35;
+    const knowing = energy > 35;
+    const empathizing = boredom < 75;
+
+    let name = 'Content';
+    if (having && knowing && empathizing) {
+      name = (boredom <= 25 && hunger <= 30) ? 'Loving' : 'Content';
+    } else if (having && knowing && !empathizing) {
+      name = (energy >= 70) ? 'Focused' : 'Creative';
+    } else if (having && !knowing && empathizing) {
+      name = (boredom >= 50) ? 'Playful' : 'Curious';
+    } else if (having && !knowing && !empathizing) {
+      name = (energy <= 30) ? 'Sleepy' : 'Drowsy';
+    } else if (!having && knowing && empathizing) {
+      name = (hunger >= 75) ? 'Craving' : 'Needy';
+    } else if (!having && knowing && !empathizing) {
+      name = (hunger >= 70) ? 'Hungry' : (cleanliness <= 30 ? 'Uncomfortable' : 'Distressed');
+    } else if (!having && !knowing && empathizing) {
+      name = 'Startled';
+    } else {
+      name = (hunger >= 80) ? 'Starving' : (energy <= 20 ? 'Exhausted' : 'Perplexed');
+    }
+
+    return { having, knowing, empathizing, name };
+  }
+
+  // 3D Speech Bubble Billboard Canvas & Sprite Utilities
+  function drawSpeechBubbleCanvas(ctx, text, w, h) {
+    ctx.clearRect(0, 0, w, h);
+
+    const padX = 16;
+    const padY = 12;
+    const bw = w - padX * 2;
+    const bh = h - padY * 2 - 20;
+    const r = 20;
+
+    ctx.beginPath();
+    ctx.moveTo(padX + r, padY);
+    ctx.lineTo(padX + bw - r, padY);
+    ctx.quadraticCurveTo(padX + bw, padY, padX + bw, padY + r);
+    ctx.lineTo(padX + bw, padY + bh - r);
+    ctx.quadraticCurveTo(padX + bw, padY + bh, padX + bw - r, padY + bh);
+
+    // Center arrow pointing down
+    const midX = w / 2;
+    ctx.lineTo(midX + 16, padY + bh);
+    ctx.lineTo(midX, padY + bh + 16);
+    ctx.lineTo(midX - 16, padY + bh);
+
+    ctx.lineTo(padX + r, padY + bh);
+    ctx.quadraticCurveTo(padX, padY + bh, padX, padY + bh - r);
+    ctx.lineTo(padX, padY + r);
+    ctx.quadraticCurveTo(padX, padY, padX + r, padY);
+    ctx.closePath();
+
+    ctx.fillStyle = 'rgba(14, 23, 20, 0.92)';
+    ctx.fill();
+    ctx.strokeStyle = '#9dd8b3';
+    ctx.lineWidth = 3.5;
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 24px "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    let display = text || '...';
+    if (display.length > 36) {
+      display = display.substring(0, 34) + '...';
+    }
+    ctx.fillText(display, midX, padY + bh / 2);
+  }
+
+  function makeSpeechBubbleSprite(text) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 128;
+    const ctx = canvas.getContext('2d');
+    drawSpeechBubbleCanvas(ctx, text, 512, 128);
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.needsUpdate = true;
+    const mat = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(3.4, 0.85, 1.0);
+    sprite.userData = { canvas, ctx, texture };
+    return sprite;
+  }
+
+  function updateSpeechBubbleSprite(sprite, text) {
+    if (!sprite || !sprite.userData) return;
+    const { canvas, ctx, texture } = sprite.userData;
+    if (!ctx || !texture) return;
+    drawSpeechBubbleCanvas(ctx, text, canvas.width, canvas.height);
+    texture.needsUpdate = true;
+  }
+
   function getSuburbanRadius(kind) {
     switch (kind) {
       case Kinds.House:
@@ -336,6 +444,9 @@
           role: 'Architect · Builder',
           fishRole: 'Flame Goby · Swimmer',
           savings: 42,
+          vitals: { hunger: 25, energy: 85, cleanliness: 90, boredom: 20 },
+          recentMemory: 'Enjoyed building a sturdy tower in the neighborhood.',
+          recentPlan: null,
         },
         {
           name: 'Ripple',
@@ -346,6 +457,9 @@
           role: 'Explorer · Scout',
           fishRole: 'Neon Tetra · Glider',
           savings: 38,
+          vitals: { hunger: 30, energy: 90, cleanliness: 85, boredom: 15 },
+          recentMemory: 'Explored the quiet trails near the clear pond.',
+          recentPlan: null,
         },
         {
           name: 'Fern',
@@ -356,6 +470,9 @@
           role: 'Botanist · Planter',
           fishRole: 'Emerald Cory · Grazer',
           savings: 55,
+          vitals: { hunger: 20, energy: 75, cleanliness: 95, boredom: 25 },
+          recentMemory: 'Tended the fresh blooming flowers in the garden.',
+          recentPlan: null,
         },
         {
           name: 'Sol',
@@ -366,6 +483,9 @@
           role: 'Astronomer · Guide',
           fishRole: 'Golden Guppy · Dasher',
           savings: 49,
+          vitals: { hunger: 35, energy: 80, cleanliness: 80, boredom: 30 },
+          recentMemory: 'Gazed up through the grand telescope at bright stars.',
+          recentPlan: null,
         },
       ];
 
@@ -1338,7 +1458,7 @@
         group.scale.set(0.85, 0.85, 0.85);
         this.scene.add(group);
 
-        this.yumons.push({
+        const yumonObj = {
           id: i,
           citizen: c,
           mesh: group,
@@ -1357,7 +1477,31 @@
           leftPaw,
           rightPaw,
           body,
-        });
+          vitals: { ...c.vitals },
+          emote: computeGroundedEmote(c.vitals),
+          recentMemory: c.recentMemory,
+          recentPlan: c.recentPlan,
+          currentAction: 'resting peacefully',
+          speechText: null,
+          speechEndTime: 0,
+          speechSprite: null,
+        };
+        yumonObj.showSpeech = (text, durationMs = 6000) => {
+          yumonObj.speechText = text;
+          yumonObj.speechEndTime = performance.now() + durationMs;
+          if (!yumonObj.speechSprite) {
+            yumonObj.speechSprite = makeSpeechBubbleSprite(text);
+            yumonObj.speechSprite.position.set(0, 1.95, 0);
+            yumonObj.mesh.add(yumonObj.speechSprite);
+          } else {
+            updateSpeechBubbleSprite(yumonObj.speechSprite, text);
+            yumonObj.speechSprite.visible = true;
+          }
+          if (this.selectedCitizen === yumonObj.id) {
+            this.updateHUDCard();
+          }
+        };
+        this.yumons.push(yumonObj);
       }
     }
 
@@ -1376,12 +1520,51 @@
           </div>
         </div>
         <div class="hud-citizen-card" id="hud-citizen-card">
-          <div class="hud-card-avatar" id="hud-card-avatar">🦊</div>
-          <div class="hud-card-body">
-            <div class="hud-card-header"><strong id="hud-card-name">Ember</strong> <span id="hud-card-role">Architect</span></div>
-            <div class="hud-card-status" id="hud-card-status">Resting peacefully</div>
+          <div class="hud-card-top-row">
+            <div class="hud-card-avatar" id="hud-card-avatar">🦊</div>
+            <div class="hud-card-body">
+              <div class="hud-card-header">
+                <strong id="hud-card-name">Ember</strong>
+                <span class="role" id="hud-card-role">Architect</span>
+                <span class="hud-emote-badge" id="hud-card-emote">Content [h+ k+ e+]</span>
+              </div>
+              <div class="hud-card-status" id="hud-card-status">Resting peacefully</div>
+            </div>
+            <button class="hud-chat-btn" id="hud-chat-btn" title="Chat with this Yumon">Chat 💬</button>
           </div>
-          <button class="hud-chat-btn" id="hud-chat-btn" title="Chat with this Yumon">Chat 💬</button>
+
+          <!-- Quantitative Vitals Stat Bars -->
+          <div class="hud-stat-grid">
+            <div class="hud-stat-box" title="Hunger (0 = full, 100 = starving)">
+              <div class="hud-stat-label"><span>🍖 Hunger</span><span class="hud-stat-val" id="stat-val-hunger">25%</span></div>
+              <div class="stat-bar-track"><div class="stat-bar-fill hunger" id="stat-fill-hunger" style="width: 25%;"></div></div>
+            </div>
+            <div class="hud-stat-box" title="Energy (100 = awake, 0 = exhausted)">
+              <div class="hud-stat-label"><span>⚡ Energy</span><span class="hud-stat-val" id="stat-val-energy">85%</span></div>
+              <div class="stat-bar-track"><div class="stat-bar-fill energy" id="stat-fill-energy" style="width: 85%;"></div></div>
+            </div>
+            <div class="hud-stat-box" title="Cleanliness (100 = clean, 0 = dirty)">
+              <div class="hud-stat-label"><span>🧼 Clean</span><span class="hud-stat-val" id="stat-val-clean">90%</span></div>
+              <div class="stat-bar-track"><div class="stat-bar-fill clean" id="stat-fill-clean" style="width: 90%;"></div></div>
+            </div>
+            <div class="hud-stat-box" title="Boredom (0 = entertained, 100 = bored)">
+              <div class="hud-stat-label"><span>🎾 Boredom</span><span class="hud-stat-val" id="stat-val-boredom">20%</span></div>
+              <div class="stat-bar-track"><div class="stat-bar-fill boredom" id="stat-fill-boredom" style="width: 20%;"></div></div>
+            </div>
+          </div>
+
+          <!-- Interactive Care Actions -->
+          <div class="hud-care-row">
+            <button class="hud-care-btn" id="hud-care-feed" type="button" title="Feed Yumon tasty food">🍖 Feed</button>
+            <button class="hud-care-btn" id="hud-care-play" type="button" title="Play with Yumon">🎾 Play</button>
+            <button class="hud-care-btn" id="hud-care-groom" type="button" title="Groom and clean Yumon">🧼 Groom</button>
+            <button class="hud-care-btn" id="hud-care-nap" type="button" title="Rest and nap">💤 Nap</button>
+          </div>
+
+          <!-- Spoken Utterance or Thought -->
+          <div class="hud-speech-row" id="hud-card-speech" style="display: none;">
+            <span>💬</span><span id="hud-card-speech-text"></span>
+          </div>
         </div>
       `;
       this.container.appendChild(this.hud);
@@ -1462,6 +1645,18 @@
           chatInput.focus();
         }
       });
+
+      const feedCareBtn = this.hud.querySelector('#hud-care-feed');
+      feedCareBtn?.addEventListener('click', () => this.feedCitizen());
+
+      const playCareBtn = this.hud.querySelector('#hud-care-play');
+      playCareBtn?.addEventListener('click', () => this.playWithCitizen());
+
+      const groomCareBtn = this.hud.querySelector('#hud-care-groom');
+      groomCareBtn?.addEventListener('click', () => this.groomCitizen());
+
+      const napCareBtn = this.hud.querySelector('#hud-care-nap');
+      napCareBtn?.addEventListener('click', () => this.napCitizen());
 
       this.updateHUDCard();
     }
@@ -1559,18 +1754,60 @@
       const roleEl = this.hud?.querySelector('#hud-card-role');
       const statusEl = this.hud?.querySelector('#hud-card-status');
       const avatarEl = this.hud?.querySelector('#hud-card-avatar');
+      const emoteEl = this.hud?.querySelector('#hud-card-emote');
 
       if (nameEl) nameEl.textContent = y.citizen.name;
       if (roleEl) {
         roleEl.textContent = this.theme === 'FishTank' ? y.citizen.fishRole : y.citizen.role;
       }
+      if (avatarEl) {
+        const icons = this.theme === 'FishTank' ? ['🐠', '🐟', '🐡', '🐬'] : ['🦊', '🐬', '🌿', '✨'];
+        avatarEl.textContent = icons[y.id % icons.length];
+      }
+
+      // Grounded Emote Badge
+      y.emote = computeGroundedEmote(y.vitals);
+      if (emoteEl) {
+        const h = y.emote.having ? '+' : '-';
+        const k = y.emote.knowing ? '+' : '-';
+        const e = y.emote.empathizing ? '+' : '-';
+        emoteEl.textContent = `${y.emote.name} [h${h} k${k} e${e}]`;
+      }
+
+      // Quantitative Vitals Stat Bars
+      const hVal = Math.round(Math.max(0, Math.min(100, y.vitals.hunger)));
+      const eVal = Math.round(Math.max(0, Math.min(100, y.vitals.energy)));
+      const cVal = Math.round(Math.max(0, Math.min(100, y.vitals.cleanliness)));
+      const bVal = Math.round(Math.max(0, Math.min(100, y.vitals.boredom)));
+
+      const hungerValEl = this.hud?.querySelector('#stat-val-hunger');
+      const hungerFillEl = this.hud?.querySelector('#stat-fill-hunger');
+      if (hungerValEl) hungerValEl.textContent = `${hVal}%`;
+      if (hungerFillEl) hungerFillEl.style.width = `${hVal}%`;
+
+      const energyValEl = this.hud?.querySelector('#stat-val-energy');
+      const energyFillEl = this.hud?.querySelector('#stat-fill-energy');
+      if (energyValEl) energyValEl.textContent = `${eVal}%`;
+      if (energyFillEl) energyFillEl.style.width = `${eVal}%`;
+
+      const cleanValEl = this.hud?.querySelector('#stat-val-clean');
+      const cleanFillEl = this.hud?.querySelector('#stat-fill-clean');
+      if (cleanValEl) cleanValEl.textContent = `${cVal}%`;
+      if (cleanFillEl) cleanFillEl.style.width = `${cVal}%`;
+
+      const boredomValEl = this.hud?.querySelector('#stat-val-boredom');
+      const boredomFillEl = this.hud?.querySelector('#stat-fill-boredom');
+      if (boredomValEl) boredomValEl.textContent = `${bVal}%`;
+      if (boredomFillEl) boredomFillEl.style.width = `${bVal}%`;
+
+      // Status text
       if (statusEl) {
         const actionLabel = BehaviorLabels[this.theme][y.behavior] || y.behavior;
         if (this.theme === 'FishTank') {
           const targetNoun = y.targetPlace !== null && this.aquascapePlaces[y.targetPlace]
             ? this.aquascapePlaces[y.targetPlace].name
             : 'open aquarium water';
-          statusEl.textContent = `${actionLabel} at the ${targetNoun} · Happy 🫧`;
+          statusEl.textContent = `${actionLabel} at the ${targetNoun} · ${y.emote.name} 🫧`;
         } else {
           const targetNoun = y.targetPlace !== null && this.world.places[y.targetPlace]
             ? Nouns[this.theme][this.world.places[y.targetPlace].kind]
@@ -1578,9 +1815,28 @@
           statusEl.textContent = `${actionLabel} at the ${targetNoun} · ${y.citizen.savings} coins`;
         }
       }
-      if (avatarEl) {
-        const icons = this.theme === 'FishTank' ? ['🐠', '🐟', '🐡', '🐬'] : ['🦊', '🐬', '🌿', '✨'];
-        avatarEl.textContent = icons[y.id % icons.length];
+
+      // Spoken Utterance or Thought Quote
+      const speechRow = this.hud?.querySelector('#hud-card-speech');
+      const speechText = this.hud?.querySelector('#hud-card-speech-text');
+      if (speechRow && speechText) {
+        if (y.speechText && performance.now() < y.speechEndTime) {
+          speechText.textContent = `"${y.speechText}"`;
+          speechRow.style.display = 'flex';
+        } else {
+          speechRow.style.display = 'none';
+        }
+      }
+
+      // Sync Chat Tab companion banner if available
+      if (window.__updateChatCompanionBanner) {
+        window.__updateChatCompanionBanner({
+          id: y.id,
+          name: y.citizen.name,
+          vitals: { hunger: hVal, energy: eVal, cleanliness: cVal, boredom: bVal },
+          emote: y.emote,
+          role: this.theme === 'FishTank' ? y.citizen.fishRole : y.citizen.role,
+        });
       }
     }
 
@@ -1661,6 +1917,46 @@
       if (this.paused) return;
 
       const isAquarium = this.theme === 'FishTank';
+
+      // Dynamic Vitals Progression over time
+      const hungerRate = 0.20;     // hunger slowly increases
+      const energyDrain = 0.18;    // energy decreases when moving
+      const energyRecover = 0.70;  // energy recovers when resting
+      const cleanDecay = 0.12;     // cleanliness slowly decays
+      const boredomRate = 0.22;    // boredom slowly accumulates
+
+      for (let i = 0; i < this.yumons.length; i++) {
+        const y = this.yumons[i];
+        y.vitals.hunger = Math.min(100, Math.max(0, y.vitals.hunger + hungerRate * dt));
+        y.vitals.cleanliness = Math.min(100, Math.max(0, y.vitals.cleanliness - cleanDecay * dt));
+
+        if (y.behavior === Behaviors.Rest) {
+          y.vitals.energy = Math.min(100, Math.max(0, y.vitals.energy + energyRecover * dt));
+        } else {
+          y.vitals.energy = Math.min(100, Math.max(0, y.vitals.energy - energyDrain * dt));
+        }
+
+        if (y.behavior === Behaviors.Play || y.behavior === Behaviors.Build) {
+          y.vitals.boredom = Math.max(0, y.vitals.boredom - 0.5 * dt);
+        } else {
+          y.vitals.boredom = Math.min(100, Math.max(0, y.vitals.boredom + boredomRate * dt));
+        }
+
+        // Hide expired speech sprite
+        if (y.speechSprite && y.speechSprite.visible && now > y.speechEndTime) {
+          y.speechSprite.visible = false;
+          if (this.selectedCitizen === y.id) {
+            const speechRow = this.hud?.querySelector('#hud-card-speech');
+            if (speechRow) speechRow.style.display = 'none';
+          }
+        }
+      }
+
+      // Periodic HUD stat bar refresh
+      if (!this.lastHudUpdate || now - this.lastHudUpdate > 400) {
+        this.lastHudUpdate = now;
+        this.updateHUDCard();
+      }
 
       // Update sparkles from fixed pool
       for (let i = 0; i < this.sparklePoolSize; i++) {
@@ -1824,6 +2120,10 @@
                 this.flakesEatenTotal += 1;
                 this.updateSkylineCount();
                 this.spawnSparkles(y.pos.x, y.pos.y + 0.3, y.pos.z, 0xffd166);
+                y.vitals.hunger = Math.max(0, y.vitals.hunger - 25);
+                y.vitals.energy = Math.min(100, y.vitals.energy + 5);
+                y.emote = computeGroundedEmote(y.vitals);
+                y.showSpeech("Delicious! 🦐", 4000);
 
                 // Look for another food flake or finish eating
                 const nextFlake = this.findNearestFoodFlake(y);
@@ -1951,14 +2251,76 @@
           }
         }
       }
+      if (y.behavior === Behaviors.Eat) {
+        y.vitals.hunger = Math.max(0, y.vitals.hunger - 30);
+        y.vitals.energy = Math.min(100, y.vitals.energy + 5);
+      } else if (y.behavior === Behaviors.Build) {
+        y.vitals.boredom = Math.max(0, y.vitals.boredom - 20);
+        y.vitals.cleanliness = Math.max(0, y.vitals.cleanliness - 8);
+      } else if (y.behavior === Behaviors.Play) {
+        y.vitals.boredom = Math.max(0, y.vitals.boredom - 30);
+        y.vitals.energy = Math.max(0, y.vitals.energy - 10);
+      } else if (y.behavior === Behaviors.Tend) {
+        y.vitals.cleanliness = Math.min(100, y.vitals.cleanliness + 35);
+        y.vitals.boredom = Math.max(0, y.vitals.boredom - 10);
+      }
+      y.emote = computeGroundedEmote(y.vitals);
       y.nextDecisionTime = performance.now() + 6000 + Math.random() * 4000;
       if (y.id === this.selectedCitizen) this.updateHUDCard();
     }
 
     decideNextAction(y) {
+      y.emote = computeGroundedEmote(y.vitals);
+
+      // Construct Environment string matching synthetic schema
+      let env = '';
       if (this.theme === 'FishTank') {
-        // Natural Fish Tank Decisions across 3D water volume
-        // If food flakes exist, prioritize food!
+        const loc = y.targetPlace !== null && this.aquascapePlaces[y.targetPlace]
+          ? this.aquascapePlaces[y.targetPlace].name
+          : 'open aquarium water';
+        const nearby = this.aquascapePlaces.map(p => p.name).slice(0, 4).join(', ');
+        env = `${loc}, nearby: ${nearby}`;
+      } else {
+        const loc = y.targetPlace !== null && this.world.places[y.targetPlace]
+          ? Nouns[this.theme][this.world.places[y.targetPlace].kind]
+          : 'neighborhood';
+        const nearby = [];
+        for (let i = 0; i < this.world.places.length; i++) {
+          const p = this.world.places[i];
+          const dist = Math.hypot(y.pos.x - p.pos.x, y.pos.z - p.pos.z);
+          if (dist <= SIGHT) {
+            nearby.push(Nouns[this.theme][p.kind] || 'place');
+          }
+        }
+        const nearbyStr = nearby.slice(0, 4).join(', ') || 'trees, garden, benches';
+        env = `${loc}, nearby: ${nearbyStr}`;
+      }
+
+      // Send DPO SimDecide request via IPC to background worker
+      if (window.ipc?.postMessage) {
+        window.ipc.postMessage(JSON.stringify({
+          type: 'sim_decide',
+          citizen_id: y.id,
+          citizen_name: y.citizen.name,
+          vitals: {
+            hunger: Math.round(y.vitals.hunger),
+            energy: Math.round(y.vitals.energy),
+            cleanliness: Math.round(y.vitals.cleanliness),
+            boredom: Math.round(y.vitals.boredom),
+          },
+          emote: y.emote,
+          environment: env,
+          memory: y.recentMemory || null,
+          plan: y.recentPlan || null,
+        }));
+      }
+
+      // Seamless interim autonomous navigation while model prepares next thought:
+      this.executeInterimBehavior(y);
+    }
+
+    executeInterimBehavior(y) {
+      if (this.theme === 'FishTank') {
         if (this.foodFlakes.some((f) => f.userData.active && !f.userData.eaten) && Math.random() < 0.8) {
           const flake = this.findNearestFoodFlake(y);
           if (flake) {
@@ -1969,18 +2331,13 @@
             return;
           }
         }
-
-        // Pick an aquascape feature (caves, dragon stones, plants, surface current)
         const choice = this.aquascapePlaces[Math.floor(Math.random() * this.aquascapePlaces.length)];
         const { behavior } = getVerbAndBehavior(choice.id, this.theme);
         y.behavior = behavior;
         y.targetPlace = choice.id;
-
-        // Position with natural 3D swim variance around the feature
         const ox = (Math.random() - 0.5) * choice.radius;
         const oy = (Math.random() - 0.5) * 2.0;
         const oz = (Math.random() - 0.5) * (choice.radius * 0.7);
-
         y.target = {
           x: Math.max(-25.0, Math.min(25.0, choice.pos.x + ox)),
           y: Math.max(1.4, Math.min(WATER_LEVEL - 0.8, choice.pos.y + oy)),
@@ -1989,7 +2346,6 @@
         y.arrived = false;
         y.travelSeconds = 0;
       } else {
-        // Suburban Decision Logic
         const nearby = [];
         for (let i = 0; i < this.world.places.length; i++) {
           const p = this.world.places[i];
@@ -1998,9 +2354,7 @@
             nearby.push({ id: i, place: p, dist });
           }
         }
-
         nearby.sort((a, b) => a.dist - b.dist);
-
         if (nearby.length > 0 && Math.random() < 0.85) {
           const choice = nearby[Math.floor(Math.random() * Math.min(5, nearby.length))];
           const { behavior } = getVerbAndBehavior(choice.place.kind, this.theme);
@@ -2025,10 +2379,170 @@
           }
         }
       }
+      if (y.id === this.selectedCitizen) {
+        this.updateHUDCard();
+      }
+    }
+
+    onSimAction(data) {
+      const y = this.yumons[data.citizen_id];
+      if (!y) return;
+
+      y.currentAction = data.action;
+      y.recentMemory = `Decided: ${data.action}`;
+
+      if (data.speech && data.speech !== 'none') {
+        y.showSpeech(data.speech);
+      }
+
+      const verb = (data.primary_verb || '').toLowerCase();
+      if (['eat', 'feed', 'graze', 'snack', 'drink'].includes(verb)) {
+        y.behavior = Behaviors.Eat;
+        y.vitals.hunger = Math.max(0, y.vitals.hunger - 25);
+        y.vitals.energy = Math.min(100, y.vitals.energy + 5);
+        if (this.theme === 'FishTank') {
+          this.findNearestFoodFlake(y);
+        }
+      } else if (['play', 'chase', 'bounce', 'catch', 'toss', 'bat', 'roll'].includes(verb)) {
+        y.behavior = Behaviors.Play;
+        y.vitals.boredom = Math.max(0, y.vitals.boredom - 25);
+        y.vitals.energy = Math.max(0, y.vitals.energy - 10);
+        this.spawnSparkles(y.pos.x, y.pos.y + 0.6, y.pos.z, y.citizen.color);
+      } else if (['rest', 'sleep', 'nap', 'curl', 'relax', 'doze', 'sit', 'lie'].includes(verb)) {
+        y.behavior = Behaviors.Rest;
+        y.vitals.energy = Math.min(100, y.vitals.energy + 25);
+      } else if (['build', 'stack', 'arrange', 'gather', 'dig'].includes(verb)) {
+        y.behavior = Behaviors.Build;
+        y.vitals.boredom = Math.max(0, y.vitals.boredom - 20);
+        this.spawnSparkles(y.pos.x, y.pos.y + 0.6, y.pos.z, 0xffd166);
+      } else if (['tend', 'groom', 'clean', 'wash', 'brush', 'wipe'].includes(verb)) {
+        y.behavior = Behaviors.Tend;
+        y.vitals.cleanliness = Math.min(100, y.vitals.cleanliness + 30);
+        this.spawnSparkles(y.pos.x, y.pos.y + 0.6, y.pos.z, 0xa5f3fc);
+      } else {
+        y.behavior = Behaviors.Explore;
+        y.vitals.boredom = Math.max(0, y.vitals.boredom - 15);
+      }
+
+      // If a target entity was identified, try to approach a matching world place
+      if (data.target) {
+        const targetNoun = data.target.toLowerCase();
+        if (this.theme === 'FishTank') {
+          const match = this.aquascapePlaces.find(p => p.name.toLowerCase().includes(targetNoun));
+          if (match) {
+            y.targetPlace = match.id;
+            y.target = { x: match.pos.x, y: match.pos.y, z: match.pos.z };
+            y.arrived = false;
+          }
+        } else {
+          const matchIdx = this.world.places.findIndex(p => {
+            const noun = (Nouns[this.theme][p.kind] || '').toLowerCase();
+            return noun.includes(targetNoun);
+          });
+          if (matchIdx >= 0) {
+            const p = this.world.places[matchIdx];
+            y.targetPlace = matchIdx;
+            y.target = approachPlaceSuburban(y.pos, p);
+            y.arrived = false;
+          }
+        }
+      }
+
+      y.emote = computeGroundedEmote(y.vitals);
+      y.nextDecisionTime = performance.now() + 10000 + Math.random() * 5000;
 
       if (y.id === this.selectedCitizen) {
         this.updateHUDCard();
       }
+    }
+
+    feedCitizen(id) {
+      const y = this.yumons[id ?? this.selectedCitizen];
+      if (!y) return;
+      y.vitals.hunger = Math.max(0, y.vitals.hunger - 30);
+      y.vitals.energy = Math.min(100, y.vitals.energy + 5);
+      y.vitals.cleanliness = Math.max(0, y.vitals.cleanliness - 5);
+      y.behavior = Behaviors.Eat;
+      y.recentMemory = 'Owner provided delicious food! Yum!';
+      y.showSpeech('Nom nom nom! 🍖');
+      this.spawnSparkles(y.pos.x, y.pos.y + 0.6, y.pos.z, 0xf59e0b);
+      if (this.theme === 'FishTank') {
+        this.dropFood(y.pos.x, y.pos.z);
+      }
+      y.emote = computeGroundedEmote(y.vitals);
+      this.updateHUDCard();
+    }
+
+    playWithCitizen(id) {
+      const y = this.yumons[id ?? this.selectedCitizen];
+      if (!y) return;
+      y.vitals.boredom = Math.max(0, y.vitals.boredom - 35);
+      y.vitals.energy = Math.max(0, y.vitals.energy - 12);
+      y.vitals.hunger = Math.min(100, y.vitals.hunger + 8);
+      y.behavior = Behaviors.Play;
+      y.recentMemory = 'Played enthusiastically with owner! Great exercise!';
+      y.showSpeech("Wheeee! Let's play! 🎾");
+      this.spawnSparkles(y.pos.x, y.pos.y + 0.8, y.pos.z, 0x8b5cf6);
+      y.emote = computeGroundedEmote(y.vitals);
+      this.updateHUDCard();
+    }
+
+    groomCitizen(id) {
+      const y = this.yumons[id ?? this.selectedCitizen];
+      if (!y) return;
+      y.vitals.cleanliness = Math.min(100, y.vitals.cleanliness + 40);
+      y.vitals.boredom = Math.max(0, y.vitals.boredom - 10);
+      y.behavior = Behaviors.Tend;
+      y.recentMemory = 'Got a warm refreshing groom. Coat is sparkling clean!';
+      y.showSpeech('All squeaky clean! ✨');
+      this.spawnSparkles(y.pos.x, y.pos.y + 0.6, y.pos.z, 0x38bdf8);
+      y.emote = computeGroundedEmote(y.vitals);
+      this.updateHUDCard();
+    }
+
+    napCitizen(id) {
+      const y = this.yumons[id ?? this.selectedCitizen];
+      if (!y) return;
+      y.vitals.energy = Math.min(100, y.vitals.energy + 40);
+      y.vitals.hunger = Math.min(100, y.vitals.hunger + 6);
+      y.behavior = Behaviors.Rest;
+      y.recentMemory = 'Took a peaceful nap and woke up rejuvenated.';
+      y.showSpeech('Zzz... cozy nap time... 💤');
+      this.spawnSparkles(y.pos.x, y.pos.y + 0.4, y.pos.z, 0x10b981);
+      y.emote = computeGroundedEmote(y.vitals);
+      this.updateHUDCard();
+    }
+
+    onChatReply(citizenId, text) {
+      const y = this.yumons[citizenId];
+      if (!y) return;
+      y.showSpeech(text, 7000);
+      y.recentMemory = `Owner said something, and I replied: "${text}"`;
+      this.spawnSparkles(y.pos.x, y.pos.y + 0.8, y.pos.z, 0xffd166);
+      y.behavior = Behaviors.Play;
+      y.vitals.boredom = Math.max(0, y.vitals.boredom - 20);
+      y.emote = computeGroundedEmote(y.vitals);
+      if (this.selectedCitizen === y.id) {
+        this.updateHUDCard();
+      }
+    }
+
+    getSelectedCitizenData() {
+      const y = this.yumons[this.selectedCitizen];
+      if (!y) return null;
+      y.emote = computeGroundedEmote(y.vitals);
+      return {
+        id: y.id,
+        name: y.citizen.name,
+        vitals: {
+          hunger: Math.round(y.vitals.hunger),
+          energy: Math.round(y.vitals.energy),
+          cleanliness: Math.round(y.vitals.cleanliness),
+          boredom: Math.round(y.vitals.boredom),
+        },
+        emote: y.emote,
+        role: this.theme === 'FishTank' ? y.citizen.fishRole : y.citizen.role,
+      };
     }
 
     // Called when RSS Chat or Products update

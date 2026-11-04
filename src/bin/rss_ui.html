@@ -124,15 +124,22 @@
   }
   .hud-citizen-card {
     display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 10px 12px;
+    border-radius: 14px;
+    background: rgba(14, 23, 20, 0.90);
+    backdrop-filter: blur(14px);
+    border: 1px solid rgba(160, 220, 187, 0.28);
+    pointer-events: auto;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.38);
+    width: 100%;
+    max-width: 484px;
+  }
+  .hud-card-top-row {
+    display: flex;
     align-items: center;
     gap: 10px;
-    padding: 8px 12px;
-    border-radius: 14px;
-    background: rgba(14, 23, 20, 0.86);
-    backdrop-filter: blur(12px);
-    border: 1px solid rgba(160, 220, 187, 0.25);
-    pointer-events: auto;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
   }
   .hud-card-avatar {
     font-size: 18px;
@@ -143,6 +150,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    flex-shrink: 0;
   }
   .hud-card-body {
     flex: 1;
@@ -154,20 +162,121 @@
     color: #e2eee7;
     display: flex;
     gap: 6px;
-    align-items: baseline;
+    align-items: center;
+    flex-wrap: wrap;
   }
-  .hud-card-header span {
+  .hud-card-header span.role {
     font-size: 10px;
     color: #9dd8b3;
     font-weight: 400;
   }
+  .hud-emote-badge {
+    padding: 2px 7px;
+    border-radius: 8px;
+    background: rgba(157, 216, 179, 0.18);
+    border: 1px solid rgba(157, 216, 179, 0.35);
+    font-size: 9px;
+    font-weight: 600;
+    color: #c5efd3;
+    letter-spacing: 0.2px;
+  }
+  .hud-stat-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px;
+    width: 100%;
+  }
+  .hud-stat-box {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .hud-stat-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 9px;
+    color: #92aa9a;
+    font-weight: 500;
+  }
+  .hud-stat-val {
+    font-weight: 600;
+    color: #e2eee7;
+  }
+  .stat-bar-track {
+    width: 100%;
+    height: 5px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+    position: relative;
+  }
+  .stat-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+  }
+  .stat-bar-fill.hunger {
+    background: linear-gradient(90deg, #f59e0b, #ef4444);
+  }
+  .stat-bar-fill.energy {
+    background: linear-gradient(90deg, #10b981, #34d399);
+  }
+  .stat-bar-fill.clean {
+    background: linear-gradient(90deg, #0ea5e9, #38bdf8);
+  }
+  .stat-bar-fill.boredom {
+    background: linear-gradient(90deg, #8b5cf6, #c084fc);
+  }
+  .hud-care-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .hud-care-btn {
+    flex: 1;
+    padding: 4px 6px;
+    border-radius: 6px;
+    background: rgba(157, 216, 179, 0.10);
+    border: 1px solid rgba(157, 216, 179, 0.22);
+    font-size: 10px;
+    font-weight: 500;
+    color: #c5efd3;
+    cursor: pointer;
+    text-align: center;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+  }
+  .hud-care-btn:hover {
+    background: rgba(157, 216, 179, 0.25);
+    color: #ffffff;
+    border-color: rgba(157, 216, 179, 0.45);
+    transform: translateY(-1px);
+  }
+  .hud-care-btn:active {
+    transform: translateY(0);
+  }
   .hud-card-status {
     font-size: 10px;
     color: #92aa9a;
-    margin-top: 2px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .hud-speech-row {
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    padding: 3px 6px;
+    border-radius: 6px;
+    background: rgba(157, 216, 179, 0.12);
+    border-left: 2px solid #9dd8b3;
+    font-size: 10px;
+    color: #e2eee7;
+    font-style: italic;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .hud-chat-btn {
     padding: 6px 10px;
@@ -178,6 +287,7 @@
     color: #c5efd3;
     cursor: pointer;
     white-space: nowrap;
+    flex-shrink: 0;
   }
   .hud-chat-btn:hover {
     background: rgba(157, 216, 179, 0.28);
@@ -228,6 +338,32 @@
   #status { margin: 0; max-height: 48px; overflow-y: auto; color: #afc5b7; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
   #next { display: block; margin-top: 3px; color: #829a8b; font-size: 10px; }
   #chat-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .chat-companion-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    background: rgba(157, 216, 179, 0.08);
+    border-bottom: 1px solid rgba(157, 216, 179, 0.15);
+    font-size: 11px;
+    color: #e2eee7;
+  }
+  .companion-avatar { font-size: 14px; }
+  .companion-name { font-weight: 650; color: #c5efd3; }
+  .companion-emote {
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: rgba(157, 216, 179, 0.18);
+    font-size: 9px;
+    font-weight: 600;
+    color: #9dd8b3;
+  }
+  .companion-stats {
+    margin-left: auto;
+    font-size: 10px;
+    color: #8da596;
+    font-variant-numeric: tabular-nums;
+  }
   #chat-messages { flex: 1; min-height: 0; overflow-y: auto; padding: 0 14px 10px; scrollbar-width: thin; scrollbar-color: #465f50 transparent; }
   .chat-empty { color: #8da596; font-size: 12px; line-height: 1.6; text-align: center; padding: 30px 12px; }
   .message { padding: 9px 11px; margin: 7px 0; border-radius: 10px; background: rgba(157, 216, 179, .07); }
@@ -664,6 +800,12 @@
     </nav>
     <main id="history" role="tabpanel" aria-labelledby="products-tab"><div id="empty"><strong>What will they build next?</strong><p>Yumon will read today's Product Hunt ideas and share a thought every five minutes.</p></div></main>
     <section id="chat-panel" role="tabpanel" aria-labelledby="chat-tab" hidden>
+      <div class="chat-companion-banner" id="chat-companion-banner">
+        <span class="companion-avatar" id="chat-companion-avatar">🦊</span>
+        <span class="companion-name" id="chat-companion-name">Ember</span>
+        <span class="companion-emote" id="chat-companion-emote">Content</span>
+        <span class="companion-stats" id="chat-companion-stats">🍖 25% · ⚡ 85% · 🧼 90% · 🎾 20%</span>
+      </div>
       <div class="chat-actions"><button id="chat-clear" type="button">Clear Chat</button></div>
       <div id="chat-messages" role="log" aria-label="Conversation with Yumon" aria-live="polite"><p class="chat-empty">Say hello, ask a question, or share a business idea with Yumon.</p></div>
       <form id="chat-form">
@@ -787,6 +929,8 @@
     if (!chatPanel.hidden) {
       chatMessages.scrollTop = chatMessages.scrollHeight;
       chatInput.focus();
+      const citizenData = window.__yumon_universe_app?.getSelectedCitizenData?.();
+      window.__updateChatCompanionBanner?.(citizenData);
     }
     if (paintPanel && !paintPanel.hidden) {
       const input = document.getElementById('paint-prompt-input');
@@ -821,7 +965,14 @@
     submittedMessage = message;
     submittedChatFingerprint = renderedChat;
     updateSend();
-    send('chat', { message });
+    const citizenData = window.__yumon_universe_app?.getSelectedCitizenData?.();
+    send('chat', {
+      message,
+      citizen_id: citizenData?.id ?? 0,
+      citizen_name: citizenData?.name ?? 'Yumon',
+      vitals: citizenData?.vitals ?? null,
+      emote: citizenData?.emote ?? null,
+    });
   });
   chatInput.addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
@@ -866,7 +1017,12 @@
         const fragment = document.createDocumentFragment();
         for (const message of messages) {
           const bubble = element('div', `message ${message.role}`, '');
-          bubble.append(element('small', '', message.role === 'user' ? 'You' : message.role === 'error' ? 'Oops' : 'Yumon'), element('p', '', message.text));
+          const sender = message.role === 'user'
+            ? 'You'
+            : message.role === 'error'
+              ? 'Oops'
+              : (message.citizen_name || 'Yumon');
+          bubble.append(element('small', '', sender), element('p', '', message.text));
           fragment.append(bubble);
         }
         chatMessages.replaceChildren(fragment);
@@ -911,6 +1067,32 @@
 
     // Sync state with 3D Universe
     window.__onUniverseRssSync?.(state);
+  };
+
+  window.__updateChatCompanionBanner = citizenData => {
+    if (!citizenData) return;
+    const avatarEl = document.getElementById('chat-companion-avatar');
+    const nameEl = document.getElementById('chat-companion-name');
+    const emoteEl = document.getElementById('chat-companion-emote');
+    const statsEl = document.getElementById('chat-companion-stats');
+    if (avatarEl) {
+      const icons = ['🦊', '🐬', '🌿', '✨'];
+      avatarEl.textContent = icons[citizenData.id % icons.length];
+    }
+    if (nameEl) nameEl.textContent = citizenData.name;
+    if (emoteEl) emoteEl.textContent = citizenData.emote?.name || 'Content';
+    if (statsEl && citizenData.vitals) {
+      const v = citizenData.vitals;
+      statsEl.textContent = `🍖 ${v.hunger}% · ⚡ ${v.energy}% · 🧼 ${v.cleanliness}% · 🎾 ${v.boredom}%`;
+    }
+  };
+
+  window.__yumon_sim_action = data => {
+    window.__yumon_universe_app?.onSimAction?.(data);
+  };
+
+  window.__yumon_chat_reply = data => {
+    window.__yumon_universe_app?.onChatReply?.(data.citizen_id, data.text);
   };
 
   // ── Paint Studio Controller ──
