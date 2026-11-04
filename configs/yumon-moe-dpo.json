@@ -24,5 +24,6 @@
   "aux_loss_weight": 0.025,
   "z_loss_weight": 0.01,
   "tie_embeddings": true,
-  "dpo_beta": 0.1
+  "dpo_beta": 0.1,
+  "eval_stage": "dpo"
 }

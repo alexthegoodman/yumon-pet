@@ -6,7 +6,7 @@
   "source": "../rust-code",
   "cache": "training-cache/sft/kilo_sft.bin",
   "tokenizer": "training-cache/kilo_talk_tokenizer",
-  "init_checkpoint": "checkpoints/yumon-base-moe/code_256h_16l_8a_512ff_256len_b2_Moe_e8_k2_f32_yumon_talk_v1_tied",
+  "init_checkpoint": "checkpoints/yumon-base-moe/code_256h_16l_8a_512ff_256len_b2_Moe_e8_k2_f32_tied",
   "max_seq_len": 256,
   "exclude_dirs": [".git", "target", "node_modules"],
   "seed": 4815162342,
@@ -23,5 +23,6 @@
   "out_dir": "checkpoints/yumon-v2-sft",
   "aux_loss_weight": 0.025,
   "z_loss_weight": 0.01,
-  "tie_embeddings": true
+  "tie_embeddings": true,
+  "eval_stage": "sft"
 }

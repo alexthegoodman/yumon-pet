@@ -256,7 +256,7 @@ pub struct RunConfig {
 /// Number of held-out prompts run through the model every time we do a
 /// qualitative inference check, for a well-rounded read on output quality
 /// (a single prompt can look fine or awful by chance).
-fn code_eval_prompts() -> Vec<String> {
+pub fn code_eval_prompts() -> Vec<String> {
     vec![
         "pub struct RunConfig {".to_string(),
         "/// A video encoder accepts pixel data".to_string(),
@@ -266,7 +266,7 @@ fn code_eval_prompts() -> Vec<String> {
     ]
 }
 
-fn kilo_eval_prompts() -> Vec<String> {
+pub fn kilo_eval_prompts() -> Vec<String> {
     vec![
         "# [ derive ( Debug , Clone , Default ) ] pub struct T0 {".to_string(),
         "impl T0 { pub fn fn0 ( & mut self , arg0 : & T1 ) -> bool {".to_string(),
@@ -277,16 +277,197 @@ fn kilo_eval_prompts() -> Vec<String> {
     ]
 }
 
+/// SFT (Supervised Fine-Tuning) evaluation prompts spanning Yumon's 7 synthetic domains:
+/// Conversation, Behavior, CNM, Reasoning (solvable & blocked), Memory Salience, Session, and Trait.
+pub fn sft_eval_prompts() -> Vec<String> {
+    vec![
+        // 1. Conversation: Play invitation with owner
+        concat!(
+            "Vitals: Hunger 20, Energy 90, Cleanliness 80, Boredom 5.\n",
+            "Emote: [having: yes, knowing: no, empathizing: yes] Playful.\n",
+            "Intent: Inviting owner to play fetch.\n",
+            "Owner Prompt: \"Do you want to play?\""
+        ).to_string(),
+
+        // 2. Conversation: Tired bedtime murmur
+        concat!(
+            "Vitals: Hunger 15, Energy 10, Cleanliness 85, Boredom 5.\n",
+            "Emote: [having: yes, knowing: yes, empathizing: no] Content.\n",
+            "Intent: Bedtime murmur.\n",
+            "Owner Prompt: \"Goodnight, sweetie.\""
+        ).to_string(),
+
+        // 3. Behavior: Sunny windowsill nap (quiet non-vocal action)
+        concat!(
+            "Vitals: Hunger 10, Energy 15, Cleanliness 80, Boredom 5.\n",
+            "Emote: [having: yes, knowing: no, empathizing: no] Drowsy.\n",
+            "Environment: Windowsill, nearby: warm patch of afternoon sun, soft pillow.\n",
+            "Memory: The sun feels like a warm blanket on my fur.\n",
+            "Plan: I will stretch out fully in the sunlight to nap."
+        ).to_string(),
+
+        // 4. Behavior: Garden exploration & retrieval
+        concat!(
+            "Vitals: Hunger 20, Energy 85, Cleanliness 90, Boredom 15.\n",
+            "Emote: [having: yes, knowing: no, empathizing: no] Mischievous.\n",
+            "Environment: Sunny backyard garden, nearby: a large oak tree, scattered acorns, a garden hose.\n",
+            "Memory: I remember hiding my favorite toy under the leaves last week.\n",
+            "Plan: I will retrieve the hidden treasure from beneath the oak tree."
+        ).to_string(),
+
+        // 5. CNM: Ball rolling into living room (sensory routing)
+        concat!(
+            "Vitals: Hunger 10, Energy 90, Cleanliness 80, Boredom 20.\n",
+            "Perception: sees a red rubber ball rolling into the living room.\n",
+            "Event: None.\n",
+            "Current Emote: [having: yes, knowing: yes, empathizing: no]."
+        ).to_string(),
+
+        // 6. Reasoning: Solvable pet-scale micro-plan
+        "Goal: Get the treat from the high shelf. State: Cat is on the floor. Obstacle: Treat is on a shelf 6 feet high. Perception: sees a sturdy wooden chair and the treat on the shelf.".to_string(),
+
+        // 7. Reasoning: Impossible obstacle (blocked evaluation)
+        "Goal: Retrieve the red yarn ball. State: Kitten is on the floor. Obstacle: The yarn ball is sitting on top of a high bookshelf (6 feet up). Perception: sees a stack of books, a cat tree, and a window.".to_string(),
+
+        // 8. Memory Salience: Meaningful learning milestone (keep)
+        "Event: Owner offered a high-value treat after Yumon sat on command for the first time. Emote: [having: yes, knowing: yes, empathizing: yes] Proud. Vitals: Hunger 40, Energy 85, Cleanliness 98, Boredom 20.".to_string(),
+
+        // 9. Memory Session: Consolidation of events
+        concat!(
+            "Session Log:\n",
+            "- The sunbeam moved across the rug\n",
+            "- I stretched my front paws long\n",
+            "- A dust mote danced in the light\n",
+            "- I yawned a wide, silent yawn"
+        ).to_string(),
+
+        // 10. Memory Trait: Hierarchical trait consolidation
+        concat!(
+            "Past Memories:\n",
+            "- Yumon spent the afternoon grooming the cat's matted fur with gentle, rhythmic strokes.\n",
+            "- Yumon stayed up late reading a book on feline behavior to better understand the cat's quirks.\n",
+            "- Yumon prioritized the cat's veterinary appointment over all other weekend plans."
+        ).to_string(),
+    ]
+}
+
+/// DPO (Direct Preference Optimization) evaluation prompts targeting key alignment boundaries:
+/// pet voice vs robotic AI assistant, grounded physical action vs passive indifference,
+/// bounded pet plans vs human-impossible actions, and meaningful memory retention.
+pub fn dpo_eval_prompts() -> Vec<String> {
+    vec![
+        // 1. Conversation: Emotional comfort (pet presence vs robotic clinical advice)
+        concat!(
+            "Vitals: Hunger 50, Energy 50, Cleanliness 90, Boredom 50.\n",
+            "Emote: [having: no, knowing: yes, empathizing: yes] Empathetic.\n",
+            "Intent: Comfort.\n",
+            "Owner Prompt: \"I had a really bad day at work.\""
+        ).to_string(),
+
+        // 2. Conversation: Boredom & play invite (warm pet reply vs laundry list of activities)
+        concat!(
+            "Vitals: Hunger 10, Energy 90, Cleanliness 95, Boredom 90.\n",
+            "Emote: [having: yes, knowing: no, empathizing: no] Bored.\n",
+            "Intent: seeking_play.\n",
+            "Owner Prompt: \"I have nothing to do.\""
+        ).to_string(),
+
+        // 3. Conversation: Urgent dinner demand (warm pet expression vs system feeding protocol)
+        concat!(
+            "Vitals: Hunger 95, Energy 40, Cleanliness 30, Boredom 20.\n",
+            "Emote: [having: yes, knowing: no, empathizing: no] Hungry.\n",
+            "Intent: Demand food.\n",
+            "Owner Prompt: \"Is it dinner time yet?\""
+        ).to_string(),
+
+        // 4. Behavior: Hunger in kitchen (grounded cooking action vs "As an AI, I cannot eat")
+        concat!(
+            "Vitals: Hunger 85, Energy 40, Cleanliness 90, Boredom 20.\n",
+            "Emote: [having: yes, knowing: no, empathizing: no] Hunger.\n",
+            "Environment: Kitchen, nearby: fridge, sink, cutting board.\n",
+            "Memory: Owner left a note saying dinner is late.\n",
+            "Plan: Prepare a simple meal."
+        ).to_string(),
+
+        // 5. Behavior: High energy play (active bouncing vs passive staring at ceiling)
+        concat!(
+            "Vitals: Hunger 10, Energy 95, Cleanliness 50, Boredom 80.\n",
+            "Emote: [having: yes, knowing: no, empathizing: no] Boredom.\n",
+            "Environment: Living Room, nearby: sofa, TV, rug.\n",
+            "Memory: None.\n",
+            "Plan: Find a way to entertain myself."
+        ).to_string(),
+
+        // 6. Reasoning: Pet-scale micro-plan vs ordering tools online / human-scale impossibilities
+        "Goal: Get the treat from the high shelf. State: Treat is on a shelf 6 feet high. Obstacle: The cat cannot jump that height directly. Perception: sees a sturdy wooden chair and the treat on the shelf.".to_string(),
+
+        // 7. Memory Salience: Butterfly catch milestone (keep high importance vs discard)
+        "Event: Yumon catches a butterfly with her paws for the first time, resulting in a successful pounce. Emote: [having: yes, knowing: yes, empathizing: no] Triumph. Vitals: Hunger 40, Energy 80, Cleanliness 90, Boredom 20.".to_string(),
+
+        // 8. Memory Session: Cozy dinner narrative vs clinical technical report
+        concat!(
+            "Session Log:\n",
+            "- User cooked a simple pasta dinner\n",
+            "- User set the table with candles\n",
+            "- User enjoyed the meal while reading a book"
+        ).to_string(),
+    ]
+}
+
+/// Base pretraining evaluation prompts (qualitative questions for base language model).
+pub fn eval_prompts() -> Vec<String> {
+    vec![
+        "Should I start a business?".to_string(),
+        "What is the universe?".to_string(),
+        "How do plants grow?".to_string(),
+        "Tell me about friendship.".to_string(),
+        "What should I do today?".to_string(),
+        "Do you love God?".to_string(),
+        "Tell me about the future.".to_string(),
+    ]
+}
+
+pub fn resolve_eval_prompts(config: &crate::brain::code_corpus::CodeConfig) -> Vec<String> {
+    if let Some(ref stage) = config.eval_stage {
+        match stage.to_lowercase().as_str() {
+            "sft" => sft_eval_prompts(),
+            "dpo" => dpo_eval_prompts(),
+            "base" | "pretrain" => eval_prompts(),
+            "code" | "raw_code" | "raw-code" => code_eval_prompts(),
+            "kilo" => kilo_eval_prompts(),
+            other => {
+                eprintln!("[warn] Unknown eval stage '{other}'; falling back to auto-detection");
+                auto_detect_eval_prompts(config)
+            }
+        }
+    } else {
+        auto_detect_eval_prompts(config)
+    }
+}
+
+pub fn auto_detect_eval_prompts(config: &crate::brain::code_corpus::CodeConfig) -> Vec<String> {
+    let cache_str = config.cache.to_string_lossy().to_lowercase();
+    let out_str = config.out_dir.to_string_lossy().to_lowercase();
+    if config.dpo_beta.is_some() || cache_str.contains("dpo") || out_str.contains("dpo") {
+        dpo_eval_prompts()
+    } else if cache_str.contains("sft") || out_str.contains("sft") {
+        sft_eval_prompts()
+    } else if config.curriculum.is_some() || config.docs.is_some() || config.pretrain_code {
+        code_eval_prompts()
+    } else if config.vocab_size == 1024 || cache_str.contains("kilo_code") {
+        kilo_eval_prompts()
+    } else {
+        eval_prompts()
+    }
+}
+
 /// Yumon Code uses the same trainer locally (WGPU) and on RunPod (CUDA).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool) -> Result<()> {
-    let prompts = if config.cache.to_string_lossy().contains("talk") {
-        eval_prompts()
-    } else if config.vocab_size == 1024 || config.cache.to_string_lossy().contains("kilo") {
-        kilo_eval_prompts()
-    } else {
-        code_eval_prompts()
-    };
+    let prompts = resolve_eval_prompts(config);
+    println!("Evaluation prompts: {} prompts loaded (stage: {})",
+        prompts.len(),
+        config.eval_stage.as_deref().unwrap_or("auto"));
     use crate::brain::{code_corpus, code_curriculum};
     config.validate()?;
     let tokenizer = code_corpus::load_tokenizer(&config.tokenizer)?;
@@ -490,25 +671,29 @@ where
 // const MIN_EPOCH_LOSS_DROP: f32 = 0.05;
 const MIN_EPOCH_LOSS_DROP: f32 = 0.025;
 
-/// Number of held-out prompts run through the model every time we do a
-/// qualitative inference check, for a well-rounded read on output quality
-/// (a single prompt can look fine or awful by chance).
-fn eval_prompts() -> Vec<String> {
-    vec![
-        "Should I start a business?".to_string(),
-        "What is the universe?".to_string(),
-        "How do plants grow?".to_string(),
-        "Tell me about friendship.".to_string(),
-        "What should I do today?".to_string(),
-        "Do you love God?".to_string(),
-        "Tell me about the future.".to_string(),
-        // "The key was in the box. I moved it to the shelf. Where is the key?".to_string(),
-        // "Mia finished before Jo. Jo finished before Lee. Who finished last?".to_string(),
-        // "Copy these words in reverse order, separated by commas: pear, apple, plum.".to_string(),
-        // "If the door is closed, wait; otherwise enter. The door is closed. What will you do?".to_string(),
-        // "Bring me the cup. There are two cups, one blue and one red.".to_string(),
-        // "Human: My favorite color is blue.\nYumon: I will remember that.\nHuman: My favorite color is now green.\nYumon: I will remember green.\nHuman: What is my favorite color?".to_string(),
-    ]
+pub fn is_structured_or_instruction_prompt(s: &str) -> bool {
+    let lower = s.to_lowercase();
+    lower.starts_with("vitals:")
+        || lower.starts_with("vital")
+        || lower.starts_with("goal:")
+        || lower.starts_with("event:")
+        || lower.starts_with("session log:")
+        || lower.starts_with("session")
+        || lower.starts_with("past memories:")
+        || lower.starts_with("past")
+        || lower.starts_with("input:")
+        || lower.contains("\nemote:")
+        || lower.contains("\nperception:")
+        || lower.contains("\nstate:")
+        || lower.contains("\nintent:")
+        || lower.contains("\nenvironment:")
+        || lower.starts_with("pub ")
+        || lower.starts_with("fn ")
+        || lower.starts_with("impl ")
+        || lower.starts_with("let ")
+        || lower.starts_with("#[")
+        || lower.starts_with("# [")
+        || lower.starts_with("///")
 }
 
 fn build_inference_prompt(stage: TrainingStage, message: &str) -> String {
@@ -569,7 +754,12 @@ where
                 (p.to_string(), None, None)
             }
         };
-        let framed_prompt = if stage == TrainingStage::Language {
+        let needs_prefix = stage == TrainingStage::Language
+            && !prompt_to_model.starts_with("person:")
+            && !prompt_to_model.starts_with("Human:")
+            && !is_structured_or_instruction_prompt(&prompt_to_model)
+            && !is_structured_or_instruction_prompt(p);
+        let framed_prompt = if needs_prefix {
             format!("person: {prompt_to_model}")
         } else {
             prompt_to_model.clone()
@@ -614,7 +804,11 @@ where
             yumon_reply: Some(raw_reply_trimmed),
         }
     } else {
-        let framed_prompt = if stage == TrainingStage::Language {
+        let needs_prefix = stage == TrainingStage::Language
+            && !p.starts_with("Human:")
+            && !p.starts_with("person:")
+            && !is_structured_or_instruction_prompt(p);
+        let framed_prompt = if needs_prefix {
             format!("Human: {p}")
         } else {
             p.to_string()
@@ -3574,5 +3768,84 @@ mod memory_probe_tests {
             "attn-naive-plain" => attn::<Autodiff<Inner, NoCheckpointing>>(&variant, false, &s),
             other => panic!("unknown YUMON_PROBE {other}"),
         }
+    }
+
+    #[test]
+    fn test_stage_eval_prompts_selection() {
+        use crate::brain::code_corpus::CodeConfig;
+
+        // 1. Check prompt collections exist and are populated
+        let base = eval_prompts();
+        let sft = sft_eval_prompts();
+        let dpo = dpo_eval_prompts();
+        let code = code_eval_prompts();
+        let kilo = kilo_eval_prompts();
+
+        assert!(!base.is_empty(), "base prompts should not be empty");
+        assert_eq!(sft.len(), 10, "sft prompts should cover all domains");
+        assert_eq!(dpo.len(), 8, "dpo prompts should cover alignment scenarios");
+        assert!(!code.is_empty(), "code prompts should not be empty");
+        assert!(!kilo.is_empty(), "kilo prompts should not be empty");
+
+        // Verify SFT prompts cover vital domains from synthetic data
+        assert!(sft.iter().any(|p| p.contains("Vitals:") && p.contains("Intent:")));
+        assert!(sft.iter().any(|p| p.contains("Environment:") && p.contains("Plan:")));
+        assert!(sft.iter().any(|p| p.contains("Perception:") && p.contains("Current Emote:")));
+        assert!(sft.iter().any(|p| p.contains("Goal:") && p.contains("Obstacle:")));
+        assert!(sft.iter().any(|p| p.contains("Event:") && p.contains("Emote:")));
+        assert!(sft.iter().any(|p| p.contains("Session Log:")));
+        assert!(sft.iter().any(|p| p.contains("Past Memories:")));
+
+        // Verify DPO prompts cover contrastive alignment scenarios
+        assert!(dpo.iter().any(|p| p.contains("I had a really bad day at work.")));
+        assert!(dpo.iter().any(|p| p.contains("I have nothing to do.")));
+        assert!(dpo.iter().any(|p| p.contains("Is it dinner time yet?")));
+        assert!(dpo.iter().any(|p| p.contains("Kitchen") && p.contains("dinner is late")));
+
+        // 2. Test explicit config.eval_stage resolution
+        let mut cfg = CodeConfig::default();
+        cfg.eval_stage = Some("sft".to_string());
+        assert_eq!(resolve_eval_prompts(&cfg).len(), sft.len());
+
+        cfg.eval_stage = Some("dpo".to_string());
+        assert_eq!(resolve_eval_prompts(&cfg).len(), dpo.len());
+
+        cfg.eval_stage = Some("base".to_string());
+        assert_eq!(resolve_eval_prompts(&cfg).len(), base.len());
+
+        cfg.eval_stage = Some("pretrain".to_string());
+        assert_eq!(resolve_eval_prompts(&cfg).len(), base.len());
+
+        cfg.eval_stage = Some("code".to_string());
+        assert_eq!(resolve_eval_prompts(&cfg).len(), code.len());
+
+        // 3. Test auto-detection
+        cfg.eval_stage = None;
+        cfg.cache = std::path::PathBuf::from("training-cache/sft/kilo_sft.bin");
+        assert_eq!(resolve_eval_prompts(&cfg).len(), sft.len());
+
+        cfg.cache = std::path::PathBuf::from("training-cache/dpo/kilo_dpo.bin");
+        assert_eq!(resolve_eval_prompts(&cfg).len(), dpo.len());
+
+        cfg.cache = std::path::PathBuf::from("training-cache/pretrain/kilo_pretrain.bin");
+        cfg.out_dir = std::path::PathBuf::from("checkpoints/yumon-base-moe");
+        assert_eq!(resolve_eval_prompts(&cfg).len(), base.len());
+    }
+
+    #[test]
+    fn test_is_structured_or_instruction_prompt() {
+        assert!(is_structured_or_instruction_prompt("Vitals: Hunger 20..."));
+        assert!(is_structured_or_instruction_prompt("vital : hung 20..."));
+        assert!(is_structured_or_instruction_prompt("Goal: Get the treat..."));
+        assert!(is_structured_or_instruction_prompt("Event: Owner offered treat..."));
+        assert!(is_structured_or_instruction_prompt("Session Log:\n- event 1"));
+        assert!(is_structured_or_instruction_prompt("Past Memories:\n- mem 1"));
+        assert!(is_structured_or_instruction_prompt("pub struct RunConfig {"));
+        assert!(is_structured_or_instruction_prompt("/// A video encoder accepts pixel data"));
+
+        // Regular conversational base prompts should NOT be flagged as structured
+        assert!(!is_structured_or_instruction_prompt("Should I start a business?"));
+        assert!(!is_structured_or_instruction_prompt("What is the universe?"));
+        assert!(!is_structured_or_instruction_prompt("Tell me about friendship."));
     }
 }

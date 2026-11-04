@@ -107,6 +107,10 @@ pub struct CodeConfig {
     /// Temperature hyperparameter beta for Direct Preference Optimization (DPO). Default is 0.1.
     #[serde(default)]
     pub dpo_beta: Option<f64>,
+    /// Optional evaluation prompt stage: "base", "sft", "dpo", "code", or "kilo".
+    /// When omitted, auto-detected from cache/model objective or defaults to "base".
+    #[serde(default)]
+    pub eval_stage: Option<String>,
 }
 
 impl Default for CodeConfig {
@@ -126,6 +130,7 @@ impl Default for CodeConfig {
             z_loss_weight: 0.001,
             init_checkpoint: None,
             dpo_beta: None,
+            eval_stage: None,
         }
     }
 }

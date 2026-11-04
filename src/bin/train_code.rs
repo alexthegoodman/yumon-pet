@@ -29,6 +29,9 @@ fn main() -> anyhow::Result<()> {
         /// Initialize weights from a base model directory or checkpoint for fine-tuning.
         #[arg(long)]
         init_checkpoint: Option<std::path::PathBuf>,
+        /// Evaluation prompt stage: "base", "sft", "dpo", or "code".
+        #[arg(long, alias = "eval-stage", alias = "eval_stage")]
+        stage: Option<String>,
     }
     let args = Args::parse();
     if args.smoke_test {
@@ -37,6 +40,9 @@ fn main() -> anyhow::Result<()> {
     let mut config = CodeConfig::load(&args.config)?;
     if let Some(init) = args.init_checkpoint {
         config.init_checkpoint = Some(init);
+    }
+    if let Some(stage) = args.stage {
+        config.eval_stage = Some(stage);
     }
     if let Some(shared) = args.num_shared_experts {
         config.num_shared_experts = shared;
