@@ -1207,6 +1207,153 @@ pub fn prepare_paired_samples_split_sep(
     .collect()
 }
 
+pub fn prepare_synthetic_sft_samples(
+    pairs: Vec<(String, String)>,
+    tokenizer: &TokenizerKind,
+    max_seq_len: usize,
+) -> Vec<Sample> {
+    println!("prepare synthetic SFT samples (count: {})", pairs.len());
+    let bad_words = ["sex", "drug", "kill", "rape", "nazi"];
+    let language_separator_len = tokenizer.encode(language_separator_for(tokenizer)).len();
+
+    map_ordered(pairs, |(prompt, target)| {
+        let prompt_trimmed = prompt.trim();
+        let target_trimmed = target.trim();
+        if prompt_trimmed.is_empty() || target_trimmed.is_empty() {
+            return None;
+        }
+        let prompt_lower = prompt_trimmed.to_lowercase();
+        let target_lower = target_trimmed.to_lowercase();
+        if bad_words.iter().any(|&w| prompt_lower.contains(w) || target_lower.contains(w)) {
+            return None;
+        }
+
+        let input_encoded = tokenizer.encode(prompt_trimmed);
+        let target_encoded = tokenizer.encode(target_trimmed);
+        if input_encoded.is_empty() || target_encoded.is_empty() {
+            return None;
+        }
+
+        let enc_input: Vec<usize> = std::iter::once(BOS_TOKEN)
+            .chain(input_encoded.into_iter())
+            .collect();
+        let target_labels: Vec<usize> = target_encoded
+            .into_iter()
+            .chain(std::iter::once(EOS_TOKEN))
+            .collect();
+
+        // BOS + input + separator + target + EOS <= max_seq_len
+        if enc_input.len() + language_separator_len + target_labels.len() > max_seq_len {
+            return None;
+        }
+
+        let pad = |mut v: Vec<usize>| -> Vec<usize> {
+            v.resize(max_seq_len, PAD_TOKEN);
+            v
+        };
+
+        Some(Sample {
+            input_ids: pad(enc_input),
+            target_labels: pad(target_labels),
+            action: Action::Sit,
+            motion_dir: CardinalDir::None,
+            world: WorldContext::default(),
+            target_json: target_trimmed.to_string(),
+            pair: (prompt_trimmed.to_string(), target_trimmed.to_string()),
+        })
+    })
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+pub fn prepare_synthetic_dpo_samples(
+    triplets: Vec<(String, String, String)>,
+    tokenizer: &TokenizerKind,
+    max_seq_len: usize,
+) -> Vec<Sample> {
+    println!("prepare synthetic DPO samples (triplets: {})", triplets.len());
+    let bad_words = ["sex", "drug", "kill", "rape", "nazi"];
+    let language_separator_len = tokenizer.encode(language_separator_for(tokenizer)).len();
+
+    map_ordered(triplets, |(prompt, chosen, rejected)| {
+        let prompt_trimmed = prompt.trim();
+        let chosen_trimmed = chosen.trim();
+        let rejected_trimmed = rejected.trim();
+        if prompt_trimmed.is_empty() || chosen_trimmed.is_empty() || rejected_trimmed.is_empty() {
+            return None;
+        }
+        let p_lower = prompt_trimmed.to_lowercase();
+        let c_lower = chosen_trimmed.to_lowercase();
+        let r_lower = rejected_trimmed.to_lowercase();
+        if bad_words.iter().any(|&w| p_lower.contains(w) || c_lower.contains(w) || r_lower.contains(w)) {
+            return None;
+        }
+
+        let input_encoded = tokenizer.encode(prompt_trimmed);
+        let chosen_encoded = tokenizer.encode(chosen_trimmed);
+        let rejected_encoded = tokenizer.encode(rejected_trimmed);
+        if input_encoded.is_empty() || chosen_encoded.is_empty() || rejected_encoded.is_empty() {
+            return None;
+        }
+
+        let enc_input: Vec<usize> = std::iter::once(BOS_TOKEN)
+            .chain(input_encoded.into_iter())
+            .collect();
+        let chosen_labels: Vec<usize> = chosen_encoded
+            .into_iter()
+            .chain(std::iter::once(EOS_TOKEN))
+            .collect();
+        let rejected_labels: Vec<usize> = rejected_encoded
+            .into_iter()
+            .chain(std::iter::once(EOS_TOKEN))
+            .collect();
+
+        if enc_input.len() + language_separator_len + chosen_labels.len() > max_seq_len {
+            return None;
+        }
+        if enc_input.len() + language_separator_len + rejected_labels.len() > max_seq_len {
+            return None;
+        }
+
+        let pad = |mut v: Vec<usize>| -> Vec<usize> {
+            v.resize(max_seq_len, PAD_TOKEN);
+            v
+        };
+
+        let input_ids_chosen = pad(enc_input.clone());
+        let input_ids_rejected = pad(enc_input);
+        let target_labels_chosen = pad(chosen_labels);
+        let target_labels_rejected = pad(rejected_labels);
+
+        let s_chosen = Sample {
+            input_ids: input_ids_chosen,
+            target_labels: target_labels_chosen,
+            action: Action::Sit,
+            motion_dir: CardinalDir::None,
+            world: WorldContext::default(),
+            target_json: chosen_trimmed.to_string(),
+            pair: (prompt_trimmed.to_string(), chosen_trimmed.to_string()),
+        };
+
+        let s_rejected = Sample {
+            input_ids: input_ids_rejected,
+            target_labels: target_labels_rejected,
+            action: Action::Sit,
+            motion_dir: CardinalDir::None,
+            world: WorldContext::default(),
+            target_json: rejected_trimmed.to_string(),
+            pair: (prompt_trimmed.to_string(), rejected_trimmed.to_string()),
+        };
+
+        Some((s_chosen, s_rejected))
+    })
+    .into_iter()
+    .flatten()
+    .flat_map(|(c, r)| [c, r])
+    .collect()
+}
+
 /// Plain-text samples hold only BOS as their prompt. The batcher adds no
 /// separator and trains every text token.
 pub fn is_plain_text(sample: &Sample) -> bool {

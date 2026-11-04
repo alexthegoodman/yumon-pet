@@ -671,78 +671,178 @@ pub fn load_arena_chats(path: &str) -> Result<HandcraftedChats> {
     Ok(HandcraftedChats { blocks })
 }
 
-fn parse_block(lines: &[String]) -> ChatBlock {
-    // If block uses INPUT: ... CHOSEN: ... REJECTED: ... preference triplet syntax
-    if lines.iter().any(|l| l.trim().starts_with("INPUT:"))
-        && lines.iter().any(|l| l.trim().starts_with("CHOSEN:"))
-        && lines.iter().any(|l| l.trim().starts_with("REJECTED:"))
+pub fn parse_dpo_block(lines: &[String]) -> Option<(String, String, String)> {
+    if !lines.iter().any(|l| l.trim().starts_with("INPUT:"))
+        || !lines.iter().any(|l| l.trim().starts_with("CHOSEN:"))
+        || !lines.iter().any(|l| l.trim().starts_with("REJECTED:"))
     {
-        let mut human_lines = Vec::new();
-        let mut chosen_lines = Vec::new();
-        let mut rejected_lines = Vec::new();
-        let mut section = 0; // 0 = input, 1 = chosen, 2 = rejected
-        for line in lines {
-            let trimmed = line.trim();
-            if trimmed.starts_with("INPUT:") {
-                let rest = trimmed.strip_prefix("INPUT:").unwrap().trim();
-                if !rest.is_empty() { human_lines.push(rest.to_string()); }
-                section = 0;
-            } else if trimmed.starts_with("CHOSEN:") {
-                let rest = trimmed.strip_prefix("CHOSEN:").unwrap().trim();
-                if !rest.is_empty() { chosen_lines.push(rest.to_string()); }
-                section = 1;
-            } else if trimmed.starts_with("REJECTED:") {
-                let rest = trimmed.strip_prefix("REJECTED:").unwrap().trim();
-                if !rest.is_empty() { rejected_lines.push(rest.to_string()); }
-                section = 2;
-            } else {
-                match section {
-                    0 => human_lines.push(trimmed.to_string()),
-                    1 => chosen_lines.push(trimmed.to_string()),
-                    2 => rejected_lines.push(trimmed.to_string()),
-                    _ => {}
-                }
+        return None;
+    }
+    let mut human_lines = Vec::new();
+    let mut chosen_lines = Vec::new();
+    let mut rejected_lines = Vec::new();
+    let mut section = 0; // 0 = input, 1 = chosen, 2 = rejected
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("INPUT:") {
+            let rest = trimmed.strip_prefix("INPUT:").unwrap().trim();
+            if !rest.is_empty() { human_lines.push(rest.to_string()); }
+            section = 0;
+        } else if trimmed.starts_with("CHOSEN:") {
+            let rest = trimmed.strip_prefix("CHOSEN:").unwrap().trim();
+            if !rest.is_empty() { chosen_lines.push(rest.to_string()); }
+            section = 1;
+        } else if trimmed.starts_with("REJECTED:") {
+            let rest = trimmed.strip_prefix("REJECTED:").unwrap().trim();
+            if !rest.is_empty() { rejected_lines.push(rest.to_string()); }
+            section = 2;
+        } else {
+            match section {
+                0 => human_lines.push(trimmed.to_string()),
+                1 => chosen_lines.push(trimmed.to_string()),
+                2 => rejected_lines.push(trimmed.to_string()),
+                _ => {}
             }
         }
-        let human = human_lines.into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
-        let chosen = chosen_lines.into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
-        let rejected = rejected_lines.into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
-        if !human.is_empty() && !chosen.is_empty() && !rejected.is_empty() {
-            return ChatBlock {
-                memories: vec![
-                    Memory { human: human.clone(), bot: chosen },
-                    Memory { human, bot: rejected },
-                ],
-            };
+    }
+    let human = human_lines.into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
+    let chosen = chosen_lines.into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
+    let rejected = rejected_lines.into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
+    if !human.is_empty() && !chosen.is_empty() && !rejected.is_empty() {
+        Some((human, chosen, rejected))
+    } else {
+        None
+    }
+}
+
+pub fn parse_sft_block(lines: &[String]) -> Option<(String, String)> {
+    if !lines.iter().any(|l| l.trim().starts_with("INPUT:")) || !lines.iter().any(|l| l.trim().starts_with("TARGET:")) {
+        return None;
+    }
+    let mut human_lines = Vec::new();
+    let mut bot_lines = Vec::new();
+    let mut in_target = false;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("INPUT:") {
+            let rest = trimmed.strip_prefix("INPUT:").unwrap().trim();
+            if !rest.is_empty() { human_lines.push(rest.to_string()); }
+            in_target = false;
+        } else if trimmed.starts_with("TARGET:") {
+            let rest = trimmed.strip_prefix("TARGET:").unwrap().trim();
+            if !rest.is_empty() { bot_lines.push(rest.to_string()); }
+            in_target = true;
+        } else if in_target {
+            bot_lines.push(trimmed.to_string());
+        } else {
+            human_lines.push(trimmed.to_string());
         }
+    }
+    let human = human_lines.into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
+    let bot = bot_lines.into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n");
+    if !human.is_empty() && !bot.is_empty() {
+        Some((human, bot))
+    } else {
+        None
+    }
+}
+
+pub fn load_synthetic_sft_pairs(path: &str) -> Result<Vec<(String, String)>> {
+    println!("📖 Loading synthetic SFT pairs: {path}");
+    let content = std::fs::read_to_string(path)?;
+    let mut pairs = Vec::new();
+    let mut current_block: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !current_block.is_empty() {
+                if let Some(pair) = parse_sft_block(&current_block) {
+                    pairs.push(pair);
+                }
+                current_block.clear();
+            }
+        } else {
+            current_block.push(trimmed.to_string());
+        }
+    }
+    if !current_block.is_empty() {
+        if let Some(pair) = parse_sft_block(&current_block) {
+            pairs.push(pair);
+        }
+    }
+    println!("✅ Loaded {} synthetic SFT pairs", pairs.len());
+    Ok(pairs)
+}
+
+pub fn load_synthetic_dpo_triplets(path: &str) -> Result<Vec<(String, String, String)>> {
+    println!("📖 Loading synthetic DPO triplets: {path}");
+    let content = std::fs::read_to_string(path)?;
+    let mut triplets = Vec::new();
+    let mut current_block: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !current_block.is_empty() {
+                if let Some(triplet) = parse_dpo_block(&current_block) {
+                    triplets.push(triplet);
+                }
+                current_block.clear();
+            }
+        } else {
+            current_block.push(trimmed.to_string());
+        }
+    }
+    if !current_block.is_empty() {
+        if let Some(triplet) = parse_dpo_block(&current_block) {
+            triplets.push(triplet);
+        }
+    }
+    println!("✅ Loaded {} synthetic DPO triplets", triplets.len());
+    Ok(triplets)
+}
+
+pub fn detect_synthetic_kind(path: &str) -> Option<crate::brain::loader::FileKind> {
+    let Ok(file) = std::fs::File::open(path) else { return None; };
+    use std::io::{BufRead, BufReader};
+    let reader = BufReader::new(file);
+    let mut has_input = false;
+    let mut has_target = false;
+    let mut has_chosen = false;
+    let mut has_rejected = false;
+    for line in reader.lines().take(120) {
+        if let Ok(l) = line {
+            let trimmed = l.trim();
+            if trimmed.starts_with("INPUT:") { has_input = true; }
+            if trimmed.starts_with("TARGET:") { has_target = true; }
+            if trimmed.starts_with("CHOSEN:") { has_chosen = true; }
+            if trimmed.starts_with("REJECTED:") { has_rejected = true; }
+        }
+    }
+    if has_input && has_chosen && has_rejected {
+        Some(crate::brain::loader::FileKind::SyntheticDpo)
+    } else if has_input && has_target {
+        Some(crate::brain::loader::FileKind::SyntheticSft)
+    } else {
+        None
+    }
+}
+
+fn parse_block(lines: &[String]) -> ChatBlock {
+    // If block uses INPUT: ... CHOSEN: ... REJECTED: ... preference triplet syntax
+    if let Some((human, chosen, rejected)) = parse_dpo_block(lines) {
+        return ChatBlock {
+            memories: vec![
+                Memory { human: human.clone(), bot: chosen },
+                Memory { human, bot: rejected },
+            ],
+        };
     }
 
     // If block uses INPUT: ... TARGET: ... syntax from gen_synthetic_v2
-    if lines.iter().any(|l| l.trim().starts_with("INPUT:")) && lines.iter().any(|l| l.trim().starts_with("TARGET:")) {
-        let mut human_lines = Vec::new();
-        let mut bot_lines = Vec::new();
-        let mut in_target = false;
-        for line in lines {
-            let trimmed = line.trim();
-            if trimmed.starts_with("INPUT:") {
-                let rest = trimmed.strip_prefix("INPUT:").unwrap().trim();
-                if !rest.is_empty() { human_lines.push(rest.to_string()); }
-                in_target = false;
-            } else if trimmed.starts_with("TARGET:") {
-                let rest = trimmed.strip_prefix("TARGET:").unwrap().trim();
-                if !rest.is_empty() { bot_lines.push(rest.to_string()); }
-                in_target = true;
-            } else if in_target {
-                bot_lines.push(trimmed.to_string());
-            } else {
-                human_lines.push(trimmed.to_string());
-            }
-        }
-        let human = human_lines.join("\n");
-        let bot = bot_lines.join("\n");
-        if !human.is_empty() && !bot.is_empty() {
-            return ChatBlock { memories: vec![Memory { human, bot }] };
-        }
+    if let Some((human, bot)) = parse_sft_block(lines) {
+        return ChatBlock { memories: vec![Memory { human, bot }] };
     }
 
     let mut memories = Vec::new();
@@ -1428,5 +1528,34 @@ mod language_chat_source_tests {
         assert_eq!(chat_block.memories[1].human, chat_block.memories[0].human);
         assert!(chat_block.memories[1].bot.starts_with("Emote: [having: no"));
         assert!(chat_block.memories[1].bot.contains("Route: send to Reasoning"));
+    }
+
+    #[test]
+    fn test_load_synthetic_sft_and_dpo() {
+        let sft_path = temp_file("test_sft.txt", concat!(
+            "INPUT: Vitals: Hunger 10.\n",
+            "TARGET: Action: run.\n\n",
+            "INPUT: Vitals: Hunger 90.\n",
+            "TARGET: Action: eat.\n",
+        ));
+        let sft_pairs = load_synthetic_sft_pairs(sft_path.to_str().unwrap()).unwrap();
+        assert_eq!(sft_pairs.len(), 2);
+        assert_eq!(sft_pairs[0].0, "Vitals: Hunger 10.");
+        assert_eq!(sft_pairs[0].1, "Action: run.");
+        assert_eq!(detect_synthetic_kind(sft_path.to_str().unwrap()), Some(crate::brain::loader::FileKind::SyntheticSft));
+        remove(&sft_path);
+
+        let dpo_path = temp_file("test_dpo.txt", concat!(
+            "INPUT: Vitals: Hunger 50.\n",
+            "CHOSEN: Action: play.\n",
+            "REJECTED: Action: sleep.\n",
+        ));
+        let dpo_triplets = load_synthetic_dpo_triplets(dpo_path.to_str().unwrap()).unwrap();
+        assert_eq!(dpo_triplets.len(), 1);
+        assert_eq!(dpo_triplets[0].0, "Vitals: Hunger 50.");
+        assert_eq!(dpo_triplets[0].1, "Action: play.");
+        assert_eq!(dpo_triplets[0].2, "Action: sleep.");
+        assert_eq!(detect_synthetic_kind(dpo_path.to_str().unwrap()), Some(crate::brain::loader::FileKind::SyntheticDpo));
+        remove(&dpo_path);
     }
 }

@@ -2189,6 +2189,20 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
     // }
 
     loader = loader
+        .add("data/synthetic_v2/behavior_train.txt",   FileKind::SyntheticSft, None)
+        .add("data/synthetic_v2/cnm_train.txt",   FileKind::SyntheticSft, None)
+        .add("data/synthetic_v2/conversation_train.txt",   FileKind::SyntheticSft, None)
+        .add("data/synthetic_v2/memory_salience_train.txt",   FileKind::SyntheticSft, None)
+        .add("data/synthetic_v2/memory_session_train.txt",   FileKind::SyntheticSft, None)
+        .add("data/synthetic_v2/memory_trait_train.txt",   FileKind::SyntheticSft, None)
+        .add("data/synthetic_v2/reasoning_train.txt",   FileKind::SyntheticSft, None)
+        .add("data/dpo/behavior_train.txt",   FileKind::SyntheticDpo, None)
+        .add("data/dpo/cnm_train.txt",   FileKind::SyntheticDpo, None)
+        .add("data/dpo/conversation_train.txt",   FileKind::SyntheticDpo, None)
+        .add("data/dpo/memory_salience_train.txt",   FileKind::SyntheticDpo, None)
+        .add("data/dpo/memory_session_train.txt",   FileKind::SyntheticDpo, None)
+        .add("data/dpo/memory_trait_train.txt",   FileKind::SyntheticDpo, None)
+        .add("data/dpo/reasoning_train.txt",   FileKind::SyntheticDpo, None)
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
         // // .add("data/ideas.txt",   FileKind::TxtLines, None)
         // .add("archive/arena_extract.txt",   FileKind::Chats, None)

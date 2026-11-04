@@ -157,13 +157,18 @@ fn main() -> Result<()> {
         "code" | "raw_code" | "raw-code" => sample_cache::CacheObjective::RawCode,
         other => anyhow::bail!("unknown objective '{other}'; choose prompt_reply, pretrain, sft, dpo"),
     };
+    let file_kind = match objective {
+        sample_cache::CacheObjective::SftInstruction => yumon_pet::brain::loader::FileKind::SyntheticSft,
+        sample_cache::CacheObjective::DpoPreference => yumon_pet::brain::loader::FileKind::SyntheticDpo,
+        _ => yumon_pet::brain::loader::FileKind::Chats,
+    };
     let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load(&args.tokenizer)?);
     let keyword_index = build_keyword_index(&build_label_keywords());
     let mut loader = if let Some(files) = &args.files {
         let mut l = yumon_pet::brain::loader::DataLoader::new(stage).seed(args.seed);
         for f in files {
             anyhow::ensure!(f.exists(), "input file does not exist: {}", f.display());
-            l = l.add(f.to_string_lossy().to_string(), yumon_pet::brain::loader::FileKind::Chats, None);
+            l = l.add(f.to_string_lossy().to_string(), file_kind, None);
         }
         l
     } else if let Some(source) = &args.dataset {
@@ -172,12 +177,12 @@ fn main() -> Result<()> {
             for entry in std::fs::read_dir(source)? {
                 let path = entry?.path();
                 if path.extension().map_or(false, |ext| ext == "txt" || ext == "csv") {
-                    l = l.add(path.to_string_lossy().to_string(), yumon_pet::brain::loader::FileKind::Chats, None);
+                    l = l.add(path.to_string_lossy().to_string(), file_kind, None);
                 }
             }
         } else {
             anyhow::ensure!(source.exists(), "source file does not exist: {}", source.display());
-            l = l.add(source.to_string_lossy().to_string(), yumon_pet::brain::loader::FileKind::Chats, None);
+            l = l.add(source.to_string_lossy().to_string(), file_kind, None);
         }
         l
     } else {

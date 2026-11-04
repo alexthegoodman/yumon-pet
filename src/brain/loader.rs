@@ -12,13 +12,24 @@ use crate::brain::chats::{load_distilled_chats, load_ultrachat_chats};
 use crate::brain::am_distill::load_am_distill_chats;
 use crate::brain::mdx::{load_chats_from_csv, load_chats_from_friends_csv};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::brain::mdx::{load_arena_chats, load_csv_bible_chapters, load_csv_bible_pairs, load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences, load_mdx_sentences, load_qa_pairs, load_quote_chats, load_quotes_csv, load_story_texts, load_specific_dict_sentences, load_text_paragraphs, load_txt_lines, load_wiki_chats, load_txt_sentences, split_sentences};
+use crate::brain::mdx::{
+    detect_synthetic_kind, load_arena_chats, load_csv_bible_chapters, load_csv_bible_pairs,
+    load_csv_words, load_dictionary_sentences, load_handcrafted_chats, load_handcrafted_sentences,
+    load_mdx_sentences, load_qa_pairs, load_quote_chats, load_quotes_csv, load_specific_dict_sentences,
+    load_story_texts, load_synthetic_dpo_triplets, load_synthetic_sft_pairs, load_text_paragraphs,
+    load_txt_lines, load_txt_sentences, load_wiki_chats, split_sentences,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::brain::pdf::load_pdfs;
-use crate::brain::samples::{Sample, TrainingStage, prepare_paired_samples_chats, prepare_paired_samples_split, prepare_paired_samples_split_sep};
+use crate::brain::samples::{
+    prepare_paired_samples_chats, prepare_paired_samples_split, prepare_paired_samples_split_sep,
+    Sample, TrainingStage,
+};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::brain::samples::prepare_plain_text_samples;
+use crate::brain::samples::{
+    prepare_plain_text_samples, prepare_synthetic_dpo_samples, prepare_synthetic_sft_samples,
+};
 use crate::brain::PAD_TOKEN;
 
 // ── File-source descriptor ────────────────────────────────────────────────────
@@ -32,6 +43,7 @@ pub struct FileEntry {
 }
 
 /// Which loader function to dispatch to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FileKind {
     Mdx,
     /// `id,b,c,v,t` verses. Training: plain text, each chapter packed into
@@ -66,6 +78,10 @@ pub enum FileKind {
     /// UltraChat conversations CSV (`data/ultrachat/*.csv` or a directory).
     /// Training: multi-turn user/assistant conversations mapped to Human/Yumon chat pairs.
     UltrachatCsv,
+    /// Synthetic SFT instruction dataset (`INPUT: ... TARGET: ...`).
+    SyntheticSft,
+    /// Synthetic DPO preference dataset (`INPUT: ... CHOSEN: ... REJECTED: ...`).
+    SyntheticDpo,
     // extend with WikiXml, Txt, Pdf, … as needed
 }
 
@@ -294,6 +310,33 @@ impl DataLoader {
 
                         sents
                     }
+                    FileKind::SyntheticSft => {
+                        let mut pairs = load_synthetic_sft_pairs(&entry.path)?;
+                        if let Some(n) = entry.limit {
+                            pairs.shuffle(&mut rng);
+                            pairs.truncate(n);
+                        }
+                        let mut sents = Vec::new();
+                        for pair in pairs {
+                            sents.push(pair.0);
+                            sents.push(pair.1);
+                        }
+                        sents
+                    }
+                    FileKind::SyntheticDpo => {
+                        let mut triplets = load_synthetic_dpo_triplets(&entry.path)?;
+                        if let Some(n) = entry.limit {
+                            triplets.shuffle(&mut rng);
+                            triplets.truncate((n / 2).max(1));
+                        }
+                        let mut sents = Vec::new();
+                        for t in triplets {
+                            sents.push(t.0);
+                            sents.push(t.1);
+                            sents.push(t.2);
+                        }
+                        sents
+                    }
                     _ => {
                         let mut pairs = load_sentences(&entry.path, &entry.kind)?;
 
@@ -334,6 +377,22 @@ impl DataLoader {
         Ok(all)
     }
  
+    /// Returns whether any loaded entry is a DPO preference source (or detected as such).
+    pub fn is_dpo(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.entries.iter().any(|e| {
+                matches!(e.kind, FileKind::SyntheticDpo)
+                    || (matches!(e.kind, FileKind::Chats)
+                        && detect_synthetic_kind(&e.path) == Some(FileKind::SyntheticDpo))
+            })
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.entries.iter().any(|e| matches!(e.kind, FileKind::SyntheticDpo))
+        }
+    }
+
     /// Load, prepare, merge, shuffle, and cap all samples.
     pub fn load(
         self,
@@ -341,6 +400,7 @@ impl DataLoader {
         keyword_index: &HashMap<std::string::String, Vec<usize>>,
         max_seq_len: usize,
     ) -> anyhow::Result<Vec<Sample>> {
+        let is_dpo = self.is_dpo();
         let mut rng = StdRng::seed_from_u64(self.seed);
         let mut all: Vec<Sample> = Vec::new();
         // Exact duplicates (same prompt and target tokens) across every source.
@@ -366,7 +426,22 @@ impl DataLoader {
         for (entry, samples) in self.entries.iter().zip(batches) {
             let mut samples = samples?;
             let before = samples.len();
-            samples.retain(|sample| seen.insert(sample_key(sample)));
+            if is_dpo {
+                // Deduplicate atomic pairs (chunks of 2)
+                let mut deduplicated = Vec::with_capacity(samples.len());
+                for pair in samples.chunks_exact(2) {
+                    let k0 = sample_key(&pair[0]);
+                    let k1 = sample_key(&pair[1]);
+                    if seen.insert(k0) {
+                        seen.insert(k1);
+                        deduplicated.push(pair[0].clone());
+                        deduplicated.push(pair[1].clone());
+                    }
+                }
+                samples = deduplicated;
+            } else {
+                samples.retain(|sample| seen.insert(sample_key(sample)));
+            }
             println!(
                 "[DataLoader] {:?}: {} samples after per-file limit, {} duplicates removed",
                 entry.path,
@@ -378,9 +453,25 @@ impl DataLoader {
         }
 
         // 4. Global shuffle then total cap
-        all.shuffle(&mut rng);
-        if let Some(n) = self.total_limit {
-            all.truncate(n);
+        if is_dpo {
+            let num_pairs = all.len() / 2;
+            let mut pair_indices: Vec<usize> = (0..num_pairs).collect();
+            pair_indices.shuffle(&mut rng);
+            let mut shuffled = Vec::with_capacity(all.len());
+            for p in pair_indices {
+                shuffled.push(all[2 * p].clone());
+                shuffled.push(all[2 * p + 1].clone());
+            }
+            all = shuffled;
+            if let Some(n) = self.total_limit {
+                let pair_limit = n / 2;
+                all.truncate(pair_limit * 2);
+            }
+        } else {
+            all.shuffle(&mut rng);
+            if let Some(n) = self.total_limit {
+                all.truncate(n);
+            }
         }
 
         println!("[DataLoader] total samples returned: {}", all.len());
@@ -441,17 +532,41 @@ impl DataLoader {
         max_seq_len:   usize,
         rng:           &mut StdRng,
     ) -> anyhow::Result<Vec<Sample>> {
-        // 1. Raw sentences from disk
-        // Chat-built sources read their own files below.
-        let mut sentences = match entry.kind {
-            FileKind::Paragraphs | FileKind::QuotesCsv | FileKind::Stories | FileKind::AmDistill | FileKind::UltrachatCsv => Vec::new(),
-            _ => load_sentences(&entry.path, &entry.kind)?,
+        #[cfg(not(target_arch = "wasm32"))]
+        let effective_kind = match entry.kind {
+            FileKind::Chats => detect_synthetic_kind(&entry.path).unwrap_or(FileKind::Chats),
+            other => other,
         };
-        println!(
-            "[DataLoader] {:?}: {} sentences loaded",
-            entry.path,
-            sentences.len()
+        #[cfg(target_arch = "wasm32")]
+        let effective_kind = entry.kind;
+
+        let is_dpo = matches!(effective_kind, FileKind::SyntheticDpo);
+
+        // 1. Raw sentences from disk
+        // Custom and synthetic sources read their own files below.
+        let is_custom_loader = matches!(
+            effective_kind,
+            FileKind::Paragraphs
+                | FileKind::QuotesCsv
+                | FileKind::Stories
+                | FileKind::AmDistill
+                | FileKind::UltrachatCsv
+                | FileKind::Chats
+                | FileKind::SyntheticSft
+                | FileKind::SyntheticDpo
         );
+        let mut sentences = if is_custom_loader {
+            Vec::new()
+        } else {
+            load_sentences(&entry.path, &effective_kind)?
+        };
+        if !is_custom_loader {
+            println!(
+                "[DataLoader] {:?}: {} sentences loaded",
+                entry.path,
+                sentences.len()
+            );
+        }
 
         // Per-file limit before sample prep to reduce load
         if let Some(n) = entry.limit {
@@ -461,7 +576,30 @@ impl DataLoader {
 
         // 2. Prepare training samples
         #[cfg(not(target_arch = "wasm32"))]
-        let mut samples = match entry.kind {
+        let mut samples = match effective_kind {
+            FileKind::SyntheticSft => {
+                let mut pairs = load_synthetic_sft_pairs(&entry.path)?;
+
+                // Per-file limit before sample prep to reduce load
+                if let Some(n) = entry.limit {
+                    pairs.shuffle(rng);
+                    pairs.truncate(n);
+                }
+
+                prepare_synthetic_sft_samples(pairs, tokenizer, max_seq_len)
+            }
+            FileKind::SyntheticDpo => {
+                let mut triplets = load_synthetic_dpo_triplets(&entry.path)?;
+
+                // Per-file limit before sample prep to reduce load
+                if let Some(n) = entry.limit {
+                    triplets.shuffle(rng);
+                    let pair_limit = (n / 2).max(1);
+                    triplets.truncate(pair_limit);
+                }
+
+                prepare_synthetic_dpo_samples(triplets, tokenizer, max_seq_len)
+            }
             FileKind::QaPairs => {
                 let mut pairs = load_qa_pairs_raw(&entry.path)?;
 
@@ -625,8 +763,22 @@ impl DataLoader {
 
         // 3. Per-file limit (shuffle first so the truncation is random)
         if let Some(n) = entry.limit {
-            samples.shuffle(rng);
-            samples.truncate(n);
+            if is_dpo {
+                let num_pairs = samples.len() / 2;
+                let mut pair_indices: Vec<usize> = (0..num_pairs).collect();
+                pair_indices.shuffle(rng);
+                let pair_limit = (n / 2).max(1);
+                pair_indices.truncate(pair_limit);
+                let mut limited = Vec::with_capacity(pair_indices.len() * 2);
+                for p in pair_indices {
+                    limited.push(samples[2 * p].clone());
+                    limited.push(samples[2 * p + 1].clone());
+                }
+                samples = limited;
+            } else {
+                samples.shuffle(rng);
+                samples.truncate(n);
+            }
         }
 
         Ok(samples)
@@ -670,6 +822,8 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
         FileKind::DialogueCsv   => Ok(Vec::new()),
         FileKind::FriendsCsv    => Ok(Vec::new()),
         FileKind::UltrachatCsv  => Ok(Vec::new()),
+        FileKind::SyntheticSft  => Ok(Vec::new()),
+        FileKind::SyntheticDpo  => Ok(Vec::new()),
     }
 }
 
@@ -686,7 +840,9 @@ fn load_sentences(path: &str, kind: &FileKind) -> anyhow::Result<Vec<String>> {
         FileKind::Chats       => Ok(Vec::new()),
         FileKind::JsonChats       => Ok(Vec::new()),
         FileKind::DistillChat   => Ok(Vec::new()),
-        FileKind::UltrachatCsv  => Ok(Vec::new())
+        FileKind::UltrachatCsv  => Ok(Vec::new()),
+        FileKind::SyntheticSft  => Ok(Vec::new()),
+        FileKind::SyntheticDpo  => Ok(Vec::new()),
     }
 }
 

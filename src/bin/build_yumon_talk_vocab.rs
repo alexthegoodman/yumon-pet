@@ -6,6 +6,8 @@
 //! 4. Builds forward and reverse synonym mapping clusters.
 //! 5. Saves the generated vocabulary to training-cache/yumon_talk_vocab.json.
 
+/// NOTE: this file may be deprecated now that we dont use the horrible thesaurus approach
+
 #[cfg(not(target_arch = "wasm32"))]
 use {
     anyhow::{Result, ensure},

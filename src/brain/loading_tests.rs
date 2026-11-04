@@ -230,3 +230,60 @@ fn fer_loading_keeps_class_labels_and_skips_corrupt_images() {
     assert!(dataset.records[0].pixels[..1024].iter().all(|&v| v == 1.0));
     assert!(dataset.records[0].pixels[1024..].iter().all(|&v| v == -1.0));
 }
+
+#[test]
+fn synthetic_sft_and_dpo_loading_works() {
+    let fixture = Fixture::new();
+    let sft_content = concat!(
+        "INPUT: Vitals: Hunger 10, Energy 90, Cleanliness 80, Boredom 20.\n",
+        "TARGET: Action: chase the ball.\n\n",
+        "INPUT: Vitals: Hunger 80, Energy 40, Cleanliness 50, Boredom 10.\n",
+        "TARGET: Action: eat food.\n"
+    );
+    let sft_file = fixture.write("sft.txt", sft_content);
+
+    let dpo_content = concat!(
+        "INPUT: Vitals: Hunger 20, Energy 80.\n",
+        "CHOSEN: Action: run.\n",
+        "REJECTED: Action: sleep.\n\n",
+        "INPUT: Vitals: Hunger 90, Energy 20.\n",
+        "CHOSEN: Action: eat.\n",
+        "REJECTED: Action: dance.\n"
+    );
+    let dpo_file = fixture.write("dpo.txt", dpo_content);
+
+    let corpus = format!("{sft_content}\n{dpo_content}");
+    let tokenizer = super::bpe::TokenizerKind::Char(super::Tokenizer::build_from_text(&corpus, 256));
+    let keywords = std::collections::HashMap::new();
+
+    // 1. Direct FileKind loading
+    let sft_loader = DataLoader::new(TrainingStage::Language)
+        .add(&sft_file, FileKind::SyntheticSft, None);
+    let sft_samples = sft_loader.load(&tokenizer, &keywords, 256).unwrap();
+    assert_eq!(sft_samples.len(), 2);
+    assert_eq!(sft_samples[0].pair.0, "Vitals: Hunger 10, Energy 90, Cleanliness 80, Boredom 20.");
+    assert_eq!(sft_samples[0].pair.1, "Action: chase the ball.");
+
+    // 2. DPO loading produces consecutive (chosen, rejected) pairs
+    let dpo_loader = DataLoader::new(TrainingStage::Language)
+        .add(&dpo_file, FileKind::SyntheticDpo, None);
+    assert!(dpo_loader.is_dpo());
+    let dpo_samples = dpo_loader.load(&tokenizer, &keywords, 256).unwrap();
+    assert_eq!(dpo_samples.len(), 4);
+    assert_eq!(dpo_samples[0].pair.1, "Action: run.");
+    assert_eq!(dpo_samples[1].pair.1, "Action: sleep.");
+    assert_eq!(dpo_samples[2].pair.1, "Action: eat.");
+    assert_eq!(dpo_samples[3].pair.1, "Action: dance.");
+
+    // 3. Auto-detection when FileKind::Chats is passed
+    let auto_sft_loader = DataLoader::new(TrainingStage::Language)
+        .add(&sft_file, FileKind::Chats, None);
+    let auto_sft_samples = auto_sft_loader.load(&tokenizer, &keywords, 256).unwrap();
+    assert_eq!(auto_sft_samples.len(), 2);
+
+    let auto_dpo_loader = DataLoader::new(TrainingStage::Language)
+        .add(&dpo_file, FileKind::Chats, None);
+    assert!(auto_dpo_loader.is_dpo());
+    let auto_dpo_samples = auto_dpo_loader.load(&tokenizer, &keywords, 256).unwrap();
+    assert_eq!(auto_dpo_samples.len(), 4);
+}
