@@ -31,7 +31,16 @@ pub const BOS_ID: usize = 1;
 pub const EOS_ID: usize = 2;
 pub const UNK_ID: usize = 3;
 
-pub const SPECIAL_TOKENS: [&str; 4] = ["<pad>", "<s>", "</s>", "<unk>"];
+pub const BASE_SPECIAL_TOKENS: [&str; 4] = ["<pad>", "<s>", "</s>", "<unk>"];
+
+pub const NUMERIC_SPECIAL_TOKENS: [&str; 11] = [
+    "0", "10", "20", "30", "40", "50", "60", "70", "80", "90", "100",
+];
+
+pub const SPECIAL_TOKENS: [&str; 15] = [
+    "<pad>", "<s>", "</s>", "<unk>",
+    "0", "10", "20", "30", "40", "50", "60", "70", "80", "90", "100",
+];
 
 pub const STANDARD_PUNCTUATION: [&str; 24] = [
     ".", ",", "!", "?", ";", ":",
@@ -45,8 +54,8 @@ pub const MAX_NUM_SLOTS: usize = 20;
 pub const MAX_DYNAMIC_SLOTS: usize = 16;
 pub const TOTAL_PLACEHOLDERS: usize = MAX_NAME_SLOTS + MAX_NUM_SLOTS + MAX_DYNAMIC_SLOTS; // 84
 
-pub const FIXED_NON_VOCAB_COUNT: usize = SPECIAL_TOKENS.len() + STANDARD_PUNCTUATION.len() + TOTAL_PLACEHOLDERS; // 112
-pub const TARGET_LEARNED_VOCAB: usize = VOCAB_SIZE - FIXED_NON_VOCAB_COUNT; // 3984
+pub const FIXED_NON_VOCAB_COUNT: usize = SPECIAL_TOKENS.len() + STANDARD_PUNCTUATION.len() + TOTAL_PLACEHOLDERS; // 123
+pub const TARGET_LEARNED_VOCAB: usize = VOCAB_SIZE - FIXED_NON_VOCAB_COUNT; // 3973
 
 /// A 64-bit non-cryptographic hash of an N-gram sandwich context frame `(left, right)`.
 pub type ContextFrameHash = u64;
@@ -326,11 +335,12 @@ impl KiloVocab {
         let mut word_to_id = HashMap::with_capacity(total * 4);
         let mut trie = PhraseTrieNode::new();
 
-        // 1. Special tokens (0..3)
+        // 1. Special tokens (0..14)
         for tok in &self.special_tokens {
             let id = id_to_token.len();
             token_to_id.insert(tok.clone(), id);
             id_to_token.push(tok.clone());
+            word_to_id.insert(tok.to_lowercase(), id);
         }
 
         // 2. Punctuation
@@ -708,6 +718,16 @@ impl KiloVocab {
         self.id_to_token(id).map_or(false, |tok| tok.starts_with("<SLOT_") && tok.ends_with('>'))
     }
 
+    /// Check if an ID belongs to any special token (<pad>, <s>, </s>, <unk>, or numeric vitals).
+    pub fn is_special_token(&self, id: usize) -> bool {
+        id < self.special_tokens.len()
+    }
+
+    /// Check if an ID belongs to one of the fixed numeric special tokens (0, 10, 20..100).
+    pub fn is_numeric_special_token(&self, id: usize) -> bool {
+        self.id_to_token(id).map_or(false, |tok| NUMERIC_SPECIAL_TOKENS.contains(&tok))
+    }
+
     /// Resolve an individual English word to a canonical token ID, checking direct vocabulary
     /// matches and morphological lemmatization variants.
     pub fn resolve_word(&self, word: &str) -> Option<usize> {
@@ -837,10 +857,22 @@ impl KiloVocab {
             // Numeric literals
             if chars[i].is_ascii_digit() {
                 let start = i;
-                while i < len && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                while i < len
+                    && (chars[i].is_ascii_digit()
+                        || (chars[i] == '.' && i + 1 < len && chars[i + 1].is_ascii_digit()))
+                {
                     i += 1;
                 }
                 let num_str: String = chars[start..i].iter().collect();
+
+                // If this numeric string is already a known token in the vocabulary
+                // (e.g. special numeric tokens: 0, 10, 20..100), emit its token ID directly
+                // without replacing it with a placeholder.
+                if let Some(id) = self.token_to_id(&num_str) {
+                    tokens.push(id);
+                    continue;
+                }
+
                 let idx = *num_map.entry(num_str.clone()).or_insert_with(|| {
                     let curr = ctx.numbers.len();
                     ctx.numbers.push(num_str);
@@ -1010,12 +1042,22 @@ impl KiloVocab {
         if let Some(parent) = file_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let added_tokens = serde_json::json!([
-            { "id": 0, "content": "<pad>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
-            { "id": 1, "content": "<s>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
-            { "id": 2, "content": "</s>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
-            { "id": 3, "content": "<unk>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true }
-        ]);
+        let added_tokens: Vec<_> = self
+            .special_tokens
+            .iter()
+            .enumerate()
+            .map(|(id, tok)| {
+                serde_json::json!({
+                    "id": id,
+                    "content": tok,
+                    "single_word": false,
+                    "lstrip": false,
+                    "rstrip": false,
+                    "normalized": false,
+                    "special": true
+                })
+            })
+            .collect();
         let mut vocab_map = serde_json::Map::new();
         for (i, tok) in self.id_to_token.iter().enumerate() {
             vocab_map.insert(tok.clone(), serde_json::Value::Number(serde_json::Number::from(i)));
@@ -1068,9 +1110,69 @@ mod tests {
         assert_eq!(model.token_to_id("</s>"), Some(EOS_ID));
         assert_eq!(model.token_to_id("<unk>"), Some(UNK_ID));
 
-        assert_eq!(model.token_to_id("<NAME_0>"), Some(28)); // 4 special + 24 punct = 28
-        assert_eq!(model.token_to_id("<NUM_0>"), Some(28 + 48));
-        assert_eq!(model.token_to_id("<SLOT_0>"), Some(28 + 48 + 20));
+        for (i, &num) in NUMERIC_SPECIAL_TOKENS.iter().enumerate() {
+            let expected_id = 4 + i;
+            assert_eq!(model.token_to_id(num), Some(expected_id));
+            assert_eq!(model.id_to_token(expected_id), Some(num));
+            assert!(model.is_special_token(expected_id));
+            assert!(model.is_numeric_special_token(expected_id));
+        }
+
+        let punct_offset = SPECIAL_TOKENS.len(); // 15
+        let name_offset = punct_offset + STANDARD_PUNCTUATION.len(); // 15 + 24 = 39
+        let num_offset = name_offset + MAX_NAME_SLOTS; // 39 + 48 = 87
+        let slot_offset = num_offset + MAX_NUM_SLOTS; // 87 + 20 = 107
+
+        assert_eq!(model.token_to_id("<NAME_0>"), Some(name_offset));
+        assert_eq!(model.token_to_id("<NUM_0>"), Some(num_offset));
+        assert_eq!(model.token_to_id("<SLOT_0>"), Some(slot_offset));
+    }
+
+    #[test]
+    fn test_numeric_special_tokens_in_sft_and_dpo() {
+        let word_counts = HashMap::new();
+        let phrase_counts = HashMap::new();
+        let model = KiloVocab::learn_from_corpus(&word_counts, &phrase_counts, 4096, 50, 0.60, 25, 5, None);
+
+        // Vitals typical of SFT and DPO inputs
+        let sft_prompt = "Vitals: Hunger 10, Energy 90, Cleanliness 80, Boredom 20, Mood 0, Max 100.";
+        let mut ctx = TranslationContext::new();
+        let tokens = model.encode(sft_prompt, &mut ctx).unwrap();
+
+        // Ensure vital numeric values are NOT replaced by <NUM_x> placeholders and NOT saved in ctx.numbers
+        assert!(ctx.numbers.is_empty(), "Numeric vitals (0, 10..100) must not be pushed to ctx.numbers");
+
+        let id_0 = model.token_to_id("0").unwrap();
+        let id_10 = model.token_to_id("10").unwrap();
+        let id_20 = model.token_to_id("20").unwrap();
+        let id_80 = model.token_to_id("80").unwrap();
+        let id_90 = model.token_to_id("90").unwrap();
+        let id_100 = model.token_to_id("100").unwrap();
+
+        assert!(tokens.contains(&id_0));
+        assert!(tokens.contains(&id_10));
+        assert!(tokens.contains(&id_20));
+        assert!(tokens.contains(&id_80));
+        assert!(tokens.contains(&id_90));
+        assert!(tokens.contains(&id_100));
+
+        let num_0_id = model.token_to_id("<NUM_0>").unwrap();
+        assert!(!tokens.contains(&num_0_id), "<NUM_0> placeholder should not be emitted for special numbers");
+
+        // Verify roundtrip decode
+        let decoded = model.decode_with_context(&tokens, &ctx);
+        assert!(decoded.contains("10"));
+        assert!(decoded.contains("90"));
+        assert!(decoded.contains("80"));
+        assert!(decoded.contains("20"));
+        assert!(decoded.contains("0"));
+        assert!(decoded.contains("100"));
+
+        // Non-special numbers (e.g. 42) must still map to <NUM_0>
+        let mut ctx2 = TranslationContext::new();
+        let tokens2 = model.encode("Score: 42 points.", &mut ctx2).unwrap();
+        assert_eq!(ctx2.numbers, vec!["42"]);
+        assert!(tokens2.contains(&num_0_id));
     }
 
     #[test]

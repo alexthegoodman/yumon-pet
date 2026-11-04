@@ -11,7 +11,7 @@ use {
     std::collections::{HashMap, HashSet},
     std::path::PathBuf,
     yumon_pet::brain::{
-        kilo_vocab::{self, KiloVocab, WordContextProfile},
+        kilo_vocab::{self, KiloVocab, WordContextProfile, NUMERIC_SPECIAL_TOKENS, SPECIAL_TOKENS},
         sample_cache,
         yumon_talk::{SEALED_WORDS, TranslationContext},
     },
@@ -107,6 +107,8 @@ fn main() -> Result<()> {
     println!("Input cache:          {}", args.input_cache.display());
     println!("Output vocab:         {}", args.output_vocab.display());
     println!("Target vocab size:    {}", args.vocab_size);
+    println!("Special tokens:       {} ({})", SPECIAL_TOKENS.len(), SPECIAL_TOKENS.join(", "));
+    println!("Numeric vital tokens: {}", NUMERIC_SPECIAL_TOKENS.join(", "));
     println!("Max phrase tokens:    {}", args.max_phrases);
     println!("Min mapping score:    {:.2} (words below this are dropped)", args.min_mapping_score);
     println!("Max cluster size:     {}", args.max_cluster_size);
@@ -244,7 +246,7 @@ fn main() -> Result<()> {
 
     println!("Vocabulary induction complete:");
     println!("  Total vocabulary size:      {}", model.vocab_size);
-    println!("  Special tokens:             {}", model.special_tokens.len());
+    println!("  Special tokens:             {} ({})", model.special_tokens.len(), model.special_tokens.join(", "));
     println!("  Punctuation:                {}", model.punctuation.len());
     println!("  Placeholders:               {}", model.placeholders.len());
     println!("  Learned entries:            {}", model.learned_vocab.len());

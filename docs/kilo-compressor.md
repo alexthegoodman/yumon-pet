@@ -68,16 +68,16 @@ Prior vocabulary generation relied on static thesaurus tables (`curated_synonyms
 
 | Category | Token Count | Description & Examples |
 | :--- | :---: | :--- |
-| **Special Tokens** | 4 | `<pad>` (0), `<s>` (1), `</s>` (2), `<unk>` (3) |
+| **Special Tokens** | 15 | `<pad>` (0), `<s>` (1), `</s>` (2), `<unk>` (3), `0`, `10`, `20`, `30`, `40`, `50`, `60`, `70`, `80`, `90`, `100` (vital numeric tokens) |
 | **Punctuation & Layout** | 24 | `.`, `,`, `!`, `?`, `;`, `:`, `(`, `)`, `[`, `]`, `"`, `'`, `-`, `/`, `\n`, etc. |
 | **Entity & Slot Placeholders** | 84 | Contextually preserved literals: |
 | ↳ *Named Entities* | 48 | `<NAME_0>`..`<NAME_47>` (capitalized proper nouns, entities, brands) |
 | ↳ *Numerics* | 20 | `<NUM_0>`..`<NUM_19>` (integers, floats, quantities) |
 | ↳ *Template Slots* | 16 | `<SLOT_0>`..`<SLOT_15>` (rare open-class terms, dynamic variables) |
-| **Learned Vocabulary** | 3,984 | Top empirical unigrams and mined multi-word phrases |
+| **Learned Vocabulary** | 3,973 | Top empirical unigrams and mined multi-word phrases |
 | ↳ *Core Closed-Class Seeds* | ~160 | Pronouns, prepositions, conjunctions, primary auxiliaries (`SEALED_WORDS`) |
 | ↳ *High-Frequency Words* | ~3,500 | Open-class vocabulary mined directly from training corpora by frequency |
-| ↳ *Multi-word Phrases* | ~324 | High-mutual-information collocations (e.g., `as well as`, `for example`) |
+| ↳ *Multi-word Phrases* | ~313 | High-mutual-information collocations (e.g., `as well as`, `for example`) |
 | **Total Vocabulary** | **4,096** | **Strictly bounded, indexable in `0..4095` (`u16`)** |
 
 ---
@@ -121,10 +121,10 @@ Prior vocabulary generation relied on static thesaurus tables (`curated_synonyms
 pub struct KiloVocab {
     pub version: usize,
     pub vocab_size: usize,                    // Exactly 4096
-    pub special_tokens: Vec<String>,          // 4
+    pub special_tokens: Vec<String>,          // 15
     pub punctuation: Vec<String>,             // 24
     pub placeholders: Vec<String>,            // 84
-    pub vocabulary: Vec<String>,              // 3984 (words + phrases)
+    pub vocabulary: Vec<String>,              // 3973 (words + phrases)
     
     // Fast lookup tables
     pub token_to_id: HashMap<String, usize>,
