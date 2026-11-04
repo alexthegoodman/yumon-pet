@@ -1425,7 +1425,7 @@ pub fn prepare_paired_samples_chats(
                         block.memories[..i].iter().map(|m| (m.human.as_str(), m.bot.as_str())),
                         tokenizer,
                         budget,
-                        2,
+                        1,
                     ) else { continue; };
                     (tokenizer.encode(&prompt), prompt)
                 }

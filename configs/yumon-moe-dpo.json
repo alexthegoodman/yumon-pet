@@ -7,7 +7,7 @@
   "cache": "training-cache/dpo/kilo_dpo.bin",
   "tokenizer": "training-cache/kilo_talk_tokenizer",
   "init_checkpoint": "checkpoints/yumon-pet-kilo-deep-light/code_256h_16l_8a_512ff_512len_b2_Moe_e8_k2_f32_yumon_talk_v1_tied",
-  "max_seq_len": 512,
+  "max_seq_len": 256,
   "exclude_dirs": [".git", "target", "node_modules"],
   "seed": 4815162342,
   "vocab_size": 4096,
