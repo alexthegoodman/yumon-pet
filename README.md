@@ -192,6 +192,23 @@ Checkpoints from before this change still load.
 cargo run --release --bin train_code -- --config configs/yumon-code-moe-mini-depth.json
 ```
 
+### Experimental optimizers (MoE)
+
+An optional `optimizer` section ([design](docs/OPTIMIZERS.md),
+`src/brain/optimizers.rs`) replaces AdamW for MoE runs. `slbfgs` is a block-diagonal
+stochastic L-BFGS for batches of 32 or less. It gets curvature from re-running the
+same batch after a step (`curvature: "probe"`) or from EMA-averaged iterates
+(`"ema"`), starts from Adam's diagonal, damps bad pairs, and takes Adam's step
+length per tensor. `fsecant` is a lightweight factored-secant quasi-Newton
+optimizer that stores only momentum and takes Sophia-style clipped Newton steps.
+Run names gain `_opt_<kind>...`, and stats go to `optimizer.jsonl`.
+
+```sh
+cargo run --release --bin train_code -- --config configs/yumon-moe-base-pretrain-slbfgs.json
+cargo run --release --bin train_code -- --config configs/yumon-moe-base-pretrain-slbfgs-ema.json
+cargo run --release --bin train_code -- --config configs/yumon-moe-base-pretrain-fsecant.json
+```
+
 ### KV-cached inference and grouped-query attention
 
 MoE and dense decoder generation keeps a KV cache: the prompt runs once through

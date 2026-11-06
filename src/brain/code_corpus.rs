@@ -111,6 +111,9 @@ pub struct CodeConfig {
     /// When omitted, auto-detected from cache/model objective or defaults to "base".
     #[serde(default)]
     pub eval_stage: Option<String>,
+    /// Optimizer experiment (docs/OPTIMIZERS.md): {"kind": "adamw" | "slbfgs" | "fsecant", ...}.
+    /// Absent = AdamW. The experimental kinds are MoE-only.
+    pub optimizer: Option<super::optimizers::OptimizerConfig>,
 }
 
 impl Default for CodeConfig {
@@ -131,6 +134,7 @@ impl Default for CodeConfig {
             init_checkpoint: None,
             dpo_beta: None,
             eval_stage: None,
+            optimizer: None,
         }
     }
 }
@@ -170,6 +174,13 @@ impl CodeConfig {
         ensure!(self.validation_fraction > 0.0 && self.validation_fraction < 1.0,
             "validation_fraction must be between 0 and 1");
         if let Some(adaptive) = &self.adaptive_loss { adaptive.validate()?; }
+        if let Some(optimizer) = &self.optimizer {
+            optimizer.validate()?;
+            ensure!(*optimizer == super::optimizers::OptimizerConfig::Adamw || self.architecture == CodeArchitecture::Moe,
+                "optimizer kinds other than adamw require architecture \"moe\"");
+            ensure!(!optimizer.needs_probe() || self.dpo_beta.is_none(),
+                "slbfgs probe curvature re-runs the CE loss; use curvature \"ema\" for DPO");
+        }
         if let Some(kv) = self.kv_heads {
             ensure!(self.architecture == CodeArchitecture::Moe, "kv_heads requires architecture \"moe\"");
             ensure!(kv > 0 && self.attn_heads % kv == 0, "attn_heads must be a positive multiple of kv_heads");

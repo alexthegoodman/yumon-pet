@@ -251,6 +251,9 @@ pub struct RunConfig {
     pub z_loss_weight: f64,
     pub init_checkpoint: Option<std::path::PathBuf>,
     pub dpo_beta: Option<f64>,
+    /// None = AdamW; see brain::optimizers.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub optimizer: Option<crate::brain::optimizers::OptimizerConfig>,
 }
 
 /// Number of held-out prompts run through the model every time we do a
@@ -548,6 +551,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 // Separate directories so A/B/C/D experiments never resume each other.
                 + &config.adaptive_loss.as_ref().map_or(String::new(), |a| format!("_alw_{}", a.effective_mode().tag()))
                 + &config.kv_heads.filter(|&kv| kv != config.attn_heads).map_or(String::new(), |kv| format!("_gqa{kv}"))
+                + &config.optimizer.as_ref().map_or(String::new(), |o| o.tag())
                 + if config.tie_embeddings { "_tied" } else { "" },
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
             n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
@@ -567,6 +571,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             z_loss_weight: config.z_loss_weight,
             init_checkpoint: config.init_checkpoint.clone(),
             dpo_beta: config.dpo_beta,
+            optimizer: config.optimizer.clone(),
         };
         let run_dir = config.out_dir.join(&run.name);
         std::fs::create_dir_all(&run_dir)?;
@@ -1689,11 +1694,12 @@ where
             println!("target_active: {}", sample.target_labels.iter().filter(|&&t| t != PAD_TOKEN).count());
         }
 
-        let mut optimizer = AdamWConfig::new()
-            .with_epsilon(stage_cfg.epsilon)
-            .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)))
-            .with_weight_decay(stage_cfg.weight_decay)
-            .init();
+        let mut optimizer = crate::brain::optimizers::TrainOptimizer::<M, TrainBackend>::new(
+            run_cfg.optimizer.as_ref(), stage_cfg.weight_decay, stage_cfg.epsilon);
+        if let Some(cfg) = run_cfg.optimizer.as_ref() {
+            println!("Optimizer: {cfg:?}");
+            anyhow::ensure!(!(is_dpo && cfg.needs_probe()), "slbfgs probe curvature is not supported for DPO; use curvature \"ema\"");
+        }
 
         let mut rng = rand::thread_rng();
         use std::io::{stdout, IsTerminal};
@@ -1868,6 +1874,9 @@ where
                 let lang_target_t = Tensor::<TrainBackend, 1, Int>::from_ints(TensorData::new(all_lang_targets, [current_batch_size * seq_len]), device);
                 let tokens_t = Tensor::<TrainBackend, 2, Int>::from_ints(TensorData::new(all_seq_ids, [current_batch_size, seq_len]), device);
 
+                // A probe re-runs this batch after the step; same seed, same dropout mask.
+                let probe_seed = optimizer.arms_next_step().then(|| (step as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                if let Some(seed) = probe_seed { <TrainBackend as Backend>::seed(device, seed); }
                 let (token_logits, aux_loss, reach) = model.forward_train_depth(tokens_t.clone());
                 if !reach.is_empty() {
                     depth_window.0.resize(reach.len(), 0.0);
@@ -1900,6 +1909,7 @@ where
                 let weight_sum = row_weights.as_ref().map_or(supervised as f64, |w| w.iter().map(|&x| x as f64).sum());
                 let rows = current_batch_size * seq_len;
                 let row_weights_t = row_weights.map(|w| Tensor::<TrainBackend, 1>::from_floats(TensorData::new(w, [rows]), device));
+                let probe_weights_t = row_weights_t.clone().filter(|_| probe_seed.is_some());
                 window.overhead += bookkeeping.elapsed();
 
                 let (lang_loss, accurate_pairs) = if is_dpo {
@@ -1953,6 +1963,24 @@ where
                 let grad_norm = adaptive.as_ref().filter(|a| a.closes_window_next_step())
                     .map(|_| global_grad_norm(&model, &grads));
                 model = optimizer.step(current_lr, model, grads);
+                if optimizer.probe_pending() {
+                    // Same batch, same dropout, new parameters: y = g(x + s) - g(x).
+                    <TrainBackend as Backend>::seed(device, probe_seed.unwrap_or_default());
+                    let (logits, aux, _) = model.forward_train_depth(tokens_t.clone());
+                    let loss = weighted_token_ce(logits.reshape([current_batch_size * seq_len, vocab]), lang_target_t.clone(),
+                        probe_weights_t, supervised, stage_cfg.smoothing) + aux.cast(burn::tensor::FloatDType::F32);
+                    let grads = GradientsParams::from_grads(loss.backward(), &model);
+                    model = optimizer.probe(model, grads);
+                }
+                if let Some(stats) = optimizer.take_stats() {
+                    let line = serde_json::json!({"step": step + 1, "epoch": epoch + 1, "lr": current_lr,
+                        "optimizer": optimizer.kind(), "stats": stats});
+                    if terminal.is_none() { println!("optimizer {line}"); }
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(run_dir.join("optimizer.jsonl")) {
+                        let _ = writeln!(f, "{line}");
+                    }
+                }
 
                 let lang_val: f32 = lang_loss.inner().to_data().convert::<f32>().to_vec::<f32>().unwrap()[0];
                 // Charts, epoch loss and metadata stay on unweighted CE for comparability.
@@ -2340,6 +2368,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     z_loss_weight: 0.001,
                                     init_checkpoint: None,
                                     dpo_beta: None,
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    optimizer: None,
                                 });
                             }
                         }

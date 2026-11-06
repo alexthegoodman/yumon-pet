@@ -98,3 +98,13 @@ Packing is done at load (`pack_min_tokens` in code_curriculum.rs). Run name
 `_code_pretrain_v1_min<n>`. moe-lite: 128 -> 89,508 blocks (mean 318, 0.2% of tokens
 dropped); 256 gives 60,474 blocks (mean 470, 0.7% dropped). Tiers are unaffected.
 
+
+Optimizers (2026-11-06): optional `optimizer` config section (`optimizers.rs`,
+docs/OPTIMIZERS.md), MoE-only; absent = AdamW. `slbfgs`: per-tensor stochastic
+L-BFGS (history pairs, Powell damping, H0 = Adam diagonal, Adam-grafted step length);
+`curvature: "probe"` re-runs the same batch with the same dropout seed every
+`interval` steps (`TrainOptimizer::probe` in `train_causal_lm`; not for DPO), `"ema"`
+uses EMA iterates/momentum. `fsecant`: momentum-only factored row/column secant
+curvature with Sophia-style clipped steps. Run names gain `_opt_...`; stats go to
+`optimizer.jsonl`. Optimizer state is not checkpointed. Configs:
+`yumon-moe-base-pretrain-{slbfgs,slbfgs-ema,fsecant}.json`.

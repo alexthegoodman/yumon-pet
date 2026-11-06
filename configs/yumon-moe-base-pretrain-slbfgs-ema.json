@@ -1,0 +1,43 @@
+{
+  "architecture": "moe",
+  "num_experts": 8,
+  "top_k": 2,
+  "num_shared_experts": 0,
+  "source": "../rust-code",
+  "cache": "training-cache/pretrain/kilo_pretrain.bin",
+  "tokenizer": "training-cache/kilo_talk_tokenizer",
+  "max_seq_len": 256,
+  "exclude_dirs": [
+    ".git",
+    "target",
+    "node_modules"
+  ],
+  "seed": 4815162342,
+  "vocab_size": 4096,
+  "embed_dim": 256,
+  "n_layers": 16,
+  "attn_heads": 8,
+  "ff_dim": 512,
+  "batch_size": 2,
+  "epochs": 10,
+  "first_lr": 0.0003,
+  "last_lr": 3e-05,
+  "validation_fraction": 0.01,
+  "out_dir": "checkpoints/yumon-base-moe",
+  "aux_loss_weight": 0.025,
+  "z_loss_weight": 0.01,
+  "tie_embeddings": true,
+  "eval_stage": "base",
+  "optimizer": {
+    "kind": "slbfgs",
+    "history": 4,
+    "curvature": "ema",
+    "interval": 10,
+    "beta_1": 0.9,
+    "beta_2": 0.999,
+    "epsilon": 1e-08,
+    "damping": 0.2,
+    "grad_clip": 1.0,
+    "stats_every": 200
+  }
+}
