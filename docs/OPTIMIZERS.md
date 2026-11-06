@@ -164,3 +164,13 @@ step_size and the schedule, capped at `max_step`), the secant condition H y_newe
 damping of a negative-curvature pair (the direction stays a descent direction), and
 descent of every optimizer on diagonal and rotated quadratics (condition number
 1000) with and without gradient noise.
+
+## Inspecting weights
+
+`cargo run --release --bin analyze_weights_pass1 -- <config.json | out_dir | run dir> [--compare <other>] [--run <substr>] [--csv out.csv] [--all] [--raw]`
+loads the MoE checkpoint and reports per-tensor stable rank, rank-1 share, s1 over the
+random-matrix (Marchenko-Pastur) edge, starved/collapsed experts per layer, norm gains
+still at exactly 1.0, embedding anisotropy, and the run's `optimizer.jsonl`. A config
+resolves to the newest run under its `out_dir` trained with that optimizer; if the run has
+no `model.bin` yet it says so and lists sibling out_dirs that do. `--compare` prints group
+stats side by side (and elementwise drift only when both runs share an init).

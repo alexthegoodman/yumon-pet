@@ -23,17 +23,17 @@
   "first_lr": 0.0003,
   "last_lr": 3e-05,
   "validation_fraction": 0.01,
-  "out_dir": "checkpoints/yumon-base-moe",
+  "out_dir": "checkpoints/yumon-base-moe-fsecant-beta",
   "aux_loss_weight": 0.025,
   "z_loss_weight": 0.01,
   "tie_embeddings": true,
   "eval_stage": "base",
   "optimizer": {
     "kind": "fsecant",
-    "beta_1": 0.9,
-    "beta_2": 0.99,
-    "radius": 0.001,
-    "floor": 0.1,
+    "beta_1": 0.85,
+    "beta_2": 0.92,
+    "radius": 0.1,
+    "floor": 0.05,
     "grad_clip": 1.0,
     "stats_every": 200
   }

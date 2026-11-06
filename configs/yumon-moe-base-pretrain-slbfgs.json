@@ -23,7 +23,7 @@
   "first_lr": 0.0003,
   "last_lr": 3e-05,
   "validation_fraction": 0.01,
-  "out_dir": "checkpoints/yumon-base-moe-optimal",
+  "out_dir": "checkpoints/yumon-base-moe-optimal-free",
   "aux_loss_weight": 0.025,
   "z_loss_weight": 0.01,
   "tie_embeddings": true,
