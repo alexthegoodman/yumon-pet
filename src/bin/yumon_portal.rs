@@ -30,6 +30,7 @@ mod desktop {
         bpe::TokenizerKind,
         decompressor::NGramDecompressor,
         decoder_model::YumonDecBrain,
+        mamba2_model::YumonMamba2Brain,
         model::YumonBrain,
         moe_model::YumonMoeBrain,
         samples::{TrainingStage, language_prompt},
@@ -48,6 +49,7 @@ mod desktop {
         DecoderOnly,
         Moe,
         Xlstm,
+        Mamba2,
         EncoderDecoder,
     }
 
@@ -1018,6 +1020,26 @@ mod desktop {
                     println!("[Yumon Portal] Specified vocab file {} not found; using embedded vocabulary.", vocab_path.display());
                     yumon_talk::load_global_vocab_str(EMBEDDED_VOCAB_STR)?;
                 }
+            } else if let Some(ckpt) = &resolved_ckpt {
+                // Custom checkpoints are trained against the current vocab, not the
+                // one embedded with the bundled model: prefer one saved beside the
+                // checkpoint, then the workspace training cache.
+                let vocab_path = [
+                    PathBuf::from(ckpt).join("kilo_talk_vocab.json"),
+                    PathBuf::from("training-cache/kilo_talk_vocab.json"),
+                ]
+                .into_iter()
+                .find(|p| p.exists());
+                match vocab_path {
+                    Some(path) => {
+                        println!("[Yumon Portal] Loading Yumon Talk vocabulary from {} ...", path.display());
+                        yumon_talk::load_global_vocab_file(&path)?;
+                    }
+                    None => {
+                        println!("[Yumon Portal] No Yumon Talk vocabulary found for checkpoint; using embedded vocabulary.");
+                        yumon_talk::load_global_vocab_str(EMBEDDED_VOCAB_STR)?;
+                    }
+                }
             } else {
                 println!("[Yumon Portal] Using embedded Yumon Talk vocabulary.");
                 yumon_talk::load_global_vocab_str(EMBEDDED_VOCAB_STR)?;
@@ -1222,6 +1244,9 @@ mod desktop {
             let arch = if metadata.get("num_experts").is_some() && matches!(args.architecture, Architecture::DecoderOnly) {
                 println!("[Yumon Portal] Auto-detected MoE checkpoint metadata; using MoE architecture.");
                 Architecture::Moe
+            } else if metadata.get("mamba").is_some() && matches!(args.architecture, Architecture::DecoderOnly) {
+                println!("[Yumon Portal] Auto-detected Mamba-2 checkpoint metadata; using Mamba-2 architecture.");
+                Architecture::Mamba2
             } else {
                 args.architecture
             };
@@ -1238,6 +1263,10 @@ mod desktop {
                 Architecture::Xlstm => {
                     let (brain, tokenizer, config) = YumonXLstmBrain::<Wgpu>::load(ckpt, &device)?;
                     build_responder!(brain, tokenizer, config, YumonXLstmBrain<Wgpu>, |b, t, p, n, d| b.generate_unmasked_parsed(t, p, n, d).raw_output)
+                }
+                Architecture::Mamba2 => {
+                    let (brain, tokenizer, config) = YumonMamba2Brain::<BackendType>::load(ckpt, &device)?;
+                    build_responder!(brain, tokenizer, config, YumonMamba2Brain<BackendType>, |b, t, p, n, d| b.generate_unmasked_parsed(t, p, n, d).raw_output)
                 }
                 Architecture::EncoderDecoder => {
                     let (brain, tokenizer, config) = YumonBrain::<Wgpu>::load(ckpt, &device)?;
