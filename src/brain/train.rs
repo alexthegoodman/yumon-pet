@@ -39,6 +39,7 @@ use crate::brain::{
     model::{YumonBrain, YumonBrainConfig, BrainMetadata, GenerationResult},
     moe_model::{YumonMoeBrain, YumonMoeBrainConfig, MoeMetadata},
     xlstm_model::{YumonXLstmBrain, YumonXLstmBrainConfig, XLstmMetadata},
+    mamba2_model::{Mamba2Metadata, Mamba2Settings, YumonMamba2Brain, YumonMamba2BrainConfig},
     reference_model::{RefMetadata, YumonReferenceBrain, YumonReferenceBrainConfig},
 };
 
@@ -215,6 +216,8 @@ pub enum Architecture {
     /// matrix memory), prompt+reply packed as one sequence like DecoderOnly, but
     /// recurrent rather than attention-based.
     XLstm,
+    /// YumonMamba2Brain (mamba2_model.rs) — Mamba-2 SSD blocks; settings in RunConfig::mamba.
+    Mamba2,
     /// Causal transformer with dropless sparse SwiGLU experts.
     Moe { num_experts: usize, top_k: usize },
     /// Stock `burn::nn::transformer` baseline (reference_model.rs).
@@ -261,6 +264,8 @@ pub struct RunConfig {
     pub router_group: Option<crate::brain::optimizers::ParamGroupConfig>,
     #[cfg(not(target_arch = "wasm32"))]
     pub expert_group: Option<crate::brain::optimizers::ParamGroupConfig>,
+    /// Mamba-2 settings; None = defaults. Mamba2 runs only.
+    pub mamba: Option<Mamba2Settings>,
 }
 
 /// Number of held-out prompts run through the model every time we do a
@@ -525,6 +530,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 num_experts: config.num_experts, top_k: config.top_k,
             },
             code_corpus::CodeArchitecture::XLstm => Architecture::XLstm,
+            code_corpus::CodeArchitecture::Mamba2 => Architecture::Mamba2,
             code_corpus::CodeArchitecture::EncoderDecoder => Architecture::EncoderDecoder,
             code_corpus::CodeArchitecture::Reference => Architecture::Reference,
         };
@@ -539,6 +545,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             }
             Architecture::DecoderOnly => "DecoderOnly".to_string(),
             Architecture::XLstm => "XLstm".to_string(),
+            Architecture::Mamba2 => config.mamba.clone().unwrap_or_default().tag(),
             Architecture::EncoderDecoder => "EncoderDecoder".to_string(),
             Architecture::Reference => "Reference".to_string(),
         };
@@ -585,6 +592,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             token_embed_dim: config.token_embed_dim.filter(|&d| d != config.embed_dim),
             router_group: config.router.clone(),
             expert_group: config.experts.clone(),
+            mamba: config.mamba.clone(),
         };
         let run_dir = config.out_dir.join(&run.name);
         std::fs::create_dir_all(&run_dir)?;
@@ -608,6 +616,8 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             Architecture::DecoderOnly => train_causal_lm::<YumonDecBrain<TrainBackend>>(
                 &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
             Architecture::XLstm => train_causal_lm::<YumonXLstmBrain<TrainBackend>>(
+                &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
+            Architecture::Mamba2 => train_causal_lm::<YumonMamba2Brain<TrainBackend>>(
                 &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
             Architecture::EncoderDecoder => train_causal_lm::<YumonBrain<TrainBackend>>(
                 &run, &run_dir, &tokenizer, &HashMap::new(), &prompts, &device, Some(prepared))?,
@@ -1582,6 +1592,70 @@ impl CausalLmTrain for YumonReferenceBrain<TrainBackend> {
     }
 }
 
+impl<B: Backend> CausalLm<B> for YumonMamba2Brain<B> {
+    fn logits(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> { self.forward(tokens) }
+    fn generate(&self, tokenizer: &TokenizerKind, prompt: &str, max_tokens: usize, device: &B::Device) -> GenerationResult {
+        self.generate_unmasked_parsed(tokenizer, prompt, max_tokens, device)
+    }
+}
+
+impl CausalLmTrain for YumonMamba2Brain<TrainBackend> {
+    fn init_or_resume(run_cfg: &RunConfig, tokenizer: &TokenizerKind, run_dir: &std::path::Path, device: &<TrainBackend as Backend>::Device) -> Result<(Self, usize)> {
+        let settings = run_cfg.mamba.clone().unwrap_or_default();
+        let config = YumonMamba2BrainConfig::new(tokenizer.vocab_size(), run_cfg.stages[0].stage, settings.clone())
+            .with_embed_dim(run_cfg.embed_dim).with_n_layers(run_cfg.n_layers)
+            .with_attn_heads(run_cfg.attn_heads).with_ff_dim(run_cfg.ff_dim)
+            .with_max_seq_len(run_cfg.max_seq_len).with_dropout_rate(run_cfg.dropout_rate)
+            .with_tie_embeddings(run_cfg.tie_embeddings);
+        println!("Mamba-2: {:.2}M parameters, {} SSM heads x {} dims, d_state {}, chunked SSD scan{}{}.",
+            config.param_count() as f64 / 1e6, run_cfg.attn_heads, settings.expand * run_cfg.embed_dim / run_cfg.attn_heads,
+            settings.d_state, if settings.mlp { ", SwiGLU MLP per block" } else { "" },
+            if run_cfg.tie_embeddings { ", tied embeddings" } else { "" });
+        let same = |saved: &YumonMamba2BrainConfig| saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
+            && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
+            && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
+            && saved.tie_embeddings == config.tie_embeddings && saved.settings == config.settings;
+        if !run_dir.join("model.bin").exists() {
+            if let Some(init_path) = &run_cfg.init_checkpoint {
+                println!("Initializing Mamba-2 weights from base checkpoint: {}", init_path.display());
+                let (m, checkpoint_tokenizer, saved) = Self::load(init_path.to_str().unwrap(), device)?;
+                anyhow::ensure!(same(&saved), "Base Mamba-2 checkpoint configuration differs from requested fine-tuning run");
+                ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
+                return Ok((m, 0));
+            }
+            return Ok((config.init(device), 0));
+        }
+        let (m, checkpoint_tokenizer, saved) = Self::load(run_dir.to_str().unwrap(), device)?;
+        anyhow::ensure!(same(&saved), "Mamba-2 checkpoint configuration differs from requested run");
+        ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
+        let meta: Mamba2Metadata = serde_json::from_str(&std::fs::read_to_string(run_dir.join("metadata.json"))?)?;
+        Ok((m, meta.epochs_trained))
+    }
+    fn set_stage(&mut self, stage: TrainingStage) { self.config.0.training_stage = stage; }
+    fn forward_train(&self, tokens: Tensor<TrainBackend, 2, Int>) -> (Tensor<TrainBackend, 3>, Tensor<TrainBackend, 1>) {
+        let device = tokens.device();
+        (self.forward(tokens), Tensor::zeros([1], &device))
+    }
+    fn save_run(&self, dir: &str, tokenizer: &TokenizerKind, p: &RunProgress) -> Result<()> {
+        self.save(dir, tokenizer, &Mamba2Metadata {
+            dropout_rate:   self.config.dropout_rate,
+            vocab_size:     tokenizer.vocab_size(),
+            epochs_trained: p.epochs_trained,
+            final_loss:     p.final_loss,
+            val_loss:       p.val_loss,
+            batch_size:     p.batch_size,
+            training_stage: p.stage,
+            embed_dim:      p.run_cfg.embed_dim,
+            n_layers:       p.run_cfg.n_layers,
+            attn_heads:     p.run_cfg.attn_heads,
+            ff_dim:         p.run_cfg.ff_dim,
+            max_seq_len:    p.run_cfg.max_seq_len,
+            tie_embeddings: self.config.tie_embeddings,
+            mamba:          self.config.settings.clone(),
+        })
+    }
+}
+
 impl<B: Backend> CausalLm<B> for YumonXLstmBrain<B> {
     fn logits(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> { self.forward(tokens) }
     fn generate(&self, tokenizer: &TokenizerKind, prompt: &str, max_tokens: usize, device: &B::Device) -> GenerationResult {
@@ -2375,6 +2449,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     Architecture::DecoderOnly    => (2e-4, 2e-5),
                                     Architecture::EncoderDecoder => (1e-3, 1e-4),
                                     Architecture::XLstm          => (1e-3, 1e-4),
+                                    Architecture::Mamba2         => (1e-3, 1e-4),
                                     Architecture::Reference      => (3e-4, 3e-5),
                                 };
                                 let arch_tag = match architecture {
@@ -2382,6 +2457,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     Architecture::DecoderOnly    => "DecoderOnly".to_string(),
                                     Architecture::EncoderDecoder => "EncoderDecoder".to_string(),
                                     Architecture::XLstm          => "XLstm".to_string(),
+                                    Architecture::Mamba2         => Mamba2Settings::default().tag(),
                                     Architecture::Reference      => "Reference".to_string(),
                                 };
                                 let stage_tag = match stage {
@@ -2432,6 +2508,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     router_group: None,
                                     #[cfg(not(target_arch = "wasm32"))]
                                     expert_group: None,
+                                    mamba: None,
                                 });
                             }
                         }
@@ -3324,6 +3401,10 @@ pub fn run_with_architecture(
 
         Architecture::Reference => {
             train_causal_lm::<YumonReferenceBrain<TrainBackend>>(&run_cfg, &run_dir, &tokenizer, &keyword_index, &prompts, &device, None)?;
+        }
+
+        Architecture::Mamba2 => {
+            train_causal_lm::<YumonMamba2Brain<TrainBackend>>(&run_cfg, &run_dir, &tokenizer, &keyword_index, &prompts, &device, None)?;
         }
 
         } // match run_cfg.architecture

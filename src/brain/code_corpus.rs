@@ -21,6 +21,9 @@ pub enum CodeArchitecture {
     Moe,
     #[serde(rename = "xlstm")]
     XLstm,
+    /// Mamba-2 SSD blocks (mamba2_model.rs); settings in the `mamba` section.
+    #[serde(rename = "mamba2")]
+    Mamba2,
     EncoderDecoder,
     /// Stock Burn transformer (no flash attention, RoPE or custom blocks) as a baseline.
     Reference,
@@ -122,6 +125,9 @@ pub struct CodeConfig {
     pub router: Option<super::optimizers::ParamGroupConfig>,
     /// MoE routed + shared expert overrides; same fields as `router`.
     pub experts: Option<super::optimizers::ParamGroupConfig>,
+    /// Mamba-2 settings (d_state, expand, d_conv, chunk_size, mlp); architecture
+    /// "mamba2" only. Absent = defaults. attn_heads is the number of SSM heads.
+    pub mamba: Option<super::mamba2_model::Mamba2Settings>,
 }
 
 impl Default for CodeConfig {
@@ -146,6 +152,7 @@ impl Default for CodeConfig {
             token_embed_dim: None,
             router: None,
             experts: None,
+            mamba: None,
         }
     }
 }
@@ -191,6 +198,11 @@ impl CodeConfig {
                 "optimizer kinds other than adamw require architecture \"moe\"");
             ensure!(!optimizer.needs_probe() || self.dpo_beta.is_none(),
                 "slbfgs probe curvature re-runs the CE loss; use curvature \"ema\" for DPO");
+        }
+        if self.architecture == CodeArchitecture::Mamba2 {
+            self.mamba.clone().unwrap_or_default().validate(self.embed_dim, self.attn_heads)?;
+        } else {
+            ensure!(self.mamba.is_none(), "mamba settings require architecture \"mamba2\"");
         }
         if let Some(kv) = self.kv_heads {
             ensure!(self.architecture == CodeArchitecture::Moe, "kv_heads requires architecture \"moe\"");

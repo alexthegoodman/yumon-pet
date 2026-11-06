@@ -32,6 +32,7 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
         },
         Architecture::XLstm,
         Architecture::EncoderDecoder,
+        Architecture::Mamba2,
         Architecture::Reference,
         // Factorized tied embedding plus router/expert parameter groups.
         Architecture::Moe {
@@ -42,7 +43,7 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
     .into_iter()
     .enumerate()
     {
-        let grouped = index == 5;
+        let grouped = index == 6;
         let mut run = RunConfig {
             name: format!("architecture-{index}"),
             embed_dim: 16,
@@ -83,6 +84,9 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
             expert_group: grouped.then(|| crate::brain::optimizers::ParamGroupConfig {
                 last_lr: Some(0.0005), ..Default::default()
             }),
+            mamba: (architecture == Architecture::Mamba2).then(|| crate::brain::mamba2_model::Mamba2Settings {
+                d_state: 4, chunk_size: 4, ..Default::default()
+            }),
         };
         let path = directory.join(&run.name);
         std::fs::create_dir_all(&path)?;
@@ -101,6 +105,9 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
             }
             Architecture::Reference => {
                 exercise::<YumonReferenceBrain<TrainBackend>>(&mut run, &path, &tokenizer, &device)?
+            }
+            Architecture::Mamba2 => {
+                exercise::<YumonMamba2Brain<TrainBackend>>(&mut run, &path, &tokenizer, &device)?
             }
         }
     }

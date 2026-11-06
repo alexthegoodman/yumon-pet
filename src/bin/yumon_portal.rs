@@ -541,10 +541,11 @@ mod desktop {
             return Some(path.to_string());
         }
         let candidates = [
-            "checkpoints/yumon-v2-dpo/code_256h_16l_8a_512ff_256len_b2_Moe_e8_k2_f32_tied",
-            "checkpoints/yumon-v2-dpo",
-            "checkpoints/yumon-v2-sft/code_256h_16l_8a_512ff_256len_b2_Moe_e8_k2_f32_tied",
-            "checkpoints/yumon-v2-sft",
+            "checkpoints/yumon-dpo-mamba2-medium"
+            // "checkpoints/yumon-v2-dpo/code_256h_16l_8a_512ff_256len_b2_Moe_e8_k2_f32_tied",
+            // "checkpoints/yumon-v2-dpo",
+            // "checkpoints/yumon-v2-sft/code_256h_16l_8a_512ff_256len_b2_Moe_e8_k2_f32_tied",
+            // "checkpoints/yumon-v2-sft",
         ];
         for candidate in candidates {
             let p = PathBuf::from(candidate);
