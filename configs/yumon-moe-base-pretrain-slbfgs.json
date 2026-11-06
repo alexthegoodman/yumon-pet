@@ -34,10 +34,9 @@
     "curvature": "probe",
     "interval": 4,
     "beta_1": 0.9,
-    "beta_2": 0.999,
-    "epsilon": 1e-08,
+    "step_size": 1.0,
+    "max_step": 0.001,
     "damping": 0.1,
-    "grad_clip": 1.0,
     "stats_every": 200
   }
 }

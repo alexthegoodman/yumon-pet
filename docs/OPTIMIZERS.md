@@ -17,9 +17,12 @@ Every `stats_every` steps, a line goes to `optimizer.jsonl` in the run directory
 
 ```json
 "optimizer": {"kind": "slbfgs", "history": 4, "curvature": "probe", "interval": 10,
-              "beta_1": 0.9, "beta_2": 0.999, "epsilon": 1e-8, "damping": 0.2,
-              "grad_clip": 1.0, "stats_every": 200}
+              "beta_1": 0.9, "step_size": 1.0, "max_step": 0.001, "damping": 0.2,
+              "stats_every": 200}
 ```
+
+slbfgs is standalone: no Adam moments, no grafting and no gradient clipping. The
+quasi-Newton step sets both the direction and the length of every update.
 
 Plain L-BFGS breaks at batch sizes of 2-32. Its gradient difference
 y = g_{k+1} - g_k is taken on two different batches, so y is mostly sampling noise,
@@ -39,31 +42,33 @@ of the problem:
   moving iterate, m is close to the gradient at x_avg, so the pair is consistent, and
   averaging over about 1/(1 - beta_1) batches cuts the noise. Use this one for DPO
   (the probe re-runs the CE loss only).
-- **H0 = gamma * Adam diagonal.** The recursion starts from
-  diag(1 / (sqrt(v) + eps)) instead of the identity, so directions the history does
-  not cover still get Adam's per-coordinate scaling. gamma = s'y / y'P y comes from
-  the newest usable pair. With empty history the direction is exactly Adam's.
+- **H0 = gamma * I.** The standard L-BFGS scaling, gamma = s'y / y'y from the
+  newest usable pair (Nocedal and Wright 7.20). Before the first pair, gamma = 1
+  and the step is the momentum, bounded by `max_step`.
 - **Powell damping.** If s'y < damping * s'B0 s (negative or weak curvature, common
   in a nonconvex net), y is blended toward B0 s, so H stays positive definite and
-  the step stays a descent direction. B0's scale is matched to |y|.
+  the step stays a descent direction. B0 = (|y| / |s|) I, so the test reduces to
+  cos(s, y) < damping.
 - **Safe reciprocal.** rho = s'y / ((s'y)^2 + tiny), so a degenerate pair drops out
   (rho -> 0) instead of blowing up. This keeps everything branch-free on the GPU.
-- **Grafting.** The update takes the L-BFGS direction with the norm of the Adam
-  step, per tensor (Agarwal et al., learning-rate grafting). L-BFGS supplies the
-  shape and Adam the length, so the configs' learning rates and linear decay carry
-  over unchanged. Without it the Newton-scaled step lengths would need a separate LR
-  search.
+- **Step length.** The update is x -= step_size * (lr / first_lr) * H m. The
+  trainer's lr only contributes its schedule shape (1 at the start, last_lr /
+  first_lr at the end), not its scale, so a full Newton step is step_size = 1.
+- **Trust region (`max_step`).** If the step's RMS over a tensor exceeds `max_step`
+  (parameter units), the step is shrunk to that RMS, keeping its direction. This is
+  the only safeguard. Gradients are not clipped, because clipping g rescales H m
+  and the probe pairs (raw gradients) would no longer match the scale of m.
 - Momentum m (`beta_1`) is what the recursion transforms, not the raw gradient.
-  Per-tensor norm clipping (`grad_clip`) applies to the update; probe pairs use raw
-  gradients. Weight decay is decoupled, as in AdamW.
+  Weight decay is decoupled (x *= 1 - lr * wd) and uses the trainer's lr.
 
-Memory per parameter: m, v, 2 x `history` pair vectors (default 4 -> 10 copies),
+Memory per parameter: m and 2 x `history` pair vectors (default 4 -> 9 copies),
 plus 2 transient copies at probe steps (or 3 persistent ones in `ema` mode). Compute:
 about 4 x `history` dot products and axpys per tensor per step.
 
-Stats: `cos_adam` (cosine between the L-BFGS and Adam directions; 1 means
+Stats: `cos_grad` (cosine between the L-BFGS direction and the momentum; 1 means
 curvature changed nothing), `mean_history`, `damped_tensors` (tensors whose newest
-pair needed damping) and `update_rms_over_lr`.
+pair needed damping), `capped_tensors` (tensors whose step hit `max_step`; tune it
+with this) and `update_rms` (parameter units).
 
 ## `fsecant`: factored secant (lightweight)
 
@@ -120,7 +125,9 @@ cargo run --release --bin train_code -- --config configs/yumon-moe-base-pretrain
 
 ## First local comparison (2026-11-06)
 
-This is a smoke check, not a verdict. Setup: `yumon-moe-base-pretrain` (256h, 16
+These slbfgs rows are from the earlier Adam-grafted version (H0 = Adam diagonal,
+Adam step length, gradient clip 1.0), which has since been removed. The standalone
+version has not been run on the model yet. This is a smoke check, not a verdict. Setup: `yumon-moe-base-pretrain` (256h, 16
 layers, 8 experts top-2, batch 2, lr 3e-4), Intel UHD 770 via WGPU, FP32, 420 s per
 arm with the same seeded batch order, scratch `out_dir`. The loss is the epoch's
 running mean of training CE (the console `avg`).
@@ -151,8 +158,9 @@ What it shows so far:
 
 ## Tests
 
-`cargo test --lib brain::optimizers` covers config parsing, the empty-history step
-matching Adam, the secant condition H y_newest = s_newest after each undamped pair,
+`cargo test --lib brain::optimizers` covers config parsing (Adam fields and
+`grad_clip` are rejected for slbfgs), the empty-history step (momentum, scaled by
+step_size and the schedule, capped at `max_step`), the secant condition H y_newest = s_newest after each undamped pair,
 damping of a negative-curvature pair (the direction stays a descent direction), and
 descent of every optimizer on diagonal and rotated quadratics (condition number
 1000) with and without gradient noise.

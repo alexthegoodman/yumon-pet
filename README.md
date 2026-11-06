@@ -198,8 +198,9 @@ An optional `optimizer` section ([design](docs/OPTIMIZERS.md),
 `src/brain/optimizers.rs`) replaces AdamW for MoE runs. `slbfgs` is a block-diagonal
 stochastic L-BFGS for batches of 32 or less. It gets curvature from re-running the
 same batch after a step (`curvature: "probe"`) or from EMA-averaged iterates
-(`"ema"`), starts from Adam's diagonal, damps bad pairs, and takes Adam's step
-length per tensor. `fsecant` is a lightweight factored-secant quasi-Newton
+(`"ema"`), damps bad pairs, and takes its own quasi-Newton step (no Adam, no
+gradient clip), scaled only by the LR schedule's shape and capped per tensor by
+`max_step`. `fsecant` is a lightweight factored-secant quasi-Newton
 optimizer that stores only momentum and takes Sophia-style clipped Newton steps.
 Run names gain `_opt_<kind>...`, and stats go to `optimizer.jsonl`.
 

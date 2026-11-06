@@ -1695,7 +1695,7 @@ where
         }
 
         let mut optimizer = crate::brain::optimizers::TrainOptimizer::<M, TrainBackend>::new(
-            run_cfg.optimizer.as_ref(), stage_cfg.weight_decay, stage_cfg.epsilon);
+            run_cfg.optimizer.as_ref(), stage_cfg.weight_decay, stage_cfg.epsilon, stage_cfg.first_lr);
         if let Some(cfg) = run_cfg.optimizer.as_ref() {
             println!("Optimizer: {cfg:?}");
             anyhow::ensure!(!(is_dpo && cfg.needs_probe()), "slbfgs probe curvature is not supported for DPO; use curvature \"ema\"");

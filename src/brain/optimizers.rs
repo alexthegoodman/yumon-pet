@@ -7,8 +7,9 @@
 //! - `slbfgs`: block-diagonal stochastic L-BFGS for small batches. Curvature
 //!   pairs come from re-evaluating the same batch after a step (`probe`, needs the
 //!   training loop) or from EMA-averaged iterates and momentum (`ema`, free).
-//!   H0 is Adam's diagonal, pairs are Powell-damped, and each tensor's step length
-//!   is grafted from Adam so learning rates carry over.
+//!   H0 = gamma * I from the newest pair, pairs are Powell-damped, and the step is
+//!   the quasi-Newton step itself: the trainer's lr only contributes its schedule
+//!   shape (lr / first_lr), and a per-tensor RMS cap acts as the trust region.
 //! - `fsecant`: lightweight diagonal quasi-Newton. Secant curvature from the
 //!   momentum change over the step just taken, least-squares fitted per row and
 //!   per column (Adafactor-style factors), with a Sophia-style clipped Newton step.
@@ -58,21 +59,24 @@ pub struct SlbfgsConfig {
     pub interval: usize,
     /// Momentum of the gradient fed to the two-loop recursion (and the EMA pairs).
     pub beta_1: f32,
-    /// Second-moment decay of the Adam diagonal used as H0 and for grafting.
-    pub beta_2: f32,
-    pub epsilon: f32,
-    /// Powell damping: keep s'y >= damping * s'B0 s.
+    /// Multiplier on the quasi-Newton step H m (1 = full step), scaled by the
+    /// schedule shape lr / first_lr.
+    pub step_size: f32,
+    /// Trust region: per-tensor cap on the RMS of the applied step, in parameter
+    /// units. Also bounds the steps before the first curvature pair (H = I). It is
+    /// the only step safeguard: gradients are not clipped, since rescaling them
+    /// would rescale the Newton step too.
+    pub max_step: f32,
+    /// Powell damping: keep s'y >= damping * |s| |y| (B0 = I scaled to |y| / |s|).
     pub damping: f32,
-    /// Per-tensor gradient norm clip; 0 disables.
-    pub grad_clip: f32,
     /// Steps between stats readbacks (optimizer.jsonl); 0 disables.
     pub stats_every: usize,
 }
 
 impl Default for SlbfgsConfig {
     fn default() -> Self {
-        Self { history: 4, curvature: CurvatureSource::Probe, interval: 10, beta_1: 0.9, beta_2: 0.999,
-            epsilon: 1e-8, damping: 0.2, grad_clip: 1.0, stats_every: 200 }
+        Self { history: 4, curvature: CurvatureSource::Probe, interval: 10, beta_1: 0.9, step_size: 1.0,
+            max_step: 1e-3, damping: 0.2, stats_every: 200 }
     }
 }
 
@@ -105,9 +109,9 @@ impl OptimizerConfig {
             Self::Adamw => {}
             Self::Slbfgs(c) => {
                 anyhow::ensure!(c.history >= 1 && c.interval >= 1, "slbfgs needs history >= 1 and interval >= 1");
-                anyhow::ensure!(beta(c.beta_1) && beta(c.beta_2), "slbfgs betas must be in [0, 1)");
+                anyhow::ensure!(beta(c.beta_1), "slbfgs beta_1 must be in [0, 1)");
                 anyhow::ensure!(c.damping > 0.0 && c.damping < 1.0, "slbfgs damping must be in (0, 1)");
-                anyhow::ensure!(c.epsilon > 0.0 && c.grad_clip >= 0.0, "slbfgs epsilon must be positive, grad_clip >= 0");
+                anyhow::ensure!(c.step_size > 0.0 && c.max_step > 0.0, "slbfgs step_size and max_step must be positive");
             }
             Self::Fsecant(c) => {
                 anyhow::ensure!(beta(c.beta_1) && beta(c.beta_2), "fsecant betas must be in [0, 1)");
@@ -122,8 +126,9 @@ impl OptimizerConfig {
     pub fn tag(&self) -> String {
         match self {
             Self::Adamw => String::new(),
-            Self::Slbfgs(c) => format!("_opt_slbfgs_{}_h{}_i{}",
-                match c.curvature { CurvatureSource::Probe => "probe", CurvatureSource::Ema => "ema" }, c.history, c.interval),
+            Self::Slbfgs(c) => format!("_opt_slbfgs_{}_h{}_i{}_s{}_m{}",
+                match c.curvature { CurvatureSource::Probe => "probe", CurvatureSource::Ema => "ema" }, c.history, c.interval,
+                c.step_size, c.max_step),
             Self::Fsecant(c) => format!("_opt_fsecant_r{}", c.radius),
         }
     }
@@ -146,15 +151,18 @@ const PHASE_PROBE: u8 = 2;
 pub struct OptimizerStats {
     pub tensors: usize,
     pub numel: f64,
-    /// slbfgs: cosine between the L-BFGS direction and Adam's direction.
-    pub cos_adam: f64,
+    /// slbfgs: cosine between the L-BFGS direction and the momentum.
+    pub cos_grad: f64,
+    /// slbfgs: tensors whose step hit the `max_step` cap.
+    pub capped: usize,
     /// slbfgs: mean curvature pairs held per tensor.
     pub history: f64,
     /// slbfgs: tensors whose newest pair needed Powell damping.
     pub damped: usize,
     /// fsecant: fraction of coordinates whose Newton step was not clipped.
     pub unclipped: f64,
-    /// RMS of the applied update divided by lr.
+    /// RMS of the applied update: divided by lr for fsecant, in parameter units
+    /// for slbfgs.
     pub update_rms: f64,
 }
 
@@ -162,9 +170,9 @@ impl OptimizerStats {
     pub fn to_json(&self, kind: &str) -> serde_json::Value {
         let n = self.numel.max(1.0);
         match kind {
-            "slbfgs" => serde_json::json!({"tensors": self.tensors, "cos_adam": self.cos_adam / n,
+            "slbfgs" => serde_json::json!({"tensors": self.tensors, "cos_grad": self.cos_grad / n,
                 "mean_history": self.history / self.tensors.max(1) as f64, "damped_tensors": self.damped,
-                "update_rms_over_lr": self.update_rms / n}),
+                "capped_tensors": self.capped, "update_rms": self.update_rms / n}),
             _ => serde_json::json!({"tensors": self.tensors, "unclipped": self.unclipped / n,
                 "update_rms_over_lr": self.update_rms / n}),
         }
@@ -212,6 +220,8 @@ fn clip_norm<B: Backend, const D: usize>(g: Tensor<B, D>, max: f32) -> Tensor<B,
 pub struct StochasticLbfgs {
     cfg: SlbfgsConfig,
     weight_decay: f32,
+    /// The schedule's first lr; lr / peak_lr is the step's schedule factor.
+    peak_lr: f64,
     control: Control,
 }
 
@@ -219,11 +229,10 @@ pub struct StochasticLbfgs {
 pub struct SlbfgsState<B: Backend, const D: usize> {
     pub time: usize,
     pub m: Tensor<B, D>,
-    pub v: Tensor<B, D>,
     pub s: Vec<Tensor<B, D>>,
     pub y: Vec<Tensor<B, D>>,
     pub rho: Vec<Tensor<B, 1>>,
-    /// H0 = gamma * diag(1 / (sqrt(v) + eps)), from the newest usable pair.
+    /// H0 = gamma * I, gamma = s'y / y'y from the newest usable pair.
     pub gamma: Tensor<B, 1>,
     /// Damping factor of the newest pair (1 = undamped), for stats.
     pub theta: Tensor<B, 1>,
@@ -237,31 +246,25 @@ pub struct SlbfgsState<B: Backend, const D: usize> {
 }
 
 impl StochasticLbfgs {
-    /// sqrt(v) + eps: the inverse of the Adam diagonal.
-    fn adam_denominator<B: Backend, const D: usize>(&self, v: &Tensor<B, D>) -> Tensor<B, D> {
-        v.clone().sqrt().add_scalar(self.cfg.epsilon)
-    }
-
-    /// Powell-damped pair against B0 = diag(sqrt(v) + eps) / gamma_d, where gamma_d
-    /// matches the magnitudes of B0 s and y. Pushes the pair and updates gamma
-    /// when s'y_hat is usable; a zero pair gets rho = 0 and drops out.
+    /// Powell-damped pair against B0 = (|y| / |s|) I, i.e. B0 scaled to match the
+    /// magnitude of y. Pushes the pair and updates gamma when s'y_hat is usable; a
+    /// zero pair gets rho = 0 and drops out.
     fn push_pair<B: Backend, const D: usize>(&self, state: &mut SlbfgsState<B, D>, s: Tensor<B, D>, y: Tensor<B, D>) {
-        let denom = self.adam_denominator(&state.v);
-        let s_b_s_raw = (s.clone().square() * denom.clone()).sum();
-        let y_p_y = (y.clone().square() / denom.clone()).sum();
-        let gamma_d = (s_b_s_raw.clone() / y_p_y.add_scalar(TINY)).sqrt().clamp_min(TINY);
-        let s_b_s = s_b_s_raw / gamma_d.clone();
+        let s_norm = s.clone().square().sum().sqrt();
+        let y_norm = y.clone().square().sum().sqrt();
+        let scale = y_norm / s_norm.clone().add_scalar(TINY);
+        let s_b_s = s_norm.square() * scale.clone();
         let s_y = dot(&s, &y);
         let damp = s_y.clone().lower(s_b_s.clone().mul_scalar(self.cfg.damping));
         let theta_damped = s_b_s.clone().mul_scalar(1.0 - self.cfg.damping)
             / (s_b_s - s_y).add_scalar(TINY);
         let theta = Tensor::ones_like(&theta_damped).mask_where(damp, theta_damped);
-        let b0_s = s.clone() * denom.clone() / bc(gamma_d);
+        let b0_s = s.clone() * bc(scale);
         let y_hat = y * bc(theta.clone()) + b0_s * bc(theta.clone().neg().add_scalar(1.0));
         let s_y_hat = dot(&s, &y_hat);
         // Safe reciprocal: tends to 0 instead of inf as s'y_hat -> 0.
         let rho = s_y_hat.clone() / (s_y_hat.clone().square().add_scalar(TINY));
-        let gamma_new = s_y_hat.clone() / ((y_hat.clone().square() / denom).sum().add_scalar(TINY));
+        let gamma_new = s_y_hat.clone() / y_hat.clone().square().sum().add_scalar(TINY);
         let usable = s_y_hat.greater_elem(TINY.sqrt());
         state.gamma = state.gamma.clone().mask_where(usable, gamma_new);
         state.theta = theta;
@@ -275,8 +278,8 @@ impl StochasticLbfgs {
         state.rho.push(rho);
     }
 
-    /// Two-loop recursion H q with H0 = gamma * diag(1 / denom).
-    fn direction<B: Backend, const D: usize>(state: &SlbfgsState<B, D>, q: Tensor<B, D>, denom: &Tensor<B, D>) -> Tensor<B, D> {
+    /// Two-loop recursion H q with H0 = gamma * I.
+    fn direction<B: Backend, const D: usize>(state: &SlbfgsState<B, D>, q: Tensor<B, D>) -> Tensor<B, D> {
         let k = state.s.len();
         let mut q = q;
         let mut alphas = Vec::with_capacity(k);
@@ -285,7 +288,7 @@ impl StochasticLbfgs {
             q = q - state.y[i].clone() * bc(alpha.clone());
             alphas.push(alpha);
         }
-        let mut r = q / denom.clone() * bc(state.gamma.clone());
+        let mut r = q * bc(state.gamma.clone());
         for i in 0..k {
             let beta = state.rho[i].clone() * dot(&state.y[i], &r);
             r = r + state.s[i].clone() * bc(alphas[k - 1 - i].clone() - beta);
@@ -309,22 +312,20 @@ impl<B: Backend> SimpleOptimizer<B> for StochasticLbfgs {
             return (tensor, Some(state));
         }
 
-        let raw = grad;
-        let g = clip_norm(raw.clone(), self.cfg.grad_clip);
-        let (b1, b2) = (self.cfg.beta_1, self.cfg.beta_2);
+        let g = grad;
+        let b1 = self.cfg.beta_1;
         let ema = self.cfg.curvature == CurvatureSource::Ema;
-        // First step: moments start at g and g^2, so no bias correction is needed.
+        // First step: momentum starts at g, so no bias correction is needed.
         let mut state = match state {
             Some(mut st) => {
                 st.m = st.m.mul_scalar(b1) + g.clone().mul_scalar(1.0 - b1);
-                st.v = st.v.mul_scalar(b2) + g.square().mul_scalar(1.0 - b2);
                 st.time += 1;
                 st
             }
             None => {
                 let device = tensor.device();
                 SlbfgsState {
-                    time: 1, m: g.clone(), v: g.clone().square(), s: Vec::new(), y: Vec::new(), rho: Vec::new(),
+                    time: 1, m: g.clone(), s: Vec::new(), y: Vec::new(), rho: Vec::new(),
                     gamma: Tensor::ones([1], &device), theta: Tensor::ones([1], &device),
                     pending_g: None, pending_s: None,
                     x_avg: ema.then(|| tensor.clone()), x_snap: ema.then(|| tensor.clone()), m_snap: ema.then(|| g.clone()),
@@ -346,35 +347,40 @@ impl<B: Backend> SimpleOptimizer<B> for StochasticLbfgs {
             state.x_avg = Some(x_avg);
         }
 
-        let denom = self.adam_denominator(&state.v);
-        let adam = state.m.clone() / denom.clone();
-        let d = Self::direction(&state, state.m.clone(), &denom);
-        // Graft: L-BFGS direction, Adam's per-tensor step length.
-        let adam_norm = adam.clone().square().sum().sqrt();
-        let d_norm = d.clone().square().sum().sqrt();
-        let update = d.clone() * bc(adam_norm.clone() / d_norm.clone().add_scalar(TINY));
+        // The quasi-Newton step H m sets direction and length; the schedule only
+        // contributes its shape, and the RMS cap bounds the step (trust region).
+        let d = Self::direction(&state, state.m.clone());
+        let factor = self.cfg.step_size as f64 * if self.peak_lr > 0.0 { lr / self.peak_lr } else { 1.0 };
+        let step = d.clone().mul_scalar(factor);
+        let step_rms = step.clone().square().mean().sqrt();
+        let cap = step_rms.add_scalar(TINY).recip().mul_scalar(self.cfg.max_step).clamp_max(1.0);
+        let update = step * bc(cap.clone());
 
         if self.control.collecting() {
             let numel = tensor.shape().num_elements() as f64;
-            let cos = scalar(dot(&d, &adam) / (d_norm * adam_norm).add_scalar(TINY));
+            let m_norm = state.m.clone().square().sum().sqrt();
+            let d_norm = d.clone().square().sum().sqrt();
+            let cos = scalar(dot(&d, &state.m) / (d_norm * m_norm).add_scalar(TINY));
             let rms = scalar(update.clone().square().mean().sqrt());
+            let capped = scalar(cap) < 1.0;
             let damped = !state.s.is_empty() && scalar(state.theta.clone()) < 1.0;
             let held = state.s.len() as f64;
             self.control.record(|s| {
                 s.tensors += 1;
                 s.numel += numel;
-                s.cos_adam += cos * numel;
+                s.cos_grad += cos * numel;
                 s.history += held;
                 s.damped += damped as usize;
+                s.capped += capped as usize;
                 s.update_rms += rms * numel;
             });
         }
 
         let decay = 1.0 - lr * self.weight_decay as f64;
-        let new = tensor.clone().mul_scalar(decay) - update.mul_scalar(lr);
+        let new = tensor.clone().mul_scalar(decay) - update;
         if phase == PHASE_ARM {
             state.pending_s = Some(new.clone() - tensor);
-            state.pending_g = Some(raw);
+            state.pending_g = Some(g);
         }
         (new, Some(state))
     }
@@ -382,7 +388,6 @@ impl<B: Backend> SimpleOptimizer<B> for StochasticLbfgs {
     fn to_device<const D: usize>(mut state: Self::State<D>, device: &B::Device) -> Self::State<D> {
         let mv = |t: Tensor<B, D>| t.to_device(device);
         state.m = mv(state.m);
-        state.v = mv(state.v);
         state.s = state.s.into_iter().map(mv).collect();
         state.y = state.y.into_iter().map(mv).collect();
         state.rho = state.rho.into_iter().map(|t| t.to_device(device)).collect();
@@ -549,7 +554,8 @@ impl Schedule {
 }
 
 impl<M: AutodiffModule<B>, B: AutodiffBackend> TrainOptimizer<M, B> {
-    pub fn new(config: Option<&OptimizerConfig>, weight_decay: f32, epsilon: f32) -> Self {
+    /// `peak_lr` is the schedule's first lr; slbfgs scales its step by lr / peak_lr.
+    pub fn new(config: Option<&OptimizerConfig>, weight_decay: f32, epsilon: f32, peak_lr: f64) -> Self {
         let clip = Some(GradientClippingConfig::Norm(1.0));
         match config.unwrap_or(&OptimizerConfig::Adamw) {
             OptimizerConfig::Adamw => Self::AdamW(AdamWConfig::new().with_epsilon(epsilon)
@@ -558,8 +564,8 @@ impl<M: AutodiffModule<B>, B: AutodiffBackend> TrainOptimizer<M, B> {
                 let control = Control::default();
                 let probe = (cfg.curvature == CurvatureSource::Probe).then_some(cfg.interval);
                 let schedule = Schedule::new(control.clone(), probe, cfg.stats_every);
-                // Clipping happens inside the step so probe pairs see raw gradients.
-                Self::Slbfgs(OptimizerAdaptor::from(StochasticLbfgs { cfg: cfg.clone(), weight_decay, control }), schedule)
+                let opt = StochasticLbfgs { cfg: cfg.clone(), weight_decay, peak_lr, control };
+                Self::Slbfgs(OptimizerAdaptor::from(opt), schedule)
             }
             OptimizerConfig::Fsecant(cfg) => {
                 let control = Control::default();
@@ -658,7 +664,7 @@ mod tests {
         let a = Tensor::<TB, 1>::from_floats(curvature_matrix(rotated).as_slice(), &device).reshape([64, 64]);
         let input = Tensor::<TB, 2>::ones([4, 8], &device);
         let mut model = Quad { w: Param::from_tensor(Tensor::ones([8, 8], &device)), lin: LinearConfig::new(8, 4).init(&device) };
-        let mut opt = TrainOptimizer::<Quad<TB>, TB>::new(config.as_ref(), 0.0, 1e-8);
+        let mut opt = TrainOptimizer::<Quad<TB>, TB>::new(config.as_ref(), 0.0, 1e-8, lr);
         let batch_loss = |model: &Quad<TB>, n: &Tensor<TB, 2>| loss(model, &a, &input) + (model.w.val() * n.clone()).sum();
         let mut seen_stats = 0;
         for _ in 0..steps {
@@ -682,8 +688,9 @@ mod tests {
         for rotated in [false, true] {
             let start = run(None, 0, 0.0, 0.0, rotated);
             for noise in [0.0, 5.0] {
-                let probe = Some(OptimizerConfig::Slbfgs(SlbfgsConfig { interval: 2, stats_every: 10, ..Default::default() }));
-                let ema = Some(OptimizerConfig::Slbfgs(SlbfgsConfig { curvature: CurvatureSource::Ema, interval: 5, stats_every: 10, ..Default::default() }));
+                let probe = Some(OptimizerConfig::Slbfgs(SlbfgsConfig { interval: 2, max_step: 0.05, stats_every: 10, ..Default::default() }));
+                let ema = Some(OptimizerConfig::Slbfgs(SlbfgsConfig { curvature: CurvatureSource::Ema, interval: 5, max_step: 0.05,
+                    stats_every: 10, ..Default::default() }));
                 let secant = Some(OptimizerConfig::Fsecant(FsecantConfig { stats_every: 10, ..Default::default() }));
                 let results = [("adamw", None), ("slbfgs-probe", probe), ("slbfgs-ema", ema), ("fsecant", secant)]
                     .map(|(name, cfg)| (name, run(cfg, 200, 0.02, noise, rotated)));
@@ -698,27 +705,37 @@ mod tests {
     #[test]
     fn config_parses_and_tags() {
         let c: OptimizerConfig = serde_json::from_str(r#"{"kind":"slbfgs","history":3,"curvature":"ema"}"#).unwrap();
-        assert_eq!(c.tag(), "_opt_slbfgs_ema_h3_i10");
+        assert_eq!(c.tag(), "_opt_slbfgs_ema_h3_i10_s1_m0.001");
         c.validate().unwrap();
         let c: OptimizerConfig = serde_json::from_str(r#"{"kind":"fsecant"}"#).unwrap();
         assert!(c.tag().starts_with("_opt_fsecant"));
         assert!(serde_json::from_str::<OptimizerConfig>(r#"{"kind":"slbfgs","histroy":3}"#).is_err());
+        assert!(serde_json::from_str::<OptimizerConfig>(r#"{"kind":"slbfgs","beta_2":0.999}"#).is_err(), "no Adam fields left");
+        assert!(serde_json::from_str::<OptimizerConfig>(r#"{"kind":"slbfgs","grad_clip":1.0}"#).is_err(), "slbfgs does not clip");
         let c: OptimizerConfig = serde_json::from_str(r#"{"kind":"adamw"}"#).unwrap();
         assert_eq!(c.tag(), "");
     }
 
-    /// With no history the L-BFGS direction is Adam's, so the update equals a
-    /// bias-free Adam step of the same length.
+    /// With no history H = I: the step is the momentum (= g on the first step),
+    /// scaled by step_size * lr / peak_lr, and shrunk to max_step RMS when longer.
     #[test]
-    fn slbfgs_first_step_matches_adam_direction() {
+    fn slbfgs_first_step_is_momentum_within_trust_region() {
         let device = Default::default();
-        let opt = StochasticLbfgs { cfg: SlbfgsConfig { grad_clip: 0.0, ..Default::default() }, weight_decay: 0.0, control: Control::default() };
-        let x = Tensor::<burn::backend::Wgpu, 1>::from_floats([1.0, -2.0, 3.0], &device);
-        let g = Tensor::<burn::backend::Wgpu, 1>::from_floats([0.5, 4.0, -1.0], &device);
-        let (new, _) = SimpleOptimizer::step(&opt, 0.1, x.clone(), g, None);
-        let step: Vec<f32> = (x - new).into_data().to_vec().unwrap();
-        // m = g, v = g^2 -> m / sqrt(v) = sign(g), length sqrt(3).
-        for (s, e) in step.iter().zip([0.1, 0.1, -0.1]) { assert!((s - e).abs() < 1e-4, "{step:?}"); }
+        let first_step = |max_step: f32, lr: f64| {
+            let cfg = SlbfgsConfig { max_step, step_size: 0.5, ..Default::default() };
+            let opt = StochasticLbfgs { cfg, weight_decay: 0.0, peak_lr: 0.2, control: Control::default() };
+            let x = Tensor::<burn::backend::Wgpu, 1>::from_floats([1.0, -2.0, 3.0], &device);
+            let g = Tensor::<burn::backend::Wgpu, 1>::from_floats([0.5, 4.0, -1.0], &device);
+            let (new, _) = SimpleOptimizer::step(&opt, lr, x.clone(), g, None);
+            (x - new).into_data().to_vec::<f32>().unwrap()
+        };
+        // Uncapped: 0.5 * (0.1 / 0.2) * g.
+        let step = first_step(10.0, 0.1);
+        for (s, e) in step.iter().zip([0.125, 1.0, -0.25]) { assert!((s - e).abs() < 1e-5, "{step:?}"); }
+        // Capped: same direction, RMS = 0.01.
+        let step = first_step(0.01, 0.1);
+        let rms = (step.iter().map(|s| s * s).sum::<f32>() / 3.0).sqrt();
+        assert!((rms - 0.01).abs() < 1e-5 && step[1] > 0.0 && step[2] < 0.0, "{step:?}");
     }
 
     /// The two-loop recursion satisfies the newest secant condition H y = s.
@@ -726,28 +743,26 @@ mod tests {
     fn slbfgs_two_loop_satisfies_secant_condition() {
         type IB = burn::backend::Wgpu;
         let device = Default::default();
-        let opt = StochasticLbfgs { cfg: SlbfgsConfig::default(), weight_decay: 0.0, control: Control::default() };
+        let opt = StochasticLbfgs { cfg: SlbfgsConfig::default(), weight_decay: 0.0, peak_lr: 1.0, control: Control::default() };
         let t = |v: [f32; 4]| Tensor::<IB, 1>::from_floats(v, &device);
         let a = [[4.0, 1.0, 0.0, 0.5], [1.0, 3.0, 0.2, 0.0], [0.0, 0.2, 2.0, 0.3], [0.5, 0.0, 0.3, 1.0]];
         let mul = |s: [f32; 4]| t(std::array::from_fn(|i| (0..4).map(|j| a[i][j] * s[j]).sum()));
         let mut state = SlbfgsState::<IB, 1> {
-            time: 1, m: t([1.0; 4]), v: t([0.25, 1.0, 4.0, 0.5]), s: vec![], y: vec![], rho: vec![],
+            time: 1, m: t([1.0; 4]), s: vec![], y: vec![], rho: vec![],
             gamma: Tensor::ones([1], &device), theta: Tensor::ones([1], &device),
             pending_g: None, pending_s: None, x_avg: None, x_snap: None, m_snap: None,
         };
         for s in [[1.0, 0.0, 0.5, 0.0], [0.0, 1.0, -0.3, 0.2], [0.3, -0.2, 1.0, 1.0]] {
             opt.push_pair(&mut state, t(s), mul(s));
             assert!(state.theta.clone().into_scalar() == 1.0, "a positive definite A needs no damping");
-            let denom = opt.adam_denominator(&state.v);
-            let hy: Vec<f32> = StochasticLbfgs::direction(&state, mul(s), &denom).into_data().to_vec().unwrap();
+            let hy: Vec<f32> = StochasticLbfgs::direction(&state, mul(s)).into_data().to_vec().unwrap();
             for (h, e) in hy.iter().zip(s) { assert!((h - e).abs() < 1e-4, "H y = {hy:?}, s = {s:?}"); }
         }
         // A negative-curvature pair is damped and keeps H positive definite.
         opt.push_pair(&mut state, t([1.0, 0.0, 0.0, 0.0]), t([-1.0, 0.0, 0.0, 0.0]));
         assert!(state.theta.clone().into_scalar() < 1.0);
         let q = t([1.0, -1.0, 0.5, 2.0]);
-        let denom = opt.adam_denominator(&state.v);
-        let d = StochasticLbfgs::direction(&state, q.clone(), &denom);
+        let d = StochasticLbfgs::direction(&state, q.clone());
         assert!((d * q).sum().into_scalar() > 0.0, "direction must stay a descent direction");
     }
 
