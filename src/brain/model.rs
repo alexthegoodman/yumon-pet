@@ -275,13 +275,16 @@ impl<B: Backend> LinearForce<B> {
 pub struct MLPConfig {
     d_model:    usize,
     d_hidden:   usize,
+    /// Std of the N(0, std) init on every projection.
+    #[config(default = 0.02)]
+    init_std:   f64,
 }
 
 impl MLPConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> MLP<B> {
         // GPT-2-style init: N(0, 0.02) on every projection.
         // Simple, fan-in-independent, and well-validated at this scale.
-        let init = Initializer::Normal { mean: 0.0, std: 0.02 };
+        let init = Initializer::Normal { mean: 0.0, std: self.init_std };
 
         MLP {
             w1: LinearConfig::new(self.d_model, self.d_hidden)

@@ -254,6 +254,13 @@ pub struct RunConfig {
     /// None = AdamW; see brain::optimizers.
     #[cfg(not(target_arch = "wasm32"))]
     pub optimizer: Option<crate::brain::optimizers::OptimizerConfig>,
+    /// MoE token embedding width; None = embed_dim (no projections).
+    pub token_embed_dim: Option<usize>,
+    /// MoE router / expert hyperparameter overrides, each with its own optimizer.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub router_group: Option<crate::brain::optimizers::ParamGroupConfig>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub expert_group: Option<crate::brain::optimizers::ParamGroupConfig>,
 }
 
 /// Number of held-out prompts run through the model every time we do a
@@ -552,6 +559,9 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 + &config.adaptive_loss.as_ref().map_or(String::new(), |a| format!("_alw_{}", a.effective_mode().tag()))
                 + &config.kv_heads.filter(|&kv| kv != config.attn_heads).map_or(String::new(), |kv| format!("_gqa{kv}"))
                 + &config.optimizer.as_ref().map_or(String::new(), |o| o.tag())
+                + &config.token_embed_dim.filter(|&d| d != config.embed_dim).map_or(String::new(), |d| format!("_tok{d}"))
+                + &config.router.as_ref().map_or(String::new(), |g| g.tag(crate::brain::optimizers::ParamGroup::Router))
+                + &config.experts.as_ref().map_or(String::new(), |g| g.tag(crate::brain::optimizers::ParamGroup::Experts))
                 + if config.tie_embeddings { "_tied" } else { "" },
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
             n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
@@ -572,6 +582,9 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             init_checkpoint: config.init_checkpoint.clone(),
             dpo_beta: config.dpo_beta,
             optimizer: config.optimizer.clone(),
+            token_embed_dim: config.token_embed_dim.filter(|&d| d != config.embed_dim),
+            router_group: config.router.clone(),
+            expert_group: config.experts.clone(),
         };
         let run_dir = config.out_dir.join(&run.name);
         std::fs::create_dir_all(&run_dir)?;
@@ -1058,17 +1071,17 @@ fn dpo_loss_stable<B: Backend>(
 
 /// Global L2 norm of all parameter gradients before clipping, with one readback.
 #[cfg(not(target_arch = "wasm32"))]
-fn global_grad_norm<M: AutodiffModule<TrainBackend>>(model: &M, grads: &GradientsParams) -> f32 {
-    struct SquaredSum<'a> { grads: &'a GradientsParams, total: Option<Tensor<InnerBackend, 1>> }
+fn global_grad_norm<'a, M: AutodiffModule<TrainBackend>>(model: &M, grads: impl IntoIterator<Item = &'a GradientsParams>) -> f32 {
+    struct SquaredSum<'a> { grads: Vec<&'a GradientsParams>, total: Option<Tensor<InnerBackend, 1>> }
     impl burn::module::ModuleVisitor<TrainBackend> for SquaredSum<'_> {
         fn visit_float<const D: usize>(&mut self, param: &burn::module::Param<Tensor<TrainBackend, D>>) {
-            if let Some(grad) = self.grads.get::<InnerBackend, D>(param.id) {
+            if let Some(grad) = self.grads.iter().find_map(|g| g.get::<InnerBackend, D>(param.id)) {
                 let sum = grad.square().sum();
                 self.total = Some(match self.total.take() { Some(total) => total + sum, None => sum });
             }
         }
     }
-    let mut visitor = SquaredSum { grads, total: None };
+    let mut visitor = SquaredSum { grads: grads.into_iter().collect(), total: None };
     model.visit(&mut visitor);
     visitor.total.map_or(0.0, |t| t.into_scalar().elem::<f32>().sqrt())
 }
@@ -1272,6 +1285,21 @@ trait CausalLmTrain: AutodiffModule<TrainBackend> + Sized {
     }
     fn depth_tier_names(&self) -> Vec<String> { Vec::new() }
     fn save_run(&self, dir: &str, tokenizer: &TokenizerKind, progress: &RunProgress) -> Result<()>;
+    /// Removes `group`'s parameter gradients from `grads` (empty for models without it).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn group_grads(&self, _group: crate::brain::optimizers::ParamGroup,
+        _grads: &mut <TrainBackend as AutodiffBackend>::Gradients) -> GradientsParams {
+        GradientsParams::new()
+    }
+}
+
+/// Splits a backward pass into the default group's gradients and one set per
+/// optimizer parameter group, in `groups` order.
+#[cfg(not(target_arch = "wasm32"))]
+fn split_grads<M: CausalLmTrain>(model: &M, mut grads: <TrainBackend as AutodiffBackend>::Gradients,
+    groups: &[crate::brain::optimizers::ParamGroup]) -> (GradientsParams, Vec<GradientsParams>) {
+    let grouped = groups.iter().map(|&g| model.group_grads(g, &mut grads)).collect();
+    (GradientsParams::from_grads(grads, model), grouped)
 }
 
 fn ensure_same_tokenizer(current: &TokenizerKind, saved: &TokenizerKind) -> Result<()> {
@@ -1312,7 +1340,16 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             .with_num_shared_experts(run_cfg.num_shared_experts)
             .with_aux_loss_weight(run_cfg.aux_loss_weight)
             .with_tie_embeddings(run_cfg.tie_embeddings)
+            .with_token_embed_dim(run_cfg.token_embed_dim)
             .with_z_loss_weight(run_cfg.z_loss_weight);
+        #[cfg(not(target_arch = "wasm32"))]
+        let config = config
+            .with_router_init_std(run_cfg.router_group.as_ref().and_then(|g| g.init_std).unwrap_or(0.02))
+            .with_expert_init_std(run_cfg.expert_group.as_ref().and_then(|g| g.init_std).unwrap_or(0.02));
+        if let Some(dim) = run_cfg.token_embed_dim {
+            println!("Factorized embedding: {} x {dim} table, projected to width {}{}.", tokenizer.vocab_size(),
+                run_cfg.embed_dim, if run_cfg.tie_embeddings { " and back for the tied head" } else { "" });
+        }
         if let Some(kv) = run_cfg.kv_heads {
             println!("Grouped-query attention: {kv} KV heads for {} query heads.", run_cfg.attn_heads);
         }
@@ -1345,7 +1382,8 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
                     && saved.adaptive_depth == config.adaptive_depth
                     && saved.effective_kv_heads() == config.effective_kv_heads()
                     && saved.num_shared_experts == config.num_shared_experts
-                    && saved.tie_embeddings == config.tie_embeddings,
+                    && saved.tie_embeddings == config.tie_embeddings
+            && saved.token_embed_dim == config.token_embed_dim,
                     "Base MoE checkpoint configuration differs from requested fine-tuning run");
                 ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
                 return Ok((m, 0));
@@ -1360,7 +1398,8 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             && saved.adaptive_depth == config.adaptive_depth
             && saved.effective_kv_heads() == config.effective_kv_heads()
             && saved.num_shared_experts == config.num_shared_experts
-            && saved.tie_embeddings == config.tie_embeddings,
+            && saved.tie_embeddings == config.tie_embeddings
+            && saved.token_embed_dim == config.token_embed_dim,
             "MoE checkpoint configuration differs from requested run");
         ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
         let meta: MoeMetadata = serde_json::from_str(&std::fs::read_to_string(run_dir.join("metadata.json"))?)?;
@@ -1378,6 +1417,15 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
     }
     fn depth_tier_names(&self) -> Vec<String> {
         self.config.adaptive_depth.iter().flat_map(|d| d.tiers.iter().map(|t| t.name.clone())).collect()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn group_grads(&self, group: crate::brain::optimizers::ParamGroup,
+        grads: &mut <TrainBackend as AutodiffBackend>::Gradients) -> GradientsParams {
+        use crate::brain::optimizers::ParamGroup;
+        match group {
+            ParamGroup::Router => GradientsParams::from_module(grads, &self.router_modules()),
+            ParamGroup::Experts => GradientsParams::from_module(grads, &self.expert_modules()),
+        }
     }
     fn save_run(&self, dir: &str, tokenizer: &TokenizerKind, p: &RunProgress) -> Result<()> {
         let meta = MoeMetadata {
@@ -1406,6 +1454,7 @@ impl CausalLmTrain for YumonMoeBrain<TrainBackend> {
             use_coord_router: self.config.use_coord_router,
             num_shared_experts: self.config.num_shared_experts,
             tie_embeddings: self.config.tie_embeddings,
+            token_embed_dim: self.config.token_embed_dim,
         };
         self.save(dir, tokenizer, &meta)
     }
@@ -1696,6 +1745,16 @@ where
 
         let mut optimizer = crate::brain::optimizers::TrainOptimizer::<M, TrainBackend>::new(
             run_cfg.optimizer.as_ref(), stage_cfg.weight_decay, stage_cfg.epsilon, stage_cfg.first_lr);
+        for (group, cfg) in [(crate::brain::optimizers::ParamGroup::Router, &run_cfg.router_group),
+            (crate::brain::optimizers::ParamGroup::Experts, &run_cfg.expert_group)] {
+            let Some(cfg) = cfg else { continue };
+            let (first, last) = cfg.lr_range(stage_cfg.first_lr, stage_cfg.last_lr);
+            let weight_decay = cfg.weight_decay.unwrap_or(stage_cfg.weight_decay);
+            println!("Parameter group {}: lr {first} -> {last}, weight decay {weight_decay}, init std {}.",
+                group.name(), cfg.init_std.unwrap_or(0.02));
+            optimizer.add_group(group, weight_decay, first, last);
+        }
+        let param_groups = optimizer.groups();
         if let Some(cfg) = run_cfg.optimizer.as_ref() {
             println!("Optimizer: {cfg:?}");
             anyhow::ensure!(!(is_dpo && cfg.needs_probe()), "slbfgs probe curvature is not supported for DPO; use curvature \"ema\"");
@@ -1854,11 +1913,9 @@ where
 
             for batch_num in 0..num_batches {
                 let step = step_base + batch_num;
-                let current_lr = {
-                    let total_steps = batch_plan.as_ref().map_or(stage_cfg.epochs * num_batches, |p| p.iter().sum());
-                    let t = step as f64 / total_steps as f64;
-                    stage_cfg.first_lr * (1.0 - t) + stage_cfg.last_lr * t
-                };
+                let total_steps = batch_plan.as_ref().map_or(stage_cfg.epochs * num_batches, |p| p.iter().sum());
+                let progress = step as f64 / total_steps as f64;
+                let current_lr = stage_cfg.first_lr * (1.0 - progress) + stage_cfg.last_lr * progress;
 
                 let batch_start = batch_num * stage_cfg.batch_size;
                 let batch_end = (batch_start + stage_cfg.batch_size).min(idx.len());
@@ -1959,18 +2016,18 @@ where
                 };
 
                 let total_loss = lang_loss.clone() + aux_loss.cast(burn::tensor::FloatDType::F32);
-                let grads = GradientsParams::from_grads(total_loss.backward(), &model);
+                let (grads, group_grads) = split_grads(&model, total_loss.backward(), &param_groups);
                 let grad_norm = adaptive.as_ref().filter(|a| a.closes_window_next_step())
-                    .map(|_| global_grad_norm(&model, &grads));
-                model = optimizer.step(current_lr, model, grads);
+                    .map(|_| global_grad_norm(&model, std::iter::once(&grads).chain(&group_grads)));
+                model = optimizer.step_groups(current_lr, progress, model, grads, group_grads);
                 if optimizer.probe_pending() {
                     // Same batch, same dropout, new parameters: y = g(x + s) - g(x).
                     <TrainBackend as Backend>::seed(device, probe_seed.unwrap_or_default());
                     let (logits, aux, _) = model.forward_train_depth(tokens_t.clone());
                     let loss = weighted_token_ce(logits.reshape([current_batch_size * seq_len, vocab]), lang_target_t.clone(),
                         probe_weights_t, supervised, stage_cfg.smoothing) + aux.cast(burn::tensor::FloatDType::F32);
-                    let grads = GradientsParams::from_grads(loss.backward(), &model);
-                    model = optimizer.probe(model, grads);
+                    let (grads, group_grads) = split_grads(&model, loss.backward(), &param_groups);
+                    model = optimizer.probe_groups(model, grads, group_grads);
                 }
                 if let Some(stats) = optimizer.take_stats() {
                     let line = serde_json::json!({"step": step + 1, "epoch": epoch + 1, "lr": current_lr,
@@ -2370,6 +2427,11 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     dpo_beta: None,
                                     #[cfg(not(target_arch = "wasm32"))]
                                     optimizer: None,
+                                    token_embed_dim: None,
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    router_group: None,
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    expert_group: None,
                                 });
                             }
                         }

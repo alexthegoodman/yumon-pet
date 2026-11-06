@@ -507,7 +507,7 @@ impl Category {
             Category::Expert
         } else if has("q") || has("k") || has("v") || has("o") {
             Category::Attention
-        } else if has("embedding") {
+        } else if has("embedding") || has("embed_projections") {
             Category::Embedding
         } else if has("token_head") {
             Category::Head

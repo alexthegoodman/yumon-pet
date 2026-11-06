@@ -100,16 +100,20 @@ impl<B: Backend> SparseMoe<B> {
     }
     /// Heterogeneous experts: one SwiGLU per entry of `hidden`, one shared router.
     pub fn with_widths(width: usize, hidden: &[usize], top_k: usize, device: &B::Device) -> Self {
+        Self::with_init(width, hidden, top_k, 0.02, 0.02, device)
+    }
+    /// `with_widths` with N(0, std) init stds for the router and the experts.
+    pub fn with_init(width: usize, hidden: &[usize], top_k: usize, router_std: f64, expert_std: f64, device: &B::Device) -> Self {
         let experts = hidden.len();
         assert!(width > 0 && experts > 0 && hidden.iter().all(|&h| h > 0));
         assert!(top_k > 0 && top_k <= experts);
         Self {
             router: LinearConfig::new(width, experts)
-                .with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 0.02 })
+                .with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: router_std })
                 .with_bias(false)
                 .init(device),
             experts: hidden.iter()
-                .map(|&h| MLPConfig::new(width, h).init(device))
+                .map(|&h| MLPConfig::new(width, h).with_init_std(expert_std).init(device))
                 .collect(),
             top_k,
         }
@@ -380,6 +384,27 @@ pub struct YumonMoeBrain<B: Backend> {
     pub coord_router_projectors: Vec<Linear<B>>,
     /// Shared experts (1 per block) that process every token unconditionally.
     pub shared_experts: Vec<MLP<B>>,
+    /// Factorized embedding (`token_embed_dim`): empty, [in] (token_dim -> width),
+    /// or [in, out] with tied embeddings (out: width -> token_dim before the head).
+    embed_projections: Vec<Linear<B>>,
+}
+
+/// Record layout of checkpoints saved before factorized embeddings.
+#[derive(Module, Debug)]
+struct LegacyMoeBrainV5<B: Backend> {
+    config: Ignored<YumonMoeBrainConfig>,
+    embedding: Embedding<B>,
+    rope: RotaryEncoding<B>,
+    blocks: Vec<MoeBlock<B>>,
+    norm: RMSNorm<B>,
+    dropout: Dropout,
+    token_head: Linear<B>,
+    exit_gates: Vec<ExitGate<B>>,
+    vision_encoders: Vec<VisionPatchEncoder<B>>,
+    edge_heads: Vec<Linear<B>>,
+    subpixel_embeds: Vec<Embedding<B>>,
+    coord_router_projectors: Vec<Linear<B>>,
+    shared_experts: Vec<MLP<B>>,
 }
 
 /// Record layout of checkpoints saved before coord router and shared expert integration.
@@ -497,6 +522,16 @@ pub struct YumonMoeBrainConfig {
     /// Whether this model uses tied embeddings (tied lm_head).
     #[config(default = false)]
     pub tie_embeddings: bool,
+    /// Token embedding width when it differs from `embed_dim` (the model width);
+    /// learned projections map between the two. None = embed_dim, no projections.
+    #[config(default = "None")]
+    pub token_embed_dim: Option<usize>,
+    /// N(0, std) init of the routers (fresh models only).
+    #[config(default = 0.02)]
+    pub router_init_std: f64,
+    /// N(0, std) init of routed and shared experts (fresh models only).
+    #[config(default = 0.02)]
+    pub expert_init_std: f64,
 }
 impl YumonMoeBrainConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> YumonMoeBrain<B> {
@@ -550,14 +585,28 @@ impl YumonMoeBrainConfig {
         };
         let shared_experts = if self.num_shared_experts > 0 {
             (0..self.n_layers)
-                .map(|_| MLPConfig::new(self.embed_dim, self.ff_dim).init(device))
+                .map(|_| MLPConfig::new(self.embed_dim, self.ff_dim).with_init_std(self.expert_init_std).init(device))
                 .collect()
         } else {
             Vec::new()
         };
+        // Factorized embedding: token_dim -> width in, width -> token_dim before the
+        // tied head. N(0, 1/fan_in) keeps the activation scale through each projection.
+        let token_dim = self.effective_token_embed_dim();
+        let projection = |from: usize, to: usize| LinearConfig::new(from, to)
+            .with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 1.0 / (from as f64).sqrt() })
+            .with_bias(false)
+            .init(device);
+        let embed_projections = if token_dim == self.embed_dim {
+            Vec::new()
+        } else if self.tie_embeddings {
+            vec![projection(token_dim, self.embed_dim), projection(self.embed_dim, token_dim)]
+        } else {
+            vec![projection(token_dim, self.embed_dim)]
+        };
         YumonMoeBrain {
             config: Ignored(self.clone()),
-            embedding: EmbeddingConfig::new(self.vocab_size, self.embed_dim)
+            embedding: EmbeddingConfig::new(self.vocab_size, token_dim)
                 .with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 0.02 })
                 .init(device),
             rope: RotaryEncodingConfig::new(self.max_seq_len, self.embed_dim / self.attn_heads)
@@ -573,9 +622,11 @@ impl YumonMoeBrainConfig {
                     moe: match (&self.adaptive_depth, &tiers) {
                         (Some(depth), Some(tiers)) => {
                             let tier = &depth.tiers[tiers[layer]];
-                            SparseMoe::with_widths(self.embed_dim, &tier.expert_widths(), tier.top_k, device)
+                            SparseMoe::with_init(self.embed_dim, &tier.expert_widths(), tier.top_k,
+                                self.router_init_std, self.expert_init_std, device)
                         }
-                        _ => SparseMoe::new(self.embed_dim, self.ff_dim, self.num_experts, self.top_k, device),
+                        _ => SparseMoe::with_init(self.embed_dim, &vec![self.ff_dim; self.num_experts], self.top_k,
+                            self.router_init_std, self.expert_init_std, device),
                     },
                     heads: self.attn_heads,
                 })
@@ -600,6 +651,7 @@ impl YumonMoeBrainConfig {
             subpixel_embeds,
             coord_router_projectors,
             shared_experts,
+            embed_projections,
         }
     }
 }
@@ -607,13 +659,41 @@ impl YumonMoeBrainConfig {
     pub fn effective_kv_heads(&self) -> usize {
         self.kv_heads.unwrap_or(self.attn_heads)
     }
+    /// Width of the token embedding table; `embed_dim` (the model width) unless factorized.
+    pub fn effective_token_embed_dim(&self) -> usize {
+        self.token_embed_dim.unwrap_or(self.embed_dim)
+    }
+}
+
+impl<B: Backend> YumonMoeBrain<B> {
+    /// Token embeddings at model width (through the in-projection when factorized).
+    pub fn embed_tokens(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+        let x = self.embedding.forward(tokens);
+        match self.embed_projections.first() {
+            Some(up) => up.forward(x),
+            None => x,
+        }
+    }
+    /// Every block's router, for per-group optimizer gradients.
+    pub fn router_modules(&self) -> Vec<Linear<B>> {
+        self.blocks.iter().map(|b| b.moe.router.clone()).collect()
+    }
+    /// Every routed expert in every block, then the shared experts.
+    pub fn expert_modules(&self) -> Vec<MLP<B>> {
+        self.blocks.iter().flat_map(|b| b.moe.experts.iter().cloned())
+            .chain(self.shared_experts.iter().cloned()).collect()
+    }
 }
 
 impl<B: FlashAttention> YumonMoeBrain<B> {
     pub fn project_logits(&self, normed_x: Tensor<B, 3>) -> Tensor<B, 3> {
         if self.config.tie_embeddings {
-            let [batch, seq, embed_dim] = normed_x.dims();
-            let flat = normed_x.reshape([batch * seq, embed_dim]);
+            let normed_x = match self.embed_projections.get(1) {
+                Some(down) => down.forward(normed_x),
+                None => normed_x,
+            };
+            let [batch, seq, token_dim] = normed_x.dims();
+            let flat = normed_x.reshape([batch * seq, token_dim]);
             let logits_flat = flat.matmul(self.embedding.weight.val().transpose());
             logits_flat.reshape([batch, seq, self.config.vocab_size])
         } else {
@@ -677,7 +757,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         } else {
             RopeTables::new(seq, head_dim, &device)
         };
-        let mut x = self.dropout.forward(self.embedding.forward(tokens));
+        let mut x = self.dropout.forward(self.embed_tokens(tokens));
         let mut auxiliary = Tensor::<B, 1>::zeros([1], &device).cast(FloatDType::F32);
         let mut counts = Vec::new();
         let rows = batch * seq;
@@ -850,7 +930,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         let vis_emb = encoder.forward(canvas);
 
         // 2. Token embeddings for text: [batch, text_seq, embed_dim]
-        let mut text_emb = self.embedding.forward(tokens.clone());
+        let mut text_emb = self.embed_tokens(tokens.clone());
 
         // Identify active tokens
         let ids = tokens
@@ -1174,7 +1254,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         assert!(batch == 1 && t > 0 && cache.len() + t <= self.config.max_seq_len);
         let device = tokens.device();
         let rope = cache.next_rope(t);
-        let mut x = self.embedding.forward(tokens);
+        let mut x = self.embed_tokens(tokens);
         let layer_tiers = self.config.adaptive_depth.as_ref().map(|d| d.layer_tiers());
         let tier_of = |layer: usize| layer_tiers.as_ref().map_or(0, |t| t[layer]);
         let mut continuing = vec![true; t];
@@ -1266,7 +1346,19 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         let record = match recorder.load(dir.join("model").into(), device) {
             Ok(record) => record,
             Err(_) => {
-                if let Ok(v4) = recorder.load::<LegacyMoeBrainV4Record<B>>(dir.join("model").into(), device) {
+                if let Ok(v5) = recorder.load::<LegacyMoeBrainV5Record<B>>(dir.join("model").into(), device) {
+                    YumonMoeBrainRecord {
+                        config: v5.config, embedding: v5.embedding, rope: v5.rope,
+                        blocks: v5.blocks, norm: v5.norm, dropout: v5.dropout,
+                        token_head: v5.token_head, exit_gates: v5.exit_gates,
+                        vision_encoders: v5.vision_encoders,
+                        edge_heads: v5.edge_heads,
+                        subpixel_embeds: v5.subpixel_embeds,
+                        coord_router_projectors: v5.coord_router_projectors,
+                        shared_experts: v5.shared_experts,
+                        embed_projections: Vec::new(),
+                    }
+                } else if let Ok(v4) = recorder.load::<LegacyMoeBrainV4Record<B>>(dir.join("model").into(), device) {
                     YumonMoeBrainRecord {
                         config: v4.config, embedding: v4.embedding, rope: v4.rope,
                         blocks: v4.blocks, norm: v4.norm, dropout: v4.dropout,
@@ -1276,6 +1368,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                         subpixel_embeds: v4.subpixel_embeds,
                         coord_router_projectors: Vec::new(),
                         shared_experts: Vec::new(),
+                        embed_projections: Vec::new(),
                     }
                 } else if let Ok(v3) = recorder.load::<LegacyMoeBrainV3Record<B>>(dir.join("model").into(), device) {
                     YumonMoeBrainRecord {
@@ -1287,6 +1380,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                         subpixel_embeds: Vec::new(),
                         coord_router_projectors: Vec::new(),
                         shared_experts: Vec::new(),
+                        embed_projections: Vec::new(),
                     }
                 } else if let Ok(v2) = recorder.load::<LegacyMoeBrainV2Record<B>>(dir.join("model").into(), device) {
                     YumonMoeBrainRecord {
@@ -1298,6 +1392,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                         subpixel_embeds: Vec::new(),
                         coord_router_projectors: Vec::new(),
                         shared_experts: Vec::new(),
+                        embed_projections: Vec::new(),
                     }
                 } else if let Ok(v1) = recorder.load::<LegacyMoeBrainV1Record<B>>(dir.join("model").into(), device) {
                     YumonMoeBrainRecord {
@@ -1309,6 +1404,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                         subpixel_embeds: Vec::new(),
                         coord_router_projectors: Vec::new(),
                         shared_experts: Vec::new(),
+                        embed_projections: Vec::new(),
                     }
                 } else if let Ok(legacy) = recorder.load::<LegacyMoeBrainRecord<B>>(dir.join("model").into(), device) {
                     YumonMoeBrainRecord {
@@ -1320,6 +1416,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                         subpixel_embeds: Vec::new(),
                         coord_router_projectors: Vec::new(),
                         shared_experts: Vec::new(),
+                        embed_projections: Vec::new(),
                     }
                 } else {
                     anyhow::bail!("failed to load checkpoint from {}", dir.display());
@@ -1348,6 +1445,9 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             use_coord_router: metadata.use_coord_router,
             num_shared_experts: metadata.num_shared_experts,
             tie_embeddings: metadata.tie_embeddings,
+            token_embed_dim: metadata.token_embed_dim,
+            router_init_std: 0.02,
+            expert_init_std: 0.02,
         };
 
         let model = config.init::<B>(device).load_record(record);
@@ -1373,6 +1473,24 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
         .flatten()
         .or_else(|| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                recorder.load::<LegacyMoeBrainV5Record<B>>(model_bytes.to_vec(), device).ok()
+            }))
+            .ok()
+            .flatten()
+            .map(|v5| YumonMoeBrainRecord {
+                config: v5.config, embedding: v5.embedding, rope: v5.rope,
+                blocks: v5.blocks, norm: v5.norm, dropout: v5.dropout,
+                token_head: v5.token_head, exit_gates: v5.exit_gates,
+                vision_encoders: v5.vision_encoders,
+                edge_heads: v5.edge_heads,
+                subpixel_embeds: v5.subpixel_embeds,
+                coord_router_projectors: v5.coord_router_projectors,
+                shared_experts: v5.shared_experts,
+                embed_projections: Vec::new(),
+            })
+        })
+        .or_else(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 recorder.load::<LegacyMoeBrainV4Record<B>>(model_bytes.to_vec(), device).ok()
             }))
             .ok()
@@ -1386,6 +1504,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                 subpixel_embeds: v4.subpixel_embeds,
                 coord_router_projectors: Vec::new(),
                 shared_experts: Vec::new(),
+                embed_projections: Vec::new(),
             })
         })
         .or_else(|| {
@@ -1403,6 +1522,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                 subpixel_embeds: Vec::new(),
                 coord_router_projectors: Vec::new(),
                 shared_experts: Vec::new(),
+                embed_projections: Vec::new(),
             })
         })
         .or_else(|| {
@@ -1420,6 +1540,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                 subpixel_embeds: Vec::new(),
                 coord_router_projectors: Vec::new(),
                 shared_experts: Vec::new(),
+                embed_projections: Vec::new(),
             })
         })
         .or_else(|| {
@@ -1437,6 +1558,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                 subpixel_embeds: Vec::new(),
                 coord_router_projectors: Vec::new(),
                 shared_experts: Vec::new(),
+                embed_projections: Vec::new(),
             })
         })
         .or_else(|| {
@@ -1454,6 +1576,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                 subpixel_embeds: Vec::new(),
                 coord_router_projectors: Vec::new(),
                 shared_experts: Vec::new(),
+                embed_projections: Vec::new(),
             })
         })
         .ok_or_else(|| anyhow::anyhow!("failed to load checkpoint from bytes"))?;
@@ -1479,6 +1602,9 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
             use_coord_router: metadata.use_coord_router,
             num_shared_experts: metadata.num_shared_experts,
             tie_embeddings: metadata.tie_embeddings,
+            token_embed_dim: metadata.token_embed_dim,
+            router_init_std: 0.02,
+            expert_init_std: 0.02,
         };
 
         let model = config.init::<B>(device).load_record(record);
@@ -1535,6 +1661,9 @@ pub struct MoeMetadata {
     /// Whether this model uses tied embeddings (tied lm_head).
     #[serde(default)]
     pub tie_embeddings: bool,
+    /// Factorized token embedding width; absent = embed_dim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_embed_dim: Option<usize>,
 }
 
 fn default_true() -> bool {
@@ -1885,6 +2014,7 @@ mod tests {
             use_coord_router: false,
             num_shared_experts: 0,
             tie_embeddings: false,
+            token_embed_dim: None,
             batch_size: 1,
             training_stage: config.training_stage,
             embed_dim: config.embed_dim,
@@ -2028,7 +2158,7 @@ mod tests {
                 embed_dim: config.embed_dim, hidden_units: config.hidden_units, n_layers: config.n_layers,
                 attn_heads: config.attn_heads, ff_dim: config.ff_dim, max_seq_len: config.max_seq_len,
                 adaptive_depth: config.adaptive_depth.clone(), kv_heads: config.kv_heads, is_multimodal: false, has_edge_head: false, use_mrope: false,
-                use_coord_router: false, num_shared_experts: 0, tie_embeddings: false };
+                use_coord_router: false, num_shared_experts: 0, tie_embeddings: false, token_embed_dim: None };
             model.save(path.to_str().unwrap(), &tokenizer, &meta).unwrap();
             if !depth {
                 // Rewrite the weights in the pre-adaptive-depth record layout.
@@ -2405,5 +2535,125 @@ mod tests {
 
         let updated = AdamWConfig::new().init().step(0.01, model, grads);
         assert_ne!(before, values(updated.embedding.weight.val()), "Tied embedding weights must update");
+    }
+
+    fn rms(x: Vec<f32>) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
+    }
+
+    /// Every float parameter of a module, flattened.
+    fn module_values<M: Module<B>>(module: &M) -> Vec<f32> {
+        struct Collect(Vec<f32>);
+        impl burn::module::ModuleVisitor<B> for Collect {
+            fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
+                self.0.extend(values(param.val()));
+            }
+        }
+        let mut collect = Collect(Vec::new());
+        module.visit(&mut collect);
+        collect.0
+    }
+
+    #[test]
+    fn test_factorized_tied_embeddings_and_param_groups() {
+        let device = Default::default();
+        let config = tiny_config()
+            .with_tie_embeddings(true)
+            .with_token_embed_dim(Some(8))
+            .with_router_init_std(0.2)
+            .with_expert_init_std(0.005);
+        let model: YumonMoeBrain<B> = config.init(&device);
+        assert_eq!(model.embedding.weight.dims(), [config.vocab_size, 8]);
+        assert_eq!(model.embed_projections.len(), 2);
+        assert_eq!(model.embed_projections[0].weight.dims(), [8, 16]);
+        assert_eq!(model.embed_projections[1].weight.dims(), [16, 8]);
+
+        // Init stds reach the routers and experts (generous bounds; few samples).
+        let routers = model.router_modules();
+        assert_eq!(routers.len(), config.n_layers);
+        let router_rms = rms(routers.iter().flat_map(|r| values(r.weight.val())).collect());
+        assert!((0.12..0.3).contains(&router_rms), "router rms {router_rms}");
+        let experts = model.expert_modules();
+        assert_eq!(experts.len(), config.n_layers * config.num_experts);
+        let expert_rms = rms(module_values(&experts[0]));
+        assert!((0.004..0.006).contains(&expert_rms), "expert rms {expert_rms}");
+
+        let tokens = Tensor::<B, 2, Int>::from_ints([[1, 4, 5, 6]], &device);
+        let (logits, aux, _) = model.forward_with_aux(tokens);
+        assert_eq!(logits.dims(), [1, 4, config.vocab_size]);
+        let mut raw = (logits.powf_scalar(2.0).mean() + aux).backward();
+
+        // Router gradients move to their own set and leave the default set.
+        let router_grads = GradientsParams::from_module(&mut raw, &routers);
+        let rest = GradientsParams::from_grads(raw, &model);
+        let router_id = model.blocks[0].moe.router.weight.id;
+        assert!(router_grads.get::<Wgpu, 2>(router_id).is_some());
+        assert!(rest.get::<Wgpu, 2>(router_id).is_none());
+        for param in [model.embedding.weight.id, model.embed_projections[0].weight.id, model.embed_projections[1].weight.id] {
+            assert!(rest.get::<Wgpu, 2>(param).is_some(), "factorized embedding parameters get gradients");
+        }
+    }
+
+    fn checkpoint_meta(config: &YumonMoeBrainConfig) -> MoeMetadata {
+        MoeMetadata {
+            num_experts: config.num_experts, top_k: config.top_k, aux_loss_weight: config.aux_loss_weight,
+            z_loss_weight: config.z_loss_weight, dropout_rate: config.dropout_rate, vocab_size: config.vocab_size,
+            epochs_trained: 1, final_loss: 1.0, val_loss: None, is_multimodal: false, has_edge_head: false,
+            use_mrope: config.use_mrope, use_coord_router: false, num_shared_experts: 0,
+            tie_embeddings: config.tie_embeddings, token_embed_dim: config.token_embed_dim, batch_size: 1,
+            training_stage: config.training_stage, embed_dim: config.embed_dim, hidden_units: config.hidden_units,
+            n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
+            max_seq_len: config.max_seq_len, adaptive_depth: None, kv_heads: config.kv_heads,
+        }
+    }
+
+    fn same_logits(a: &YumonMoeBrain<Wgpu>, b: &YumonMoeBrain<Wgpu>, device: &<Wgpu as Backend>::Device) {
+        let tokens = || Tensor::from_ints([[1, 4, 5]], device);
+        assert_close(values(a.forward(tokens())), values(b.forward(tokens())), 1e-5);
+    }
+
+    #[test]
+    fn factorized_checkpoint_roundtrip() {
+        let device = Default::default();
+        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe").unwrap());
+        let mut config = tiny_config().with_tie_embeddings(true).with_token_embed_dim(Some(8));
+        config.vocab_size = tokenizer.vocab_size();
+        let model: YumonMoeBrain<Wgpu> = config.init(&device);
+        let path = std::env::temp_dir().join(format!("yumon-moe-{}", uuid::Uuid::new_v4()));
+        model.save(path.to_str().unwrap(), &tokenizer, &checkpoint_meta(&config)).unwrap();
+        let (restored, _, restored_config) = YumonMoeBrain::<Wgpu>::load(path.to_str().unwrap(), &device).unwrap();
+        assert_eq!(restored_config.token_embed_dim, Some(8));
+        same_logits(&model, &restored, &device);
+        assert_eq!(path.parent(), Some(std::env::temp_dir().as_path()));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    /// Checkpoints written before `embed_projections` existed still load.
+    #[test]
+    fn v5_checkpoint_loads() {
+        let device = Default::default();
+        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe").unwrap());
+        let mut config = tiny_config().with_tie_embeddings(true);
+        config.vocab_size = tokenizer.vocab_size();
+        let model: YumonMoeBrain<Wgpu> = config.init(&device);
+        let path = std::env::temp_dir().join(format!("yumon-moe-{}", uuid::Uuid::new_v4()));
+        model.save(path.to_str().unwrap(), &tokenizer, &checkpoint_meta(&config)).unwrap();
+        let r = model.clone().into_record();
+        let legacy = LegacyMoeBrainV5Record::<Wgpu> {
+            config: r.config, embedding: r.embedding, rope: r.rope, blocks: r.blocks, norm: r.norm,
+            dropout: r.dropout, token_head: r.token_head, exit_gates: r.exit_gates,
+            vision_encoders: r.vision_encoders, edge_heads: r.edge_heads, subpixel_embeds: r.subpixel_embeds,
+            coord_router_projectors: r.coord_router_projectors, shared_experts: r.shared_experts,
+        };
+        BinFileRecorder::<FullPrecisionSettings>::new().record(legacy, path.join("model")).unwrap();
+        let (restored, _, _) = YumonMoeBrain::<Wgpu>::load(path.to_str().unwrap(), &device).unwrap();
+        same_logits(&model, &restored, &device);
+        let bytes = std::fs::read(path.join("model.bin")).unwrap();
+        let tokenizer_bytes = std::fs::read(path.join("tokenizer.json")).unwrap();
+        let meta = std::fs::read_to_string(path.join("metadata.json")).unwrap();
+        let (from_bytes, _, _) = YumonMoeBrain::<Wgpu>::load_from_bytes(&bytes, &tokenizer_bytes, &meta, &device).unwrap();
+        same_logits(&model, &from_bytes, &device);
+        assert_eq!(path.parent(), Some(std::env::temp_dir().as_path()));
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

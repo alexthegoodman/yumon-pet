@@ -33,10 +33,16 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
         Architecture::XLstm,
         Architecture::EncoderDecoder,
         Architecture::Reference,
+        // Factorized tied embedding plus router/expert parameter groups.
+        Architecture::Moe {
+            num_experts: 2,
+            top_k: 1,
+        },
     ]
     .into_iter()
     .enumerate()
     {
+        let grouped = index == 5;
         let mut run = RunConfig {
             name: format!("architecture-{index}"),
             embed_dim: 16,
@@ -64,12 +70,19 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
             adaptive_depth: None,
             kv_heads: None,
             num_shared_experts: 0,
-            tie_embeddings: false,
+            tie_embeddings: grouped,
             aux_loss_weight: 0.01,
             z_loss_weight: 0.001,
             init_checkpoint: None,
             dpo_beta: None,
             optimizer: None,
+            token_embed_dim: grouped.then_some(8),
+            router_group: grouped.then(|| crate::brain::optimizers::ParamGroupConfig {
+                first_lr: Some(0.003), weight_decay: Some(0.0), init_std: Some(0.01), ..Default::default()
+            }),
+            expert_group: grouped.then(|| crate::brain::optimizers::ParamGroupConfig {
+                last_lr: Some(0.0005), ..Default::default()
+            }),
         };
         let path = directory.join(&run.name);
         std::fs::create_dir_all(&path)?;

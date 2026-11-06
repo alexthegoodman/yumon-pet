@@ -110,3 +110,13 @@ uses EMA iterates/momentum. `fsecant`: momentum-only factored row/column secant
 curvature with Sophia-style clipped steps. Run names gain `_opt_...`; stats go to
 `optimizer.jsonl`. Optimizer state is not checkpointed. Configs:
 `yumon-moe-base-pretrain-{slbfgs,slbfgs-ema,fsecant}.json`.
+
+Parameter groups (2026-11-06): optional MoE `router` / `experts` sections
+(`ParamGroupConfig`: first_lr, last_lr, weight_decay, init_std) each get their own
+optimizer instance (`TrainOptimizer::add_group` / `step_groups`; gradients split by
+`split_grads` via `router_modules()` / `expert_modules()`, shared experts count as
+experts). `token_embed_dim` factorizes the embedding (`embed_projections`: in, plus out
+when tied); `embed_dim` stays the model width. Record layout before this is
+`LegacyMoeBrainV5`. Run names gain `_router_...`, `_experts_...`, `_tok<n>`. Unit tests
+and the GPU all-architectures test (now with a grouped, factorized MoE) pass; no real
+runs yet.

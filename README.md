@@ -204,6 +204,11 @@ gradient clip), scaled only by the LR schedule's shape and capped per tensor by
 optimizer that stores only momentum and takes Sophia-style clipped Newton steps.
 Run names gain `_opt_<kind>...`, and stats go to `optimizer.jsonl`.
 
+Optional `router` / `experts` sections set `first_lr`, `last_lr`, `weight_decay` and
+`init_std` for those parameters, each with its own optimizer instance. `token_embed_dim`
+sets the embedding table width separately from the model width (`embed_dim`), with
+learned projections between them. Both are MoE-only; see [docs/OPTIMIZERS.md](docs/OPTIMIZERS.md).
+
 ```sh
 cargo run --release --bin train_code -- --config configs/yumon-moe-base-pretrain-slbfgs.json
 cargo run --release --bin train_code -- --config configs/yumon-moe-base-pretrain-slbfgs-ema.json

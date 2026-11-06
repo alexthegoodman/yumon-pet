@@ -108,6 +108,38 @@ uses half of AdamW's optimizer memory.
 Stats: `unclipped` (fraction of coordinates in the Newton regime; tune `radius`
 with it) and `update_rms_over_lr`.
 
+## Router and expert parameter groups
+
+Optional `router` and `experts` sections (MoE only) give those parameters their own
+optimizer instance of the run's kind:
+
+```json
+"router":  { "first_lr": 0.001, "last_lr": 0.0001, "weight_decay": 0.0, "init_std": 0.006 },
+"experts": { "first_lr": 0.0006, "weight_decay": 0.05 }
+```
+
+- `router` is every block's router; `experts` is every routed expert plus the shared
+  experts. Everything else (embedding, attention, norms, head, exit gates) keeps the
+  run's settings.
+- Every field is optional. `first_lr` defaults to the run's; `last_lr` defaults to the
+  group's `first_lr` times the run's last/first ratio. Both follow the same linear
+  schedule. `weight_decay` defaults to the run's (0.01). `init_std` (default 0.02) only
+  applies to fresh runs.
+- After backward, `train.rs` `split_grads` moves each group's gradients out with
+  `GradientsParams::from_module`, and `TrainOptimizer::step_groups` steps every group
+  separately. Burn clips per tensor and skips parameters it has no gradient for, so
+  splitting changes nothing else. slbfgs/fsecant groups share one probe/stats schedule.
+  slbfgs uses the group's `first_lr` as its peak.
+- Run names gain `_router_...` / `_experts_...`, e.g. `_router_lr0.001-0.0001_wd0_std0.006`.
+
+`token_embed_dim` (MoE only) sets the embedding table width separately from
+`embed_dim`, which stays the model width. The table is `vocab x token_embed_dim`, an
+in-projection maps it to the model width and, with `tie_embeddings`, an out-projection
+maps the final hidden state back before the tied head. Projections are bias-free with
+N(0, 1/fan_in) init. Absent or equal to `embed_dim` means no projections and the old
+checkpoint layout. Run names gain `_tok<n>`, and metadata stores `token_embed_dim`.
+Checkpoints from before this change load through `LegacyMoeBrainV5`.
+
 ## Configs
 
 | Config | Optimizer |

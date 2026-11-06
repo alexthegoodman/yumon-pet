@@ -138,6 +138,69 @@ impl OptimizerConfig {
     }
 }
 
+// ─── Parameter groups ────────────────────────────────────────────────────────
+
+/// MoE parameters that can take their own hyperparameters (config `router` /
+/// `experts` sections). Everything else stays in the run's default group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamGroup {
+    /// Every block's router (`SparseMoe::router`).
+    Router,
+    /// Every routed expert plus the shared experts.
+    Experts,
+}
+
+impl ParamGroup {
+    pub fn name(self) -> &'static str {
+        match self { Self::Router => "router", Self::Experts => "experts" }
+    }
+}
+
+/// Overrides for one parameter group; unset fields use the run's values.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ParamGroupConfig {
+    /// Schedule start for this group (default: the run's `first_lr`).
+    pub first_lr: Option<f64>,
+    /// Schedule end (default: this group's first_lr times the run's last/first ratio).
+    pub last_lr: Option<f64>,
+    /// Default: the run's weight decay.
+    pub weight_decay: Option<f32>,
+    /// Std of the N(0, std) init for fresh runs (default 0.02). Ignored on resume.
+    pub init_std: Option<f64>,
+}
+
+impl ParamGroupConfig {
+    pub fn validate(&self, group: ParamGroup) -> anyhow::Result<()> {
+        let name = group.name();
+        for (field, lr) in [("first_lr", self.first_lr), ("last_lr", self.last_lr)] {
+            anyhow::ensure!(lr.is_none_or(|v| v.is_finite() && v >= 0.0), "{name}.{field} must be finite and >= 0");
+        }
+        anyhow::ensure!(self.weight_decay.is_none_or(|v| v.is_finite() && v >= 0.0), "{name}.weight_decay must be finite and >= 0");
+        anyhow::ensure!(self.init_std.is_none_or(|v| v.is_finite() && v > 0.0), "{name}.init_std must be finite and > 0");
+        Ok(())
+    }
+
+    /// (first_lr, last_lr) given the run's schedule.
+    pub fn lr_range(&self, run_first: f64, run_last: f64) -> (f64, f64) {
+        let first = self.first_lr.unwrap_or(run_first);
+        let ratio = if run_first > 0.0 { run_last / run_first } else { 1.0 };
+        (first, self.last_lr.unwrap_or(first * ratio))
+    }
+
+    /// Run-name suffix, e.g. `_router_lr0.001-0.0001_wd0_std0.006`; empty when nothing is set.
+    pub fn tag(&self, group: ParamGroup) -> String {
+        let mut tag = String::new();
+        if self.first_lr.is_some() || self.last_lr.is_some() {
+            tag += &format!("_lr{}-{}", self.first_lr.map_or("run".into(), |v| v.to_string()),
+                self.last_lr.map_or("auto".into(), |v| v.to_string()));
+        }
+        if let Some(wd) = self.weight_decay { tag += &format!("_wd{wd}"); }
+        if let Some(std) = self.init_std { tag += &format!("_std{std}"); }
+        if tag.is_empty() { tag } else { format!("_{}{tag}", group.name()) }
+    }
+}
+
 // ─── Shared control between the training loop and the per-tensor steps ──────
 
 const PHASE_NORMAL: u8 = 0;
@@ -516,10 +579,47 @@ impl<B: Backend> SimpleOptimizer<B> for FactoredSecant {
 
 // ─── The optimizer the training loop holds ───────────────────────────────────
 
-pub enum TrainOptimizer<M: AutodiffModule<B>, B: AutodiffBackend> {
+/// One optimizer instance; each parameter group owns one.
+enum GroupOptimizer<M: AutodiffModule<B>, B: AutodiffBackend> {
     AdamW(OptimizerAdaptor<AdamW, M, B>),
-    Slbfgs(OptimizerAdaptor<StochasticLbfgs, M, B>, Schedule),
-    Fsecant(OptimizerAdaptor<FactoredSecant, M, B>, Schedule),
+    Slbfgs(OptimizerAdaptor<StochasticLbfgs, M, B>),
+    Fsecant(OptimizerAdaptor<FactoredSecant, M, B>),
+}
+
+impl<M: AutodiffModule<B>, B: AutodiffBackend> GroupOptimizer<M, B> {
+    fn new(config: &OptimizerConfig, weight_decay: f32, epsilon: f32, peak_lr: f64, control: &Control) -> Self {
+        match config {
+            OptimizerConfig::Adamw => Self::AdamW(AdamWConfig::new().with_epsilon(epsilon)
+                .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0))).with_weight_decay(weight_decay).init()),
+            OptimizerConfig::Slbfgs(cfg) => Self::Slbfgs(OptimizerAdaptor::from(
+                StochasticLbfgs { cfg: cfg.clone(), weight_decay, peak_lr, control: control.clone() })),
+            OptimizerConfig::Fsecant(cfg) => Self::Fsecant(OptimizerAdaptor::from(
+                FactoredSecant { cfg: cfg.clone(), weight_decay, control: control.clone() })),
+        }
+    }
+
+    fn step(&mut self, lr: f64, module: M, grads: GradientsParams) -> M {
+        match self {
+            Self::AdamW(o) => o.step(lr, module, grads),
+            Self::Slbfgs(o) => o.step(lr, module, grads),
+            Self::Fsecant(o) => o.step(lr, module, grads),
+        }
+    }
+}
+
+/// The run's optimizer: one instance for the default group plus one per
+/// `ParamGroup` added with `add_group`. Each only updates the parameters whose
+/// gradients it is handed (Burn skips the rest), and clipping is per tensor, so
+/// splitting a model's gradients between groups changes nothing else.
+pub struct TrainOptimizer<M: AutodiffModule<B>, B: AutodiffBackend> {
+    config: OptimizerConfig,
+    epsilon: f32,
+    control: Control,
+    /// slbfgs / fsecant only; shared by every group so one probe covers them all.
+    schedule: Option<Schedule>,
+    default: GroupOptimizer<M, B>,
+    /// Extra groups in `add_group` order, with their (first_lr, last_lr).
+    groups: Vec<(ParamGroup, (f64, f64), GroupOptimizer<M, B>)>,
 }
 
 /// CPU-side step counter deciding which steps arm a probe or collect stats.
@@ -556,70 +656,94 @@ impl Schedule {
 impl<M: AutodiffModule<B>, B: AutodiffBackend> TrainOptimizer<M, B> {
     /// `peak_lr` is the schedule's first lr; slbfgs scales its step by lr / peak_lr.
     pub fn new(config: Option<&OptimizerConfig>, weight_decay: f32, epsilon: f32, peak_lr: f64) -> Self {
-        let clip = Some(GradientClippingConfig::Norm(1.0));
-        match config.unwrap_or(&OptimizerConfig::Adamw) {
-            OptimizerConfig::Adamw => Self::AdamW(AdamWConfig::new().with_epsilon(epsilon)
-                .with_grad_clipping(clip).with_weight_decay(weight_decay).init()),
-            OptimizerConfig::Slbfgs(cfg) => {
-                let control = Control::default();
-                let probe = (cfg.curvature == CurvatureSource::Probe).then_some(cfg.interval);
-                let schedule = Schedule::new(control.clone(), probe, cfg.stats_every);
-                let opt = StochasticLbfgs { cfg: cfg.clone(), weight_decay, peak_lr, control };
-                Self::Slbfgs(OptimizerAdaptor::from(opt), schedule)
-            }
-            OptimizerConfig::Fsecant(cfg) => {
-                let control = Control::default();
-                let schedule = Schedule::new(control.clone(), None, cfg.stats_every);
-                Self::Fsecant(OptimizerAdaptor::from(FactoredSecant { cfg: cfg.clone(), weight_decay, control }), schedule)
-            }
-        }
+        let config = config.cloned().unwrap_or(OptimizerConfig::Adamw);
+        let control = Control::default();
+        let schedule = match &config {
+            OptimizerConfig::Adamw => None,
+            OptimizerConfig::Slbfgs(cfg) => Some(Schedule::new(control.clone(),
+                (cfg.curvature == CurvatureSource::Probe).then_some(cfg.interval), cfg.stats_every)),
+            OptimizerConfig::Fsecant(cfg) => Some(Schedule::new(control.clone(), None, cfg.stats_every)),
+        };
+        let default = GroupOptimizer::new(&config, weight_decay, epsilon, peak_lr, &control);
+        Self { config, epsilon, control, schedule, default, groups: Vec::new() }
+    }
+
+    /// Gives `group` its own optimizer instance with these settings. Its
+    /// gradients then go to `step_groups` in the order groups were added.
+    pub fn add_group(&mut self, group: ParamGroup, weight_decay: f32, first_lr: f64, last_lr: f64) {
+        let optimizer = GroupOptimizer::new(&self.config, weight_decay, self.epsilon, first_lr, &self.control);
+        self.groups.push((group, (first_lr, last_lr), optimizer));
+    }
+
+    /// Groups added with `add_group`, in the order `step_groups` expects their gradients.
+    pub fn groups(&self) -> Vec<ParamGroup> {
+        self.groups.iter().map(|(g, ..)| *g).collect()
     }
 
     pub fn kind(&self) -> &'static str {
-        match self { Self::AdamW(_) => "adamw", Self::Slbfgs(..) => "slbfgs", Self::Fsecant(..) => "fsecant" }
+        match self.config {
+            OptimizerConfig::Adamw => "adamw", OptimizerConfig::Slbfgs(_) => "slbfgs", OptimizerConfig::Fsecant(_) => "fsecant",
+        }
     }
 
     /// Whether the next `step` will arm a probe (seed dropout before its forward).
     pub fn arms_next_step(&self) -> bool {
-        match self {
-            Self::Slbfgs(_, s) => s.probe_interval.is_some_and(|i| (s.steps + 1) % i == 0),
-            _ => false,
-        }
+        self.schedule.as_ref().is_some_and(|s| s.probe_interval.is_some_and(|i| (s.steps + 1) % i == 0))
     }
 
+    /// Single-group step: every gradient goes to the default optimizer.
     pub fn step(&mut self, lr: f64, module: M, grads: GradientsParams) -> M {
-        match self {
-            Self::AdamW(o) => o.step(lr, module, grads),
-            Self::Slbfgs(o, s) => { s.before_step(); let m = o.step(lr, module, grads); s.after_step(); m }
-            Self::Fsecant(o, s) => { s.before_step(); let m = o.step(lr, module, grads); s.after_step(); m }
+        self.step_groups(lr, 0.0, module, grads, Vec::new())
+    }
+
+    /// `lr` drives the default group; each extra group interpolates its own
+    /// (first_lr, last_lr) at `progress` (0..1 through the run's schedule).
+    pub fn step_groups(&mut self, lr: f64, progress: f64, module: M, grads: GradientsParams, group_grads: Vec<GradientsParams>) -> M {
+        assert_eq!(group_grads.len(), self.groups.len(), "one gradient set per parameter group");
+        if let Some(s) = self.schedule.as_mut() { s.before_step(); }
+        let mut module = self.default.step(lr, module, grads);
+        for ((_, (first, last), optimizer), grads) in self.groups.iter_mut().zip(group_grads) {
+            module = optimizer.step(*first + (*last - *first) * progress, module, grads);
         }
+        if let Some(s) = self.schedule.as_mut() { s.after_step(); }
+        module
     }
 
     /// True after an armed step until `probe` is called with the same batch's
     /// gradient at the updated parameters.
     pub fn probe_pending(&self) -> bool {
-        matches!(self, Self::Slbfgs(_, s) if s.probe_pending)
+        matches!(self.config, OptimizerConfig::Slbfgs(_)) && self.schedule.as_ref().is_some_and(|s| s.probe_pending)
+    }
+
+    /// Single-group probe; see `probe_groups`.
+    pub fn probe(&mut self, module: M, grads: GradientsParams) -> M {
+        self.probe_groups(module, grads, Vec::new())
     }
 
     /// Forms curvature pairs from the probe gradient; parameters are unchanged.
-    pub fn probe(&mut self, module: M, grads: GradientsParams) -> M {
-        let Self::Slbfgs(o, s) = self else { return module };
-        s.control.phase.store(PHASE_PROBE, Ordering::Relaxed);
+    pub fn probe_groups(&mut self, module: M, grads: GradientsParams, group_grads: Vec<GradientsParams>) -> M {
+        if !self.probe_pending() { return module; }
+        assert_eq!(group_grads.len(), self.groups.len(), "one gradient set per parameter group");
+        let control = self.control.clone();
+        control.phase.store(PHASE_PROBE, Ordering::Relaxed);
         // Keep this step's stats (if any) for take_stats; probes add none.
-        let collect = s.control.collect.swap(0, Ordering::Relaxed);
-        let module = o.step(0.0, module, grads);
-        s.control.collect.store(collect, Ordering::Relaxed);
-        s.control.phase.store(PHASE_NORMAL, Ordering::Relaxed);
-        s.probe_pending = false;
+        let collect = control.collect.swap(0, Ordering::Relaxed);
+        let mut module = self.default.step(0.0, module, grads);
+        for ((.., optimizer), grads) in self.groups.iter_mut().zip(group_grads) {
+            module = optimizer.step(0.0, module, grads);
+        }
+        control.collect.store(collect, Ordering::Relaxed);
+        control.phase.store(PHASE_NORMAL, Ordering::Relaxed);
+        if let Some(s) = self.schedule.as_mut() { s.probe_pending = false; }
         module
     }
 
-    /// Stats from the last step if it was a stats step.
+    /// Stats from the last step if it was a stats step (all groups together).
     pub fn take_stats(&mut self) -> Option<serde_json::Value> {
         let kind = self.kind();
-        let (Self::Slbfgs(_, s) | Self::Fsecant(_, s)) = self else { return None };
-        if s.control.collect.swap(0, Ordering::Relaxed) == 0 { return None; }
-        let stats = s.control.stats.lock().ok()?.clone();
+        self.schedule.as_ref()?;
+        if self.control.collect.swap(0, Ordering::Relaxed) == 0 { return None; }
+        let stats = self.control.stats.lock().ok()?.clone();
         Some(stats.to_json(kind))
     }
 }
@@ -764,6 +888,41 @@ mod tests {
         let q = t([1.0, -1.0, 0.5, 2.0]);
         let d = StochasticLbfgs::direction(&state, q.clone());
         assert!((d * q).sum().into_scalar() > 0.0, "direction must stay a descent direction");
+    }
+
+    /// A group only gets the gradients split off for it, at its own lr; the
+    /// default optimizer never touches those parameters.
+    #[test]
+    fn param_group_steps_only_its_parameters_at_its_own_lr() {
+        let device = Default::default();
+        let input = Tensor::<TB, 2>::ones([4, 8], &device);
+        let values = |t: Tensor<TB, 2>| t.into_data().convert::<f32>().to_vec::<f32>().unwrap();
+        // Group schedule 0 -> 0.1: at progress 0 the group is frozen, at 1 it moves.
+        for (progress, group_moves) in [(0.0, false), (1.0, true)] {
+            let model = Quad { w: Param::from_tensor(Tensor::ones([8, 8], &device)), lin: LinearConfig::new(8, 4).init(&device) };
+            let (w0, lin0) = (values(model.w.val()), values(model.lin.weight.val()));
+            let mut opt = TrainOptimizer::<Quad<TB>, TB>::new(None, 0.0, 1e-8, 0.01);
+            opt.add_group(ParamGroup::Router, 0.0, 0.0, 0.1);
+            assert_eq!(opt.groups(), vec![ParamGroup::Router]);
+            let loss = model.lin.forward(input.clone()).square().sum() + model.w.val().square().sum();
+            let mut raw = loss.backward();
+            let group = GradientsParams::from_module::<TB, _>(&mut raw, &model.lin);
+            let rest = GradientsParams::from_grads::<TB, Quad<TB>>(raw, &model);
+            let model = opt.step_groups(0.01, progress, model, rest, vec![group]);
+            assert_ne!(w0, values(model.w.val()), "default group steps");
+            assert_eq!(lin0 != values(model.lin.weight.val()), group_moves, "progress {progress}");
+        }
+    }
+
+    #[test]
+    fn param_group_config_resolves_and_tags() {
+        let g: ParamGroupConfig = serde_json::from_str(r#"{"first_lr":0.001,"weight_decay":0.0}"#).unwrap();
+        assert_eq!(g.lr_range(3e-4, 3e-5), (0.001, 0.001 * (3e-5 / 3e-4)));
+        assert_eq!(ParamGroupConfig { last_lr: Some(1e-5), ..Default::default() }.lr_range(3e-4, 3e-5), (3e-4, 1e-5));
+        assert_eq!(g.tag(ParamGroup::Router), "_router_lr0.001-auto_wd0");
+        assert_eq!(ParamGroupConfig::default().tag(ParamGroup::Experts), "");
+        assert!(serde_json::from_str::<ParamGroupConfig>(r#"{"lr":1}"#).is_err());
+        assert!(ParamGroupConfig { init_std: Some(0.0), ..Default::default() }.validate(ParamGroup::Experts).is_err());
     }
 
     #[test]

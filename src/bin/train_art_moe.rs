@@ -834,6 +834,7 @@ fn main() -> Result<()> {
                 use_coord_router,
                 num_shared_experts,
                 tie_embeddings: false,
+                token_embed_dim: None,
             };
 
             let meta_json = serde_json::to_string_pretty(&meta)?;

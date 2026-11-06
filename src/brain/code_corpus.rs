@@ -114,6 +114,14 @@ pub struct CodeConfig {
     /// Optimizer experiment (docs/OPTIMIZERS.md): {"kind": "adamw" | "slbfgs" | "fsecant", ...}.
     /// Absent = AdamW. The experimental kinds are MoE-only.
     pub optimizer: Option<super::optimizers::OptimizerConfig>,
+    /// MoE token embedding width when it should differ from `embed_dim` (the model
+    /// width); learned projections map between them. Absent = embed_dim.
+    pub token_embed_dim: Option<usize>,
+    /// MoE router overrides: first_lr / last_lr / weight_decay / init_std
+    /// (docs/OPTIMIZERS.md). Absent = the run's values, one optimizer for everything.
+    pub router: Option<super::optimizers::ParamGroupConfig>,
+    /// MoE routed + shared expert overrides; same fields as `router`.
+    pub experts: Option<super::optimizers::ParamGroupConfig>,
 }
 
 impl Default for CodeConfig {
@@ -135,6 +143,9 @@ impl Default for CodeConfig {
             dpo_beta: None,
             eval_stage: None,
             optimizer: None,
+            token_embed_dim: None,
+            router: None,
+            experts: None,
         }
     }
 }
@@ -193,6 +204,15 @@ impl CodeConfig {
         }
         if self.num_shared_experts > 0 {
             ensure!(self.architecture == CodeArchitecture::Moe, "num_shared_experts requires architecture \"moe\"");
+        }
+        if let Some(dim) = self.token_embed_dim {
+            ensure!(self.architecture == CodeArchitecture::Moe, "token_embed_dim requires architecture \"moe\"");
+            ensure!(dim > 0, "token_embed_dim must be positive");
+        }
+        for (group, cfg) in [(super::optimizers::ParamGroup::Router, &self.router), (super::optimizers::ParamGroup::Experts, &self.experts)] {
+            let Some(cfg) = cfg else { continue };
+            ensure!(self.architecture == CodeArchitecture::Moe, "{} requires architecture \"moe\"", group.name());
+            cfg.validate(group)?;
         }
         if let Some(init) = &self.init_checkpoint {
             ensure!(init.exists(), "init_checkpoint path does not exist: {}", init.display());
