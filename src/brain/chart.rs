@@ -24,6 +24,10 @@ pub struct TrainingState {
 /// Smoothing factor for the loss EMA drawn over the raw per-batch points.
 pub const EMA_ALPHA: f64 = 0.05;
 
+/// Top of the loss chart's y-axis, so huge early losses don't flatten the rest.
+/// Higher points are pinned to the top edge; the CSV keeps the raw values.
+pub const LOSS_CHART_MAX: f64 = 10.0;
+
 /// Exponential moving average of a (step, value) series.
 pub fn ema(data: &[(f64, f64)], alpha: f64) -> Vec<(f64, f64)> {
     let mut previous: Option<f64> = None;
@@ -87,18 +91,23 @@ pub fn render(frame: &mut ratatui::Frame, state: &TrainingState) {
     frame.render_widget(para, chunks[0]);
 
     // ── Loss: raw (dim), EMA, epoch average, entropy, and validation on log10 axes ──────
-    let raw = log_xy(&state.loss_history);
-    let smooth = log_xy(&ema(&state.loss_history, EMA_ALPHA));
-    let avg = log_xy(&state.avg_loss_history);
-    let entropy = log_xy(&state.entropy_history);
-    let val_loss = log_xy(&state.val_loss_history);
+    let top = LOSS_CHART_MAX.log10();
+    let capped = |data: &[(f64, f64)]| -> Vec<(f64, f64)> {
+        log_xy(data).into_iter().map(|(x, y)| (x, y.min(top))).collect()
+    };
+    let raw = capped(&state.loss_history);
+    let smooth = capped(&ema(&state.loss_history, EMA_ALPHA));
+    let avg = capped(&state.avg_loss_history);
+    let entropy = capped(&state.entropy_history);
+    let val_loss = capped(&state.val_loss_history);
     let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
     for &(_, y) in raw.iter().chain(&entropy).chain(&avg).chain(&val_loss) {
         lo = lo.min(y);
         hi = hi.max(y);
     }
     if !lo.is_finite() { lo = -1.0; hi = 1.0; }
-    let (lo, hi) = (lo.floor(), (hi.ceil()).max(lo.floor() + 1.0));
+    let lo = lo.floor().min(top - 1.0);
+    let hi = hi.ceil().clamp(lo + 1.0, top);
 
     fn datasets<'a>(name: &'a str, color: Color, data: &'a [(f64, f64)]) -> Dataset<'a> {
         Dataset::default().name(name).marker(symbols::Marker::Braille)
@@ -380,6 +389,9 @@ impl TrainingState {
             loss_series.push((&self.val_loss_history, val_color));
         }
         let loss_panel = Panel::new(left, 20, panel_w, 560, true, true).fit(&loss_series, false);
+        let (lo, hi) = loss_panel.yr;
+        let hi = hi.min(LOSS_CHART_MAX);
+        let loss_panel = loss_panel.y_range(lo.min(hi / 10.0), hi);
         loss_panel.draw(&mut img, &loss_series);
         for &(x, y) in &self.val_loss_history {
             if x.is_finite() && y.is_finite() && x > 0.0 && y > 0.0 {
