@@ -499,3 +499,45 @@ cargo run --release -- fluid --capacity 2 --local 6000000            # every cel
 cargo run --release -- compile examples/fluid.wir -o ../tmp/wir-fluid/fluid_c16.json --quiet
 cargo test --test fluid
 ```
+
+## Swarms and a shared world (Nov 7, 2026)
+
+Picked from `docs/ideas/WIR_FLOCK.md`. The doc's per-boid controller needs neighbour averages (a division) and products of inputs; both are avoided here by scoring headings instead of steering a velocity. Nothing is trained.
+
+**Two programs per species** (`wir swarm`, `src/swarm.rs`, `examples/{fish,bird}_{sense,brain}.wir`). Agents have sub-cell integer positions (16 units per cell) and one of 8 headings. The host counts agents into per-cell channels (`own0..own7` by heading, capped at 3; `other`, the other species, capped at 6), and the world supplies `m` (water), `wall` and, for fish, `dist` (distance to food).
+
+- The **sense** program is a grid program with a 5 x 5 window, evaluated only at agents' cells. Outputs, 8 each: `a` neighbours already heading each way (alignment), `n` neighbours lying in each direction (cohesion), `t` the other species by direction, `b` blocked directions (a diagonal also when either side cell is), and for fish `g` = clip(dist - dist[d], -1, 1). Sectors are a pinwheel of 3 cells each (the two cells along a heading plus the knight-move offset counter-clockwise of it); rounding offsets to the nearest heading instead gives diagonals 4 cells and straight headings 2, which pulled cohesion toward diagonals. `crowd` and `open` are lets read at offsets.
+- The **brain** is a plain 0.2 program (utility AI): for each heading, `align*a + cohesion*(n - (1 + spacing)*relu(n - crowd)) + other*t + goal*g + turn[steps from current] + noise*z - big*b`, then the best heading as one-hot `h2_0..h2_7`. Keys are 8*score + (7 - d), so no two tie and `ge(key, best)` is exactly one-hot. `big` is one more than the span of every other term, so a blocked heading always loses to an open one (a test sets every other input against the open heading; a penalty one smaller fails it).
+
+Layout lesson: a value that is affine in many inputs and read several layers up makes the compiler carry each input separately. The first brain (a sequential max chain over affine keys) was 9 hidden layers and 34,731 parameters; writing each key as `relu(lin) - relu(-lin)` plus its bend (one value, 2 units) and the max as a balanced tree gives [24, 28, 28, 27, 15], 4,211 parameters. Likewise `cap - relu(cap - x)` instead of `min(x, cap)` keeps the 25-tap sums out of the carries (sense: [284, 268, 268], 244,716 conv parameters before, [56, 52] and 21,940 after).
+
+| program | inputs | hidden | parameters (non-zero) |
+|---|---|---|---|
+| fish sense | 251 taps, 12 channels | [56, 52] | 21,940 conv (604) |
+| fish brain | 56 | [24, 28, 28, 27, 15] | 4,211 (470) |
+| bird sense | 242 taps, 11 channels | [40, 36] | 13,700 conv (540) |
+| bird brain | 48 | [24, 28, 28, 27, 15] | 4,019 (454) |
+
+Species: fish live in water at least 4 of 16 units deep, align 2, crowd 4, flee birds (-3 per bird), follow food (4); birds live where water is at most 1, align 3, crowd 3, are drawn to fish (+2). Both: turn scores [8, 4, 0, -6, -12] for 0 to 4 steps of 45 degrees, a noise kick (+6 to a random heading) on 1 step in 10. Movement (host): a step of 3 (fish) or 4 (bird) units, 2 or 3 per axis on diagonals; stay unless the destination is open, an agent whose cell closed may leave into any non-wall cell, and at most 3 of a species move into a cell. Without that cap agents sharing a cell see none of each other (sectors skip the centre) and stacks of 30 moved as one dot.
+
+**Checks** (`swarm_check`, default `wir swarm`): 200,000 random inputs per network against `sense_cell` / `brain_choose` (0 mismatches each), then 8 worlds (32 x 48, a walled tank half full of water with rocks, 60 fish and 60 birds) for 400 steps with networks and rule in lockstep: 384,000 decisions, 0 differing steps, 0 blocked headings picked while an open one existed. The first sense check reported 18,922 of 20,000 fish inputs wrong; the plain-code rule was wrong (it tested the agent's own cell for straight headings), not the network.
+
+Flocking, start to step 400, mean over the 8 worlds (same-species neighbours in the 5 x 5 window; local order = |mean heading vector| over an agent and those neighbours):
+
+| | neighbours | local order | global polarization |
+|---|---|---|---|
+| fish | 1.9 -> 11.4 | 0.59 -> 0.85 | 0.09 -> 0.45 |
+| birds | 1.8 -> 12.7 | 0.60 -> 0.88 | 0.13 -> 0.35 |
+| fish, align 0 | 1.9 -> 31.2 | 0.59 -> 0.43 | 0.10 -> 0.31 |
+| birds, align 0 | 2.0 -> 1.7 | 0.61 -> 0.61 | 0.11 -> 0.06 |
+
+Without alignment fish still gather (cohesion and the food goal) but head every which way; birds stay scattered.
+
+**Demo: six networks in one grid.** "WIR Tidepool" (https://claude.ai/artifact/4pq3RpGc1GijfbYMbCfAyC, private): a 40 x 72 pool running the water step (`fluid.wir`), a pathfinding step (`path.wir`, food as goals; rock and water under 4 units as walls, so the map reroutes when water moves) and the four swarm networks, all from compiled weights in JavaScript. Each model only reads the shared grid: water moves fish habitat and the fish map, fish and birds sense each other. Host rules outside the networks: food sinks, a fish that reaches food eats it and a fish hatches, a bird right above a fish at the surface catches it with probability 1/30 and then rests 400 ticks. Scenes: lagoon, two ponds split by a ridge (erase a gap and the school finds the food), dam break. An optional live comparison runs every plain rule (water, path, senses, brains); a Node run of the page's core (`node check.js`, scratch, not kept) over 1,500 ticks of each scene had 0 differences across 578k decisions (random noise, so runs differ) with water unchanged. Node 24.11.1 on the i5-12500, lagoon (141 agents): 4.4 ms per tick (water 2.9, map 0.35, swarms 1.1).
+
+```
+cd wir
+cargo run --release -- swarm --out examples                # 800k network inputs + 384k decisions, ~19 s
+cargo run --release -- swarm --no-align --cases 1000        # the control
+cargo test --test swarm
+```

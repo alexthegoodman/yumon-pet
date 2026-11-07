@@ -218,3 +218,17 @@ conv weights; exact on all 5.04M cell inputs at C 2, 20M sampled at C 16, 30k ra
 steps with mass unchanged. CPU bench 256x256: network 26 ms/step vs plain rule 1.8 ms; GPU
 not measured. Demo artifact "WIR Water": https://claude.ai/artifact/W7gEhnMaKSc9P4WZ4B97Qs
 (private). 97 wir tests.
+
+WIR swarms and a shared world (2026-11-07): see docs/WIR.md "Swarms and a shared world".
+`wir swarm` (src/swarm.rs) writes two programs per species into `examples/`: `*_sense.wir`, a
+5 x 5 grid program run only at agents' cells (a/n/t/b/g senses: alignment by heading,
+cohesion and the other species by pinwheel sector of 3 cells, blocked directions with no
+corner cutting, goal gradient from `dist`), and `*_brain.wir`, a 0.2 utility-AI program
+scoring 8 headings (one-hot out; blocked penalty = score span + 1, so an open heading always
+wins). Keys are written `relu(lin) - relu(-lin)` and the max is a balanced tree, or the
+compiler carries every input (9 layers, 34.7k params before, 4.2k after). Host (`SwarmWorld::step`):
+per-heading counts capped at 3, sub-cell positions (16 per cell), at most `ROOM` = 3 of a
+species per cell. `swarm_check`: 400k inputs and 384k lockstep decisions exact; local order
+0.85 (fish) / 0.88 (birds) vs 0.43 / 0.61 with align 0. Demo artifact "WIR Tidepool"
+(https://claude.ai/artifact/4pq3RpGc1GijfbYMbCfAyC, private) runs water, path (food goal,
+dry = wall) and the four swarm networks in one 40 x 72 grid. 102 wir tests.

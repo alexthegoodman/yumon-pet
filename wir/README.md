@@ -165,6 +165,23 @@ cargo run --release -- fluid -o examples/fluid.wir --bench 256x256   # cellular 
 cargo run --release -- fluid --capacity 2 --local 6000000            # every cell input
 ```
 
+### Swarms
+
+`wir swarm` writes two programs per species (fish and birds): a **sense** grid program
+(5 x 5 window: neighbours by heading, crowding and the other species by direction, blocked
+directions, the goal gradient), run only at agents' cells, and a **brain** 0.2 program that
+scores the 8 headings and outputs the best one-hot. The host counts agents into per-heading
+channels and moves them; there is no neighbour search.
+
+```
+cargo run --release -- swarm --out examples        # writes {fish,bird}_{sense,brain}.wir, checked
+cargo run --release -- swarm --no-align            # control: no alignment term
+```
+
+The check compares each network with the rule as plain code on random inputs, then runs
+worlds with networks and rule in lockstep, agent for agent, and reports how flocked each
+species ends up.
+
 ## Library
 
 ```rust
@@ -193,7 +210,7 @@ let text = wir::print(&p, wir::NumFormat::CANONICAL);      // or NumFormat::EXAC
 ## Tests
 
 ```
-cargo test                      # 97 tests, ~55 s debug (fuzz and fluid are the slow ones)
+cargo test                      # 102 tests, ~60 s debug (fuzz and fluid are the slow ones)
 uv run --project ../python-train python scripts/interop.py   # NumPy 2.5 / PyTorch 2.14 cross-check
 ```
 
@@ -216,3 +233,6 @@ Conv2d / JSON files plus 100 random conv stacks through exact grid text.
 `tests/fluid.rs` covers lets read at offsets, `conserve` proofs and refusals (a leak at
 the edge, a missing inflow, a constant), the water step on every cell input at
 capacity 2, random grids against the simulator, and a basin settling level.
+`tests/swarm.rs` covers the swarm networks against the rule and in lockstep worlds, the
+blocked-heading bound (a penalty one smaller fails), the pinwheel sense sectors, and
+flocking with and without the alignment term.

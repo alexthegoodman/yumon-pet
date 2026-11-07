@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use wir::io::{self, DType, LoadOptions};
 use wir::deep;
 use wir::fluid::{self, FluidRule};
+use wir::swarm::{self, Species};
 use wir::games::{self, PathRule, Pong};
 use wir::num::format_num;
 use wir::{
@@ -43,6 +44,11 @@ usage:
                                         conservation proven by the compiler), checked
                                         cell by cell and on random grids; --bench times
                                         the network and the plain rule on one grid
+  wir swarm [--out DIR] [--cases 200000] [--worlds 4] [--steps 400] [--size 32x48]
+            [--agents 60] [--seed 1] [--no-align]
+                                        generate fish and bird programs (a grid program
+                                        for senses, a brain that picks a heading), checked
+                                        on random inputs and agent for agent in worlds
 
 Weights use PyTorch nn.Linear layout: W1 [H, D], b1 [H], W2 [O, H], b2 [O]; SwiGLU
 networks add W3 [H, D], b3 [H]. --domain drops creases never active on the probe's
@@ -121,6 +127,7 @@ fn main() -> ExitCode {
         "pong" => cmd_pong(rest),
         "path" => cmd_path(rest),
         "fluid" => cmd_fluid(rest),
+        "swarm" => cmd_swarm(rest),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
@@ -422,6 +429,62 @@ fn cmd_fluid(raw: &[String]) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+fn cmd_swarm(raw: &[String]) -> Result<(), String> {
+    let valued = ["--out", "--cases", "--worlds", "--steps", "--size", "--agents", "--seed"];
+    let args = Args::parse(raw, &valued)?;
+    args.check(&[&valued[..], &["--no-align"]].concat())?;
+    let int = |k: &str, d: i64| -> Result<i64, String> { args.get(k).map_or(Ok(d), |v| v.parse().map_err(|_| format!("bad {k} `{v}`"))) };
+    let (h, w) = grid_size(args.get("--size").unwrap_or("32x48"))?;
+    let mut species = [Species::fish(), Species::bird()];
+    if args.has("--no-align") {
+        for sp in species.iter_mut() {
+            sp.align = 0;
+        }
+    }
+    let t = std::time::Instant::now();
+    let c = swarm::swarm_check(
+        &species,
+        int("--cases", 200_000)? as u64,
+        int("--worlds", 4)? as u64,
+        int("--steps", 400)? as u64,
+        h,
+        w,
+        int("--agents", 60)? as usize,
+        int("--seed", 1)? as u64,
+    )
+    .map_err(|e| e.to_string())?;
+    for (k, sp) in species.iter().enumerate() {
+        let (taps, sh, sp_params, bh, bp) = &c.shapes[k];
+        eprintln!(
+            "{}: sense {taps} taps, hidden {sh:?}, {sp_params} conv parameters; brain hidden {bh:?}, {bp} parameters; blocked penalty {}",
+            sp.name, sp.blocked_penalty()
+        );
+        eprintln!(
+            "{}: start -> end: neighbours {:.1} -> {:.1}, local order {:.2} -> {:.2}, global polarization {:.2} -> {:.2}",
+            sp.name, c.neighbours[k].0, c.neighbours[k].1, c.order[k].0, c.order[k].1, c.polarization[k].0, c.polarization[k].1
+        );
+    }
+    eprintln!(
+        "{} sense and {} brain inputs match the rule ({} and {} mismatches); {} worlds, {} steps, {} decisions agent for agent ({} steps differ); blocked headings picked while one was open: {} ({:.1} s)",
+        c.sense_cases, c.brain_cases, c.sense_mismatches, c.brain_mismatches, c.worlds, c.steps, c.decisions, c.step_mismatches, c.blocked_picks,
+        t.elapsed().as_secs_f64()
+    );
+    if c.sense_mismatches + c.brain_mismatches + c.step_mismatches + c.blocked_picks > 0 {
+        return Err("the networks disagree with the rule".into());
+    }
+    if let Some(dir) = args.get("--out") {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
+        for sp in &species {
+            for (kind, src) in [("sense", swarm::sense_program(sp)), ("brain", swarm::brain_program(sp))] {
+                let path = std::path::Path::new(dir).join(format!("{}_{kind}.wir", sp.name));
+                std::fs::write(&path, src.map_err(|e| e.to_string())?).map_err(|e| format!("{}: {e}", path.display()))?;
+                eprintln!("wrote {}", path.display());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn cmd_pong(raw: &[String]) -> Result<(), String> {
