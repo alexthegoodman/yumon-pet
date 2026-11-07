@@ -21,6 +21,7 @@ pub mod compiler;
 pub mod deep;
 pub mod games;
 pub mod error;
+pub mod fluid;
 pub mod io;
 pub mod lexer;
 pub mod linalg;

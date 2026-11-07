@@ -154,6 +154,17 @@ own value before the first convolution (`scripts/path_planner.py` does `F.pad(x 
 Relu units are scaled so their smallest coefficient is 1, so programs with integer
 coefficients compile to integer weights, exact in f32.
 
+A grid program's `let` can also be read at an offset: `fall[-1, 0]` is the whole
+`fall` expression one row up (lowered again with every read moved). Two-pass rules
+stay one cell network. `conserve m2 = m` proves that the output summed over any grid
+equals the input: each node shape's coefficients must cancel, and every cell near a
+corner, rebuilt with the pads, must add exactly 0. A failed proof is a compile error.
+
+```
+cargo run --release -- fluid -o examples/fluid.wir --bench 256x256   # cellular water, checked
+cargo run --release -- fluid --capacity 2 --local 6000000            # every cell input
+```
+
 ## Library
 
 ```rust
@@ -182,7 +193,7 @@ let text = wir::print(&p, wir::NumFormat::CANONICAL);      // or NumFormat::EXAC
 ## Tests
 
 ```
-cargo test                      # 92 tests, ~40 s debug (fuzz is the slow one)
+cargo test                      # 97 tests, ~55 s debug (fuzz and fluid are the slow ones)
 uv run --project ../python-train python scripts/interop.py   # NumPy 2.5 / PyTorch 2.14 cross-check
 ```
 
@@ -202,3 +213,6 @@ networks through exact 0.2 text. `tests/path.rs` covers grid programs: the 4-nei
 step on every cell input (ceiling 12), 4/8-neighbour and terrain variants against
 Dijkstra, all 3 x 3 mazes, self-healing after the goal moves, the flat expansion, and
 Conv2d / JSON files plus 100 random conv stacks through exact grid text.
+`tests/fluid.rs` covers lets read at offsets, `conserve` proofs and refusals (a leak at
+the edge, a missing inflow, a constant), the water step on every cell input at
+capacity 2, random grids against the simulator, and a basin settling level.

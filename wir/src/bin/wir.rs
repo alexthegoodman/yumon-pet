@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use wir::io::{self, DType, LoadOptions};
 use wir::deep;
+use wir::fluid::{self, FluidRule};
 use wir::games::{self, PathRule, Pong};
 use wir::num::format_num;
 use wir::{
@@ -36,6 +37,12 @@ usage:
                                         generate a pathfinding step (a grid program run
                                         at every cell), checked cell by cell and on
                                         random grids against Dijkstra
+  wir fluid [--capacity 16] [-o fluid.wir] [--local 20000000] [--grids 100]
+            [--steps 300] [--size 16x24] [--bench HxW] [--seed 1]
+                                        generate a cellular water step (grid program,
+                                        conservation proven by the compiler), checked
+                                        cell by cell and on random grids; --bench times
+                                        the network and the plain rule on one grid
 
 Weights use PyTorch nn.Linear layout: W1 [H, D], b1 [H], W2 [O, H], b2 [O]; SwiGLU
 networks add W3 [H, D], b3 [H]. --domain drops creases never active on the probe's
@@ -113,6 +120,7 @@ fn main() -> ExitCode {
         "verify" => cmd_verify(rest),
         "pong" => cmd_pong(rest),
         "path" => cmd_path(rest),
+        "fluid" => cmd_fluid(rest),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
@@ -221,6 +229,13 @@ fn compile_deep(src: &str, path: &Path, args: &Args, tol: f64, dtype: DType) -> 
     }
     if !c.program.asserts.is_empty() {
         println!("asserts: {} passed (tolerance {tol:.0e})", c.program.asserts.len());
+    }
+    for p in &c.program.conserves {
+        let g = c.program.grid.as_ref().unwrap();
+        println!(
+            "conserve {} = {} (line {}): proven; {} shape(s) cancel in the interior, {} edge cells add nothing (grids {}x{} or larger)",
+            c.program.outputs[p.output].0, g.channels[p.channel].name, p.line, p.classes, p.boundary_cases, p.min_side, p.min_side
+        );
     }
     if let Some(s) = deep::StencilWeights::from_compiled(&c) {
         let k = 2 * s.radius() + 1;
@@ -350,6 +365,63 @@ fn cmd_path(raw: &[String]) -> Result<(), String> {
     std::fs::write(dir.join("manifest.jsonl"), manifest).map_err(|e| e.to_string())?;
     eprintln!("wrote {n} programs and manifest.jsonl to {}", dir.display());
     Ok(())
+}
+
+fn cmd_fluid(raw: &[String]) -> Result<(), String> {
+    let valued = ["--capacity", "-o", "--local", "--grids", "--steps", "--size", "--bench", "--seed"];
+    let args = Args::parse(raw, &valued)?;
+    args.check(&valued)?;
+    let int = |k: &str, d: i64| -> Result<i64, String> { args.get(k).map_or(Ok(d), |v| v.parse().map_err(|_| format!("bad {k} `{v}`"))) };
+    let g = FluidRule { capacity: int("--capacity", 16)? };
+    let (h, w) = grid_size(args.get("--size").unwrap_or("16x24"))?;
+    let src = fluid::fluid_program(&g).map_err(|e| e.to_string())?;
+    let compiled = deep::compile(&src, 1e-6).map_err(|e| format!("{}: {e}", g.tag()))?;
+    let proof = &compiled.program.conserves[0];
+    eprintln!(
+        "{}: conserve m2 = m proven ({} shapes cancel, {} edge cells add nothing, grids {}x{} or larger)",
+        g.tag(), proof.classes, proof.boundary_cases, proof.min_side, proof.min_side
+    );
+    let t = std::time::Instant::now();
+    let c = fluid::fluid_check(&g, &src, int("--local", 20_000_000)? as u64, int("--grids", 100)? as u64, int("--steps", 300)? as u64, h, w, int("--seed", 1)? as u64)
+        .map_err(|e| format!("{}: {e}", g.tag()))?;
+    eprintln!(
+        "{}: cell network hidden {:?}, {} conv parameters; {} {} cell inputs match the rule; {} random {h}x{w} grids, {} steps match the simulator; total water changed on {} steps, bounds broken on {} ({:.1} s)",
+        g.tag(), c.hidden, c.conv_params, if c.local_exhaustive { "all" } else { "a sample of" }, c.local_cases, c.grids, c.steps,
+        c.mass_changes, c.bound_violations, t.elapsed().as_secs_f64()
+    );
+    if c.local_mismatches + c.step_mismatches + c.mass_changes + c.bound_violations > 0 {
+        return Err(format!("{}: {} cell inputs and {} steps disagree with the reference", g.tag(), c.local_mismatches, c.step_mismatches));
+    }
+    if let Some(size) = args.get("--bench") {
+        let (bh, bw) = grid_size(size)?;
+        let s = deep::StencilWeights::from_compiled(&compiled).unwrap();
+        let mut net = deep::SparseNet::new(&s.net);
+        let mut rng = 7;
+        let grid = fluid::fluid_random_grid(&g, bh, bw, &mut rng);
+        let inputs = grid.inputs();
+        let n = 20;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(s.apply_with(&mut net, &inputs, bh, bw));
+        }
+        let net_ms = t.elapsed().as_secs_f64() * 1e3 / n as f64;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(fluid::fluid_step(&g, &grid));
+        }
+        let rule_ms = t.elapsed().as_secs_f64() * 1e3 / n as f64;
+        let macs: usize = s.net.layers.iter().map(|l| l.w.data.iter().filter(|v| **v != 0.0).count()).sum();
+        eprintln!(
+            "bench {bh}x{bw}, one thread: network {net_ms:.2} ms/step ({macs} nonzero weights per cell), plain rule {rule_ms:.2} ms/step"
+        );
+    }
+    match args.get("-o") {
+        Some(out) => std::fs::write(out, &src).map_err(|e| format!("{out}: {e}")),
+        None => {
+            print!("{src}");
+            Ok(())
+        }
+    }
 }
 
 fn cmd_pong(raw: &[String]) -> Result<(), String> {

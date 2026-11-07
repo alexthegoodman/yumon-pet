@@ -454,3 +454,48 @@ uv run --project ../python-train python scripts/path_planner.py train --out ../t
 uv run --project ../python-train python scripts/path_planner.py analyze ../tmp/wir-path/runs/*/planner.safetensors
 cargo test --test path                                       # 11 tests, ~2 s
 ```
+
+## Cellular water and conservation proofs (Nov 7, 2026)
+
+Picked from `docs/ideas/WIR_PHYSICS.md`: the flux-limited cellular liquid, with the `flow` primitive's goal (exact conservation) met by a proof instead of a new primitive. The physics doc's training ideas (`param`) are left out; nothing here is trained.
+
+**Lets at offsets.** In a grid program, a `let` (or output) can be read at an offset: `fall[-1, 0]` is the whole `fall` expression evaluated one row up. The compiler lowers the let's text again with every grid read and every let it reads moved by the offset (nested offsets add); copies are cached, and relu nodes they share with other copies are shared by the graph. Every tap still lands in the first layer, so a two-pass rule (gravity, then levelling on the result) is still one 3 x 3 convolution stack. A let is also lowered where it is defined, so its own taps exist (with zero weights) even if only shifted copies are used.
+
+**`conserve out = channel`.** Proves that, summed over any grid, the output equals the input channel, for every state in the declared domains (`deep::prove_conservation`). Each graph node is a *shape* at an offset (a tap, or a relu over shapes at relative offsets). Over an unbounded grid each shape contributes (sum of its coefficients) x (its sum over all cells), so the first check is that every shape's coefficients in output - input cancel and the constant is 0. On a bounded grid that cancelling fails only near the edges; near a corner the grid looks like a quadrant, so for each of the four corner orientations every cell in a window around the corner is rebuilt symbolically (reads inside the grid are inputs, reads outside take their pad constants, relus go through `Graph::relu`, which drops relus the pads make constant or one-signed), and what the cell adds to the total must come out as exactly 0. Checking shapes one at a time at the edges is not enough: at the bottom row `fall = m - relu(m - relu(16 - 0 - 16))` is zero only as a whole. The argument covers grids at least 2L cells on a side (L = copy spread + read reach + 1; 8 for the water step). A failed proof is a compile error naming the shape or the corner cell.
+
+**The rule** (`wir fluid`, `src/fluid.rs`, `examples/fluid.wir`). Channels `m` (water units, 0 to capacity C, default 16), `wall` and `pair` (1 where the cell trades with its right-hand neighbour this step; starts as alternating columns, flips every step).
+
+```
+let fall = min(m, relu(16 - m[1, 0] - 16*wall[1, 0]))     # pour what fits into the cell below
+let mv = m - fall + fall[-1, 0]
+let d = mv - mv[0, 1]
+let half = ge(d, 1) + ge(d, 3) + ... - le(d, -1) - ...     # half the difference, rounded up
+let flow = select(and(pair, not(wall), not(wall[0, 1])), half, 0)
+output m2 = mv - flow + flow[0, -1]
+output pair2 = not(pair)
+conserve m2 = m
+```
+
+Design notes from a numpy prototype (scratch, not kept): letting a cell give a fraction of its difference to both sides at once leaves a staircase surface (integer units cannot move a difference of 1), and a global left/right bias fixes that but makes a period-2 checkerboard. Disjoint alternating pairs (Margolus-style) settle a basin flat within one unit, and since each cell has one partner, nonnegativity and the capacity bound follow: a cell gives at most ceil(d/2) <= its water, and the receiver ends at most at the giver's old level. Requiring support below before spreading stopped water from pouring off ledges, so it was dropped. No pressure: a U-bend does not equalize. The bounds need valid states (dry walls, alternating `pair`); conservation does not.
+
+| C | taps | cell network | conv weights |
+|---|---|---|---|
+| 2 | 17 | [15, 12, 14, 8] | 932 |
+| 4 | 17 | [15, 12, 22, 8] | 1,100 |
+| 16 | 17 | [15, 12, 70, 8] | 2,108 (all integers) |
+
+64 of the 70 third-layer units are `half` (two copies of 16 steps of 2 relus).
+
+**Checks** (`wir fluid` runs them on the program it writes; `fluid_check`): the proof (4 shapes cancel, 39 edge cells per program add exactly 0); the cell network against `fluid_cell` on all 5,038,848 tap combinations at C = 2 and 20M sampled ones at C = 16; 100 random 16 x 24 grids (boxes, ledges, pillars, blocks or random water) for 300 steps each against `fluid_step`: 0 differing steps, total water never changed, no cell outside 0..C, walls always dry. `tests/fluid.rs` (5 tests, ~1 s release, ~14 s debug) adds refusals and a basin that settles level.
+
+**Speed** (`--bench 256x256`, one thread, release, Intel Core i5-12500): the network takes 26.2 ms per step (577 nonzero weights per cell), the plain rule 1.8 ms, so as a network it is about 15x slower on a CPU. GPU timing is not measured; the conv stack is what a GPU would run, but that comparison has not been done.
+
+**Demo.** "WIR Water" (https://claude.ai/artifact/W7gEhnMaKSc9P4WZ4B97Qs, private): a 34 x 60 tank run by the compiled weights in JavaScript, with brushes for water and walls, four scenes, a water ledger (added and removed by the brush, changed by the network: always 0) and an optional per-cell comparison with the plain rule.
+
+```
+cd wir
+cargo run --release -- fluid -o examples/fluid.wir --bench 256x256   # proof + 20M cell inputs + 30k grid steps, ~14 s
+cargo run --release -- fluid --capacity 2 --local 6000000            # every cell input
+cargo run --release -- compile examples/fluid.wir -o ../tmp/wir-fluid/fluid_c16.json --quiet
+cargo test --test fluid
+```

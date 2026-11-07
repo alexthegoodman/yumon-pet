@@ -204,3 +204,17 @@ from scratch: the 6+5+2 shape never learned it (0/6), 32+32 one-step training re
 99.8% steps exact but only 71% exact cells on 32 x 32, end-to-end training learns a
 48-step transient. Runs and summary.json in tmp/wir-path. Demo artifact "WIR Pathfinder":
 https://claude.ai/artifact/RSPLyZ7kbA5coemgbPfwHQ (private). 92 wir tests.
+
+WIR cellular water (2026-11-07): see docs/WIR.md "Cellular water and conservation proofs".
+Grid programs can read a `let` at an offset (`fall[-1, 0]` relowers the let's text with
+every read moved; Scope.shift / shifted_let in deep.rs), so two-pass rules stay one conv
+stack. `conserve out = channel` (deep::prove_conservation, DeepProgram.conserves) proves
+the grid sum is unchanged: node shapes up to translation must cancel, and cells near each
+corner, rebuilt symbolically with pads, must add exactly 0; failure is a compile error.
+`wir fluid` (src/fluid.rs: fluid_program, fluid_cell, fluid_step, fluid_check) writes
+`examples/fluid.wir`: gravity, then alternating left/right pairs levelling by half the
+difference; channels m (0..16), wall, pair. C 16: 17 taps, [15, 12, 70, 8], 2,108 integer
+conv weights; exact on all 5.04M cell inputs at C 2, 20M sampled at C 16, 30k random grid
+steps with mass unchanged. CPU bench 256x256: network 26 ms/step vs plain rule 1.8 ms; GPU
+not measured. Demo artifact "WIR Water": https://claude.ai/artifact/W7gEhnMaKSc9P4WZ4B97Qs
+(private). 97 wir tests.

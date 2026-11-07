@@ -38,7 +38,7 @@ pub const VERSION: f64 = 0.2;
 
 pub const FUNCTIONS: &[&str] =
     &["relu", "abs", "max", "min", "clip", "step", "gt", "ge", "lt", "le", "eq", "and", "or", "not", "select"];
-const RESERVED: &[&str] = &["wir", "input", "let", "output", "assert", "in"];
+const RESERVED: &[&str] = &["wir", "input", "let", "output", "assert", "conserve", "in"];
 
 // ---------------------------------------------------------------- weights
 
@@ -328,6 +328,8 @@ pub struct DeepProgram {
     pub asserts: Vec<DeepAssert>,
     /// Present when the inputs are grids: the program is one cell's rule.
     pub grid: Option<GridSpec>,
+    /// `conserve` statements, each proven while lowering.
+    pub conserves: Vec<Conservation>,
 }
 
 /// A grid input: one channel of the field, with the value read outside the grid.
@@ -361,6 +363,178 @@ impl DeepProgram {
     pub fn eval(&self, x: &[f64]) -> Vec<f64> {
         let v = self.graph.eval(x);
         self.outputs.iter().map(|(_, a)| eval_affine(a, &v)).collect()
+    }
+}
+
+/// A proven `conserve out = channel`: summed over any grid, the output equals the input.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Conservation {
+    pub output: usize,
+    pub channel: usize,
+    pub line: usize,
+    /// Node shapes (equal up to translation) in output - input. The coefficients of each
+    /// shape sum to zero, so over the grid every copy that one cell adds, another removes.
+    pub classes: usize,
+    /// (corner orientation, cell) cases where that cancelling breaks at the edge of the
+    /// grid; in each, what the cell adds simplifies to 0 for every state in the domains.
+    pub boundary_cases: usize,
+    /// The edge argument holds for grids at least this many cells on each side.
+    pub min_side: usize,
+}
+
+/// A node shape up to translation: a grid input, or a relu over shapes at relative offsets.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ShapeKey {
+    Tap(usize),
+    Relu(Vec<(usize, i64, i64, i64)>, i64),
+}
+
+#[derive(Debug, Clone)]
+enum Shape {
+    Tap(usize),
+    Relu(Vec<(usize, i64, i64, f64)>, f64),
+}
+
+/// Prove that `delta` (output minus the channel at the cell) sums to zero over every grid.
+///
+/// Every node is a shape at an offset (`d[-1, 0]` is the shape `d` at (-1, 0); a relu
+/// over shifted copies of a let is that let's relu at the shift). Summed over an
+/// unbounded grid, each shape contributes (sum of its coefficients) times the sum of
+/// the shape over all cells, so if every shape's coefficients cancel, the change is 0.
+/// On a bounded grid the cancelling fails only near the edges: at cell q the shape
+/// counts sum(k over copies whose cell q - offset is inside). Near a corner the grid
+/// looks like a quadrant, so every q in a window around each of the four corners is
+/// checked; wherever the count is not zero, the shape must be 0 with reads outside the
+/// grid fixed to their pads (interval arithmetic over the domains).
+fn prove_conservation(prog: &DeepProgram, delta: &Affine) -> std::result::Result<Conservation, String> {
+    let spec = prog.grid.as_ref().expect("grid program");
+    let g = &prog.graph;
+    let quant = |v: f64| (v * 1e9).round() as i64;
+    let mut ids: HashMap<ShapeKey, usize> = HashMap::new();
+    let mut shapes: Vec<Shape> = vec![];
+    let mut first: Vec<usize> = vec![];
+    let mut of: Vec<(usize, (i64, i64))> = Vec::with_capacity(g.nodes.len());
+    for (id, node) in g.nodes.iter().enumerate() {
+        let (key, shape, off) = match node {
+            Node::Input(i) => {
+                let (ch, dy, dx) = spec.taps[*i];
+                (ShapeKey::Tap(ch), Shape::Tap(ch), (dy, dx))
+            }
+            Node::Relu(a) => {
+                let r = a.terms.keys().map(|&n| of[n].1).min().unwrap_or((0, 0));
+                let mut terms: Vec<(usize, i64, i64, f64)> =
+                    a.terms.iter().map(|(&n, &k)| (of[n].0, of[n].1.0 - r.0, of[n].1.1 - r.1, k)).collect();
+                terms.sort_by(|x, y| (x.0, x.1, x.2).cmp(&(y.0, y.1, y.2)));
+                let key = ShapeKey::Relu(terms.iter().map(|&(s, dy, dx, k)| (s, dy, dx, quant(k))).collect(), quant(a.c));
+                (key, Shape::Relu(terms, a.c), r)
+            }
+        };
+        let s = *ids.entry(key).or_insert_with(|| {
+            shapes.push(shape);
+            first.push(id);
+            shapes.len() - 1
+        });
+        of.push((s, off));
+    }
+    let describe = |s: usize| match &shapes[s] {
+        Shape::Tap(ch) => format!("the input `{}`", spec.channels[*ch].name),
+        Shape::Relu(..) => format!("a relu unit built on line {}", g.line[first[s]]),
+    };
+    if delta.c.abs() > 1e-9 {
+        return Err(format!("the change has a constant term {}", format_num(delta.c, NumFormat::CANONICAL)));
+    }
+    // Interior: each shape's coefficients cancel.
+    let mut terms: BTreeMap<usize, Vec<((i64, i64), f64)>> = BTreeMap::new();
+    for (&n, &k) in &delta.terms {
+        terms.entry(of[n].0).or_default().push((of[n].1, k));
+    }
+    for (&s, copies) in &terms {
+        let sum: f64 = copies.iter().map(|c| c.1).sum();
+        if sum.abs() > 1e-9 {
+            let at: Vec<String> = copies.iter().map(|((dy, dx), k)| format!("{} at [{dy}, {dx}]", format_num(*k, NumFormat::CANONICAL))).collect();
+            return Err(format!("{} does not cancel: its copies ({}) sum to {}", describe(s), at.join(", "), format_num(sum, NumFormat::CANONICAL)));
+        }
+    }
+    // Edges: how far copies sit from the cell, and how far each shape reads.
+    let mut reach = vec![0i64; shapes.len()];
+    for s in 0..shapes.len() {
+        if let Shape::Relu(ts, _) = &shapes[s] {
+            reach[s] = ts.iter().map(|&(c, dy, dx, _)| reach[c] + dy.abs().max(dx.abs())).max().unwrap_or(0);
+        }
+    }
+    let spread = terms.values().flatten().map(|((dy, dx), _)| dy.abs().max(dx.abs())).max().unwrap_or(0);
+    let read = terms.keys().map(|&s| reach[s]).max().unwrap_or(0);
+    let l = spread + read + 1;
+    let mut cases = 0;
+    for (fy, fx) in [(1, 1), (1, -1), (-1, 1), (-1, -1)] {
+        let inside = |y: i64, x: i64| fy * y >= 0 && fx * x >= 0;
+        let mut edge = EdgeGraph { shapes: &shapes, spec, inside: &inside, g: Graph::default(), taps: HashMap::new(), memo: HashMap::new() };
+        for y in -l..=l {
+            for x in -l..=l {
+                // What cell (y, x) adds to the grid total beyond what cancels.
+                let mut sum = Affine::default();
+                let mut touched = false;
+                for (&s, copies) in &terms {
+                    let w: f64 = copies.iter().filter(|((dy, dx), _)| inside(y - dy, x - dx)).map(|c| c.1).sum();
+                    if w.abs() > 1e-9 {
+                        touched = true;
+                        sum = sum.add(&edge.build(s, y, x).scale(w));
+                    }
+                }
+                cases += touched as usize;
+                let (lo, hi) = edge.g.range_of(&sum);
+                if lo.abs() > 1e-9 || hi.abs() > 1e-9 {
+                    let corner = format!("{}{}", if fy > 0 { "top" } else { "bottom" }, if fx > 0 { "-left" } else { "-right" });
+                    let near: Vec<String> = terms.keys().map(|&s| describe(s)).collect();
+                    return Err(format!(
+                        "near the {corner} corner of the grid, cell [{}, {}] from the corner changes the total by {} to {} (terms from {})",
+                        fy * y, fx * x, format_num(lo, NumFormat::CANONICAL), format_num(hi, NumFormat::CANONICAL), near.join(", ")
+                    ));
+                }
+            }
+        }
+    }
+    Ok(Conservation { classes: terms.len(), boundary_cases: cases, min_side: 2 * l as usize, ..Default::default() })
+}
+
+/// Shapes rebuilt at absolute cells near a corner: reads inside the grid are inputs
+/// (one per channel and cell), reads outside are their pad constants, and relus go
+/// through `Graph::relu`, so a relu the pads make constant or one-signed simplifies.
+struct EdgeGraph<'a, F: Fn(i64, i64) -> bool> {
+    shapes: &'a [Shape],
+    spec: &'a GridSpec,
+    inside: &'a F,
+    g: Graph,
+    taps: HashMap<(usize, i64, i64), Affine>,
+    memo: HashMap<(usize, i64, i64), Affine>,
+}
+
+impl<F: Fn(i64, i64) -> bool> EdgeGraph<'_, F> {
+    fn build(&mut self, s: usize, y: i64, x: i64) -> Affine {
+        if let Some(a) = self.memo.get(&(s, y, x)) {
+            return a.clone();
+        }
+        let a = match &self.shapes[s] {
+            Shape::Tap(ch) => {
+                let c = &self.spec.channels[*ch];
+                if (self.inside)(y, x) {
+                    let n = self.taps.len();
+                    let g = &mut self.g;
+                    self.taps.entry((*ch, y, x)).or_insert_with(|| g.input(n, c.range, 0)).clone()
+                } else {
+                    Affine::constant(c.pad)
+                }
+            }
+            Shape::Relu(ts, c) => {
+                let mut sum = Affine::constant(*c);
+                for &(t, dy, dx, k) in ts {
+                    sum = sum.add(&self.build(t, y + dy, x + dx).scale(k));
+                }
+                self.g.relu(&sum, 0)
+            }
+        };
+        self.memo.insert((s, y, x), a.clone());
+        a
     }
 }
 
@@ -410,9 +584,13 @@ fn point_text(p: &[f64]) -> String {
 /// Parse and lower to the graph.
 pub fn lower(src: &str) -> Result<DeepProgram> {
     let stmts = split_statements(src)?;
-    let mut prog = DeepProgram { inputs: vec![], outputs: vec![], graph: Graph::default(), asserts: vec![], grid: None };
+    let mut prog = DeepProgram { inputs: vec![], outputs: vec![], graph: Graph::default(), asserts: vec![], grid: None, conserves: vec![] };
     let mut env: HashMap<String, Affine> = HashMap::new();
     let mut taps: HashMap<(usize, i64, i64), Affine> = HashMap::new();
+    // Grid programs: where each let's expression starts (statement, token), so it can be
+    // lowered again at an offset, and the copies made so far.
+    let mut lets: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut shifted: HashMap<(String, i64, i64), Affine> = HashMap::new();
     for (i, s) in stmts.iter().enumerate() {
         let mut p = Cursor { t: &s.tokens, i: 0, s };
         let head = p.ident()?;
@@ -488,13 +666,60 @@ pub fn lower(src: &str) -> Result<DeepProgram> {
                 let name = p.ident()?;
                 p.fresh(&name, &env)?;
                 p.expect(&Tok::Eq)?;
-                let mut sc = Scope { g: &mut prog.graph, env: &env, grid: prog.grid.as_mut(), inputs: &mut prog.inputs, taps: &mut taps };
+                let start = p.i;
+                let mut sc = Scope {
+                    g: &mut prog.graph,
+                    env: &env,
+                    grid: prog.grid.as_mut(),
+                    inputs: &mut prog.inputs,
+                    taps: &mut taps,
+                    stmts: &stmts,
+                    lets: &lets,
+                    shifted: &mut shifted,
+                    shift: (0, 0),
+                };
                 let v = p.expr(&mut sc)?;
                 p.end()?;
                 if head == "output" {
                     prog.outputs.push((name.clone(), v.clone()));
                 }
+                if prog.grid.is_some() {
+                    lets.insert(name.clone(), (i, start));
+                }
                 env.insert(name, v);
+            }
+            "conserve" => {
+                // conserve <output> = <grid input>: summed over the grid, the output equals
+                // the input, for every state in the declared domains.
+                if prog.grid.is_none() {
+                    return Err(p.err("`conserve` is for grid programs"));
+                }
+                let out = p.ident()?;
+                p.expect(&Tok::Eq)?;
+                let ch = p.ident()?;
+                p.end()?;
+                let output = prog
+                    .outputs
+                    .iter()
+                    .position(|(n, _)| *n == out)
+                    .ok_or_else(|| p.err(&format!("`{out}` is not an output (declare it before `conserve`)")))?;
+                let spec = prog.grid.as_ref().unwrap();
+                let channel = spec.channels.iter().position(|c| c.name == ch).ok_or_else(|| p.err(&format!("`{ch}` is not a grid input")))?;
+                let mut sc = Scope {
+                    g: &mut prog.graph,
+                    env: &env,
+                    grid: prog.grid.as_mut(),
+                    inputs: &mut prog.inputs,
+                    taps: &mut taps,
+                    stmts: &stmts,
+                    lets: &lets,
+                    shifted: &mut shifted,
+                    shift: (0, 0),
+                };
+                let own = sc.tap(channel, 0, 0, s.line);
+                let delta = prog.outputs[output].1.sub(&own);
+                let proof = prove_conservation(&prog, &delta).map_err(|m| p.err(&format!("cannot prove `conserve {out} = {ch}`: {m}")))?;
+                prog.conserves.push(Conservation { output, channel, line: s.line, ..proof });
             }
             "assert" if prog.grid.is_some() => return Err(p.err("grid programs do not take asserts yet (check them against a simulator)")),
             "assert" => loop {
@@ -522,7 +747,7 @@ pub fn lower(src: &str) -> Result<DeepProgram> {
                     break;
                 }
             },
-            other => return Err(p.err(&format!("unknown statement `{other}` (0.2 has input, let, output, assert)"))),
+            other => return Err(p.err(&format!("unknown statement `{other}` (0.2 has input, let, output, assert, conserve)"))),
         }
     }
     if stmts.is_empty() {
@@ -550,6 +775,11 @@ struct Scope<'a> {
     grid: Option<&'a mut GridSpec>,
     inputs: &'a mut Vec<(String, (f64, f64))>,
     taps: &'a mut HashMap<(usize, i64, i64), Affine>,
+    stmts: &'a [Statement],
+    lets: &'a HashMap<String, (usize, usize)>,
+    shifted: &'a mut HashMap<(String, i64, i64), Affine>,
+    /// Added to every grid read: nonzero while a let is lowered again at an offset.
+    shift: (i64, i64),
 }
 
 impl Scope<'_> {
@@ -565,6 +795,37 @@ impl Scope<'_> {
         spec.taps.push((c, dy, dx));
         self.taps.insert((c, dy, dx), a.clone());
         a
+    }
+
+    /// A grid program's let read at an offset: its expression lowered again with every
+    /// grid read (and every let it reads) moved by the offset. Copies are shared, and
+    /// relu nodes they have in common with other copies are shared by the graph.
+    fn shifted_let(&mut self, name: &str, dy: i64, dx: i64) -> Result<Affine> {
+        if (dy, dx) == (0, 0) {
+            return Ok(self.env[name].clone());
+        }
+        let key = (name.to_string(), dy, dx);
+        if let Some(a) = self.shifted.get(&key) {
+            return Ok(a.clone());
+        }
+        let (si, start) = self.lets[name];
+        let st = &self.stmts[si];
+        let mut cur = Cursor { t: &st.tokens, i: start, s: st };
+        let mut sub = Scope {
+            g: &mut *self.g,
+            env: self.env,
+            grid: self.grid.as_deref_mut(),
+            inputs: &mut *self.inputs,
+            taps: &mut *self.taps,
+            stmts: self.stmts,
+            lets: self.lets,
+            shifted: &mut *self.shifted,
+            shift: (dy, dx),
+        };
+        let v = cur.expr(&mut sub)?;
+        cur.end()?;
+        self.shifted.insert(key, v.clone());
+        Ok(v)
     }
 }
 
@@ -696,12 +957,12 @@ impl Cursor<'_> {
             Tok::Ident(name) if self.peek() == Some(&Tok::LParen) => self.call(&name, sc),
             Tok::Ident(name) => {
                 let channel = sc.grid.as_ref().and_then(|g| g.channels.iter().position(|c| c.name == name));
-                let Some(c) = channel else {
+                if channel.is_none() && !sc.lets.contains_key(&name) {
                     if self.peek() == Some(&Tok::LBracket) {
-                        return Err(self.err(&format!("only grid inputs take offsets; `{name}` is not one")));
+                        return Err(self.err(&format!("only grid inputs and the lets of grid programs take offsets; `{name}` is neither")));
                     }
                     return sc.env.get(&name).cloned().ok_or_else(|| self.err(&format!("unknown name `{name}`")));
-                };
+                }
                 let (mut dy, mut dx) = (0, 0);
                 if self.eat(&Tok::LBracket) {
                     let int = |p: &mut Self| -> Result<i64> {
@@ -716,7 +977,11 @@ impl Cursor<'_> {
                     dx = int(self)?;
                     self.expect(&Tok::RBracket)?;
                 }
-                Ok(sc.tap(c, dy, dx, self.s.line))
+                let (dy, dx) = (dy + sc.shift.0, dx + sc.shift.1);
+                match channel {
+                    Some(c) => Ok(sc.tap(c, dy, dx, self.s.line)),
+                    None => sc.shifted_let(&name, dy, dx),
+                }
             }
             t => Err(self.err(&format!("expected an expression, found {}", t.describe()))),
         }

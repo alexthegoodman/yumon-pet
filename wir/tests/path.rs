@@ -47,7 +47,7 @@ fn grid_program_errors() {
         ("wir 0.2\ninput a: grid\ninput b: R1\noutput y = a\n", "either all R1 or all grid"),
         ("wir 0.2\ninput a: grid in [1, 2]\noutput y = a\n", "default pad 0 is outside"),
         ("wir 0.2\ninput a: grid in [0, 2] pad 3\noutput y = a\n", "pad value must lie"),
-        ("wir 0.2\ninput a: grid\nlet b = a\noutput y = b[1, 0]\n", "only grid inputs take offsets"),
+        ("wir 0.2\ninput a: R1\nlet b = a\noutput y = b[1, 0]\n", "only grid inputs and the lets of grid programs take offsets"),
         ("wir 0.2\ninput a: grid\noutput y = a[1/2, 0]\n", "grid offsets are integers"),
         ("wir 0.2\ninput a: grid in [0, 1]\noutput y = a\nassert y(1) == 1\n", "do not take asserts"),
     ];
