@@ -98,6 +98,10 @@ name = "export_wir_colorizer"
 path = "src/bin/export_wir_colorizer.rs"
 
 [[bin]]
+name = "wir_decoder"
+path = "src/bin/wir_decoder.rs"
+
+[[bin]]
 name = "eval_pixel_generator"
 path = "src/bin/eval_pixel_generator.rs"
 

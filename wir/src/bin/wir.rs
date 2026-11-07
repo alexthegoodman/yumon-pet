@@ -286,6 +286,7 @@ fn cmd_verify(raw: &[String]) -> Result<(), String> {
         return Err(format!("probe has {} inputs but {} outputs", xs.len(), ys.len()));
     }
     let (mut max_abs, mut max_ref, mut argmax_same) = (0f64, 0f64, 0usize);
+    let (mut sq_diff, mut sq_ref) = (0f64, 0f64);
     let argmax = |v: &[f64]| v.iter().enumerate().fold(0, |b, (i, x)| if *x > v[b] { i } else { b });
     for (x, y) in xs.iter().zip(&ys) {
         if x.len() != w.input_dim() || y.len() != w.output_dim() {
@@ -298,6 +299,8 @@ fn cmd_verify(raw: &[String]) -> Result<(), String> {
         for (g, e) in got.iter().zip(y) {
             max_abs = max_abs.max((g - e).abs());
             max_ref = max_ref.max(e.abs());
+            sq_diff += (g - e) * (g - e);
+            sq_ref += e * e;
         }
         argmax_same += (argmax(&got) == argmax(y)) as usize;
     }
@@ -305,6 +308,9 @@ fn cmd_verify(raw: &[String]) -> Result<(), String> {
         "{} points, {} outputs each: max |diff| {:.3e} (reference max |y| {:.3e}), argmax agrees on {}/{}",
         xs.len(), w.output_dim(), max_abs, max_ref, argmax_same, xs.len()
     );
+    if sq_ref > 0.0 {
+        println!("relative RMS error |diff| / |y|: {:.4e}", (sq_diff / sq_ref).sqrt());
+    }
     if max_abs > tol {
         return Err(format!("max |diff| {max_abs:.3e} exceeds tolerance {tol:.0e}"));
     }

@@ -327,6 +327,11 @@ impl<B: Backend> MLP<B> {
 
         self.w2.forward(hidden)
     }
+
+    /// (w1, w3, w2) in Burn `[in, out]` layout: y = w2(silu(w1 x) * w3 x).
+    pub fn swiglu_weights(&self) -> (Tensor<B, 2>, Tensor<B, 2>, Tensor<B, 2>) {
+        (self.w1.weight.val(), self.w3.weight.val(), self.w2.weight.val())
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

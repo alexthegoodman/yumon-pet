@@ -263,6 +263,47 @@ impl<B: FlashAttention> DecBlock<B> {
     }
 }
 
+/// A one-hidden-layer ReLU network standing in for a block's SwiGLU MLP, in
+/// nn.Linear layout: w1 [h, d], b1 [h], w2 [d, h], b2 [d]. Used to test WIR
+/// decompiles of the MLPs inside the real model (`wir_decoder`).
+pub struct ReluMlp<B: Backend> {
+    pub w1: Tensor<B, 2>,
+    pub b1: Tensor<B, 1>,
+    pub w2: Tensor<B, 2>,
+    pub b2: Tensor<B, 1>,
+}
+impl<B: Backend> ReluMlp<B> {
+    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        let [batch, seq, width] = x.dims();
+        let x = x.reshape([batch * seq, width]);
+        let h = burn::tensor::activation::relu(x.matmul(self.w1.clone().transpose()) + self.b1.clone().unsqueeze());
+        let y = h.matmul(self.w2.clone().transpose()) + self.b2.clone().unsqueeze();
+        y.reshape([batch, seq, width])
+    }
+}
+
+impl<B: FlashAttention> DecBlock<B> {
+    /// `forward` with the MLP optionally replaced; also returns the MLP's input and output.
+    fn forward_probe(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, mlp: Option<&ReluMlp<B>>)
+        -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>) {
+        let [batch, seq, width] = x.dims();
+        let hd = width / self.heads;
+        let norm = self.attn_norm.forward(x.clone());
+        let split = |t: Tensor<B, 3>| t.reshape([batch, seq, self.heads, hd]).swap_dims(1, 2);
+        let q = apply_rope(split(self.q.forward(norm.clone())), rope);
+        let k = apply_rope(split(self.k.forward(norm.clone())), rope);
+        let v = split(self.v.forward(norm));
+        let attn = causal_flash_attention(q, k, v).swap_dims(1, 2).reshape([batch, seq, width]);
+        let x = x + self.o.forward(attn);
+        let mlp_in = self.ffn_norm.forward(x.clone());
+        let mlp_out = match mlp {
+            Some(m) => m.forward(mlp_in.clone()),
+            None => self.mlp.forward(mlp_in.clone()),
+        };
+        (x + mlp_out.clone(), mlp_in, mlp_out)
+    }
+}
+
 #[derive(Module, Debug)]
 pub struct YumonDecBrain<B: Backend> {
     pub config: Ignored<YumonDecBrainConfig>,
@@ -332,6 +373,27 @@ impl YumonDecBrainConfig {
     }
 }
 impl<B: FlashAttention> YumonDecBrain<B> {
+    /// Logits with any block's MLP replaced by a ReLU network, plus every block's
+    /// (MLP input, MLP output) as run. No dropout. `mlps` is indexed by layer.
+    pub fn forward_probe(&self, tokens: Tensor<B, 2, Int>, mlps: &[Option<ReluMlp<B>>])
+        -> (Tensor<B, 3>, Vec<(Tensor<B, 3>, Tensor<B, 3>)>) {
+        let [_, seq] = tokens.dims();
+        let rope = RopeTables::new(seq, self.config.embed_dim / self.config.attn_heads, &tokens.device());
+        let mut x = self.embedding.forward(tokens);
+        let mut trace = Vec::with_capacity(self.blocks.len());
+        for (layer, block) in self.blocks.iter().enumerate() {
+            let (next, mlp_in, mlp_out) = block.forward_probe(x, &rope, mlps.get(layer).and_then(Option::as_ref));
+            trace.push((mlp_in, mlp_out));
+            x = next;
+        }
+        (self.token_head.forward(self.norm.forward(x)), trace)
+    }
+
+    /// Block `layer`'s SwiGLU weights (w1, w3, w2), Burn `[in, out]` layout.
+    pub fn mlp_weights(&self, layer: usize) -> (Tensor<B, 2>, Tensor<B, 2>, Tensor<B, 2>) {
+        self.blocks[layer].mlp.swiglu_weights()
+    }
+
     /// Logits [batch, seq, vocab]. Right-padded input only (see module docs).
     pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         let [_, seq] = tokens.dims();
