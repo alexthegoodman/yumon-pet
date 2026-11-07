@@ -353,13 +353,13 @@ Small programs whose behaviour can be checked, such as one step of a game, are t
 wir 0.2
 input bx: R1 in [1, 14]            # named scalar inputs, each with an optional interval
 input vx: R1 in [-1, 1]
-let nx = bx + vx                   # affine arithmetic; * and / by constants only
+let nx = bx + vx                   # affine arithmetic; * and / by constants (and small products, below)
 let at_l = lt(nx, 1)
 output bx2 = select(at_l, 2, nx)
 assert bx2(1, -1) == 2             # one value per input, in declaration order
 ```
 
-- **Combinators**, each an exact composition of relu and affine maps: `relu`, `abs`, `max`/`min` (n-ary; max(a, b) = b + relu(a - b)), `clip(a, lo, hi)` with constant bounds, `step(a)` = clip(a, 0, 1), comparisons `gt ge lt le eq` (steps of a - b, so exact when a - b is an integer: `ge(a, b)` = step(a - b + 1)), `and`/`or`/`not` (exact on bits: and = relu(sum - (n - 1)), or = sum - relu(sum - 1)), and `select(c, a, b)` for a bit c, via the big-M product c d = relu(d - M+ (1 - c)) - relu(-d - M- (1 - c)).
+- **Combinators**, each an exact composition of relu and affine maps: `relu`, `abs`, `max`/`min` (n-ary; max(a, b) = b + relu(a - b)), `clip(a, lo, hi)` with constant bounds, `step(a)` = clip(a, 0, 1), comparisons `gt ge lt le eq` (steps of a - b, so exact when a - b is an integer: `ge(a, b)` = step(a - b + 1)), `and`/`or`/`not` (exact on bits: and = relu(sum - (n - 1)), or = sum - relu(sum - 1)), and `select(c, a, b)` for a bit c, via the big-M product c d = relu(d - M+ (1 - c)) - relu(-d - M- (1 - c)). `a * b` of two values compiles when one factor takes at most three integer values (added with the tactical brains, see the last section).
 - **Intervals.** Every node carries a sound interval computed from the input domains. `select` takes its M from them (and refuses unbounded values), and a relu whose argument is never negative becomes the argument, one never positive becomes 0. Both hold only while inputs stay in their domains; the compiled network is wrong outside them.
 - **Depth is chosen by the compiler.** Relu nodes are shared when identical (after scaling to smallest coefficient 1, so integer programs get integer weights; max coefficient 1 until Nov 7), each sits one layer above the deepest node it reads, and values read more than one layer later ride on carry units: relu(v - lo) + lo, one unit when v has a lower bound, two (relu(v) - relu(-v)) when unbounded. `wir compile` reports units per layer and statement, carries separately.
 - **Decompiler.** Any ReLU MLP (`.json` with `layers`, or `nn.Sequential` safetensors with 3+ linear layers) decompiles to flat 0.2 text, one `let hK_U = relu(...)` per hidden unit. The canonical form scales each unit to max incoming weight 1, folds constant units into the next bias, drops unread units, merges duplicates and sorts each layer, so scaling and permuting hidden units leave the text unchanged. Numbers snap to rationals with denominators up to 1,000 (`35/72`), which integer-grid programs produce and six digits cannot hold.
@@ -540,4 +540,64 @@ cd wir
 cargo run --release -- swarm --out examples                # 800k network inputs + 384k decisions, ~19 s
 cargo run --release -- swarm --no-align --cases 1000        # the control
 cargo test --test swarm
+```
+
+## Tactical enemies and response curves (Nov 7, 2026)
+
+Picked from `docs/ideas/WIR_BEHAVIOR.md`: utility AI with response curves over shared fields. The doc's example did not compile as written (`aggro_drive * dp_n` multiplies two inputs; its Pong foresight fold needs a third mirror), and its emergent-tactics claims were guesses. Below is what was built and measured. Nothing is trained.
+
+**Small products.** `a * b` of two non-constant values now compiles when one factor's interval is two or three integers (width 1 or 2, integer ends), exact when that factor is an integer. With t = m + u, u in {-1, 0, 1}: x t = m x + x [u = 1] - x [u = -1], and both gated terms are big-M products whose gate is u itself (u = -1 pushes the first pair of relus to 0, u = 1 the second), so a product is 4 relus one layer above its inputs, with no gate bits (`Graph::mul_small`). Two wide factors are refused. This is what lets a brain write `approach*gp0`: a drive times a field gradient.
+
+**The world** (`wir tactics`, `src/tactics.rs`). A 24 x 40 arena, one player, 9 enemies (3 archetypes x 3), one cell per tick, 8 headings or hold. The host traces the player's line of sight (`exp`) and runs two shared distance fields with the 8-move `wir path` step (ceiling 96, 3 iterations per tick): `dp` to the player, with ally cells costing 3 to leave (terrain channel), and `dc` to cover (open cells the player cannot see). Every enemy runs:
+
+- **senses**, one grid program at its cell: `gp`, `gc` grade each neighbour against the best neighbour (1 within 1 of it, 0 within 3, -1 farther; the enemy's own cell is inflated by its ally cost, so neighbours are not compared with it), `e` exposure of each neighbour, `n` allies per pinwheel sector of the 5 x 5 window, `b` blocked headings (wall, ally, the player, wall corners), and at the cell `dps` (distance after the best step), `es`, `gcs` (the cell's own cover grade).
+- **a brain** per archetype, a 0.2 program of response curves:
+
+```
+let empty = relu(1 - ammo)                                    # reloading drops the magazine
+let fear = 2*relu(8 - hp) + 2*relu(4 - hp) + 7*empty
+let approach = clip(dp - 10 - fear, -4, 4)                    # fear pushes the preferred range out
+let cover = clip(fear - 3, 0, 10)
+let peek = clip(4 - fear, -3, 4)                              # empty is always -3: 7 >= 4 + 3
+let plant = 5*and(es, ge(ammo, 1), le(dp, 18), ge(dp, 4))
+let s0 = approach*gp0 + cover*gc0 + peek*e0 + k0              # k0: spacing, inertia, blocked
+let s8 = cover*gcs + peek*es + plant + k8                     # hold
+output o2_0 = and(w01, w02, ..., w08)                         # beats every other key
+output fire = and(es, ge(ammo, 1), le(cool, 0), le(dp, 18))
+```
+
+Archetypes are constants in the source, one network each: grunt (range 10, fire 18), rusher (range 0, fire 3, fearless until 3 hp), sniper (range 22, fire 34, plants, more cover). Inertia scores `[3, 1, 0, -1, -3]` for 0..4 steps of 45 degrees from the current heading (+1 or +2 to keep holding). A blocked heading loses one more than every score can span, so it always loses to holding.
+
+**Layout lessons.** The first brain was 10 hidden layers and 93,365 parameters, almost all carries: `select(gt(gp0, 0), approach, 0)` builds a gate bit a layer before the drive is ready, each score was a long affine sum carried to the argmax, and the max tree added 4 layers. The current one: products with no gate bits; the affine rest of each score packed as `relu(x - lo) + lo` (one unit); each key one unit (`9*relu(s + 78) - 702`); the argmax as 36 pairwise `gt` plus one `and` per option. Making "empty" a single relu (reloading drops the magazine) and having the fear curve, not a select, push `peek` to its floor saved two more layers.
+
+| network | shape | parameters (non-zero) |
+|---|---|---|
+| path step (8 moves, terrain 3, ceiling 96) | 15 taps, [15, 13, 11, 7, 2] | 1,020 conv (94) |
+| senses | 58 taps, [74, 82, 80, 129] | 38,153 conv (820) |
+| grunt / sniper brain | 56 inputs, [49, 45, 101, 18, 74, 11] | 13,888 (947) |
+| rusher brain | [34, 34, 55, 12, 74, 11] | 7,644 (704) |
+
+**Checks** (`tactics_check`): 200,000 random sense inputs and 200,000 brain inputs per archetype against the rule as plain code, then 8 arenas x 600 ticks with networks and rule in lockstep (fields, every enemy, the player): 0 mismatches, 0 blocked headings picked (6.5 s). The two control brain sets compile and check exact too.
+
+**Behaviour** (rule, 8 arenas x 600 ticks, scripted player that walks to random cells, waits 8 ticks and shoots the nearest enemy it sees every 2 ticks):
+
+| | step-and-reverse moves | seen while hurt or empty: steps toward cover (grunt / rusher / sniper) | spread around the player |
+|---|---|---|---|
+| full | 0.6% | 85.5% / 16.9% / 95.2% | 0.40 |
+| no fear curve | 0.3% | 16.4% / 15.0% / 18.1% | 0.39 |
+| no inertia | 7.4% | 85.3% / 13.6% / 91.3% | 0.31 |
+| no spacing | 0.6% | 86.5% / 16.2% / 92.3% | 0.39 |
+| no ally cost | 0.7% | 88.7% / 16.5% / 92.9% | 0.38 |
+
+Inertia cuts step-and-reverse moves by 12x. The fear curve turns retreat to cover from about 1 decision in 6 into 85-95% for grunts and snipers (the rusher is fearless by design). The share of time hurt enemies are seen barely moves (79% vs 84%), because the player only damages enemies it sees: an enemy becomes hurt while exposed, and heals out of the bucket soon after reaching cover. Measuring the decision is the useful number. Fear adds a little step-and-reverse (0.6% vs 0.3%): a hurt enemy hides, heals a point, steps out, and is pushed back. The pincer the idea doc predicted did not appear: spread (0 = all on one side, 1 = surrounded) is 0.38-0.40 with or without spacing or ally cost; ally cost 10 with 5 enemies per archetype gave 0.44 vs 0.41. Spacing only sees a 5 x 5 window, and the ally cost only reroutes followers behind an enemy, not around the player.
+
+Two earlier design mistakes are worth keeping in mind. With gradients as sign(dp - dp[d]), a sideways step that shaved 1 off the distance tied with a real approach, and inertia then slid enemies along walls. And a scripted player that never stops, moving at enemy speed, can never be caught by a rusher.
+
+**Demo.** "WIR Skirmish" (https://claude.ai/artifact/CvH96ywotgdD56qR2gCtxD, private): the arena in JavaScript from the exported weights (`--export`, 160 KB with three brain sets), three maps, wall editing, overlays for sight and both fields, an inspector for one enemy (its four response curves with the current point, option scores on a compass, the network's choice, the WIR source), brain sets full / no fear / no inertia, and a live check against the plain rule. A Node run of the page's core (scratch, not kept): 3 maps x 3 brain sets x 400 ticks, about 29k decisions and 20.8M field cells, 0 differences; about 9 ms per tick with the check off.
+
+```
+cd wir
+cargo run --release -- tactics --out examples --export ../tmp/wir-tactics/tactics_demo.json   # 800k inputs + 4,800 lockstep ticks
+cargo run --release -- tactics --rule-only --arenas 8 --steps 600 --no-fear                    # a control, rule only
+cargo test --test tactics
 ```

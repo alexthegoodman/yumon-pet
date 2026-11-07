@@ -23,6 +23,7 @@ pub mod games;
 pub mod error;
 pub mod fluid;
 pub mod swarm;
+pub mod tactics;
 pub mod io;
 pub mod lexer;
 pub mod linalg;

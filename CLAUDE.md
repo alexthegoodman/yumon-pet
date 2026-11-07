@@ -232,3 +232,17 @@ species per cell. `swarm_check`: 400k inputs and 384k lockstep decisions exact; 
 0.85 (fish) / 0.88 (birds) vs 0.43 / 0.61 with align 0. Demo artifact "WIR Tidepool"
 (https://claude.ai/artifact/4pq3RpGc1GijfbYMbCfAyC, private) runs water, path (food goal,
 dry = wall) and the four swarm networks in one 40 x 72 grid. 102 wir tests.
+
+WIR tactical enemies (2026-11-07): see docs/WIR.md "Tactical enemies and response curves".
+`a * b` in 0.2 now compiles when one factor has at most three integer values (`Graph::mul_small`,
+4 relus, no gate bits). `wir tactics` (src/tactics.rs) writes `examples/tactics_sense.wir` and
+`{grunt,rusher,sniper}_brain.wir`: response curves (fear from hp and empty ammo, approach
+= clip(dp - range - fear), cover, peek) times field gradients graded against the best
+neighbour, inertia on the current option, blocked headings lose to holding. Shared fields are
+the 8-move path step (dp with ally cells costing 3, dc to cells the player cannot see); the
+host traces sight and moves. Brains 13,888 / 7,644 params (6 layers; the first version was
+93k / 10 layers of carries). 800k inputs and 4,800 lockstep ticks exact. Fear: 85-95% of
+seen hurt/empty grunt and sniper decisions step toward cover (vs 16-18% without); inertia:
+0.6% step-and-reverse vs 7.4%; spacing and ally cost did not produce pincers. `--export`
+writes weights for a page; demo artifact "WIR Skirmish"
+(https://claude.ai/artifact/CvH96ywotgdD56qR2gCtxD, private). 106 wir tests.

@@ -100,6 +100,7 @@ wir 0.2
 input bx: R1 in [1, 14]                       # named scalar inputs, optional interval
 input pl, ul: R1 in [0, 9]
 let hit = and(lt(bx - 1, 1), ge(bx, pl))      # relu abs max min clip step gt ge lt le eq and or not select
+let sp = ul*bx                                # a * b when one factor has <= 3 integer values
 output pl2 = clip(pl + ul, 0, 9)
 output bx2 = select(hit, 2, bx - 1)
 assert bx2(1, 0, 0) == 2                      # one value per input, in order
@@ -182,6 +183,24 @@ The check compares each network with the rule as plain code on random inputs, th
 worlds with networks and rule in lockstep, agent for agent, and reports how flocked each
 species ends up.
 
+### Tactical enemies
+
+`wir tactics` writes a **sense** grid program (field gradients graded against the best
+neighbour, exposure, allies by sector, blocked headings) and one **brain** per archetype
+(grunt, rusher, sniper): response curves for fear, approach, cover and peek, a score for 8
+headings and holding, the best one-hot, and fire / reload bits. The host traces the
+player's sight and runs two shared `wir path` fields (to the player, to cover).
+
+```
+cargo run --release -- tactics --out examples --export demo.json   # checked; --export: weights for a page
+cargo run --release -- tactics --rule-only --no-fear               # controls: --no-fear --no-inertia
+                                                                    # --no-spacing --no-ally-cost
+```
+
+The check compares the networks with the rule on random inputs, then runs arenas with
+networks and rule in lockstep, and reports behaviour (retreat to cover when hurt or
+empty, step-and-reverse moves, spread around the player).
+
 ## Library
 
 ```rust
@@ -210,7 +229,7 @@ let text = wir::print(&p, wir::NumFormat::CANONICAL);      // or NumFormat::EXAC
 ## Tests
 
 ```
-cargo test                      # 102 tests, ~60 s debug (fuzz and fluid are the slow ones)
+cargo test                      # 106 tests, ~60 s debug (fuzz and fluid are the slow ones)
 uv run --project ../python-train python scripts/interop.py   # NumPy 2.5 / PyTorch 2.14 cross-check
 ```
 
@@ -235,4 +254,7 @@ the edge, a missing inflow, a constant), the water step on every cell input at
 capacity 2, random grids against the simulator, and a basin settling level.
 `tests/swarm.rs` covers the swarm networks against the rule and in lockstep worlds, the
 blocked-heading bound (a penalty one smaller fails), the pinwheel sense sectors, and
-flocking with and without the alignment term.
+flocking with and without the alignment term. `tests/tactics.rs` covers the tactical
+networks against the rule and in lockstep arenas, holding beating every blocked heading,
+small-integer products (and the refusal of two wide factors), and the fear and inertia
+curves changing behaviour against their controls.

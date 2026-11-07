@@ -7,6 +7,7 @@ use wir::io::{self, DType, LoadOptions};
 use wir::deep;
 use wir::fluid::{self, FluidRule};
 use wir::swarm::{self, Species};
+use wir::tactics::{self, Archetype};
 use wir::games::{self, PathRule, Pong};
 use wir::num::format_num;
 use wir::{
@@ -49,6 +50,15 @@ usage:
                                         generate fish and bird programs (a grid program
                                         for senses, a brain that picks a heading), checked
                                         on random inputs and agent for agent in worlds
+  wir tactics [--out DIR] [--cases 200000] [--arenas 4] [--steps 400] [--size 24x40]
+              [--per 3] [--seed 1] [--rule-only] [--no-inertia] [--no-spacing] [--no-fear]
+              [--no-ally-cost]
+              [--export demo.json]
+                                        generate tactical enemy programs (a sense grid
+                                        program, a response-curve brain per archetype),
+                                        checked on random inputs and enemy for enemy in
+                                        arenas; reports behaviour (the --no-* controls
+                                        zero one part of every archetype)
 
 Weights use PyTorch nn.Linear layout: W1 [H, D], b1 [H], W2 [O, H], b2 [O]; SwiGLU
 networks add W3 [H, D], b3 [H]. --domain drops creases never active on the probe's
@@ -128,6 +138,7 @@ fn main() -> ExitCode {
         "path" => cmd_path(rest),
         "fluid" => cmd_fluid(rest),
         "swarm" => cmd_swarm(rest),
+        "tactics" => cmd_tactics(rest),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
@@ -483,6 +494,100 @@ fn cmd_swarm(raw: &[String]) -> Result<(), String> {
                 eprintln!("wrote {}", path.display());
             }
         }
+    }
+    Ok(())
+}
+
+fn cmd_tactics(raw: &[String]) -> Result<(), String> {
+    let valued = ["--out", "--cases", "--arenas", "--steps", "--size", "--per", "--seed", "--export"];
+    let flags = ["--rule-only", "--no-inertia", "--no-spacing", "--no-fear", "--no-ally-cost"];
+    let args = Args::parse(raw, &valued)?;
+    args.check(&[&valued[..], &flags[..]].concat())?;
+    let int = |k: &str, d: i64| -> Result<i64, String> { args.get(k).map_or(Ok(d), |v| v.parse().map_err(|_| format!("bad {k} `{v}`"))) };
+    let (h, w) = grid_size(args.get("--size").unwrap_or("24x40"))?;
+    let mut archetypes = Archetype::all();
+    for a in archetypes.iter_mut() {
+        if args.has("--no-inertia") {
+            a.keep = [0; 5];
+            a.keep_hold = 0;
+        }
+        if args.has("--no-spacing") {
+            a.spacing = 0;
+        }
+        if args.has("--no-fear") {
+            (a.f1, a.f2, a.fe) = (0, 0, 0);
+        }
+    }
+    let ally_cost = if args.has("--no-ally-cost") { 1 } else { tactics::ALLY_COST };
+    let (arenas, steps, per, seed) = (int("--arenas", 4)? as u64, int("--steps", 400)? as u64, int("--per", 3)? as usize, int("--seed", 1)? as u64);
+    let t = std::time::Instant::now();
+    let (b, check) = if args.has("--rule-only") {
+        (tactics::tactics_behaviour(&archetypes, arenas, steps, h, w, per, ally_cost, seed), None)
+    } else {
+        let c = tactics::tactics_check(&archetypes, int("--cases", 200_000)? as u64, arenas, steps, h, w, per, ally_cost, seed).map_err(|e| e.to_string())?;
+        (c.behaviour.clone(), Some(c))
+    };
+    if let Some(c) = &check {
+        eprintln!("path: {} taps, hidden {:?}, {} conv parameters", c.path_shape.0, c.path_shape.1, c.path_shape.2);
+        eprintln!("sense: {} taps, hidden {:?}, {} conv parameters", c.sense_shape.0, c.sense_shape.1, c.sense_shape.2);
+        for (a, (hid, p)) in archetypes.iter().zip(&c.brain_shapes) {
+            eprintln!("{} brain: hidden {hid:?}, {p} parameters; blocked penalty {}", a.name, a.blocked_penalty());
+        }
+    }
+    let t_ = &b.ticks;
+    let pct = |a: u64, n: u64| if n == 0 { 0.0 } else { 100.0 * a as f64 / n as f64 };
+    eprintln!(
+        "{} decisions, {} moves: back-and-forth {:.1}% of moves; blocked picks {}",
+        t_.decisions, t_.moves, pct(t_.back_forth, t_.moves), t_.blocked_picks
+    );
+    eprintln!(
+        "exposed {:.1}% of enemy-ticks; at <= 4 hp {:.1}% ({} ticks); while empty {:.1}% ({} ticks)",
+        pct(b.exposed, b.alive), pct(b.hurt_exposed, b.hurt), b.hurt, pct(b.empty_exposed, b.empty), b.empty
+    );
+    let cover: Vec<String> = archetypes.iter().enumerate().take(4).map(|(k, a)| format!("{} {:.1}% of {}", a.name, pct(t_.to_cover[k], t_.afraid[k]), t_.afraid[k])).collect();
+    eprintln!("seen while hurt or empty, decisions that step toward cover: {}", cover.join(", "));
+    let dist: Vec<String> = archetypes.iter().zip(&b.distance).map(|(a, (s, n))| format!("{} {:.1}", a.name, s / (*n).max(1) as f64)).collect();
+    eprintln!("mean distance to the player (cells): {}", dist.join(", "));
+    eprintln!(
+        "spread around the player {:.2} over {} engaged ticks; shots {}, hits {}, reloads {}, enemy deaths {}",
+        b.spread / b.engaged.max(1) as f64, b.engaged, t_.shots, t_.hits, t_.reloads, t_.kills
+    );
+    if let Some(c) = &check {
+        eprintln!(
+            "{} sense and {} brain inputs match the rule ({} and {} mismatches); {} arenas, {} ticks enemy for enemy ({} ticks differ) ({:.1} s)",
+            c.sense_cases, c.brain_cases, c.sense_mismatches, c.brain_mismatches, c.arenas, c.steps, c.step_mismatches, t.elapsed().as_secs_f64()
+        );
+        if c.sense_mismatches + c.brain_mismatches + c.step_mismatches + t_.blocked_picks > 0 {
+            return Err("the networks disagree with the rule".into());
+        }
+    }
+    if let Some(dir) = args.get("--out") {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
+        let mut files = vec![("tactics_sense.wir".to_string(), tactics::sense_program())];
+        for a in &archetypes {
+            files.push((format!("{}_brain.wir", a.name), tactics::brain_program(a).map_err(|e| e.to_string())?));
+        }
+        for (name, src) in files {
+            let path = std::path::Path::new(dir).join(name);
+            std::fs::write(&path, src).map_err(|e| format!("{}: {e}", path.display()))?;
+            eprintln!("wrote {}", path.display());
+        }
+    }
+    if let Some(out) = args.get("--export") {
+        // The page switches between the archetypes as run here and two controls.
+        let control = |f: &dyn Fn(&mut Archetype)| -> Vec<Archetype> {
+            let mut v = archetypes.clone();
+            v.iter_mut().for_each(f);
+            v
+        };
+        let variants = [
+            ("full", archetypes.clone()),
+            ("no_fear", control(&|a| (a.f1, a.f2, a.fe) = (0, 0, 0))),
+            ("no_inertia", control(&|a| (a.keep, a.keep_hold) = ([0; 5], 0))),
+        ];
+        let json = tactics::export_json(&variants).map_err(|e| e.to_string())?;
+        std::fs::write(out, json).map_err(|e| format!("{out}: {e}"))?;
+        eprintln!("wrote {out}");
     }
     Ok(())
 }

@@ -2,7 +2,8 @@
 //!
 //! A 0.2 program names scalar inputs (each with an optional interval), binds
 //! expressions with `let`, and defines outputs. Expressions are affine arithmetic
-//! (`+ -`, `*` and `/` by constants) plus combinators that compile to exact ReLU
+//! (`+ -`, `*` and `/` by constants, `*` of two values when one takes at most three
+//! integer values) plus combinators that compile to exact ReLU
 //! constructions:
 //!
 //!   relu(a)  abs(a)  max(a, b, ..)  min(a, b, ..)  clip(a, lo, hi)  step(a)
@@ -300,6 +301,42 @@ impl Graph {
         let p = self.relu(&Affine::lin(d, 1.0, c, mp).plus(-mp), line);
         let m = self.relu(&Affine::lin(d, -1.0, c, mn).plus(-mn), line);
         Ok(p.sub(&m))
+    }
+
+    /// a * b where one factor takes at most three integer values (an interval of width
+    /// 1 or 2 with integer ends) and the other is bounded. With t = m + u, u in {-1, 0, 1}:
+    /// x t = m x + x [u = 1] - x [u = -1], and both gated terms are big-M products whose
+    /// gate is u itself (u = -1 pushes the first relu pair to 0, u = 1 the second), so the
+    /// product costs 4 relus one layer up and no separate gate bits. Exact only when the
+    /// small factor is an integer.
+    pub fn mul_small(&mut self, a: &Affine, b: &Affine, line: usize) -> std::result::Result<Affine, String> {
+        let small = |r: (f64, f64)| r.0.fract() == 0.0 && r.1.fract() == 0.0 && r.1 - r.0 <= 2.0;
+        let (ra, rb) = (self.range_of(a), self.range_of(b));
+        let (x, t, rt) = match (small(rb), small(ra)) {
+            (true, false) => (a, b, rb),
+            (false, true) => (b, a, ra),
+            (true, true) if rb.1 - rb.0 <= ra.1 - ra.0 => (a, b, rb),
+            (true, true) => (b, a, ra),
+            _ => {
+                return Err(format!(
+                    "`*` needs a constant on one side or a factor with at most three integer values (got [{}, {}] and [{}, {}]); for bit * value use select(c, v, 0)",
+                    ra.0, ra.1, rb.0, rb.1
+                ))
+            }
+        };
+        if rt.0 == rt.1 {
+            return Ok(x.scale(rt.0));
+        }
+        if rt.1 - rt.0 == 1.0 {
+            // t = lo + c, c a bit
+            let c = t.plus(-rt.0);
+            return Ok(x.scale(rt.0).add(&self.mul_bit(&c, x, line)?));
+        }
+        let m = rt.0 + 1.0;
+        let u = t.plus(-m);
+        let up = self.mul_bit(&u, x, line)?;
+        let down = self.mul_bit(&u.scale(-1.0), x, line)?;
+        Ok(x.scale(m).add(&up).sub(&down))
     }
 }
 
@@ -929,7 +966,10 @@ impl Cursor<'_> {
                 acc = match (acc.as_const(), rhs.as_const()) {
                     (Some(k), _) => rhs.scale(k),
                     (_, Some(k)) => acc.scale(k),
-                    _ => return Err(self.err("`*` needs a constant on one side (for bit * value use select(c, v, 0))")),
+                    _ => {
+                        let line = self.s.line;
+                        sc.g.mul_small(&acc, &rhs, line).map_err(|m| self.err(&m))?
+                    }
                 };
             } else if self.eat(&Tok::Slash) {
                 let rhs = self.unary(sc)?;
