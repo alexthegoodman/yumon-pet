@@ -21,7 +21,13 @@ cargo run -- decompile net.npz --exact --assert-at "0,0;1,1"
 cargo run -- canon examples/xor_solve.wir                  # what decompile would print
 cargo run -- fmt examples/tent.wir                         # resolved program, names kept
 cargo run -- eval examples/tent.wir 0.25 "0.5;2"
+cargo run -- verify net.wir probe.json --tol 1e-4         # vs reference inputs/outputs
 ```
+
+`verify` takes a JSON file with `inputs` [N][D] and `outputs` [N][O] (for example
+activations and logits recorded from the source model) and reports max |diff| and
+argmax agreement. The colorizer head from a real Yumon Pet checkpoint is the
+worked example: see "First real checkpoint" in `../docs/WIR.md`.
 
 `decompile` options: `--keys W1,b1,W2,b2` for tensors with other names (slices
 of larger checkpoints), `--transpose` for `[in, out]` storage (Burn `Linear`),

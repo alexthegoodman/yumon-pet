@@ -240,3 +240,18 @@ Open questions, as answered for v0:
 - Snapping covers simple rationals only (see above), not √2-style constants.
 - The decompiler always emits the flat canonical form, with no macros.
 - Input domains are not implemented yet; the known gaps above (hidden linear terms, units that never activate on a domain) remain.
+
+## First real checkpoint (Nov 7, 2026)
+
+The text models (talk, code, ViT colorizer) use SwiGLU or SiLU, which v0 cannot state exactly. The CNN colorizer (`src/vision/colorizer.rs`, Yumon Paint pass 6) ends in `out_conv(relu(head_conv(f)))`, a 3x3 conv (64 -> 64) then a 1x1 conv (64 -> 313). At each pixel that is exactly a one-hidden-layer ReLU network over the 3x3 feature patch: input R576 (index channel*9 + ky*3 + kx, zero padding at the border), 64 creases, 313 outputs.
+
+```
+cargo run --release --bin export_wir_colorizer        # checkpoints/old/yumon-colorizer-256-a -> tmp/wir-colorizer/{head,probe}.json
+cd wir && cargo run --release -- decompile ../tmp/wir-colorizer/head.json -o ../tmp/wir-colorizer/head.wir
+cargo run --release -- verify ../tmp/wir-colorizer/head.wir ../tmp/wir-colorizer/probe.json
+```
+
+`probe.json` holds real backbone patches and the model's own logits from a Burn WGPU forward on `gt_sample0.png`. Results on all 4,096 head pixels: canonical text max |diff| 1.2e-5 against logits up to 7.7, exact text 3.6e-6 (the f32 forward vs f64 eval floor), argmax bin identical on 4,096/4,096. Canonical text is a parse fixed point (1.1 MB, 64 creases, no merges). 26 of 64 units never activate on that image: the known no-domain gap, so they stay in the text.
+
+Not covered: the backbone (stacked ReLU convs and residual blocks need depth, v0.2) and every SwiGLU/SiLU checkpoint (needs an approximate story, not an exact decompile).
+

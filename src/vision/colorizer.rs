@@ -947,6 +947,12 @@ impl<B: Backend> ColorizerModel<B> {
     /// Input:  `[batch, 1, H, W]` (Grayscale Lightness normalized in [-1.0, 1.0])
     /// Output: `[batch, 313, 64, 64]` (Unnormalized logits over the 313 color cluster bins)
     pub fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+        let f = self.features(x);
+        self.out_conv.forward(relu(self.head_conv.forward(f)))
+    }
+
+    /// Backbone output `[batch, c, 64, 64]`: the input of the classification head.
+    pub fn features(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
         let mut f = x;
 
         if let Some(ref d1) = self.down1 {
@@ -962,9 +968,13 @@ impl<B: Backend> ColorizerModel<B> {
         for block in &self.res_blocks {
             f = block.forward(f);
         }
+        f
+    }
 
-        f = relu(self.head_conv.forward(f));
-        self.out_conv.forward(f)
+    /// The head `out_conv(relu(head_conv(f)))`: per pixel, a one-hidden-layer ReLU
+    /// network over the 3x3 feature patch (exported to WIR by `export_wir_colorizer`).
+    pub fn head(&self) -> (&Conv2d<B>, &Conv2d<B>) {
+        (&self.head_conv, &self.out_conv)
     }
 
     /// Predict continuous chromaticity (a, b) at 64x64 using temperature-annealed softmax.

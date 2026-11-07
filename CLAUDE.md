@@ -143,3 +143,12 @@ implementation notes at the end of WIR.md). 51 tests pass (`cargo test` in wir/,
 ~20 s) incl. the 1,000-network fuzz; `wir/scripts/interop.py` cross-checks NumPy
 and PyTorch via the python-train uv env. Repo checkpoints (Burn .bin, SwiGLU) are
 not yet decompilable.
+
+WIR on a real checkpoint (2026-11-07): `export_wir_colorizer` loads the CNN colorizer
+(`checkpoints/old/yumon-colorizer-256-a`, 64 ch, 5 blocks) and writes its head
+(3x3 head_conv -> ReLU -> 1x1 out_conv = per-pixel ReLU MLP, R576 -> 64 -> 313) as
+`tmp/wir-colorizer/head.json` plus `probe.json` (real patches + logits).
+`ColorizerModel::features` / `head()` are new. `wir decompile` then `wir verify`
+(new command) match the model on all 4,096 pixels: 1.2e-5 canonical, 3.6e-6 exact.
+SwiGLU/SiLU checkpoints and the stacked backbone are still not decompilable.
+

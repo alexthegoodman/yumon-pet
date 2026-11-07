@@ -17,6 +17,8 @@ usage:
   wir fmt <file.wir> [--exact]          print the resolved program (names and asserts kept)
   wir canon <file.wir> [--exact]        print the canonical form (what decompile would emit)
   wir eval <file.wir|weights> <x1,x2,...> [more points]
+  wir verify <file.wir|weights> <probe.json> [--tol 1e-4]
+                                        compare against reference inputs/outputs
 
 Weights use PyTorch nn.Linear layout: W1 [H, D], b1 [H], W2 [O, H], b2 [O].
 .safetensors files use the nn.Sequential(Linear, ReLU, Linear) keys 0.weight ... 2.bias.
@@ -79,6 +81,7 @@ fn main() -> ExitCode {
         "fmt" => cmd_print(rest, false),
         "canon" => cmd_print(rest, true),
         "eval" => cmd_eval(rest),
+        "verify" => cmd_verify(rest),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
@@ -247,5 +250,64 @@ fn cmd_eval(raw: &[String]) -> Result<(), String> {
             }
         }
     }
+    Ok(())
+}
+
+/// `probe.json` holds `inputs` [N][D] and reference `outputs` [N][O], e.g. activations
+/// and logits recorded from the model a weights file was taken from.
+fn cmd_verify(raw: &[String]) -> Result<(), String> {
+    let valued = ["--keys", "--tol"];
+    let args = Args::parse(raw, &valued)?;
+    args.check(&["--keys", "--tol", "--transpose"])?;
+    let path = args.file("program or weights file")?;
+    let probe_path = args.positional.get(1).map(PathBuf::from).ok_or("missing probe .json")?;
+    let tol: f64 = match args.get("--tol") {
+        Some(t) => t.parse().map_err(|_| format!("bad --tol `{t}`"))?,
+        None => 1e-4,
+    };
+    let w = if path.extension().is_some_and(|e| e == "wir") {
+        compile(&read(&path)?, CompileOptions::default()).map_err(|e| format!("{}: {e}", path.display()))?.weights
+    } else {
+        load_weights(&path, &args)?
+    };
+    let probe: serde_json::Value =
+        serde_json::from_str(&read(&probe_path)?).map_err(|e| format!("{}: {e}", probe_path.display()))?;
+    let matrix = |key: &str| -> Result<Vec<Vec<f64>>, String> {
+        probe[key]
+            .as_array()
+            .ok_or(format!("probe has no `{key}` array"))?
+            .iter()
+            .map(|r| r.as_array().and_then(|r| r.iter().map(|x| x.as_f64()).collect::<Option<Vec<_>>>()))
+            .collect::<Option<_>>()
+            .ok_or(format!("probe `{key}` must be an array of number arrays"))
+    };
+    let (xs, ys) = (matrix("inputs")?, matrix("outputs")?);
+    if xs.len() != ys.len() {
+        return Err(format!("probe has {} inputs but {} outputs", xs.len(), ys.len()));
+    }
+    let (mut max_abs, mut max_ref, mut argmax_same) = (0f64, 0f64, 0usize);
+    let argmax = |v: &[f64]| v.iter().enumerate().fold(0, |b, (i, x)| if *x > v[b] { i } else { b });
+    for (x, y) in xs.iter().zip(&ys) {
+        if x.len() != w.input_dim() || y.len() != w.output_dim() {
+            return Err(format!(
+                "probe point is R{} -> R{}, the network is R{} -> R{}",
+                x.len(), y.len(), w.input_dim(), w.output_dim()
+            ));
+        }
+        let got = w.eval(x);
+        for (g, e) in got.iter().zip(y) {
+            max_abs = max_abs.max((g - e).abs());
+            max_ref = max_ref.max(e.abs());
+        }
+        argmax_same += (argmax(&got) == argmax(y)) as usize;
+    }
+    println!(
+        "{} points, {} outputs each: max |diff| {:.3e} (reference max |y| {:.3e}), argmax agrees on {}/{}",
+        xs.len(), w.output_dim(), max_abs, max_ref, argmax_same, xs.len()
+    );
+    if max_abs > tol {
+        return Err(format!("max |diff| {max_abs:.3e} exceeds tolerance {tol:.0e}"));
+    }
+    println!("ok (tolerance {tol:.0e})");
     Ok(())
 }
