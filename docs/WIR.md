@@ -313,3 +313,34 @@ On held-out MLP inputs (2,048 per layer) the canonical text is within 0.05-0.10%
 Coded rows are scored with `wir_decoder eval --offset 1`: 256 samples next to the ones the probes (and so the calibration) came from, 30,934 positions, base loss 4.0127. Layer 0 is the most sensitive (`g4` alone: +0.011); mixing `g2` there and `g4` elsewhere is an option. Decompiling and coding one layer takes 0.8 s.
 
 Not covered: the colorizer backbone (stacked ReLU convs and residual blocks need depth, v0.2), and the attention, norms and embeddings of the decoder (WIR states MLPs only).
+
+## Function-space distillation (Nov 7, 2026)
+
+Coding weights tops out near 4 weights per Qwen token, so a sunrise layer can't drop much below ~65k tokens that way. The alternative is to describe the layer's *behaviour* with a much smaller program: fit a SwiGLU gate program with h << 512 gates to the layer's real inputs and outputs (MSE, Adam, gates started from the original's h highest-contribution units), then code that with `g4` as usual. The text says a different function that agrees with the layer where the model actually uses it.
+
+```
+cargo run --release --bin wir_decoder -- record --eval 1024 --offset 3 --probe 40000 --out tmp/wir-approx   # 40k fit rows per layer
+cd python-train && uv run python ../wir/scripts/distill.py 0 --gates 32 --steps 6000 --init top --out ../tmp/wir-approx/fit/l0_g32.json
+cd ../wir && cargo run --release -- decompile ../tmp/wir-approx/fit/l0_g32.json --codebook g4 --calibrate ../tmp/wir-sunrise/layer0_probe.json -o l0.wir
+# compile, then wir_decoder eval --offset 1 --mlp 0=... (all six layers)
+```
+
+All six sunrise MLPs replaced, scored with `eval --offset 1` (30,934 positions; fit rows come from offset-3 samples, so neither fitting nor calibration saw them):
+
+| per layer | weights | Qwen tokens | all six: loss change | top-1 same |
+| --- | --- | --- | --- | --- |
+| original 512 gates, `g4` | 196,608 | 65k | +0.019 | 98.72% |
+| 64 gates, numbers | 24,832 | | +0.237 | 95.34% |
+| 32 gates, numbers | 12,480 | | +0.509 | 93.38% |
+| 32 gates, `g4` | 12,480 | 8.4k-8.5k | +0.541 | 92.13% |
+| 16 gates, `g4` | 6,304 | 6.3k | +1.974 | 83.15% |
+
+32 gates is the knee: 16x fewer weights, 7.6x fewer tokens, about 92% top-1 agreement. Per-layer relative error at 32 gates ranges from 0.07 (layer 5) to 0.50 (layer 1), and an exact least-squares linear map already reaches 0.15-0.64, so the layers are mostly a linear map plus a few dozen nonlinear corrections. Layers 0 and 1 cost the most (layer 0 alone at 16 gates: 86% top-1), so a fixed token budget should give them more gates.
+
+What did not help:
+
+- **A shared low-dimensional frame** (gates read r = 16-32 projections of x and write back through an r-dim map) was worse than plain gates at equal parameters (layer 0: 0.236 at 20.9k vs 0.193 at 24.8k).
+- **A separate low-rank linear term** (48 gates + rank 16) was no better than 64 gates.
+- **Sequential fitting** (`wir_decoder record --mlp ...`: inputs from the model with earlier layers already replaced, targets from the original) lowered the six-layer loss change to +0.430 but top-1 fell to 90.11%. Its targets only undo MLP drift, not attention drift.
+
+At 32 gates the readouts are about 45% of the text: 128 output lines, each an 8-word vector, a scale and a 6-digit bias. Writing one `writes` vector per gate (128 entries, 32 words) plus one coded bias vector would bring layer 0 from 8.5k to about 5.0k Qwen tokens (estimated by tokenizing synthesized text; the syntax does not exist yet and coding the biases is untested).

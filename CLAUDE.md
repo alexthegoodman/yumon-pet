@@ -167,3 +167,11 @@ g4 --calibrate probe.json` rounds GPTQ style. A last word may overhang a vector;
 98.7% top-1 with all six layers), 114k with g2 (+0.005, 99.4%); colorizer head 19.7k.
 `wir_decoder eval --offset N` scores on samples other than the probe's. `canon` expands
 coded text back to numbers. 68 wir tests.
+
+WIR distillation (2026-11-07): see docs/WIR.md "Function-space distillation".
+`wir/scripts/distill.py` fits an h-gate SwiGLU program to a layer's recorded
+inputs/outputs (MSE; `--init top` starts from the original's strongest units) and
+writes a wir weights JSON for `decompile --codebook g4`. Sunrise at 32 gates + g4:
+8.5k Qwen tokens per layer, 92.1% top-1 with all six layers replaced (16 gates: 83%).
+`wir_decoder record --mlp l=path` takes probe inputs from the model with those MLPs
+replaced (outputs stay original); sequential fitting with it did not help top-1.

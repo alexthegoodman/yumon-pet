@@ -6,7 +6,10 @@
 //!
 //! - `record`: per layer, the SwiGLU weights as a wir weights file
 //!   (`layer{l}_swiglu.json`: W1 W3 [ff, d], W2 [d, ff], zero biases) and a
-//!   `wir verify` probe of real MLP inputs/outputs (`layer{l}_probe.json`).
+//!   `wir verify` probe of real MLP inputs/outputs (`layer{l}_probe.json`). With
+//!   `--mlp`, probe inputs come from the model with those MLPs replaced while the
+//!   outputs stay the original model's, so a layer fitted to them also undoes the
+//!   drift of earlier replaced layers.
 //! - `eval`: next-token loss and top-1 agreement of the model with MLPs replaced by
 //!   WIR weight files (`--mlp 0=layer0.json`, ReLU or SwiGLU), each layer alone and
 //!   all together.
@@ -62,6 +65,9 @@ enum Cmd {
         probe: usize,
         #[arg(long, default_value = "tmp/wir-sunrise")]
         out: PathBuf,
+        /// `layer=weights.json` replacements for the probe inputs, repeatable.
+        #[arg(long = "mlp")]
+        mlps: Vec<String>,
     },
     Eval {
         #[command(flatten)]
@@ -142,9 +148,11 @@ fn linear_layout(w: Tensor<B, 2>) -> (Vec<usize>, Vec<f32>) {
     (vec![o, i], floats(w.transpose()))
 }
 
-fn record(c: &Common, probe: usize, out: &Path) -> Result<()> {
+fn record(c: &Common, probe: usize, out: &Path, specs: &[String]) -> Result<()> {
     let device = Default::default();
     let (model, eval_seqs) = setup(c, &device)?;
+    let mut replaced = load_replacements(specs, model.config.n_layers, &device)?;
+    let mlps: Vec<Option<WirMlp<B>>> = (0..model.config.n_layers).map(|l| replaced.remove(&l)).collect();
     std::fs::create_dir_all(out)?;
     let layers = model.config.n_layers;
 
@@ -179,8 +187,10 @@ fn record(c: &Common, probe: usize, out: &Path) -> Result<()> {
     let mut py = vec![Vec::new(); layers];
     for chunk in eval_seqs.chunks(c.batch) {
         let (t, _) = batch_tokens(chunk, &device);
-        let (_, trace) = model.forward_probe(t, &[]);
+        let (_, trace) = model.forward_probe(t.clone(), &[]);
+        let inputs = if specs.is_empty() { None } else { Some(model.forward_probe(t, &mlps).1) };
         for (l, (x, y)) in trace.into_iter().enumerate() {
+            let x = inputs.as_ref().map_or(x, |t| t[l].0.clone());
             real_rows(x, chunk, &mut px[l]);
             real_rows(y, chunk, &mut py[l]);
         }
@@ -198,6 +208,18 @@ fn record(c: &Common, probe: usize, out: &Path) -> Result<()> {
     }
     println!("wrote probes: {} of {total} held-out rows per layer", pick.len());
     Ok(())
+}
+
+/// `layer=path` specs as replacement MLPs.
+fn load_replacements(specs: &[String], layers: usize, device: &<B as Backend>::Device) -> Result<BTreeMap<usize, WirMlp<B>>> {
+    let mut out = BTreeMap::new();
+    for s in specs {
+        let (l, p) = s.split_once('=').with_context(|| format!("--mlp `{s}` should be layer=path"))?;
+        let l: usize = l.parse()?;
+        ensure!(l < layers, "layer {l} out of range (model has {layers})");
+        out.insert(l, load_wir_mlp(Path::new(p), device)?);
+    }
+    Ok(out)
 }
 
 fn load_wir_mlp(path: &Path, device: &<B as Backend>::Device) -> Result<WirMlp<B>> {
@@ -282,13 +304,7 @@ fn eval(c: &Common, specs: &[String]) -> Result<()> {
     let device = Default::default();
     let (model, eval_seqs) = setup(c, &device)?;
     let layers = model.config.n_layers;
-    let mut replacements: BTreeMap<usize, WirMlp<B>> = BTreeMap::new();
-    for s in specs {
-        let (l, p) = s.split_once('=').with_context(|| format!("--mlp `{s}` should be layer=path"))?;
-        let l: usize = l.parse()?;
-        ensure!(l < layers, "layer {l} out of range (model has {layers})");
-        replacements.insert(l, load_wir_mlp(Path::new(p), &device)?);
-    }
+    let mut replacements = load_replacements(specs, layers, &device)?;
     let mut reference = Vec::new();
     let base = score(&model, &eval_seqs, c.batch, &[], &mut reference);
     let base_loss = base.loss_sum / base.loss_n as f64;
@@ -321,7 +337,7 @@ fn eval(c: &Common, specs: &[String]) -> Result<()> {
 
 fn main() -> Result<()> {
     match Args::parse().cmd {
-        Cmd::Record { common, probe, out } => record(&common, probe, &out),
+        Cmd::Record { common, probe, out, mlps } => record(&common, probe, &out, &mlps),
         Cmd::Eval { common, mlps } => eval(&common, &mlps),
     }
 }
