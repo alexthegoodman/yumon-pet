@@ -122,3 +122,10 @@ And compute the distance desire to the player using an absolute-value "sweet spo
 * Set `preferred_range = 1, bravery = 6, pack_instinct = 14` $\rightarrow$ **Pack Wolf** (hovers at a safe distance alone, but rushes in as soon as 2+ ally wolves are nearby because `da` boosts its confidence).
 
 Even better: because everything in WIR is just ReLU and linear layers, you can **hand-author the initial WIR program** so the AI is 100% functional on Day 1 (and passes all your `assert` safety tests), and then use **Reinforcement Learning (PPO) or Evolution Strategies** to fine-tune the slopes and thresholds of those `relu` curves so the enemies discover emergent tactics against human players.
+
+---
+
+Another interesting area of exploration would be swarming behaviors. Flight behaviors, basically handling storms and avoiding objects, would be interesting.
+
+WIR models are curious because they are often quite perfect and memorized. However, unlike a traditional program, unexpected inputs don't degrade into nothing - they point to the closest known response.
+Therefore, even though they may struggle to generalize as effectively as learned models, they do generalize in a certain sense.
