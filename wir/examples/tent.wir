@@ -1,0 +1,10 @@
+wir 0.1
+input  x: R1
+output y: R1
+
+y = hinge at 0.0 turn +1    # slope 0 -> +1
+  + hinge at 0.5 turn -2    # slope +1 -> -1
+  + hinge at 1.0 turn +1    # slope -1 -> 0
+
+assert y(0.5) == 0.5
+assert y(2.0) == 0

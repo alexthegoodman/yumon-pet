@@ -205,14 +205,14 @@ tests/
 
 **Acceptance criteria**
 
-- [ ] `tent.wir` and `xor.wir` compile to exactly the expected weights in the syntax section, and all asserts pass.
-- [ ] `xor_solve.wir` compiles with residual < 1e-9 and reproduces the XOR truth table.
-- [ ] Each compile error case (anchor on plane, non-positive anchor, unsolvable `solve`, failed assert) has a test with a clear message naming the statement and line.
-- [ ] `print(parse(src))` is idempotent: printing twice gives identical text.
-- [ ] Round-trip source: `decompile(compile(src))` equals `canonicalize(src)` as text.
-- [ ] Round-trip weights: for 1,000 random networks (D ∈ {1,2,3}, 1–16 hidden units), `compile(decompile(W))` matches W as a function on 10,000 sampled inputs within 1e-6.
-- [ ] Scaling and permuting hidden units of any network leaves its decompiled text unchanged.
-- [ ] The CLI prints a per-statement cost report on compile.
+- [x] `tent.wir` and `xor.wir` compile to exactly the expected weights in the syntax section, and all asserts pass.
+- [x] `xor_solve.wir` compiles with residual < 1e-9 and reproduces the XOR truth table.
+- [x] Each compile error case (anchor on plane, non-positive anchor, unsolvable `solve`, failed assert) has a test with a clear message naming the statement and line.
+- [x] `print(parse(src))` is idempotent: printing twice gives identical text.
+- [x] Round-trip source: `decompile(compile(src))` equals `canonicalize(src)` as text.
+- [x] Round-trip weights: for 1,000 random networks (D ∈ {1,2,3}, 1–16 hidden units), `compile(decompile(W))` matches W as a function on 10,000 sampled inputs within 1e-6.
+- [x] Scaling and permuting hidden units of any network leaves its decompiled text unchanged.
+- [x] The CLI prints a per-statement cost report on compile.
 
 **Milestones**
 
@@ -220,3 +220,23 @@ tests/
 2. Printer and canonicalization pass the idempotence test.
 3. Decompiler passes both round-trip tests and the symmetry test.
 4. Fuzzing and CLI polish; then open v0.2 (combinators and depth).
+
+## Implementation notes (v0 reference, Nov 6, 2026)
+
+The reference implementation is the Rust crate `yumon-pet/wir` (standalone, `serde_json` only), not the Python layout sketched above, to match the repo's language and keep checkpoints close. Usage and test commands are in `wir/README.md`. All eight acceptance criteria pass (51 tests); the weights round-trip worst case is 9.1e-13 over 1,000 networks x 10,000 points. NumPy 2.5.4 and PyTorch 2.14.1 read the exported `.npz`/`.safetensors` (`wir/scripts/interop.py`).
+
+Decisions that refine the spec:
+
+- **Canonical scale is the max norm** (max|wᵢ| = 1), not |w| = 1. Unit normals are rarely exact decimals, so 6-digit text could not hold "slope 1" and the error leaked into readout coefficients, which broke re-canonicalization. With the max norm every canonical crease reads `equals 1` and XOR decompiles to `y = c1 - 2*c2`. In 1D the two agree.
+- **Printed points sit on a coordinate axis.** P is where the plane crosses the axis on which the normal is ±1, Q = P + (−m₂, m₁), and the anchor is P one step along that axis. A foot of the perpendicular drifts by a rounding error on every parse; this choice makes `print(parse(print(p))) == print(p)` hold by construction.
+- **New plane form** `zero on plane normal V through P`, used by the printer for D ≠ 2 (`offset` is still accepted).
+- **Number literals** may be `p/q`; canonical text snaps values within 1e-9 (relative) of p/q with q ≤ 16 and |x| ≤ 1e6.
+- **Several scalar outputs** may share creases (`output u: R1`, `output v: R1`), giving W2 [O, H]. `R2` outputs are rejected with a hint.
+- **Weights** use PyTorch `nn.Linear` layout. `.safetensors` uses `nn.Sequential` keys (`0.weight` ... `2.bias`), `.npz` uses `W1 b1 W2 b2`, and either set of names is accepted on read.
+
+Open questions, as answered for v0:
+
+- Tolerances are relative with a floor of 1: zero when |x| ≤ ε·max(1, largest |x| of its kind). Dead weight/coefficient 1e-9, merge 1e-7, sort grid 1e-6, asserts and `solve` residuals 1e-6 (`--tol`).
+- Snapping covers simple rationals only (see above), not √2-style constants.
+- The decompiler always emits the flat canonical form, with no macros.
+- Input domains are not implemented yet; the known gaps above (hidden linear terms, units that never activate on a domain) remain.

@@ -1,0 +1,20 @@
+[package]
+name = "wir"
+version = "0.1.0"
+edition = "2024"
+description = "WIR v0: Weight-Space Intermediate Representation compiler and decompiler for one-hidden-layer ReLU networks"
+
+# Standalone crate: kept out of the yumon-pet build so it compiles in seconds.
+# The yumon-pet crate can depend on it later with `wir = { path = "wir" }`.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "wir"
+path = "src/bin/wir.rs"
+
+[dependencies]
+serde_json = { version = "1", features = ["float_roundtrip"] }
+

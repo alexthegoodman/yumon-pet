@@ -1,0 +1,9 @@
+wir 0.1
+input  x: R2
+output y: R1
+
+crease a: zero on line (0,0)->(1,-1), equals 1 at (1,0)
+crease b: zero on line (1,0)->(0,1),  equals 1 at (1,1)
+y = solve over {a, b}: (0,0)->0, (1,0)->1, (0,1)->1, (1,1)->0
+
+assert y(0,0)==0, y(1,0)==1, y(0,1)==1, y(1,1)==0

@@ -131,3 +131,15 @@ together. `sample_order.rs` holds the scoring. The cache header gets
 `order: "difficulty-v1"`, and full-cache configs then train in cache order every
 epoch with no shuffle (`PreparedCode.shuffle`); config `"shuffle": true/false`
 overrides. Rebuild caches to use it.
+
+WIR v0 (2026-11-06): `wir/` is a standalone crate (own `[workspace]`, serde_json
+only, not part of the yumon-pet build) with the reference compiler and decompiler
+for docs/WIR.md: WIR source <-> one-hidden-layer ReLU weights (`wir compile`,
+`decompile`, `canon`, `fmt`, `eval`). Weights use nn.Linear layout; .npz (W1 b1 W2
+b2), .safetensors (nn.Sequential keys 0.weight..2.bias) and .json; `--keys` and
+`--transpose` read slices of other checkpoints. Canonical form uses max|w_i| = 1
+and axis-pinned points so printed text is a parse fixed point (see the
+implementation notes at the end of WIR.md). 51 tests pass (`cargo test` in wir/,
+~20 s) incl. the 1,000-network fuzz; `wir/scripts/interop.py` cross-checks NumPy
+and PyTorch via the python-train uv env. Repo checkpoints (Burn .bin, SwiGLU) are
+not yet decompilable.
