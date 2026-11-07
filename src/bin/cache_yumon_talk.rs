@@ -72,6 +72,10 @@ struct Args {
     /// Difficulty weights as length,rarity,complexity (percentile ranks are averaged with these).
     #[arg(long, default_value = "1,1,1")]
     sort_weights: Weights,
+    /// Drop samples whose share of repeated token 4-grams is above this
+    /// (chants, "da na na na na . . ."). 1.0 keeps everything.
+    #[arg(long, default_value_t = 0.5)]
+    max_repetition: f64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -537,6 +541,11 @@ fn main() -> Result<()> {
         println!(">>> YUMON TALK REPLY <<<\n{}", r_yum.trim());
         println!(">>> RECONSTRUCTED REPLY (RANDOM SYNONYM SAMPLING) <<<\n{}", r_rec.trim());
     }
+
+    let repetitive = sample_order::drop_repetitive(&mut yumon_samples, args.max_repetition, is_dpo);
+    println!("Dropped {} repetitive samples (> {:.0}% repeated 4-grams); {} remain",
+        repetitive, args.max_repetition * 100.0, yumon_samples.len());
+    ensure!(!yumon_samples.is_empty(), "every sample was dropped as repetitive; raise --max-repetition");
 
     let order = if args.order == Order::Difficulty {
         let w = args.sort_weights;

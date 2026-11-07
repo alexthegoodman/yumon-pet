@@ -16,7 +16,7 @@
   "first_lr": 0.001,
   "last_lr": 0.0001,
   "validation_fraction": 0.01,
-  "out_dir": "checkpoints/yumon-base-dec-sunset",
+  "out_dir": "checkpoints/yumon-base-dec-sunrise",
   "tie_embeddings": true,
   "eval_stage": "base"
 }

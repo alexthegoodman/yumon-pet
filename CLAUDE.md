@@ -120,3 +120,14 @@ when tied); `embed_dim` stays the model width. Record layout before this is
 `LegacyMoeBrainV5`. Run names gain `_router_...`, `_experts_...`, `_tok<n>`. Unit tests
 and the GPU all-architectures test (now with a grouped, factorized MoE) pass; no real
 runs yet.
+
+Inner-epoch curriculum (2026-11-06): `cache_yumon_talk` drops repetitive samples
+(`--max-repetition`, default 0.5 = share of repeated token 4-grams), then sorts
+easiest first (`--order difficulty`, the default; `original` keeps input order) by
+the weighted mean of percentile ranks of length, word rarity (mean unigram
+surprisal) and complexity (clause punctuation + slot/name/num tokens),
+`--sort-weights length,rarity,complexity` (default 1,1,1). DPO pairs stay
+together. `sample_order.rs` holds the scoring. The cache header gets
+`order: "difficulty-v1"`, and full-cache configs then train in cache order every
+epoch with no shuffle (`PreparedCode.shuffle`); config `"shuffle": true/false`
+overrides. Rebuild caches to use it.

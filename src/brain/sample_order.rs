@@ -57,6 +57,29 @@ fn clause_marks(text: &str) -> usize {
     text.chars().filter(|c| matches!(c, ',' | ';' | ':' | '.' | '!' | '?' | '\n')).count()
 }
 
+/// Share of repeated token 4-grams in a sample (0 = all distinct, near 1 = one
+/// phrase over and over). Chant-like samples ("da na na na na . . .") would
+/// otherwise rank as hard because they are long and punctuation-heavy.
+pub fn repetition(sample: &Sample) -> f64 {
+    let tokens: Vec<usize> = active_tokens(sample).collect();
+    if tokens.len() < 8 { return 0.0; }
+    let grams: Vec<&[usize]> = tokens.windows(4).collect();
+    let distinct: std::collections::HashSet<&[usize]> = grams.iter().copied().collect();
+    1.0 - distinct.len() as f64 / grams.len() as f64
+}
+
+/// Drops samples whose `repetition` exceeds `max` (pairs drop together when either
+/// is over). Returns the number of samples removed.
+pub fn drop_repetitive(samples: &mut Vec<Sample>, max: f64, pairs: bool) -> usize {
+    let group = if pairs { 2 } else { 1 };
+    let before = samples.len();
+    let keep: Vec<bool> = samples.chunks(group)
+        .map(|g| g.iter().all(|s| repetition(s) <= max)).collect();
+    let mut index = 0;
+    samples.retain(|_| { let k = keep[index / group]; index += 1; k });
+    before - samples.len()
+}
+
 /// Percentile rank in [0, 1]; ties share their mean rank.
 fn percentile_ranks(values: &[f64]) -> Vec<f64> {
     let n = values.len();
@@ -175,6 +198,16 @@ mod tests {
         assert_eq!(samples[1].pair.1, "easy");
         assert_eq!(samples[1].target_labels[0], 11);
         assert!(sort_by_difficulty(&mut samples[..3].to_vec(), Weights::default(), true, |_| false).is_err());
+    }
+
+    #[test]
+    fn repetitive_samples_are_dropped() {
+        let chant: Vec<usize> = [20, 21, 21, 21, 21, 22].repeat(5);
+        let varied: Vec<usize> = (20..50).collect();
+        let mut samples = vec![sample(&varied[..12], &varied[12..], "varied"), sample(&chant[..12], &chant[12..], "chant")];
+        assert!(repetition(&samples[0]) == 0.0 && repetition(&samples[1]) > 0.5);
+        assert_eq!(drop_repetitive(&mut samples, 0.5, false), 1);
+        assert_eq!(samples[0].pair.1, "varied");
     }
 
     #[test]
