@@ -128,21 +128,21 @@ pub fn lower(src: &Source, opts: CompileOptions) -> Result<Lowered> {
     }
 
     // Declarations first: they fix D and the output list for everything after.
-    let mut input: Option<(String, usize)> = None;
+    let mut input: Option<(String, usize, Option<Vec<usize>>, Option<(f64, f64)>)> = None;
     let mut outputs: Vec<Output> = Vec::new();
     let mut body = Vec::new();
     for s in stmts {
         let err = |m: String| WirError::at(s.line, &s.text, m);
         match &s.kind {
             StmtKind::Header { .. } => return Err(err("duplicate `wir` header".into())),
-            StmtKind::Input { name, dim } => {
+            StmtKind::Input { name, dim, shape, domain } => {
                 if !body.is_empty() {
                     return Err(err("declarations must come before creases, readouts and asserts".into()));
                 }
                 if input.is_some() {
                     return Err(err("v0 takes exactly one input; use one vector input like `input x: R3`".into()));
                 }
-                input = Some((name.clone(), *dim));
+                input = Some((name.clone(), *dim, shape.clone(), *domain));
             }
             StmtKind::Output { name, dim } => {
                 if !body.is_empty() {
@@ -161,7 +161,7 @@ pub fn lower(src: &Source, opts: CompileOptions) -> Result<Lowered> {
             _ => body.push(s),
         }
     }
-    let Some((input_name, dim)) = input else {
+    let Some((input_name, dim, shape, domain)) = input else {
         return Err(WirError::new("missing input declaration, e.g. `input x: R2`"));
     };
     if outputs.is_empty() {
@@ -194,9 +194,34 @@ pub fn lower(src: &Source, opts: CompileOptions) -> Result<Lowered> {
 
     for s in body {
         let err = |m: String| WirError::at(s.line, &s.text, m);
+        let taken = |name: &String, creases: &[(String, CreaseInfo)]| {
+            name == &input_name || outputs.iter().any(|o| &o.name == name) || creases.iter().any(|c| &c.0 == name)
+        };
         match &s.kind {
+            StmtKind::RampCrease { name, ramp } | StmtKind::Gate { name, gate: ramp, .. } => {
+                if taken(name, &creases) {
+                    return Err(err(format!("`{name}` is already declared")));
+                }
+                let (w, b) = ramp_form(ramp, dim, shape.as_deref(), s)?;
+                let (up, params) = match &s.kind {
+                    StmtKind::Gate { up, .. } => {
+                        let (u, c) = ramp_form(up, dim, shape.as_deref(), s)?;
+                        (Some(Up { u, c }), 2 * dim + 2 + n_out)
+                    }
+                    _ => {
+                        if w.iter().all(|x| *x == 0.0) {
+                            return Err(err("ramp direction is the zero vector".into()));
+                        }
+                        (None, unit_params)
+                    }
+                };
+                let kind = if up.is_some() { UnitKind::Gate } else { UnitKind::Crease };
+                creases.push((name.clone(), CreaseInfo { unit: units.len(), used: false, cost: costs.len() }));
+                units.push(Unit { name: name.clone(), kind, w, b, coeffs: vec![0.0; n_out], up, line: Some(s.line) });
+                costs.push(CostLine { line: s.line, text: s.text.clone(), units: 1, params });
+            }
             StmtKind::Crease { name, plane, anchor } => {
-                if name == &input_name || outputs.iter().any(|o| &o.name == name) || creases.iter().any(|c| &c.0 == name) {
+                if taken(name, &creases) {
                     return Err(err(format!("`{name}` is already declared")));
                 }
                 let (w, b) = crease_weights(plane, anchor, dim, &check_dim, s)?;
@@ -207,6 +232,7 @@ pub fn lower(src: &Source, opts: CompileOptions) -> Result<Lowered> {
                     w,
                     b,
                     coeffs: vec![0.0; n_out],
+                    up: None,
                     line: Some(s.line),
                 });
                 costs.push(CostLine { line: s.line, text: s.text.clone(), units: 1, params: unit_params });
@@ -227,6 +253,15 @@ pub fn lower(src: &Source, opts: CompileOptions) -> Result<Lowered> {
                             info.used = true;
                             units[info.unit].coeffs[o] += t.coef;
                         }
+                        TermKind::Dot { coefs, names } => {
+                            for (n, c) in names.iter().zip(coefs) {
+                                let Some((_, info)) = creases.iter_mut().find(|cr| &cr.0 == n) else {
+                                    return Err(err(format!("`{n}` is not a declared crease or gate (declare it before the readout)")));
+                                };
+                                info.used = true;
+                                units[info.unit].coeffs[o] += t.coef * c;
+                            }
+                        }
                         TermKind::Hinge { left, at, turn } => {
                             if dim != 1 {
                                 return Err(err(format!("`hinge` is 1D sugar but the input is R{dim}; use a crease")));
@@ -238,7 +273,7 @@ pub fn lower(src: &Source, opts: CompileOptions) -> Result<Lowered> {
                             let mut coeffs = vec![0.0; n_out];
                             coeffs[o] = t.coef * turn;
                             let name = fresh_name(&units, &creases, &input_name, &outputs, "h");
-                            units.push(Unit { name, kind: UnitKind::Hinge, w: vec![w], b, coeffs, line: Some(t.line) });
+                            units.push(Unit { name, kind: UnitKind::Hinge, w: vec![w], b, coeffs, up: None, line: Some(t.line) });
                             hinges += 1;
                         }
                     }
@@ -360,8 +395,24 @@ pub fn lower(src: &Source, opts: CompileOptions) -> Result<Lowered> {
     let mut it = keep.iter();
     units.retain(|_| *it.next().unwrap());
 
+    if units.iter().any(|u| u.up.is_some()) && units.iter().any(|u| u.up.is_none()) {
+        return Err(WirError::new(
+            "a program is either ReLU (creases, hinges) or SwiGLU (gates); this one mixes both",
+        ));
+    }
+    if let Some((lo, hi)) = domain {
+        for u in units.iter().filter(|u| u.up.is_none()) {
+            if box_max(&u.w, u.b, lo, hi) <= 0.0 {
+                warnings.push(Warning {
+                    line: u.line,
+                    message: format!("crease `{}` is never active on the domain [{lo}, {hi}]^{dim}", u.name),
+                });
+            }
+        }
+    }
+
     Ok(Lowered {
-        program: Program { input: input_name, dim, outputs, units, asserts },
+        program: Program { input: input_name, dim, shape, domain, outputs, units, asserts },
         costs,
         solves,
         warnings,
@@ -468,4 +519,55 @@ fn crease_weights(
     }
     let k = anchor.value / delta;
     Ok((n.iter().map(|x| k * x).collect(), -k * e))
+}
+
+/// Largest value of w . x + b over the box [lo, hi]^D.
+pub fn box_max(w: &[f64], b: f64, lo: f64, hi: f64) -> f64 {
+    b + w.iter().map(|x| (x * lo).max(x * hi)).sum::<f64>()
+}
+
+/// `along DIR [above E]` -> (DIR as a flat vector, -E).
+fn ramp_form(r: &Ramp, dim: usize, shape: Option<&[usize]>, s: &Stmt) -> Result<(Vec<f64>, f64)> {
+    let err = |m: String| WirError::at(s.line, &s.text, m);
+    if !r.above.is_finite() {
+        return Err(err("`above` level is not finite".into()));
+    }
+    let v = expand_direction(&r.along, dim, shape).map_err(err)?;
+    Ok((v, -r.above))
+}
+
+/// Flat vector of a direction; `patch` needs a `R<c>x3x3` input.
+pub fn expand_direction(d: &Direction, dim: usize, shape: Option<&[usize]>) -> std::result::Result<Vec<f64>, String> {
+    let v = match d {
+        Direction::Flat(v) => {
+            if v.len() != dim {
+                return Err(format!("direction has {} entries but the input is R{dim}", v.len()));
+            }
+            v.clone()
+        }
+        Direction::Patch(parts) => {
+            let Some(&[c, 3, 3]) = shape else {
+                return Err(format!("`patch` needs an input shaped like R<c>x3x3, but the input is R{dim}"));
+            };
+            let mut v = vec![0.0; dim];
+            for (name, coefs) in parts {
+                if coefs.len() != c {
+                    return Err(format!("patch component `{name}` has {} entries for {c} channels", coefs.len()));
+                }
+                let &(_, i, j) = PATCH_BASIS.iter().find(|b| b.0 == name).unwrap();
+                for (ch, k) in coefs.iter().enumerate() {
+                    for row in 0..3 {
+                        for col in 0..3 {
+                            v[ch * 9 + row * 3 + col] += k * patch_profile(i, col) * patch_profile(j, row);
+                        }
+                    }
+                }
+            }
+            v
+        }
+    };
+    if v.iter().any(|x| !x.is_finite()) {
+        return Err("direction has a non-finite entry".into());
+    }
+    Ok(v)
 }

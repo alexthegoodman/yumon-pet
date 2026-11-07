@@ -144,11 +144,15 @@ implementation notes at the end of WIR.md). 51 tests pass (`cargo test` in wir/,
 and PyTorch via the python-train uv env. Repo checkpoints (Burn .bin, SwiGLU) are
 not yet decompilable.
 
-WIR on a real checkpoint (2026-11-07): `export_wir_colorizer` loads the CNN colorizer
-(`checkpoints/old/yumon-colorizer-256-a`, 64 ch, 5 blocks) and writes its head
-(3x3 head_conv -> ReLU -> 1x1 out_conv = per-pixel ReLU MLP, R576 -> 64 -> 313) as
-`tmp/wir-colorizer/head.json` plus `probe.json` (real patches + logits).
-`ColorizerModel::features` / `head()` are new. `wir decompile` then `wir verify`
-(new command) match the model on all 4,096 pixels: 1.2e-5 canonical, 3.6e-6 exact.
-SwiGLU/SiLU checkpoints and the stacked backbone are still not decompilable.
-
+WIR on real checkpoints (2026-11-07): see docs/WIR.md "Compact syntax..." and "Real
+checkpoints". wir now has vector literals (`[..] / 990`, integers over a 2-sig-digit
+scale), `crease: ramp along V above E`, SwiGLU `gate: silu along A, times along U`
+(weights W3/b3), vector readouts `[..] . (c1..c64)`, shaped inputs `R64x3x3` with
+`patch` directions (`--kernel-terms N` lossy), box domains `in [lo, hi]` and
+`decompile --domain probe.json`, and `wir verify`. Compact text for D > 3 or gates.
+Colorizer head (`export_wir_colorizer`, `ColorizerModel::features`/`head()`): 674k
+-> 79k tokens, 2.6e-4 relative error vs the model's logits. Sunrise
+(`wir_decoder record|eval`, `YumonDecBrain::forward_probe`/`mlp_weights`, `WirMlp`):
+each SwiGLU layer is 512 gates (~407k tokens); all six WIR-compiled layers in the
+model change loss by < 1e-4 with identical argmax tokens. Tokens stay ~2 per weight:
+FFT/low-rank/pruning of trained weights tested poorly. Attention/norms are not WIR.

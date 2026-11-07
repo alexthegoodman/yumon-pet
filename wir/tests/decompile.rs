@@ -6,7 +6,7 @@ use wir::{compile, decompile, print, DecompileOptions, Mat, NumFormat, Weights};
 fn weights(w1: Vec<Vec<f64>>, b1: Vec<f64>, w2: Vec<Vec<f64>>, b2: Vec<f64>) -> Weights {
     let d = w1.first().map_or(1, |r| r.len());
     let w1 = if w1.is_empty() { Mat::zeros(0, d) } else { Mat::from_rows(&w1).unwrap() };
-    Weights { w1, b1, w2: Mat::from_rows(&w2).unwrap(), b2, input: None, outputs: None }
+    Weights { w1, b1, w2: Mat::from_rows(&w2).unwrap(), b2, up: None, input: None, outputs: None, shape: None }
 }
 
 fn text(w: &Weights) -> String {

@@ -5,6 +5,14 @@
 //! rationals print as decimals (0.5, 0.0625), the rest as `p/q`, which the
 //! lexer reads back exactly. `Exact` prints the shortest string that parses
 //! back to the same f64, for lossless weight round-trips.
+//!
+//! Vectors (`[...]` literals, used by the compact high-dimensional syntax) print as
+//! integers over one scale with two significant digits, `[-881 -415 107] / 990` or
+//! `[...] / 4.1e4`. The scale is the largest such number that keeps every integer
+//! within `vector_digits` digits, so the largest entry lands near 10^d (900..999 for
+//! d = 3): d digits of resolution relative to the vector's largest entry. Integers
+//! of up to three digits are one token for common LLM tokenizers, against ~8 for
+//! `-0.881469`.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Precision {
@@ -18,14 +26,16 @@ pub enum Precision {
 pub struct NumFormat {
     pub precision: Precision,
     pub snap_rationals: bool,
+    /// Digits kept by vector literals in rounded modes (largest |entry| -> 10^(d-1)..10^d).
+    pub vector_digits: u32,
 }
 
 impl NumFormat {
     /// The v0 canonical display: 6 significant digits with rational snapping.
     pub const CANONICAL: NumFormat =
-        NumFormat { precision: Precision::Significant(6), snap_rationals: true };
+        NumFormat { precision: Precision::Significant(6), snap_rationals: true, vector_digits: 3 };
     /// Lossless: every printed number parses back to the identical f64.
-    pub const EXACT: NumFormat = NumFormat { precision: Precision::Exact, snap_rationals: false };
+    pub const EXACT: NumFormat = NumFormat { precision: Precision::Exact, snap_rationals: false, vector_digits: 17 };
 }
 
 impl Default for NumFormat {
@@ -93,6 +103,56 @@ pub fn format_num(x: f64, fmt: NumFormat) -> String {
     }
 }
 
+/// A vector literal. Exact mode lists exact numbers; rounded modes print integers
+/// over a power of ten chosen so the largest |entry| becomes 10^(d-1)..10^d.
+pub fn format_vector(v: &[f64], fmt: NumFormat) -> String {
+    let list = |items: Vec<String>| format!("[{}]", items.join(" "));
+    let big = v.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+    if fmt.precision == Precision::Exact || big == 0.0 || !big.is_finite() {
+        return list(v.iter().map(|x| if *x == 0.0 { "0".into() } else { format_exact(*x) }).collect());
+    }
+    let (m, e) = vector_scale(big, fmt.vector_digits);
+    let q = scale_value(m, e);
+    let ints = list(v.iter().map(|x| format!("{}", (x * q).round() as i64)).collect());
+    if q == 1.0 { ints } else { format!("{ints} / {}", scale_text(m, e)) }
+}
+
+/// Scale m * 10^e (m in 10..=99): the largest with big * scale <= 10^d - 0.5.
+pub fn vector_scale(big: f64, digits: u32) -> (i64, i32) {
+    let limit = 10f64.powi(digits as i32) - 0.5;
+    let target = limit / big;
+    let mut e = target.log10().floor() as i32 - 1;
+    let mut m = (target / 10f64.powi(e)).floor() as i64;
+    // Float noise at the edges of a decade.
+    while m >= 100 {
+        m /= 10;
+        e += 1;
+    }
+    while m < 10 {
+        m = m * 10 + 9;
+        e -= 1;
+    }
+    while m > 10 && big * scale_value(m, e) > limit {
+        m -= 1;
+    }
+    (m, e)
+}
+
+/// m * 10^e as an f64 (division for negative exponents keeps it exact-ish).
+pub fn scale_value(m: i64, e: i32) -> f64 {
+    if e >= 0 { m as f64 * 10f64.powi(e) } else { m as f64 / 10f64.powi(-e) }
+}
+
+/// `990`, `4.1e4`, `0.12`: integers up to 4 digits plainly, otherwise mantissa form.
+fn scale_text(m: i64, e: i32) -> String {
+    match e {
+        0..=2 => format!("{}", m * 10i64.pow(e as u32)),
+        -2..=-1 => format_exact(scale_value(m, e)),
+        _ if m % 10 == 0 => format!("{}e{}", m / 10, e + 1),
+        _ => format!("{}.{}e{}", m / 10, m % 10, e + 1),
+    }
+}
+
 fn format_exact(x: f64) -> String {
     let a = x.abs();
     if (1e-5..1e15).contains(&a) { format!("{x}") } else { format!("{x:e}") }
@@ -144,6 +204,17 @@ mod tests {
         assert_eq!(format_num(123456789.4, c), "123457000");
         assert_eq!(format_num(1.234567e-7, c), "1.23457e-7");
         assert_eq!(format_num(1e-13, c), "0");
+    }
+
+    #[test]
+    fn vector_formatting() {
+        let c = NumFormat::CANONICAL;
+        assert_eq!(format_vector(&[1.0, -0.5, 0.1234], c), "[990 -495 122] / 990");
+        assert_eq!(format_vector(&[0.024, -0.0001], c), "[984 -4] / 4.1e4");
+        assert_eq!(format_vector(&[0.0047, -0.0001], c), "[987 -21] / 2.1e5");
+        assert_eq!(format_vector(&[250.0, 3.0], c), "[975 12] / 3.9");
+        assert_eq!(format_vector(&[0.0, 0.0], c), "[0 0]");
+        assert_eq!(format_vector(&[0.5, 0.0], NumFormat::EXACT), "[0.5 0]");
     }
 
     #[test]

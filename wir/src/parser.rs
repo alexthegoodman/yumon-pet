@@ -117,8 +117,78 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// `( NUM {, NUM} )`, or a bare number as a 1D point.
+    /// `[ NUM NUM ... ] [/ NUM]`: entries separated by spaces (commas allowed),
+    /// all divided by the optional scale.
+    fn vector(&mut self) -> Result<Vec<f64>> {
+        self.expect(Tok::LBracket)?;
+        let mut v = Vec::new();
+        while self.peek() != Some(&Tok::RBracket) {
+            if self.at_end() {
+                return Err(self.err("unclosed `[` vector"));
+            }
+            v.push(self.number()?);
+            if self.peek() == Some(&Tok::Comma) {
+                self.pos += 1;
+            }
+        }
+        self.pos += 1;
+        if v.is_empty() {
+            return Err(self.err("empty vector `[]`"));
+        }
+        if self.peek() == Some(&Tok::Slash) {
+            self.pos += 1;
+            let q = self.number()?;
+            if !(q != 0.0 && q.is_finite()) {
+                return Err(self.err("vector scale must be a finite non-zero number"));
+            }
+            v.iter_mut().for_each(|x| *x /= q);
+        }
+        Ok(v)
+    }
+
+    /// A vector, or `patch NAME VEC {NAME VEC}` over the 3x3 basis.
+    fn direction(&mut self) -> Result<Direction> {
+        if !self.is_kw("patch") {
+            return Ok(Direction::Flat(self.point()?));
+        }
+        self.pos += 1;
+        let mut parts: Vec<(String, Vec<f64>)> = Vec::new();
+        while let Some(Tok::Ident(n)) = self.peek() {
+            let n = n.clone();
+            if !PATCH_BASIS.iter().any(|b| b.0 == n) {
+                break;
+            }
+            if parts.iter().any(|p| p.0 == n) {
+                return Err(self.err(format!("patch component `{n}` appears twice")));
+            }
+            self.pos += 1;
+            parts.push((n, self.vector()?));
+        }
+        if parts.is_empty() {
+            let names: Vec<&str> = PATCH_BASIS.iter().map(|b| b.0).collect();
+            return Err(self.err(format!("`patch` needs components ({}), found {}", names.join(", "), self.found())));
+        }
+        Ok(Direction::Patch(parts))
+    }
+
+    /// `along DIR [above NUM]`
+    fn ramp(&mut self) -> Result<Ramp> {
+        self.keyword("along")?;
+        let along = self.direction()?;
+        let above = if self.is_kw("above") {
+            self.pos += 1;
+            self.number()?
+        } else {
+            0.0
+        };
+        Ok(Ramp { along, above })
+    }
+
+    /// `( NUM {, NUM} )`, a `[...]` vector, or a bare number as a 1D point.
     fn point(&mut self) -> Result<Vec<f64>> {
+        if self.peek() == Some(&Tok::LBracket) {
+            return self.vector();
+        }
         if self.peek() != Some(&Tok::LParen) {
             if self.number_follows() {
                 return Ok(vec![self.number()?]);
@@ -135,14 +205,24 @@ impl<'a> Cursor<'a> {
         Ok(v)
     }
 
-    fn dim(&mut self) -> Result<usize> {
+    /// `R<d>` or a shaped space `R<a>x<b>x...`: (dimension, shape if shaped).
+    fn dim(&mut self) -> Result<(usize, Option<Vec<usize>>)> {
         match self.next() {
-            Some(Tok::Ident(s)) if s.len() > 1 && s.starts_with('R') && s[1..].chars().all(|c| c.is_ascii_digit()) => {
-                let d: usize = s[1..].parse().map_err(|_| self.err("dimension out of range"))?;
+            Some(Tok::Ident(s))
+                if s.len() > 1
+                    && s.starts_with('R')
+                    && s[1..].split('x').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())) =>
+            {
+                let shape: Vec<usize> = s[1..]
+                    .split('x')
+                    .map(|p| p.parse::<usize>())
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(|_| self.err("dimension out of range"))?;
+                let d: usize = shape.iter().product();
                 if d == 0 {
                     return Err(self.err("dimension must be at least 1 (R1)"));
                 }
-                Ok(d)
+                Ok((d, (shape.len() > 1).then_some(shape)))
             }
             _ => {
                 self.pos -= 1;
@@ -171,12 +251,44 @@ impl<'a> Cursor<'a> {
                     self.pos += 1;
                     let name = self.name()?;
                     self.expect(Tok::Colon)?;
-                    let dim = self.dim()?;
-                    if is_input { StmtKind::Input { name, dim } } else { StmtKind::Output { name, dim } }
+                    let (dim, shape) = self.dim()?;
+                    if is_input {
+                        let domain = if self.is_kw("in") {
+                            self.pos += 1;
+                            self.expect(Tok::LBracket)?;
+                            let lo = self.number()?;
+                            self.expect(Tok::Comma)?;
+                            let hi = self.number()?;
+                            self.expect(Tok::RBracket)?;
+                            if !(lo < hi) {
+                                return Err(self.err("domain `in [lo, hi]` needs lo < hi"));
+                            }
+                            Some((lo, hi))
+                        } else {
+                            None
+                        };
+                        StmtKind::Input { name, dim, shape, domain }
+                    } else {
+                        if shape.is_some() {
+                            return Err(self.err("outputs are scalar in v0; declare `output <name>: R1` components"));
+                        }
+                        StmtKind::Output { name, dim }
+                    }
                 }
                 "crease" => {
                     self.pos += 1;
                     self.crease()?
+                }
+                "gate" => {
+                    self.pos += 1;
+                    let name = self.name()?;
+                    self.expect(Tok::Colon)?;
+                    self.keyword("silu")?;
+                    let gate = self.ramp()?;
+                    self.expect(Tok::Comma)?;
+                    self.keyword("times")?;
+                    let up = self.ramp()?;
+                    StmtKind::Gate { name, gate, up }
                 }
                 "assert" => {
                     self.pos += 1;
@@ -193,6 +305,10 @@ impl<'a> Cursor<'a> {
     fn crease(&mut self) -> Result<StmtKind> {
         let name = self.name()?;
         self.expect(Tok::Colon)?;
+        if self.is_kw("ramp") {
+            self.pos += 1;
+            return Ok(StmtKind::RampCrease { name, ramp: self.ramp()? });
+        }
         let plane = if self.is_kw("zero") {
             self.pos += 1;
             self.keyword("on")?;
@@ -224,7 +340,7 @@ impl<'a> Cursor<'a> {
             PlaneSpec::Between { p, q }
         } else {
             return Err(self.err(format!(
-                "expected a plane (`zero on line`, `zero on plane normal`, `between`), found {}",
+                "expected a plane (`zero on line`, `zero on plane normal`, `between`) or `ramp along`, found {}",
                 self.found()
             )));
         };
@@ -313,6 +429,32 @@ impl<'a> Cursor<'a> {
             self.pos += 1;
             coef = -coef;
         }
+        if self.peek() == Some(&Tok::LBracket) {
+            let coefs = self.vector()?;
+            self.expect(Tok::Dot)?;
+            self.expect(Tok::LParen)?;
+            let mut names = Vec::new();
+            loop {
+                let first = self.name()?;
+                if self.peek() == Some(&Tok::DotDot) {
+                    self.pos += 1;
+                    let last = self.name()?;
+                    names.extend(self.name_range(&first, &last)?);
+                } else {
+                    names.push(first);
+                }
+                if self.peek() == Some(&Tok::Comma) {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            self.expect(Tok::RParen)?;
+            if coefs.len() != names.len() {
+                return Err(self.err(format!("{} coefficients for {} names", coefs.len(), names.len())));
+            }
+            return Ok(Term { coef, kind: TermKind::Dot { coefs, names }, line });
+        }
         if self.is_kw("hinge") {
             self.pos += 1;
             let left = self.is_kw("left");
@@ -326,6 +468,20 @@ impl<'a> Cursor<'a> {
             return Ok(Term { coef, kind: TermKind::Hinge { left, at, turn }, line });
         }
         Ok(Term { coef, kind: TermKind::Name(self.name()?), line })
+    }
+}
+
+impl Cursor<'_> {
+    /// `c1..c64` -> c1, c2, ..., c64 (same prefix, ascending numbers).
+    fn name_range(&self, first: &str, last: &str) -> Result<Vec<String>> {
+        let split = |n: &str| {
+            let i = n.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+            (n[..i].to_string(), n[i..].parse::<usize>().ok())
+        };
+        match (split(first), split(last)) {
+            ((p, Some(a)), (q, Some(b))) if p == q && a <= b => Ok((a..=b).map(|i| format!("{p}{i}")).collect()),
+            _ => Err(self.err(format!("`{first}..{last}` is not a range like c1..c64"))),
+        }
     }
 }
 

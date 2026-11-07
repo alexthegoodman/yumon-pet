@@ -81,8 +81,10 @@ pub fn random_network(rng: &mut Rng, d: usize, h: usize, o: usize) -> Weights {
         b1: rows.iter().map(|r| r.1).collect(),
         w2,
         b2: (0..o).map(|_| rng.uniform(-1.0, 1.0)).collect(),
+        up: None,
         input: None,
         outputs: None,
+        shape: None,
     }
 }
 

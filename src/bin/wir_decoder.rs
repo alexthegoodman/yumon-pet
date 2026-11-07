@@ -1,28 +1,29 @@
-//! WIR approximations of a dense decoder's SwiGLU MLPs (e.g. yumon-base-dec-sunrise).
+//! WIR decompiles of a dense decoder's SwiGLU MLPs (e.g. yumon-base-dec-sunrise).
 //!
-//! SwiGLU, w2(silu(w1 x) * w3 x), is not piecewise linear, so WIR v0 cannot state it
-//! exactly. The pipeline fits a one-hidden-layer ReLU network to each block's MLP on
-//! real activations (`scripts/wir_fit_mlp.py`), decompiles it with `wir`, compiles the
-//! WIR text back to weights and puts those into the real model:
+//! Each block's MLP w2(silu(w1 x) * w3 x) is a WIR program of `gate` units. The
+//! pipeline decompiles it with `wir`, compiles the WIR text back to weights and runs
+//! those inside the real model:
 //!
-//! - `record`: per layer, MLP inputs/outputs on fit samples (`layer{l}_x.npy`,
-//!   `layer{l}_y.npy`), the SwiGLU weights (`layer{l}_swiglu.npz`: w1 w3 [ff, d], w2
-//!   [d, ff]) and a `wir verify` probe from held-out eval samples (`layer{l}_probe.json`).
+//! - `record`: per layer, the SwiGLU weights as a wir weights file
+//!   (`layer{l}_swiglu.json`: W1 W3 [ff, d], W2 [d, ff], zero biases) and a
+//!   `wir verify` probe of real MLP inputs/outputs (`layer{l}_probe.json`).
 //! - `eval`: next-token loss and top-1 agreement of the model with MLPs replaced by
-//!   WIR weight files (`--mlp 0=layer0.json`), each layer alone and all together.
+//!   WIR weight files (`--mlp 0=layer0.json`, ReLU or SwiGLU), each layer alone and
+//!   all together.
 //!
-//! Fit and eval samples are disjoint, spread evenly over the cache.
+//! Eval samples are spread evenly over the cache.
 
 use anyhow::{Context, Result, ensure};
 use burn::{prelude::*, tensor::{TensorData, activation::log_softmax}};
 use clap::{Parser, Subcommand};
 use serde_json::json;
-use std::{collections::BTreeMap, io::Write, path::{Path, PathBuf}};
+use std::{collections::BTreeMap, path::{Path, PathBuf}};
 
 use yumon_pet::brain::{
     PAD_TOKEN,
-    decoder_model::{ReluMlp, YumonDecBrain},
+    decoder_model::{WirMlp, YumonDecBrain},
     sample_cache::load_cache,
+    samples::{is_plain_text, language_separator_for},
 };
 
 type B = burn_cubecl::CubeBackend<cubecl::wgpu::WgpuRuntime, f32, i32, u32>;
@@ -52,9 +53,6 @@ enum Cmd {
     Record {
         #[command(flatten)]
         common: Common,
-        /// Samples whose activations are written for fitting.
-        #[arg(long, default_value_t = 4000)]
-        fit: usize,
         /// Rows per layer in each `wir verify` probe.
         #[arg(long, default_value_t = 2048)]
         probe: usize,
@@ -76,13 +74,14 @@ struct Seq {
     targets: Vec<i32>,
 }
 
-/// Prompt + reply joined as in training (plain text has no separator); loss from the
-/// last prompt token on.
-fn build(input: &[usize], target: &[usize], max: usize) -> Seq {
-    let input_len = input.iter().position(|&t| t == PAD_TOKEN).unwrap_or(input.len()).min(max - 1);
+/// `[prompt][separator][reply]` as in training (`build_moe_batch`; plain text has no
+/// separator); loss from the last prompt token on.
+fn build(input: &[usize], target: &[usize], sep: &[usize], max: usize) -> Seq {
+    let input_len = input.iter().position(|&t| t == PAD_TOKEN).unwrap_or(input.len()).min(max - sep.len() - 1);
     let target_len = target.iter().position(|&t| t == PAD_TOKEN).unwrap_or(target.len());
-    let mut tokens: Vec<i32> = input[..input_len].iter().map(|&t| t as i32).collect();
-    tokens.extend(target[..target_len.min(max - input_len)].iter().map(|&t| t as i32));
+    let mut tokens: Vec<i32> = input[..input_len].iter().chain(sep).map(|&t| t as i32).collect();
+    let room = max - tokens.len();
+    tokens.extend(target[..target_len.min(room)].iter().map(|&t| t as i32));
     let mut targets = vec![PAD_TOKEN as i32; tokens.len()];
     for i in input_len.saturating_sub(1)..tokens.len().saturating_sub(1) {
         targets[i] = tokens[i + 1];
@@ -90,20 +89,23 @@ fn build(input: &[usize], target: &[usize], max: usize) -> Seq {
     Seq { tokens, targets }
 }
 
-/// Model, (fit, eval) sequences; fit is empty when `fit == 0`.
-fn setup(c: &Common, fit: usize, device: &<B as Backend>::Device) -> Result<(YumonDecBrain<B>, Vec<Seq>, Vec<Seq>)> {
+/// Model and eval sequences.
+fn setup(c: &Common, device: &<B as Backend>::Device) -> Result<(YumonDecBrain<B>, Vec<Seq>)> {
     let (model, tokenizer, config) = YumonDecBrain::<B>::load(c.checkpoint.to_str().unwrap(), device)?;
     let samples = load_cache(&c.cache, &tokenizer, config.training_stage, config.max_seq_len)?;
     let n = samples.len();
-    ensure!(c.eval + fit < n, "cache has {n} samples, asked for {} + {fit}", c.eval);
+    ensure!(c.eval > 0 && c.eval <= n, "cache has {n} samples, asked for {}", c.eval);
     let eval_idx: Vec<usize> = (0..c.eval).map(|i| (2 * i + 1) * n / (2 * c.eval)).collect();
-    let rest: Vec<usize> = (0..n).filter(|i| !eval_idx.contains(i)).collect();
-    let fit_idx: Vec<usize> = (0..fit).map(|i| rest[i * rest.len() / fit.max(1)]).collect();
-    let seq = |i: &usize| build(&samples[*i].input_ids, &samples[*i].target_labels, config.max_seq_len);
-    let (fit, eval): (Vec<Seq>, Vec<Seq>) = (fit_idx.iter().map(seq).collect(), eval_idx.iter().map(seq).collect());
-    let tokens = |s: &[Seq]| s.iter().map(|q| q.tokens.len()).sum::<usize>();
-    println!("{n} cached samples; fit {} ({} tokens), eval {} ({} tokens)", fit.len(), tokens(&fit), eval.len(), tokens(&eval));
-    Ok((model, fit, eval))
+    let sep = tokenizer.encode(language_separator_for(&tokenizer));
+    let seq = |i: &usize| {
+        let s = &samples[*i];
+        let sep = if is_plain_text(s) { &[][..] } else { &sep[..] };
+        build(&s.input_ids, &s.target_labels, sep, config.max_seq_len)
+    };
+    let eval: Vec<Seq> = eval_idx.iter().map(seq).collect();
+    let tokens: usize = eval.iter().map(|q| q.tokens.len()).sum();
+    println!("{n} cached samples; eval {} ({tokens} tokens)", eval.len());
+    Ok((model, eval))
 }
 
 /// Right-padded batch tensor and its width.
@@ -130,33 +132,15 @@ fn real_rows(t: Tensor<B, 3>, seqs: &[Seq], out: &mut Vec<f32>) {
     }
 }
 
-fn write_npy(path: &Path, shape: &[usize], data: &[f32]) -> Result<()> {
-    let dims = shape.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ");
-    let dims = if shape.len() == 1 { format!("{dims},") } else { dims };
-    let mut header = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({dims}), }}");
-    while (10 + header.len() + 1) % 64 != 0 {
-        header.push(' ');
-    }
-    header.push('\n');
-    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
-    f.write_all(b"\x93NUMPY\x01\x00")?;
-    f.write_all(&(header.len() as u16).to_le_bytes())?;
-    f.write_all(header.as_bytes())?;
-    for x in data {
-        f.write_all(&x.to_le_bytes())?;
-    }
-    Ok(())
-}
-
 /// [rows, cols] from a Burn [in, out] weight, transposed to nn.Linear [out, in].
 fn linear_layout(w: Tensor<B, 2>) -> (Vec<usize>, Vec<f32>) {
     let [i, o] = w.dims();
     (vec![o, i], floats(w.transpose()))
 }
 
-fn record(c: &Common, fit: usize, probe: usize, out: &Path) -> Result<()> {
+fn record(c: &Common, probe: usize, out: &Path) -> Result<()> {
     let device = Default::default();
-    let (model, fit_seqs, eval_seqs) = setup(c, fit, &device)?;
+    let (model, eval_seqs) = setup(c, &device)?;
     std::fs::create_dir_all(out)?;
     let layers = model.config.n_layers;
 
@@ -166,31 +150,25 @@ fn record(c: &Common, fit: usize, probe: usize, out: &Path) -> Result<()> {
     let diff = floats((probe_logits - model.forward(t)).abs().max());
     println!("forward_probe vs forward: max |diff| {:.3e}", diff[0]);
 
-    let mut xs = vec![Vec::new(); layers];
-    let mut ys = vec![Vec::new(); layers];
-    for (k, chunk) in fit_seqs.chunks(c.batch).enumerate() {
-        let (t, _) = batch_tokens(chunk, &device);
-        let (_, trace) = model.forward_probe(t, &[]);
-        for (l, (x, y)) in trace.into_iter().enumerate() {
-            real_rows(x, chunk, &mut xs[l]);
-            real_rows(y, chunk, &mut ys[l]);
-        }
-        if k % 50 == 0 {
-            println!("  fit batch {k}/{}", fit_seqs.len().div_ceil(c.batch));
-        }
-    }
     let d = model.config.embed_dim;
     for l in 0..layers {
-        let rows = xs[l].len() / d;
-        write_npy(&out.join(format!("layer{l}_x.npy")), &[rows, d], &xs[l])?;
-        write_npy(&out.join(format!("layer{l}_y.npy")), &[rows, d], &ys[l])?;
         let (w1, w3, w2) = model.mlp_weights(l);
-        for (name, w) in [("w1", w1), ("w3", w3), ("w2", w2)] {
+        let ff = w1.dims()[1];
+        let rows = |w: Tensor<B, 2>| -> Vec<Vec<f32>> {
             let (shape, v) = linear_layout(w);
-            write_npy(&out.join(format!("layer{l}_{name}.npy")), &shape, &v)?;
-        }
+            v.chunks(shape[1]).map(<[f32]>::to_vec).collect()
+        };
+        let weights = json!({
+            "format": "wir-weights",
+            "source": format!("{} layer {l} SwiGLU MLP", c.checkpoint.display()),
+            "input": "x",
+            "W1": rows(w1), "b1": vec![0.0; ff],
+            "W3": rows(w3), "b3": vec![0.0; ff],
+            "W2": rows(w2), "b2": vec![0.0; d],
+        });
+        std::fs::write(out.join(format!("layer{l}_swiglu.json")), serde_json::to_string(&weights)?)?;
     }
-    println!("wrote {} fit rows per layer", xs[0].len() / d);
+    println!("wrote {layers} layer weight files");
 
     // Probes: held-out rows, an even stride over every real eval position.
     let mut px = vec![Vec::new(); layers];
@@ -218,7 +196,7 @@ fn record(c: &Common, fit: usize, probe: usize, out: &Path) -> Result<()> {
     Ok(())
 }
 
-fn load_relu_mlp(path: &Path, device: &<B as Backend>::Device) -> Result<ReluMlp<B>> {
+fn load_wir_mlp(path: &Path, device: &<B as Backend>::Device) -> Result<WirMlp<B>> {
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).with_context(|| path.display().to_string())?)?;
     let matrix = |k: &str| -> Result<(Vec<f32>, [usize; 2])> {
         let rows = v[k].as_array().with_context(|| format!("{}: no {k}", path.display()))?;
@@ -231,7 +209,18 @@ fn load_relu_mlp(path: &Path, device: &<B as Backend>::Device) -> Result<ReluMlp
     };
     let ((w1, s1), (w2, s2)) = (matrix("W1")?, matrix("W2")?);
     let (b1, b2) = (vector("b1")?, vector("b2")?);
-    Ok(ReluMlp {
+    let up = match v.get("W3") {
+        Some(_) => {
+            let ((w3, s3), b3) = (matrix("W3")?, vector("b3")?);
+            Some((
+                Tensor::from_data(TensorData::new(w3, s3), device),
+                Tensor::from_data(TensorData::new(b3.clone(), [b3.len()]), device),
+            ))
+        }
+        None => None,
+    };
+    Ok(WirMlp {
+        up,
         w1: Tensor::from_data(TensorData::new(w1, s1), device),
         b1: Tensor::from_data(TensorData::new(b1.clone(), [b1.len()]), device),
         w2: Tensor::from_data(TensorData::new(w2, s2), device),
@@ -249,7 +238,7 @@ struct Score {
 
 /// Loss on training-supervised positions; top-1 agreement with `reference` argmaxes on
 /// every real position (`reference` is filled when empty).
-fn score(model: &YumonDecBrain<B>, seqs: &[Seq], batch: usize, mlps: &[Option<ReluMlp<B>>], reference: &mut Vec<i32>) -> Score {
+fn score(model: &YumonDecBrain<B>, seqs: &[Seq], batch: usize, mlps: &[Option<WirMlp<B>>], reference: &mut Vec<i32>) -> Score {
     let device = Default::default();
     let fill = reference.is_empty();
     let mut s = Score::default();
@@ -287,14 +276,14 @@ fn score(model: &YumonDecBrain<B>, seqs: &[Seq], batch: usize, mlps: &[Option<Re
 
 fn eval(c: &Common, specs: &[String]) -> Result<()> {
     let device = Default::default();
-    let (model, _, eval_seqs) = setup(c, 0, &device)?;
+    let (model, eval_seqs) = setup(c, &device)?;
     let layers = model.config.n_layers;
-    let mut replacements: BTreeMap<usize, ReluMlp<B>> = BTreeMap::new();
+    let mut replacements: BTreeMap<usize, WirMlp<B>> = BTreeMap::new();
     for s in specs {
         let (l, p) = s.split_once('=').with_context(|| format!("--mlp `{s}` should be layer=path"))?;
         let l: usize = l.parse()?;
         ensure!(l < layers, "layer {l} out of range (model has {layers})");
-        replacements.insert(l, load_relu_mlp(Path::new(p), &device)?);
+        replacements.insert(l, load_wir_mlp(Path::new(p), &device)?);
     }
     let mut reference = Vec::new();
     let base = score(&model, &eval_seqs, c.batch, &[], &mut reference);
@@ -307,7 +296,7 @@ fn eval(c: &Common, specs: &[String]) -> Result<()> {
         println!("{:<14} {:>9.4} {:>+9.4} {:>9.2}%", name, loss, loss - base_loss, 100.0 * s.agree as f64 / s.positions as f64);
     };
     let keys: Vec<usize> = replacements.keys().copied().collect();
-    let take = |only: Option<usize>, r: &mut BTreeMap<usize, ReluMlp<B>>| -> Vec<Option<ReluMlp<B>>> {
+    let take = |only: Option<usize>, r: &mut BTreeMap<usize, WirMlp<B>>| -> Vec<Option<WirMlp<B>>> {
         (0..layers).map(|l| if only.is_none_or(|o| o == l) { r.remove(&l) } else { None }).collect()
     };
     for &l in &keys {
@@ -328,7 +317,7 @@ fn eval(c: &Common, specs: &[String]) -> Result<()> {
 
 fn main() -> Result<()> {
     match Args::parse().cmd {
-        Cmd::Record { common, fit, probe, out } => record(&common, fit, probe, &out),
+        Cmd::Record { common, probe, out } => record(&common, probe, &out),
         Cmd::Eval { common, mlps } => eval(&common, &mlps),
     }
 }

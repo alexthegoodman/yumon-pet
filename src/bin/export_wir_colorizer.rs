@@ -43,8 +43,9 @@ struct Args {
     #[arg(long, default_value = "gt_sample0.png")]
     image: PathBuf,
 
-    /// Number of probe pixels (the four corners are always included).
-    #[arg(long, default_value_t = 512)]
+    /// Number of probe pixels (the four corners are always included). The default
+    /// covers every head pixel, so the probe is also a safe `wir decompile --domain`.
+    #[arg(long, default_value_t = 4096)]
     samples: usize,
 
     #[arg(long, default_value = "tmp/wir-colorizer")]

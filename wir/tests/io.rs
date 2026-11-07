@@ -74,7 +74,7 @@ fn explicit_keys_and_transpose() {
     let path = tmp("slice.json");
     std::fs::write(&path, json.to_string()).unwrap();
     let keys = ["mlp.fc1.weight", "mlp.fc1.bias", "mlp.fc2.weight", "mlp.fc2.bias"].map(String::from);
-    let back = io::load(&path, &LoadOptions { keys: Some(keys), transpose: true }).unwrap();
+    let back = io::load(&path, &LoadOptions { keys: Some(keys.to_vec()), transpose: true }).unwrap();
     assert_eq!(back.w1, w.w1);
     assert_eq!(back.w2, w.w2);
     // Without keys the error lists what is available.

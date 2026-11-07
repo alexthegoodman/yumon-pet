@@ -10,6 +10,10 @@
 //! On read, any of those spellings (or `w1`/`w2`) is accepted, or explicit
 //! keys can be given for slices of larger checkpoints. `.npz` must be stored
 //! (`np.savez`), not deflated (`np.savez_compressed`).
+//!
+//! SwiGLU networks add `W3`, `b3` (the up projection; a missing `b3` reads as
+//! zeros). Their safetensors keys are `w1.weight`/`w1.bias`, `w3.*`, `w2.*`. An
+//! optional input shape travels as `input_shape` (JSON key or metadata).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -50,8 +54,8 @@ pub enum DType {
 /// Which tensors to read, for checkpoints that do not use the default names.
 #[derive(Debug, Clone, Default)]
 pub struct LoadOptions {
-    /// Explicit names for W1, b1, W2, b2.
-    pub keys: Option<[String; 4]>,
+    /// Explicit names for W1, b1, W2, b2, optionally followed by W3, b3 (SwiGLU).
+    pub keys: Option<Vec<String>>,
     /// Weights are stored [in, out] (Burn `Linear` layout) rather than [out, in].
     pub transpose: bool,
 }
@@ -67,6 +71,7 @@ pub struct TensorFile {
     pub tensors: BTreeMap<String, Tensor>,
     pub input: Option<String>,
     pub outputs: Option<Vec<String>>,
+    pub shape: Option<Vec<usize>>,
 }
 
 pub fn save(w: &Weights, path: &Path, dtype: DType) -> Result<()> {
@@ -93,25 +98,52 @@ pub fn read_tensors(bytes: &[u8], format: Format) -> Result<TensorFile> {
     }
 }
 
-fn layer_tensors(w: &Weights) -> [(&'static str, Vec<usize>, &[f64]); 4] {
-    [
+fn layer_tensors(w: &Weights) -> Vec<(&'static str, Vec<usize>, &[f64])> {
+    let mut t: Vec<(&'static str, Vec<usize>, &[f64])> = vec![
         ("W1", vec![w.w1.rows, w.w1.cols], &w.w1.data),
         ("b1", vec![w.b1.len()], &w.b1),
         ("W2", vec![w.w2.rows, w.w2.cols], &w.w2.data),
         ("b2", vec![w.b2.len()], &w.b2),
-    ]
+    ];
+    if let Some((w3, b3)) = &w.up {
+        t.push(("W3", vec![w3.rows, w3.cols], &w3.data));
+        t.push(("b3", vec![b3.len()], b3));
+    }
+    t
 }
 
 fn meta_json(w: &Weights) -> Value {
-    json!({ "input": w.input, "outputs": w.outputs })
+    json!({ "input": w.input, "outputs": w.outputs, "input_shape": w.shape })
 }
 
 /// Pick W1, b1, W2, b2 out of a tensor file and check their shapes.
 pub fn assemble(file: &TensorFile, opts: &LoadOptions) -> Result<Weights> {
-    const CANDIDATES: [&[&str]; 4] =
-        [&["W1", "w1", "0.weight"], &["b1", "0.bias"], &["W2", "w2", "2.weight"], &["b2", "2.bias"]];
-    let mut picked = Vec::new();
+    const CANDIDATES: [&[&str]; 6] = [
+        &["W1", "w1", "0.weight", "w1.weight"],
+        &["b1", "0.bias", "w1.bias"],
+        &["W2", "w2", "2.weight", "w2.weight"],
+        &["b2", "2.bias", "w2.bias"],
+        &["W3", "w3", "w3.weight"],
+        &["b3", "w3.bias"],
+    ];
+    if let Some(keys) = &opts.keys
+        && keys.len() != 4 && keys.len() != 6 {
+            return Err(WirError::new("keys must name W1,b1,W2,b2 or W1,b1,W2,b2,W3,b3"));
+        }
+    let has_up = match &opts.keys {
+        Some(keys) => keys.len() == 6,
+        None => CANDIDATES[4].iter().any(|k| file.tensors.contains_key(*k)),
+    };
+    let mut picked: Vec<Tensor> = Vec::new();
     for (i, cands) in CANDIDATES.iter().enumerate() {
+        if i >= 4 && !has_up {
+            break;
+        }
+        if i == 5 && opts.keys.is_none() && !cands.iter().any(|k| file.tensors.contains_key(*k)) {
+            let h = picked[4].shape.first().copied().unwrap_or(0);
+            picked.push(Tensor { shape: vec![h], data: vec![0.0; h] });
+            continue;
+        }
         let t = match &opts.keys {
             Some(keys) => file.tensors.get(&keys[i]).ok_or_else(|| {
                 WirError::new(format!("tensor `{}` not found; available: {}", keys[i], available(file)))
@@ -126,7 +158,10 @@ pub fn assemble(file: &TensorFile, opts: &LoadOptions) -> Result<Weights> {
         };
         picked.push(t.clone());
     }
-    let [w1, b1, w2, b2]: [Tensor; 4] = picked.try_into().unwrap();
+    let mut picked = picked.into_iter();
+    let mut next = || picked.next();
+    let (w1, b1, w2, b2) = (next().unwrap(), next().unwrap(), next().unwrap(), next().unwrap());
+    let (w3, b3) = (next(), next());
     let matrix = |t: Tensor, name: &str| -> Result<Mat> {
         let (r, c) = match t.shape.as_slice() {
             [r, c] => (*r, *c),
@@ -142,13 +177,19 @@ pub fn assemble(file: &TensorFile, opts: &LoadOptions) -> Result<Weights> {
             _ => Err(WirError::new(format!("{name} must be 1-D, got shape {:?}", t.shape))),
         }
     };
+    let up = match (w3, b3) {
+        (Some(w3), Some(b3)) => Some((matrix(w3, "W3")?, vector(b3, "b3")?)),
+        _ => None,
+    };
     let weights = Weights {
         w1: matrix(w1, "W1")?,
         b1: vector(b1, "b1")?,
         w2: matrix(w2, "W2")?,
         b2: vector(b2, "b2")?,
+        up,
         input: file.input.clone(),
         outputs: file.outputs.clone(),
+        shape: file.shape.clone(),
     };
     weights.check_shapes()?;
     Ok(weights)
@@ -169,13 +210,16 @@ fn transpose(m: &Mat) -> Mat {
     t
 }
 
-fn read_meta(v: &Value) -> (Option<String>, Option<Vec<String>>) {
-    let input = v.get("input").and_then(|x| x.as_str()).map(String::from);
-    let outputs = v
+fn read_meta(v: &Value, file: &mut TensorFile) {
+    file.input = v.get("input").and_then(|x| x.as_str()).map(String::from);
+    file.outputs = v
         .get("outputs")
         .and_then(|x| x.as_array())
         .and_then(|a| a.iter().map(|s| s.as_str().map(String::from)).collect::<Option<Vec<_>>>());
-    (input, outputs)
+    file.shape = v
+        .get("input_shape")
+        .and_then(|x| x.as_array())
+        .and_then(|a| a.iter().map(|d| d.as_u64().map(|d| d as usize)).collect::<Option<Vec<_>>>());
 }
 
 // ---------------------------------------------------------------- JSON
@@ -185,10 +229,17 @@ pub fn to_json(w: &Weights) -> String {
     obj.insert("format".into(), json!("wir-weights"));
     obj.insert("input".into(), json!(w.input));
     obj.insert("outputs".into(), json!(w.outputs));
+    if let Some(shape) = &w.shape {
+        obj.insert("input_shape".into(), json!(shape));
+    }
     obj.insert("W1".into(), json!(w.w1.to_rows()));
     obj.insert("b1".into(), json!(w.b1));
     obj.insert("W2".into(), json!(w.w2.to_rows()));
     obj.insert("b2".into(), json!(w.b2));
+    if let Some((w3, b3)) = &w.up {
+        obj.insert("W3".into(), json!(w3.to_rows()));
+        obj.insert("b3".into(), json!(b3));
+    }
     serde_json::to_string_pretty(&Value::Object(obj)).unwrap() + "\n"
 }
 
@@ -196,8 +247,11 @@ fn from_json(bytes: &[u8]) -> Result<TensorFile> {
     let v: Value = serde_json::from_slice(bytes).map_err(|e| WirError::new(format!("invalid JSON: {e}")))?;
     let obj = v.as_object().ok_or_else(|| WirError::new("expected a JSON object of tensors"))?;
     let mut file = TensorFile::default();
-    (file.input, file.outputs) = read_meta(&v);
+    read_meta(&v, &mut file);
     for (k, val) in obj {
+        if k == "input_shape" {
+            continue;
+        }
         if let Some(t) = json_tensor(val) {
             file.tensors.insert(k.clone(), t);
         }
@@ -225,10 +279,14 @@ fn json_tensor(v: &Value) -> Option<Tensor> {
 // ---------------------------------------------------------------- safetensors
 
 pub fn to_safetensors(w: &Weights, dtype: DType) -> Vec<u8> {
-    let torch_names = ["0.weight", "0.bias", "2.weight", "2.bias"];
+    let torch_names: &[&str] = if w.up.is_some() {
+        &["w1.weight", "w1.bias", "w2.weight", "w2.bias", "w3.weight", "w3.bias"]
+    } else {
+        &["0.weight", "0.bias", "2.weight", "2.bias"]
+    };
     let mut header = serde_json::Map::new();
     let mut data = Vec::new();
-    for ((_, shape, values), name) in layer_tensors(w).into_iter().zip(torch_names) {
+    for ((_, shape, values), name) in layer_tensors(w).into_iter().zip(torch_names.iter().copied()) {
         let start = data.len();
         encode(values, dtype, &mut data);
         header.insert(
@@ -246,6 +304,9 @@ pub fn to_safetensors(w: &Weights, dtype: DType) -> Vec<u8> {
     }
     if let Some(o) = &w.outputs {
         meta.insert("wir.outputs".into(), json!(serde_json::to_string(o).unwrap()));
+    }
+    if let Some(sh) = &w.shape {
+        meta.insert("wir.input_shape".into(), json!(serde_json::to_string(sh).unwrap()));
     }
     header.insert("__metadata__".into(), Value::Object(meta));
     let mut h = serde_json::to_string(&Value::Object(header)).unwrap().into_bytes();
@@ -275,6 +336,10 @@ fn from_safetensors(bytes: &[u8]) -> Result<TensorFile> {
             .get("wir.outputs")
             .and_then(|v| v.as_str())
             .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok());
+        file.shape = meta
+            .get("wir.input_shape")
+            .and_then(|v| v.as_str())
+            .and_then(|s| serde_json::from_str::<Vec<usize>>(s).ok());
     }
     for (name, info) in obj {
         if name == "__metadata__" {
@@ -381,7 +446,7 @@ fn from_npz(bytes: &[u8]) -> Result<TensorFile> {
         let (shape, descr, payload, fortran) = parse_npy(&data).map_err(|m| WirError::new(format!("{name}: {m}")))?;
         if key == "wir_meta" && descr == "|u1" {
             if let Ok(v) = serde_json::from_slice::<Value>(payload) {
-                (file.input, file.outputs) = read_meta(&v);
+                read_meta(&v, &mut file);
             }
             continue;
         }

@@ -25,13 +25,34 @@ cargo run -- verify net.wir probe.json --tol 1e-4         # vs reference inputs/
 ```
 
 `verify` takes a JSON file with `inputs` [N][D] and `outputs` [N][O] (for example
-activations and logits recorded from the source model) and reports max |diff| and
-argmax agreement. The colorizer head from a real Yumon Pet checkpoint is the
-worked example: see "First real checkpoint" in `../docs/WIR.md`.
+activations and logits recorded from the source model) and reports max and relative
+error and argmax agreement. Real Yumon Pet checkpoints (the CNN colorizer head and
+the sunrise decoder's SwiGLU MLPs) are the worked examples: see "Real checkpoints"
+in `../docs/WIR.md`.
 
-`decompile` options: `--keys W1,b1,W2,b2` for tensors with other names (slices
-of larger checkpoints), `--transpose` for `[in, out]` storage (Burn `Linear`),
-`--input`/`--outputs` to name things, `--exact` for lossless numbers.
+`decompile` options: `--keys W1,b1,W2,b2[,W3,b3]` for tensors with other names
+(slices of larger checkpoints), `--transpose` for `[in, out]` storage (Burn
+`Linear`), `--input`/`--outputs` to name things, `--exact` for lossless numbers,
+`--digits N` for vector precision (default 3), `--domain probe.json` to drop
+creases never active on the probe's inputs, `--shape 64x3x3` for patch directions
+and `--kernel-terms N` to keep only the first N patch components (lossy).
+
+## Compact syntax
+
+D > 3 or gates switch the printer to the compact form (all of it is accepted in
+any program):
+
+```
+input  f: R64x3x3 in [-4, 4]                                   # optional shape and box domain
+crease c1: ramp along [990 -12 455 ...] / 990 above 0.0123     # relu(V . x - E)
+gate   c2: silu along [...] / 2.1e3, times along [...] / 990   # SwiGLU unit
+crease c3: ramp along patch level [...] / 1400 dx [...] / 990  # 3x3 basis per channel
+y = [-115 -155 ...] / 1e4 . (c1..c64) + 0.0817                 # vector readout
+```
+
+Vectors are integers over a two-significant-digit scale, so the largest entry
+lands at 900-999 (one token per entry). See `../docs/WIR.md` for semantics and the
+canonical form of gates.
 
 ## Weight files
 
@@ -42,6 +63,9 @@ Layout is PyTorch `nn.Linear`: W1 `[H, D]`, b1 `[H]`, W2 `[O, H]`, b2 `[O]`.
 | `.npz` | `W1 b1 W2 b2` + `wir_meta` | `np.load` works; read side needs `np.savez`, not `savez_compressed` |
 | `.safetensors` | `0.weight 0.bias 2.weight 2.bias` | loads into `nn.Sequential(Linear, ReLU, Linear)` with `load_state_dict` |
 | `.json` | `W1 b1 W2 b2` | human-readable |
+
+SwiGLU weights add `W3 b3` (`w3.weight`/`w3.bias` in safetensors, which then uses
+`w1.*`/`w2.*` keys). An input shape travels as `input_shape`.
 
 All three accept any of these names on read. f64 by default, `--dtype f32` on
 compile. F16/BF16 safetensors and `<f2` npy are readable.
@@ -74,7 +98,7 @@ let text = wir::print(&p, wir::NumFormat::CANONICAL);      // or NumFormat::EXAC
 ## Tests
 
 ```
-cargo test                      # 51 tests, ~20 s debug (fuzz is the slow one)
+cargo test                      # 61 tests, ~20 s debug (fuzz is the slow one)
 uv run --project ../python-train python scripts/interop.py   # NumPy 2.5 / PyTorch 2.14 cross-check
 ```
 
@@ -83,4 +107,6 @@ uv run --project ../python-train python scripts/interop.py   # NumPy 2.5 / PyTor
 through decompile, exact print and compile, each compared on 10,000 points.
 `tests/decompile.rs` checks that scaling and permuting hidden units leaves the
 text unchanged; `tests/roundtrip.rs` checks `decompile(compile(src)) ==
-canonicalize(src)` on 600 generated programs.
+canonicalize(src)` on 600 generated programs. `tests/compact.rs` covers the compact
+syntax, gates, patches and domains, including 300 random D 4-9 ReLU and SwiGLU
+networks through exact and canonical compact text.

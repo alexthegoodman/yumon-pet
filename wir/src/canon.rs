@@ -16,7 +16,17 @@
 //!
 //! Tolerances are relative with a floor of 1: a quantity counts as zero when
 //! |x| <= eps * max(1, largest |x| of its kind in the network).
+//!
+//! Gates (SwiGLU units) keep their silu argument as is (silu has no scaling
+//! symmetry); their up vector is scaled so its largest-magnitude entry is +1, with
+//! the factor (and sign) moved into the readout. Gates are never merged.
+//!
+//! Domains: with a box domain (`in [lo, hi]`) or decompile-time sample inputs,
+//! creases that are never active there are dropped (the function on the domain is
+//! unchanged).
 
+use crate::ast::{patch_profile, PATCH_BASIS};
+use crate::compiler::box_max;
 use crate::error::{Result, WirError};
 use crate::model::*;
 
@@ -42,8 +52,13 @@ impl Default for Tolerances {
 /// canonical form denotes only the function, and the decompiler never
 /// invents asserts.
 pub fn canonicalize(p: &Program, tol: Tolerances) -> Program {
-    let mut out = normal_form(p.input.clone(), p.dim, p.outputs.clone(), p.units.clone(), tol);
-    out.asserts.clear();
+    let mut units = p.units.clone();
+    if let Some((lo, hi)) = p.domain {
+        units.retain(|u| u.up.is_some() || box_max(&u.w, u.b, lo, hi) > 0.0);
+    }
+    let mut out = normal_form(p.input.clone(), p.dim, p.outputs.clone(), units, tol);
+    out.shape = p.shape.clone();
+    out.domain = p.domain;
     out
 }
 
@@ -56,6 +71,36 @@ pub struct DecompileOptions {
     pub outputs: Option<Vec<String>>,
     /// Points at which to emit `assert` lines with the network's values.
     pub assert_at: Vec<Vec<f64>>,
+    /// Sample inputs the network is used on: creases never active on all of them are dropped.
+    pub domain_samples: Option<Vec<Vec<f64>>>,
+    /// Input shape override (else the weights' own); `R<c>x3x3` prints `patch` directions.
+    pub shape: Option<Vec<usize>>,
+    /// Keep only the first N of the 9 patch components (lossy; needs a `<c>x3x3` shape).
+    pub kernel_terms: Option<usize>,
+}
+
+/// Project every 3x3 kernel of `v` (laid out channel-major, `c*9 + row*3 + col`) onto
+/// the first `n` patch basis components.
+pub fn project_patch(v: &[f64], n: usize) -> Vec<f64> {
+    let mut out = vec![0.0; v.len()];
+    for (src, dst) in v.chunks(9).zip(out.chunks_mut(9)) {
+        for &(_, i, j) in &PATCH_BASIS[..n.min(9)] {
+            let basis = |r: usize, c: usize| patch_profile(i, c) * patch_profile(j, r);
+            let (mut num, mut den) = (0.0, 0.0);
+            for r in 0..3 {
+                for c in 0..3 {
+                    num += src[r * 3 + c] * basis(r, c);
+                    den += basis(r, c) * basis(r, c);
+                }
+            }
+            for r in 0..3 {
+                for c in 0..3 {
+                    dst[r * 3 + c] += num / den * basis(r, c);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Weight tensors -> canonical `Program`.
@@ -70,17 +115,39 @@ pub fn decompile(w: &Weights, opts: &DecompileOptions) -> Result<Program> {
         return Err(WirError::new(format!("{} output names given for {o} outputs", names.len())));
     }
     let outputs = names.into_iter().zip(&w.b2).map(|(name, &bias)| Output { name, bias }).collect();
-    let units = (0..h)
+    let shape = opts.shape.clone().or_else(|| w.shape.clone());
+    if let Some(s) = &shape
+        && s.iter().product::<usize>() != d {
+            return Err(WirError::new(format!("shape {s:?} does not match {d} input columns")));
+        }
+    let project = match (opts.kernel_terms, shape.as_deref()) {
+        (None, _) | (Some(9..), _) => None,
+        (Some(n), Some(&[_, 3, 3])) => Some(n),
+        (Some(_), _) => return Err(WirError::new("kernel terms need an input shape like <c>x3x3")),
+    };
+    let proj = |v: &[f64]| match project {
+        Some(n) => project_patch(v, n),
+        None => v.to_vec(),
+    };
+    let mut units: Vec<Unit> = (0..h)
         .map(|i| Unit {
             name: format!("u{}", i + 1),
-            kind: UnitKind::Crease,
-            w: w.w1.row(i).to_vec(),
+            kind: if w.up.is_some() { UnitKind::Gate } else { UnitKind::Crease },
+            w: proj(w.w1.row(i)),
             b: w.b1[i],
             coeffs: (0..o).map(|k| w.w2.get(k, i)).collect(),
+            up: w.up.as_ref().map(|(w3, b3)| Up { u: proj(w3.row(i)), c: b3[i] }),
             line: None,
         })
         .collect();
+    if let Some(xs) = &opts.domain_samples {
+        if let Some(x) = xs.iter().find(|x| x.len() != d) {
+            return Err(WirError::new(format!("domain sample has {} coordinates but the input is R{d}", x.len())));
+        }
+        units.retain(|u| u.up.is_some() || xs.iter().any(|x| dot(&u.w, x) + u.b > 0.0));
+    }
     let mut p = normal_form(input, d, outputs, units, opts.tolerances);
+    p.shape = shape;
     for pt in &opts.assert_at {
         if pt.len() != d {
             return Err(WirError::new(format!("assert point has {} coordinates but the input is R{d}", pt.len())));
@@ -99,6 +166,20 @@ fn normal_form(input: String, dim: usize, mut outputs: Vec<Output>, units: Vec<U
     let w_scale = units.iter().map(|u| norm(&u.w)).fold(1.0, f64::max);
     let mut live = Vec::new();
     for u in units {
+        if let Some(up) = &u.up {
+            // Gates: scale the up vector so its largest-|.| entry is +1.
+            let k = (0..up.u.len()).fold(0, |k, i| if up.u[i].abs() > up.u[k].abs() { i } else { k });
+            let s = if up.u.is_empty() || up.u[k] == 0.0 { up.c } else { up.u[k] };
+            if s == 0.0 {
+                continue; // silu(.) * 0
+            }
+            live.push(Unit {
+                coeffs: u.coeffs.iter().map(|c| c * s).collect(),
+                up: Some(Up { u: up.u.iter().map(|x| x / s).collect(), c: up.c / s }),
+                ..u
+            });
+            continue;
+        }
         let s = norm(&u.w);
         if s <= tol.dead_weight * w_scale {
             let h = u.b.max(0.0);
@@ -126,7 +207,8 @@ fn normal_form(input: String, dim: usize, mut outputs: Vec<Output>, units: Vec<U
     let mut merged: Vec<Unit> = Vec::new();
     for u in live {
         let same = merged.iter_mut().find(|m| {
-            m.w.iter().zip(&u.w).all(|(a, b)| (a - b).abs() <= tol.merge)
+            m.up.is_none() && u.up.is_none()
+                && m.w.iter().zip(&u.w).all(|(a, b)| (a - b).abs() <= tol.merge)
                 && (m.b - u.b).abs() <= tol.merge * m.b.abs().max(1.0)
         });
         match same {
@@ -144,10 +226,10 @@ fn normal_form(input: String, dim: usize, mut outputs: Vec<Output>, units: Vec<U
     let kind = if dim == 1 && n_out == 1 { UnitKind::Hinge } else { UnitKind::Crease };
     for (i, u) in merged.iter_mut().enumerate() {
         u.name = format!("c{}", i + 1);
-        u.kind = kind;
+        u.kind = if u.up.is_some() { UnitKind::Gate } else { kind };
         u.line = None;
     }
-    Program { input, dim, outputs, units: merged, asserts: Vec::new() }
+    Program { input, dim, shape: None, domain: None, outputs, units: merged, asserts: Vec::new() }
 }
 
 pub fn max_abs(v: &[f64]) -> f64 {
@@ -158,10 +240,13 @@ pub fn max_abs(v: &[f64]) -> f64 {
 /// float noise cannot swap units; exact values break remaining ties.
 fn sort_units(units: &mut [Unit], tol: Tolerances) {
     let q = |x: f64| (x / tol.sort_grid).round() as i64;
-    let exact = |u: &Unit| -> Vec<f64> { u.w.iter().copied().chain([-u.b]).chain(u.coeffs.iter().copied()).collect() };
+    let up = |u: &Unit| -> Vec<f64> { u.up.as_ref().map_or(vec![], |g| g.u.iter().copied().chain([g.c]).collect()) };
+    let exact = |u: &Unit| -> Vec<f64> {
+        u.w.iter().copied().chain([-u.b]).chain(up(u)).chain(u.coeffs.iter().copied()).collect()
+    };
     units.sort_by(|a, b| {
-        let ka = a.w.iter().map(|x| q(*x)).chain([q(-a.b)]);
-        let kb = b.w.iter().map(|x| q(*x)).chain([q(-b.b)]);
+        let ka = a.w.iter().map(|x| q(*x)).chain([q(-a.b)]).chain(up(a).into_iter().map(q));
+        let kb = b.w.iter().map(|x| q(*x)).chain([q(-b.b)]).chain(up(b).into_iter().map(q));
         ka.cmp(kb).then_with(|| {
             let (ea, eb) = (exact(a), exact(b));
             ea.iter().zip(&eb).map(|(x, y)| x.total_cmp(y)).find(|o| o.is_ne()).unwrap_or(std::cmp::Ordering::Equal)

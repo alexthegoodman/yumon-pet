@@ -241,17 +241,51 @@ Open questions, as answered for v0:
 - The decompiler always emits the flat canonical form, with no macros.
 - Input domains are not implemented yet; the known gaps above (hidden linear terms, units that never activate on a domain) remain.
 
-## First real checkpoint (Nov 7, 2026)
+## Compact syntax, gates, patches and domains (Nov 7, 2026)
 
-The text models (talk, code, ViT colorizer) use SwiGLU or SiLU, which v0 cannot state exactly. The CNN colorizer (`src/vision/colorizer.rs`, Yumon Paint pass 6) ends in `out_conv(relu(head_conv(f)))`, a 3x3 conv (64 -> 64) then a 1x1 conv (64 -> 313). At each pixel that is exactly a one-hidden-layer ReLU network over the 3x3 feature patch: input R576 (index channel*9 + ky*3 + kx, zero padding at the border), 64 creases, 313 outputs.
+Real checkpoints made two things clear: point-anchored text does not scale past a few dimensions (a point in R576 is 576 numbers, and the first colorizer decompile was 674k tokens by `uvx count-tokens`), and the repo's language models are SwiGLU, not ReLU. Additions, all accepted by the parser in any program:
+
+- **Vector literals** `[-881 -415 107] / 990`: entries separated by spaces, divided by an optional scale. The printer writes integers over a two-significant-digit scale (`/ 990`, `/ 4.1e4`) chosen so the largest entry lands at 900-999: three digits of resolution relative to the vector's largest entry, and one token per entry for common tokenizers (`--digits` changes it; `--exact` lists exact floats).
+- **`crease c: ramp along V [above E]`** is relu(V . x - E). It writes the slope directly, unlike the anchored forms, and is what the printer uses for D > 3.
+- **`gate g: silu along A [above E], times along U [above F]`** is a SwiGLU unit silu(A . x - E) * (U . x - F). A program is all ReLU or all gates (the compiler rejects mixtures). Weights add `W3`, `b3`. Canonical form keeps A as is (silu has no scaling symmetry), scales U so its largest-magnitude entry is +1 and moves that factor and sign into the readout; gates are sorted like creases and never merged.
+- **Vector readouts** `y = [..] / 1e4 . (c1..c64) + 0.1`: one coefficient per unit, with `a..b` name ranges. Used by the printer whenever the compact form is.
+- **Shaped inputs** `input f: R64x3x3` (product = D). Directions over such inputs may be written as `patch level [..] dx [..] dy [..] dxx [..] dyy [..] dxy [..] dxxy [..] dxyy [..] dxxyy [..]`, one per-channel vector each: level, left-to-right and top-to-bottom slope, then curvatures. The nine components (products of (1,1,1), (-1,0,1), (1,-2,1)) are orthogonal, so every 3x3 kernel has exactly one patch form, and dropping the high ones is a low-pass (DCT-like) approximation: `wir decompile --kernel-terms N` keeps the first N (lossy). Patch text is not a fixed point under `canon` (re-normalizing the expanded kernel moves the integers); `print` itself is stable.
+- **Domains.** `input x: R2 in [lo, hi]` declares a box: the compiler warns about creases never active there and the canonical form drops them. `wir decompile --domain probe.json` drops creases never active on the probe's `inputs`; the samples must cover every input the network will see (a 512-pixel probe once dropped a unit that fires elsewhere in the same image).
+- `wir verify <program|weights> <probe.json>` reports max and relative RMS error and argmax agreement against recorded outputs.
+
+Compression study (Nov 7) on the colorizer head and sunrise layer 0 at equal number budgets, scored by output change on real inputs: rounding to 3 significant digits costs 0.06-0.1%, dropping inactive units is free, 3x3 DCT terms work (3 of 9: 0.7%), while FFT of weight rows (72% error at half the numbers on sunrise), magnitude pruning (64%) and low rank (44%) do not: hidden-unit order carries no frequency structure and the trained matrices are near full rank (top 16 of 128 directions hold 27% of the energy). Tokens therefore stay roughly proportional to parameters, about 2 per weight in compact text.
+
+## Real checkpoints (Nov 7, 2026)
+
+**Yumon Paint CNN colorizer** (`checkpoints/old/yumon-colorizer-256-a`, `src/vision/colorizer.rs`). The head `out_conv(relu(head_conv(f)))`, a 3x3 conv (64 -> 64) then a 1x1 conv (64 -> 313), is at every pixel a one-hidden-layer ReLU network over the 3x3 feature patch: R576 (channel*9 + ky*3 + kx, zero padding at the border), 64 creases, 313 outputs.
 
 ```
-cargo run --release --bin export_wir_colorizer        # checkpoints/old/yumon-colorizer-256-a -> tmp/wir-colorizer/{head,probe}.json
-cd wir && cargo run --release -- decompile ../tmp/wir-colorizer/head.json -o ../tmp/wir-colorizer/head.wir
+cargo run --release --bin export_wir_colorizer     # -> tmp/wir-colorizer/head.json + probe.json (all 4,096 pixels of gt_sample0.png)
+cd wir
+cargo run --release -- decompile ../tmp/wir-colorizer/head.json --domain ../tmp/wir-colorizer/probe.json -o ../tmp/wir-colorizer/head.wir
 cargo run --release -- verify ../tmp/wir-colorizer/head.wir ../tmp/wir-colorizer/probe.json
 ```
 
-`probe.json` holds real backbone patches and the model's own logits from a Burn WGPU forward on `gt_sample0.png`. Results on all 4,096 head pixels: canonical text max |diff| 1.2e-5 against logits up to 7.7, exact text 3.6e-6 (the f32 forward vs f64 eval floor), argmax bin identical on 4,096/4,096. Canonical text is a parse fixed point (1.1 MB, 64 creases, no merges). 26 of 64 units never activate on that image: the known no-domain gap, so they stay in the text.
+| text | tokens | relative error | argmax same |
+| --- | --- | --- | --- |
+| point-anchored, 6 digits (first decompile) | 673,659 | 1.5e-6 | 4096/4096 |
+| compact | 125,353 | 2.6e-4 | 4085/4096 |
+| compact + `--domain` (26 inactive units dropped) | 78,681 | 2.6e-4 | 4085/4096 |
+| `--shape 64x3x3`, all 9 patch terms | 80,931 | 2.7e-4 | 4087/4096 |
+| 6 patch terms | 65,453 | 1.1e-3 | 4016/4096 |
+| 3 patch terms (level, dx, dy) | 50,081 | 7.1e-3 | 3666/4096 |
 
-Not covered: the backbone (stacked ReLU convs and residual blocks need depth, v0.2) and every SwiGLU/SiLU checkpoint (needs an approximate story, not an exact decompile).
+Errors are against the model's own logits (up to 7.7) from a Burn WGPU forward. `--exact` text matches within 3.6e-6, the f32/f64 floor.
 
+**yumon-base-dec-sunrise** (dense decoder, 128 wide, 6 layers, SwiGLU 128 -> 512 -> 128). Each block's MLP is a gate program: 512 gates, 128 outputs, about 407k tokens per layer.
+
+```
+cargo run --release --bin wir_decoder -- record    # tmp/wir-sunrise/layer{l}_swiglu.json + layer{l}_probe.json
+cd wir && cargo run --release -- decompile ../tmp/wir-sunrise/layer0_swiglu.json -o ../tmp/wir-sunrise/layer0.wir
+cargo run --release -- compile ../tmp/wir-sunrise/layer0.wir --quiet -o ../tmp/wir-sunrise/layer0.wir.json
+cd .. && cargo run --release --bin wir_decoder -- eval --mlp 0=tmp/wir-sunrise/layer0.wir.json   # ... up to --mlp 5=
+```
+
+On held-out MLP inputs (2,048 per layer) the canonical text is within 0.05-0.10% relative error of the SwiGLU output. With all six MLPs replaced by weights compiled from the WIR text, next-token loss on 256 cache samples (30,872 positions) is 4.1350 for both, the change is under 1e-4, and the argmax token is identical at every position.
+
+Not covered: the colorizer backbone (stacked ReLU convs and residual blocks need depth, v0.2), and the attention, norms and embeddings of the decoder (WIR states MLPs only).

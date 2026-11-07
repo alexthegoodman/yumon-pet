@@ -9,12 +9,19 @@
 //! fixed point, so `print(parse(print(p))) == print(p)` holds by construction
 //! even in corner cases the point choice does not cover. In practice the
 //! first render is already the fixed point; the round count is capped.
+//!
+//! Compact syntax: when D > 3 or the program has gates, points stop being a
+//! readable way to pin a plane (a point in R576 is 576 numbers), so creases print
+//! as `ramp along V above E` (relu(V . x - E)), gates as `silu along V, times
+//! along U`, every vector as integers over a power of ten, and each readout as one
+//! coefficient vector dotted with the unit list: `y = [..] / 1e4 . (c1..c64) + b`.
+//! `R<c>x3x3` inputs print directions as `patch` components (see `ast::PATCH_BASIS`).
 
-use crate::ast::PlaneSpec;
+use crate::ast::{patch_profile, PlaneSpec, PATCH_BASIS};
 use crate::compiler::{lower_str, plane_equation};
 use crate::canon::max_abs;
 use crate::model::{dot, Program, Unit, UnitKind};
-use crate::num::{format_num, NumFormat, Precision};
+use crate::num::{format_num, format_vector, NumFormat, Precision};
 
 const MAX_ROUNDS: usize = 8;
 const LINE_WIDTH: usize = 80;
@@ -38,8 +45,14 @@ pub fn render(p: &Program, fmt: NumFormat) -> String {
     let point = |v: &[f64]| format!("({})", v.iter().map(|x| num(*x)).collect::<Vec<_>>().join(", "));
     let inline = |u: &Unit| u.kind == UnitKind::Hinge && p.dim == 1 && p.outputs.len() == 1;
 
+    let compact = p.dim > 3 || p.units.iter().any(|u| u.up.is_some());
     let mut out = String::from("wir 0.1\n");
-    out += &format!("input  {}: R{}\n", p.input, p.dim);
+    let space = match &p.shape {
+        Some(s) => s.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("x"),
+        None => p.dim.to_string(),
+    };
+    let domain = p.domain.map_or(String::new(), |(lo, hi)| format!(" in [{}, {}]", num(lo), num(hi)));
+    out += &format!("input  {}: R{space}{domain}\n", p.input);
     for o in &p.outputs {
         out += &format!("output {}: R1\n", o.name);
     }
@@ -48,13 +61,30 @@ pub fn render(p: &Program, fmt: NumFormat) -> String {
     if !decls.is_empty() {
         out.push('\n');
     }
-    for u in decls {
-        out += &crease_decl(u, p.dim, fmt);
+    for u in &decls {
+        out += &match (&u.up, compact) {
+            (Some(up), _) => format!(
+                "gate {}: silu {}, times {}",
+                u.name,
+                ramp_text(&u.w, u.b, p, fmt),
+                ramp_text(&up.u, up.c, p, fmt)
+            ),
+            (None, true) => format!("crease {}: ramp {}", u.name, ramp_text(&u.w, u.b, p, fmt)),
+            (None, false) => crease_decl(u, p.dim, fmt),
+        };
         out.push('\n');
     }
 
     out.push('\n');
     for (k, o) in p.outputs.iter().enumerate() {
+        if compact && !decls.is_empty() {
+            let coefs: Vec<f64> = decls.iter().map(|u| u.coeffs[k]).collect();
+            let names: Vec<&str> = decls.iter().map(|u| u.name.as_str()).collect();
+            let bias = num(o.bias.abs());
+            let bias = if bias == "0" { String::new() } else { format!(" {} {bias}", if o.bias < 0.0 { "-" } else { "+" }) };
+            out += &format!("{} = {} . ({}){bias}\n", o.name, format_vector(&coefs, fmt), name_list(&names));
+            continue;
+        }
         // (separator, body) pairs; the separator of the first term is folded in.
         let mut parts: Vec<(&str, String)> = Vec::new();
         for u in &p.units {
@@ -165,4 +195,55 @@ fn crease_decl(u: &Unit, dim: usize, fmt: NumFormat) -> String {
     let value = big * (dot(&pn, &a) - pe).abs() / max_abs(&pn);
     let (value_txt, _) = printed(value, fmt);
     format!("crease {}: {plane_txt}, equals {value_txt} at {}", u.name, pt(&a_txt))
+}
+
+/// `along DIR [above E]` for the unit relu/silu(w . x + b).
+fn ramp_text(w: &[f64], b: f64, p: &Program, fmt: NumFormat) -> String {
+    let above = format_num(-b, fmt);
+    let above = if above == "0" { String::new() } else { format!(" above {above}") };
+    format!("along {}{above}", direction_text(w, p, fmt))
+}
+
+/// A vector, or for `R<c>x3x3` inputs its `patch` components (zero ones omitted).
+fn direction_text(w: &[f64], p: &Program, fmt: NumFormat) -> String {
+    let Some(&[c, 3, 3]) = p.shape.as_deref() else {
+        return format_vector(w, fmt);
+    };
+    let mut parts = Vec::new();
+    let comps: Vec<Vec<f64>> = PATCH_BASIS
+        .iter()
+        .map(|&(_, i, j)| {
+            let basis = |r: usize, col: usize| patch_profile(i, col) * patch_profile(j, r);
+            let den: f64 = (0..9).map(|t| basis(t / 3, t % 3).powi(2)).sum();
+            (0..c).map(|ch| (0..9).map(|t| w[ch * 9 + t] * basis(t / 3, t % 3)).sum::<f64>() / den).collect()
+        })
+        .collect();
+    let big = comps.iter().flatten().fold(0.0f64, |m, x| m.max(x.abs()));
+    for (&(name, _, _), v) in PATCH_BASIS.iter().zip(&comps) {
+        if v.iter().any(|x| x.abs() > 1e-12 * big) {
+            parts.push(format!("{name} {}", format_vector(v, fmt)));
+        }
+    }
+    if parts.is_empty() {
+        parts.push(format!("level {}", format_vector(&comps[0], fmt)));
+    }
+    format!("patch {}", parts.join(" "))
+}
+
+/// `c1..c64` when the names are one prefix with consecutive numbers, else a comma list.
+fn name_list(names: &[&str]) -> String {
+    let split = |n: &str| {
+        let i = n.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+        (n[..i].to_string(), n[i..].parse::<usize>().ok())
+    };
+    let parsed: Vec<_> = names.iter().map(|n| split(n)).collect();
+    // `c01` would not survive the range, so require names to equal prefix + number.
+    let consecutive = names.len() > 2
+        && parsed.iter().zip(names).all(|((p, k), n)| !p.is_empty() && p == &parsed[0].0 && k.is_some_and(|k| format!("{p}{k}") == *n))
+        && parsed.windows(2).all(|w| w[1].1 == w[0].1.map(|k| k + 1));
+    if consecutive {
+        format!("{}..{}", names[0], names[names.len() - 1])
+    } else {
+        names.join(", ")
+    }
 }

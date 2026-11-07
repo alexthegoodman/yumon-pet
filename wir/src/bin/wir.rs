@@ -12,15 +12,19 @@ wir - WIR v0 compiler and decompiler
 
 usage:
   wir compile <file.wir> [-o weights.npz|.safetensors|.json] [--dtype f64|f32] [--tol 1e-6] [--quiet]
-  wir decompile <weights> [-o out.wir] [--exact] [--keys W1,b1,W2,b2] [--transpose]
-                [--input x] [--outputs y,z] [--assert-at \"0,0;1,1\"]
+  wir decompile <weights> [-o out.wir] [--exact] [--digits 3] [--keys W1,b1,W2,b2[,W3,b3]]
+                [--transpose] [--input x] [--outputs y,z] [--assert-at \"0,0;1,1\"]
+                [--domain probe.json] [--shape 64x3x3] [--kernel-terms 3]
   wir fmt <file.wir> [--exact]          print the resolved program (names and asserts kept)
   wir canon <file.wir> [--exact]        print the canonical form (what decompile would emit)
   wir eval <file.wir|weights> <x1,x2,...> [more points]
   wir verify <file.wir|weights> <probe.json> [--tol 1e-4]
                                         compare against reference inputs/outputs
 
-Weights use PyTorch nn.Linear layout: W1 [H, D], b1 [H], W2 [O, H], b2 [O].
+Weights use PyTorch nn.Linear layout: W1 [H, D], b1 [H], W2 [O, H], b2 [O]; SwiGLU
+networks add W3 [H, D], b3 [H]. --domain drops creases never active on the probe's
+`inputs`; --kernel-terms keeps the first N of 9 patch components (lossy); --digits
+sets vector precision (default 3).
 .safetensors files use the nn.Sequential(Linear, ReLU, Linear) keys 0.weight ... 2.bias.
 ";
 
@@ -102,7 +106,20 @@ fn read(path: &PathBuf) -> Result<String, String> {
 }
 
 fn number_format(args: &Args) -> NumFormat {
-    if args.has("--exact") { NumFormat::EXACT } else { NumFormat::CANONICAL }
+    let mut f = if args.has("--exact") { NumFormat::EXACT } else { NumFormat::CANONICAL };
+    if let Some(d) = args.get("--digits").and_then(|d| d.parse::<u32>().ok()).filter(|d| (1..=15).contains(d)) {
+        f.vector_digits = d;
+    }
+    f
+}
+
+/// `inputs` of a probe JSON file (as written for `verify`).
+fn probe_inputs(path: &Path) -> Result<Vec<Vec<f64>>, String> {
+    let v: serde_json::Value = serde_json::from_str(&read(&path.to_path_buf())?).map_err(|e| format!("{}: {e}", path.display()))?;
+    v["inputs"]
+        .as_array()
+        .and_then(|rows| rows.iter().map(|r| r.as_array()?.iter().map(|x| x.as_f64()).collect()).collect())
+        .ok_or(format!("{}: expected `inputs` as an array of number arrays", path.display()))
 }
 
 fn cmd_compile(raw: &[String]) -> Result<(), String> {
@@ -171,7 +188,10 @@ fn load_weights(path: &Path, args: &Args) -> Result<Weights, String> {
     let mut opts = LoadOptions { transpose: args.has("--transpose"), ..Default::default() };
     if let Some(k) = args.get("--keys") {
         let keys: Vec<String> = k.split(',').map(|s| s.trim().to_string()).collect();
-        opts.keys = Some(keys.try_into().map_err(|_| "--keys needs four names: W1,b1,W2,b2".to_string())?);
+        if keys.len() != 4 && keys.len() != 6 {
+            return Err("--keys needs W1,b1,W2,b2 or W1,b1,W2,b2,W3,b3".into());
+        }
+        opts.keys = Some(keys);
     }
     io::load(path, &opts).map_err(|e| e.to_string())
 }
@@ -190,7 +210,7 @@ fn parse_points(s: &str) -> Result<Vec<Vec<f64>>, String> {
 }
 
 fn cmd_decompile(raw: &[String]) -> Result<(), String> {
-    let valued = ["-o", "--keys", "--input", "--outputs", "--assert-at"];
+    let valued = ["-o", "--keys", "--input", "--outputs", "--assert-at", "--domain", "--shape", "--kernel-terms", "--digits"];
     let args = Args::parse(raw, &valued)?;
     let mut allowed = valued.to_vec();
     allowed.extend(["--exact", "--transpose"]);
@@ -201,6 +221,15 @@ fn cmd_decompile(raw: &[String]) -> Result<(), String> {
         input: args.get("--input").map(String::from),
         outputs: args.get("--outputs").map(|s| s.split(',').map(|n| n.trim().to_string()).collect()),
         assert_at: args.get("--assert-at").map(parse_points).transpose()?.unwrap_or_default(),
+        domain_samples: args.get("--domain").map(|p| probe_inputs(Path::new(p))).transpose()?,
+        shape: args
+            .get("--shape")
+            .map(|s| s.split('x').map(|d| d.parse::<usize>().map_err(|_| format!("bad --shape `{s}`"))).collect())
+            .transpose()?,
+        kernel_terms: args
+            .get("--kernel-terms")
+            .map(|n| n.parse::<usize>().ok().filter(|n| (1..=9).contains(n)).ok_or(format!("bad --kernel-terms `{n}` (1-9)")))
+            .transpose()?,
         ..Default::default()
     };
     let p = decompile(&w, &opts).map_err(|e| e.to_string())?;
@@ -218,8 +247,8 @@ fn cmd_decompile(raw: &[String]) -> Result<(), String> {
 }
 
 fn cmd_print(raw: &[String], canonical: bool) -> Result<(), String> {
-    let args = Args::parse(raw, &[])?;
-    args.check(&["--exact"])?;
+    let args = Args::parse(raw, &["--digits"])?;
+    args.check(&["--exact", "--digits"])?;
     let path = args.file("input .wir file")?;
     let p = lower_str(&read(&path)?).map_err(|e| format!("{}: {e}", path.display()))?;
     let p = if canonical { canonicalize(&p, Default::default()) } else { p };
