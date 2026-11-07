@@ -12,6 +12,7 @@ use {
         BOS_TOKEN, EOS_TOKEN, PAD_TOKEN,
         bpe::{BpeTokenizer, TokenizerKind},
         sample_cache,
+        sample_order::{self, Weights},
         samples::Sample,
         yumon_talk::{self, YumonTalkVocab},
     },
@@ -63,6 +64,21 @@ struct Args {
     /// Maximum allowed SLOT placeholder tokens in a user prompt (default: 6).
     #[arg(long, default_value_t = 1)]
     max_prompt_slots: usize,
+    /// Sample order: `difficulty` sorts easiest first (length, word rarity,
+    /// complexity) and tags the cache so training keeps that order every epoch;
+    /// `original` keeps input order and training shuffles as before.
+    #[arg(long, value_enum, default_value_t = Order::Difficulty)]
+    order: Order,
+    /// Difficulty weights as length,rarity,complexity (percentile ranks are averaged with these).
+    #[arg(long, default_value = "1,1,1")]
+    sort_weights: Weights,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Order {
+    Difficulty,
+    Original,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -131,7 +147,6 @@ impl ActiveVocab {
         }
     }
 
-    #[allow(dead_code)]
     fn is_num_token(&self, id: usize) -> bool {
         match self {
             ActiveVocab::Kilo(k) => k.is_num_token(id),
@@ -523,8 +538,21 @@ fn main() -> Result<()> {
         println!(">>> RECONSTRUCTED REPLY (RANDOM SYNONYM SAMPLING) <<<\n{}", r_rec.trim());
     }
 
+    let order = if args.order == Order::Difficulty {
+        let w = args.sort_weights;
+        println!("\nSorting by difficulty (weights length {}, rarity {}, complexity {}), easiest first...",
+            w.length, w.rarity, w.complexity);
+        let features = sample_order::sort_by_difficulty(&mut yumon_samples, w, is_dpo, |id| {
+            active_vocab.is_slot_token(id) || active_vocab.is_name_token(id) || active_vocab.is_num_token(id)
+        })?;
+        print_difficulty_summary(&yumon_samples, &features);
+        Some(sample_order::DIFFICULTY_ORDER)
+    } else {
+        None
+    };
+
     println!("\nWriting Yumon Talk cache to {} ...", args.output.display());
-    let metadata = sample_cache::write_cache_with_objective(
+    let metadata = sample_cache::write_cache_ordered(
         &args.output,
         &target_tokenizer,
         input_meta.stage,
@@ -532,12 +560,33 @@ fn main() -> Result<()> {
         args.seed,
         &yumon_samples,
         input_meta.objective,
+        order,
     )?;
 
     let out_size_mb = std::fs::metadata(&args.output)?.len() as f64 / 1048576.0;
     println!("Cached {} Yumon Talk samples to {} ({:.2} MiB)", metadata.samples, args.output.display(), out_size_mb);
 
     Ok(())
+}
+
+/// Mean features per difficulty decile, plus the easiest and hardest samples.
+#[cfg(not(target_arch = "wasm32"))]
+fn print_difficulty_summary(samples: &[Sample], features: &[sample_order::Features]) {
+    println!("decile  samples  difficulty  tokens  rarity(bits)  complexity");
+    let n = features.len();
+    for d in 0..10 {
+        let part = &features[d * n / 10..(d + 1) * n / 10];
+        if part.is_empty() { continue; }
+        let mean = |f: &dyn Fn(&sample_order::Features) -> f64| part.iter().map(f).sum::<f64>() / part.len() as f64;
+        println!("{:>6}  {:>7}  {:>10.3}  {:>6.1}  {:>12.2}  {:>10.2}", d + 1, part.len(),
+            mean(&|f| f.difficulty), mean(&|f| f.length as f64), mean(&|f| f.rarity), mean(&|f| f.complexity as f64));
+    }
+    let show = |label: &str, i: usize| {
+        let (p, r) = &samples[i].pair;
+        println!("{label} #{i} (difficulty {:.3}): {} => {}", features[i].difficulty, p.trim(), r.trim());
+    };
+    for i in 0..n.min(10) { show("easiest", i); }
+    for i in n.saturating_sub(10)..n { show("hardest", i); }
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -58,6 +58,10 @@ pub struct CacheMetadata {
     pub tokenizer_sha256: String,
     pub samples: usize,
     pub seed: u64,
+    /// Sample order the trainer should keep (e.g. `difficulty-v1`, easiest
+    /// first). Absent = unordered; training shuffles every epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<String>,
 }
 
 // Persist active token IDs as u32 and reconstruct padding on load. This avoids
@@ -223,6 +227,14 @@ pub fn write_cache_with_objective(
     path: &Path, tokenizer: &TokenizerKind, stage: TrainingStage,
     max_seq_len: usize, seed: u64, samples: &[Sample], objective: CacheObjective,
 ) -> Result<CacheMetadata> {
+    write_cache_ordered(path, tokenizer, stage, max_seq_len, seed, samples, objective, None)
+}
+
+/// Like `write_cache_with_objective`, tagging the header with the samples' order.
+pub fn write_cache_ordered(
+    path: &Path, tokenizer: &TokenizerKind, stage: TrainingStage,
+    max_seq_len: usize, seed: u64, samples: &[Sample], objective: CacheObjective, order: Option<&str>,
+) -> Result<CacheMetadata> {
     ensure!(max_seq_len >= 2, "context length must be at least 2");
     ensure!(
         !samples.is_empty(),
@@ -254,6 +266,7 @@ pub fn write_cache_with_objective(
         tokenizer_sha256: tokenizer_fingerprint(tokenizer)?,
         samples: samples.len(),
         seed,
+        order: order.map(str::to_owned),
     };
     let header = serde_json::to_vec(&metadata)?;
     file.write_all(MAGIC)?;
@@ -601,6 +614,7 @@ mod tests {
             tokenizer_sha256: String::new(),
             samples: 1,
             seed: 42,
+            order: None,
         })
         .unwrap();
         let mut bytes = MAGIC.to_vec();

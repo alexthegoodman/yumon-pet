@@ -19,6 +19,8 @@ pub mod samples;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod sample_cache;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod sample_order;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod code_corpus;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod kilo;

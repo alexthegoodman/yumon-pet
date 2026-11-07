@@ -1794,6 +1794,7 @@ where
 
         let epoch_indices = prepared_code.as_ref().map(|p| (0..stage_cfg.epochs).map(|e| p.epoch_indices(e)).collect::<Vec<_>>());
         let epoch_seed = prepared_code.as_ref().map(|p| p.seed);
+        let shuffle = prepared_code.as_ref().map_or(true, |p| p.shuffle);
         let batch_plan = prepared_code.as_ref().map(|p| p.batch_plan(stage_cfg.epochs, stage_cfg.batch_size));
         let (training_samples, val_samples) = if let Some(prepared) = prepared_code.take() {
             (prepared.training, prepared.validation)
@@ -1961,18 +1962,23 @@ where
             let mut idx: Vec<usize> = if is_dpo {
                 let num_pairs = training_samples.len() / 2;
                 let mut pair_idx: Vec<usize> = (0..num_pairs).collect();
-                if let Some(seed) = epoch_seed {
-                    pair_idx.shuffle(&mut StdRng::seed_from_u64(seed.wrapping_add(epoch as u64)));
-                } else {
-                    pair_idx.shuffle(&mut rng);
+                // A sorted cache (shuffle = false) keeps its easiest-first order.
+                if shuffle {
+                    match epoch_seed {
+                        Some(seed) => pair_idx.shuffle(&mut StdRng::seed_from_u64(seed.wrapping_add(epoch as u64))),
+                        None => pair_idx.shuffle(&mut rng),
+                    }
                 }
                 pair_idx.into_iter().flat_map(|p| [2 * p, 2 * p + 1]).collect()
             } else {
                 let mut idx_list: Vec<usize> = epoch_indices.as_ref()
                     .map_or_else(|| (0..training_samples.len()).collect(), |all| all[epoch].clone());
-                if let Some(seed) = epoch_seed {
-                    idx_list.shuffle(&mut StdRng::seed_from_u64(seed.wrapping_add(epoch as u64)));
-                } else { idx_list.shuffle(&mut rng); }
+                if shuffle {
+                    match epoch_seed {
+                        Some(seed) => idx_list.shuffle(&mut StdRng::seed_from_u64(seed.wrapping_add(epoch as u64))),
+                        None => idx_list.shuffle(&mut rng),
+                    }
+                }
                 idx_list
             };
             let epoch_samples = idx.len();

@@ -26,6 +26,8 @@ pub struct PreparedCode {
     pub identity: Value,
     pub seed: u64,
     pub objective: CacheObjective,
+    /// Shuffle each epoch's indices; false keeps cache order (inner-epoch curriculum).
+    pub shuffle: bool,
 }
 impl PreparedCode {
     /// Training index range of a tier (offsets include any pretraining prefix).
@@ -117,6 +119,7 @@ impl PreparedCode {
             self.pretrain_len,
             self.validation.len()
         );
+        println!("Sample order: {}", if self.shuffle { "shuffled every epoch" } else { "cache order every epoch (no shuffle)" });
         for epoch in 0..epochs {
             let label = match self.code_epoch(epoch) {
                 None => format!(" ({stage} pretraining)"),
@@ -313,6 +316,7 @@ fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<(Prepa
             pretrain_share: 0.0,
             seed: config.seed,
             objective: metadata.objective,
+            shuffle: config.shuffle.unwrap_or(metadata.order.is_none()),
             identity: json!({"mode": "full-cache", "cache": metadata, "seed": config.seed,
                 "validation_fraction": config.validation_fraction}),
         }, held_out));
@@ -379,6 +383,7 @@ fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<(Prepa
         pretrain_share: 0.0,
         seed: config.seed,
         objective: CacheObjective::RawCode,
+        shuffle: config.shuffle.unwrap_or(true),
         identity,
     }, held_out))
 }

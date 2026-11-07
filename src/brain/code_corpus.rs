@@ -128,6 +128,10 @@ pub struct CodeConfig {
     /// Mamba-2 settings (d_state, expand, d_conv, chunk_size, mlp); architecture
     /// "mamba2" only. Absent = defaults. attn_heads is the number of SSM heads.
     pub mamba: Option<super::mamba2_model::Mamba2Settings>,
+    /// Shuffle training samples every epoch. Absent = shuffle unless the cache
+    /// header has an `order` (e.g. a difficulty-sorted `cache_yumon_talk` cache,
+    /// trained easiest first each epoch).
+    pub shuffle: Option<bool>,
 }
 
 impl Default for CodeConfig {
@@ -152,7 +156,7 @@ impl Default for CodeConfig {
             token_embed_dim: None,
             router: None,
             experts: None,
-            mamba: None,
+            mamba: None, shuffle: None,
         }
     }
 }
