@@ -246,8 +246,6 @@ mod desktop {
             message: String,
             citizen_id: usize,
             citizen_name: String,
-            vitals: Option<VitalsData>,
-            emote: Option<EmoteData>,
         },
         ClearChat,
         SimDecide {
@@ -273,8 +271,6 @@ mod desktop {
             message: String,
             citizen_id: Option<usize>,
             citizen_name: Option<String>,
-            vitals: Option<VitalsData>,
-            emote: Option<EmoteData>,
         },
         ClearChat,
         SimDecide {
@@ -333,11 +329,7 @@ mod desktop {
     #[derive(Clone, Debug)]
     enum PromptKind {
         Product,
-        Chat {
-            vitals: Option<VitalsData>,
-            emote: Option<EmoteData>,
-            intent: Option<String>,
-        },
+        Chat,
         Simulation {
             vitals: VitalsData,
             emote: EmoteData,
@@ -573,16 +565,9 @@ mod desktop {
         message: String,
         _citizen_id: usize,
         citizen_name: String,
-        vitals: Option<VitalsData>,
-        emote: Option<EmoteData>,
         responder: &Responder,
     ) -> Option<String> {
-        let kind = PromptKind::Chat {
-            vitals,
-            emote,
-            intent: Some("Chat".to_string()),
-        };
-        let res = match responder(&message, kind, &state.chat) {
+        let res = match responder(&message, PromptKind::Chat, &state.chat) {
             Ok(reply) => {
                 let text = reply.clone();
                 state.chat.push(ChatMessage {
@@ -774,14 +759,14 @@ mod desktop {
                 assert_eq!(history[0].text, "Hello Yumon!");
                 Ok("Hello friend!".into())
             });
-            answer_chat(&mut state, "Hello Yumon!".into(), 0, "Yumon".into(), None, None, &responder);
+            answer_chat(&mut state, "Hello Yumon!".into(), 0, "Yumon".into(), &responder);
             assert_eq!(state.chat[1].text, "Hello friend!");
             assert_eq!(state.chat[1].role, "yumon");
             assert_eq!(state.chat[1].citizen_name.as_deref(), Some("Yumon"));
             assert!(!state.chat_busy);
             let failed: Responder = Box::new(|_, _, _| anyhow::bail!("GPU unavailable"));
             state.chat_busy = true;
-            answer_chat(&mut state, "Try again".into(), 0, "Yumon".into(), None, None, &failed);
+            answer_chat(&mut state, "Try again".into(), 0, "Yumon".into(), &failed);
             assert_eq!(state.chat[2].role, "error");
             assert!(state.chat[2].text.contains("GPU unavailable"));
             assert!(!state.chat_busy);
@@ -919,7 +904,7 @@ mod desktop {
                 paint_vocab: None,
             };
             let responder = load_responder(&args).expect("load_responder with embedded model should succeed");
-            let reply = responder("Hello", PromptKind::Chat { vitals: None, emote: None, intent: None }, &[]).expect("inference with embedded model should succeed");
+            let reply = responder("Hello", PromptKind::Chat, &[]).expect("inference with embedded model should succeed");
             assert!(!reply.trim().is_empty());
         }
 
@@ -947,7 +932,17 @@ mod desktop {
                 };
                 let responder = load_responder(&args).expect("load DPO responder should succeed");
 
-                // 1. Chat with vitals
+                // 1. Chat with an earlier turn as memory
+                let history = [
+                    ChatMessage { role: "user", text: "I just got home.".into(), citizen_name: None },
+                    ChatMessage { role: "yumon", text: "Welcome back! I missed you.".into(), citizen_name: None },
+                    ChatMessage { role: "user", text: "Is it dinner time yet?".into(), citizen_name: None },
+                ];
+                let reply = responder("Is it dinner time yet?", PromptKind::Chat, &history).expect("DPO chat inference");
+                println!("[DPO Chat Output] {}", reply);
+                assert!(!reply.trim().is_empty());
+
+                // 2. Simulation behavior
                 let vitals = VitalsData {
                     hunger: 80,
                     energy: 40,
@@ -955,16 +950,6 @@ mod desktop {
                     boredom: 20,
                 };
                 let emote = vitals.compute_grounded_emote();
-                let chat_kind = PromptKind::Chat {
-                    vitals: Some(vitals.clone()),
-                    emote: Some(emote.clone()),
-                    intent: Some("Chat".into()),
-                };
-                let reply = responder("Is it dinner time yet?", chat_kind, &[]).expect("DPO chat inference");
-                println!("[DPO Chat Output] {}", reply);
-                assert!(!reply.trim().is_empty());
-
-                // 2. Simulation behavior
                 let sim_kind = PromptKind::Simulation {
                     vitals,
                     emote,
@@ -1099,7 +1084,7 @@ mod desktop {
                 comment_prompt("idea", config.max_seq_len, &tokenizer)?;
                 let dec_clone = decompressor.clone();
                 Ok(Box::new(
-                    move |text: &str, kind: PromptKind, _history: &[ChatMessage]| {
+                    move |text: &str, kind: PromptKind, history: &[ChatMessage]| {
                         let is_structured = yumon_pet::brain::train::is_structured_or_instruction_prompt(text);
                         let (prompt_to_encode, ctx) = match &kind {
                             PromptKind::Product => {
@@ -1117,45 +1102,21 @@ mod desktop {
                                 let p = comment_prompt(&prompt_text, config.max_seq_len, &tokenizer)?;
                                 (p, ctx)
                             }
-                            PromptKind::Chat { vitals, emote, intent } => {
-                                let formatted_prompt = if is_structured {
-                                    text.to_string()
-                                } else if let (Some(v), Some(e)) = (vitals, emote) {
-                                    format!(
-                                        "Vitals: Hunger {}, Energy {}, Cleanliness {}, Boredom {}.\nEmote: [having: {}, knowing: {}, empathizing: {}] {}.\nIntent: {}.\nOwner Prompt: \"{}\"",
-                                        v.hunger, v.energy, v.cleanliness, v.boredom,
-                                        if e.having { "yes" } else { "no" },
-                                        if e.knowing { "yes" } else { "no" },
-                                        if e.empathizing { "yes" } else { "no" },
-                                        e.name,
-                                        intent.as_deref().unwrap_or("Chat"),
-                                        text
-                                    )
-                                } else {
-                                    let def_v = VitalsData::default();
-                                    let def_e = def_v.compute_grounded_emote();
-                                    format!(
-                                        "Vitals: Hunger {}, Energy {}, Cleanliness {}, Boredom {}.\nEmote: [having: {}, knowing: {}, empathizing: {}] {}.\nIntent: Chat.\nOwner Prompt: \"{}\"",
-                                        def_v.hunger, def_v.energy, def_v.cleanliness, def_v.boredom,
-                                        if def_e.having { "yes" } else { "no" },
-                                        if def_e.knowing { "yes" } else { "no" },
-                                        if def_e.empathizing { "yes" } else { "no" },
-                                        def_e.name,
-                                        text
-                                    )
-                                };
-
-                                if use_yumon_talk {
-                                    match yumon_talk::english_to_yumon_with_map(&formatted_prompt) {
+                            PromptKind::Chat => {
+                                // Plain dialogue: earlier turns as Human:/Yumon: memories, no stats.
+                                let (message, ctx) = if use_yumon_talk {
+                                    match yumon_talk::english_to_yumon_with_map(text) {
                                         Ok((talk, context)) => (talk, context),
                                         Err(e) => {
                                             eprintln!("[Yumon Portal] English -> Yumon Talk translation fallback: {e}");
-                                            (formatted_prompt, yumon_talk::TranslationContext::new())
+                                            (text.to_string(), yumon_talk::TranslationContext::new())
                                         }
                                     }
                                 } else {
-                                    (formatted_prompt, yumon_talk::TranslationContext::new())
-                                }
+                                    (text.to_string(), yumon_talk::TranslationContext::new())
+                                };
+                                let p = chat_prompt(&message, history, config.max_seq_len, &tokenizer, use_yumon_talk)?;
+                                (p, ctx)
                             }
                             PromptKind::Simulation { vitals, emote, environment, memory, plan } => {
                                 let formatted_prompt = if is_structured {
@@ -1431,8 +1392,6 @@ mod desktop {
                         message,
                         citizen_id,
                         citizen_name,
-                        vitals,
-                        emote,
                     }) => {
                         state.chat_busy = true;
                         state.chat_status = format!("{citizen_name} is thinking...");
@@ -1449,8 +1408,6 @@ mod desktop {
                             message,
                             citizen_id,
                             citizen_name.clone(),
-                            vitals,
-                            emote,
                             &responder,
                         ) {
                             let _ = proxy.send_event(RssEvent::ChatReply {
@@ -1977,7 +1934,7 @@ mod desktop {
                         state_changed = true;
                     }
                 }
-                Event::UserEvent(RssEvent::Ui(Ipc::Chat { message, citizen_id, citizen_name, vitals, emote }))
+                Event::UserEvent(RssEvent::Ui(Ipc::Chat { message, citizen_id, citizen_name }))
                     if state.can_refresh && !state.busy && !state.chat_busy =>
                 {
                     let message = message.trim();
@@ -1988,8 +1945,6 @@ mod desktop {
                             message: message.to_owned(),
                             citizen_id: cid,
                             citizen_name: cname,
-                            vitals,
-                            emote,
                         }).is_ok() {
                             state.chat_busy = true;
                             state.chat_status = "Yumon is thinking...".into();

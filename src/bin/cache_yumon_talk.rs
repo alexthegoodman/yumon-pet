@@ -55,13 +55,13 @@ struct Args {
     #[arg(long, default_value_t = 1.0)]
     min_coverage: f64,
     /// Maximum allowed NAME placeholder tokens in a target reply (default: 2).
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = 1)]
     max_name_tokens: usize,
     /// Maximum allowed SLOT placeholder tokens in a target reply (default: 2).
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = 1)]
     max_slot_tokens: usize,
     /// Maximum allowed SLOT placeholder tokens in a user prompt (default: 6).
-    #[arg(long, default_value_t = 6)]
+    #[arg(long, default_value_t = 1)]
     max_prompt_slots: usize,
 }
 
@@ -254,6 +254,16 @@ fn convert_single_sample(
 
     if total_active_len > max_seq_len {
         return ConversionResult::SkippedOversized;
+    }
+
+    // 4 or more tokens required
+    if prompt_tokens.len() < 4 {
+        return ConversionResult::SkippedOversized; // need fix
+    }
+
+    // 4 or more tokens required
+    if reply_tokens.len() < 4 {
+        return ConversionResult::SkippedOversized; // need fix
     }
 
     let preview = if capture_preview {

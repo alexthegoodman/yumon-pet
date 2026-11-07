@@ -30,16 +30,19 @@ struct Args {
     output_vocab: PathBuf,
 
     /// Total target vocabulary size including special, punctuation, placeholders and words (default: 4096)
-    #[arg(long, default_value_t = 4096)]
+    // #[arg(long, default_value_t = 4096)]
+    #[arg(long, default_value_t = 8192)] // more expressive, still quite compressed compared to 150k+
     vocab_size: usize,
 
     /// Maximum number of recurring multi-word phrases to mine and include (default: 300)
-    #[arg(long, default_value_t = 300)]
+    // #[arg(long, default_value_t = 300)]
+    #[arg(long, default_value_t = 600)]
     max_phrases: usize,
 
     /// Minimum confidence score to map an open-class word into a canonical anchor (default: 0.60).
     /// Words scoring below this threshold are strictly dropped.
-    #[arg(long, default_value_t = 0.60)]
+    // #[arg(long, default_value_t = 0.60)]
+    #[arg(long, default_value_t = 0.40)]
     min_mapping_score: f64,
 
     /// Maximum number of mapped words per canonical anchor cluster (default: 25)
@@ -47,7 +50,8 @@ struct Args {
     max_cluster_size: usize,
 
     /// Minimum word occurrences required to perform multi-gram distributional matching (default: 10)
-    #[arg(long, default_value_t = 10)]
+    // #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 4)]
     min_context_freq: usize,
 
     /// Minimum word frequency in corpus to be considered (default: 2)
