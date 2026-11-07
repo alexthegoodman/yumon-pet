@@ -10,6 +10,7 @@
 //!
 //! In canonical form every unit has s = 1, so w *is* the unit normal and b = -d.
 
+use crate::codebook::Codes;
 use crate::error::{Result, WirError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +97,8 @@ pub struct Program {
     pub outputs: Vec<Output>,
     pub units: Vec<Unit>,
     pub asserts: Vec<AssertCheck>,
+    /// Vectors written as codebook words (`{...}`), so they print back as words.
+    pub codes: Option<Codes>,
 }
 
 impl Program {

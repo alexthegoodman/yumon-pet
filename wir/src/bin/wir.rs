@@ -5,7 +5,9 @@ use std::process::ExitCode;
 
 use wir::io::{self, DType, LoadOptions};
 use wir::num::format_num;
-use wir::{canonicalize, compile, decompile, lower_str, print, CompileOptions, DecompileOptions, NumFormat, Weights};
+use wir::{
+    canonicalize, codebook, compile, decompile, encode, lower_str, print, CompileOptions, DecompileOptions, NumFormat, Weights,
+};
 
 const USAGE: &str = "\
 wir - WIR v0 compiler and decompiler
@@ -15,6 +17,7 @@ usage:
   wir decompile <weights> [-o out.wir] [--exact] [--digits 3] [--keys W1,b1,W2,b2[,W3,b3]]
                 [--transpose] [--input x] [--outputs y,z] [--assert-at \"0,0;1,1\"]
                 [--domain probe.json] [--shape 64x3x3] [--kernel-terms 3]
+                [--codebook g4|g2] [--calibrate probe.json]
   wir fmt <file.wir> [--exact]          print the resolved program (names and asserts kept)
   wir canon <file.wir> [--exact]        print the canonical form (what decompile would emit)
   wir eval <file.wir|weights> <x1,x2,...> [more points]
@@ -24,7 +27,9 @@ usage:
 Weights use PyTorch nn.Linear layout: W1 [H, D], b1 [H], W2 [O, H], b2 [O]; SwiGLU
 networks add W3 [H, D], b3 [H]. --domain drops creases never active on the probe's
 `inputs`; --kernel-terms keeps the first N of 9 patch components (lossy); --digits
-sets vector precision (default 3).
+sets vector precision (default 3). --codebook writes vectors as codebook words
+(lossy, about 4 weights per token for g4), rounding error-aware on the
+--calibrate inputs (default: the --domain probe).
 .safetensors files use the nn.Sequential(Linear, ReLU, Linear) keys 0.weight ... 2.bias.
 ";
 
@@ -210,7 +215,10 @@ fn parse_points(s: &str) -> Result<Vec<Vec<f64>>, String> {
 }
 
 fn cmd_decompile(raw: &[String]) -> Result<(), String> {
-    let valued = ["-o", "--keys", "--input", "--outputs", "--assert-at", "--domain", "--shape", "--kernel-terms", "--digits"];
+    let valued = [
+        "-o", "--keys", "--input", "--outputs", "--assert-at", "--domain", "--shape", "--kernel-terms", "--digits",
+        "--codebook", "--calibrate",
+    ];
     let args = Args::parse(raw, &valued)?;
     let mut allowed = valued.to_vec();
     allowed.extend(["--exact", "--transpose"]);
@@ -232,10 +240,18 @@ fn cmd_decompile(raw: &[String]) -> Result<(), String> {
             .transpose()?,
         ..Default::default()
     };
-    let p = decompile(&w, &opts).map_err(|e| e.to_string())?;
+    let mut p = decompile(&w, &opts).map_err(|e| e.to_string())?;
+    if let Some(name) = args.get("--codebook") {
+        let book = codebook(name).ok_or(format!("unknown codebook `{name}` (known: {})", wir::codebook::NAMES.join(", ")))?;
+        let samples = match args.get("--calibrate") {
+            Some(f) => Some(probe_inputs(Path::new(f))?),
+            None => opts.domain_samples.clone(),
+        };
+        p = encode(&p, book, samples.as_deref());
+    }
     let text = print(&p, number_format(&args));
     eprintln!(
-        "decompiled {} hidden unit(s) into {} crease(s)",
+        "decompiled {} hidden unit(s) into {} unit(s)",
         w.hidden(),
         p.units.len()
     );

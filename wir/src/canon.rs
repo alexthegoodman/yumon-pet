@@ -229,7 +229,7 @@ fn normal_form(input: String, dim: usize, mut outputs: Vec<Output>, units: Vec<U
         u.kind = if u.up.is_some() { UnitKind::Gate } else { kind };
         u.line = None;
     }
-    Program { input, dim, shape: None, domain: None, outputs, units: merged, asserts: Vec::new() }
+    Program { input, dim, shape: None, domain: None, outputs, units: merged, asserts: Vec::new(), codes: None }
 }
 
 pub fn max_abs(v: &[f64]) -> f64 {

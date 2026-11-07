@@ -1,5 +1,7 @@
 //! Source-level syntax tree: one node per statement, numbers as written.
 
+use crate::codebook::Codes;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlaneSpec {
     /// `zero on line P -> Q` (2D only).
@@ -64,8 +66,11 @@ pub struct Check {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
     Header { version: f64 },
+    /// `codebook NAME`: words in `{...}` vectors after this line come from it.
+    Codebook { name: String },
     Input { name: String, dim: usize, shape: Option<Vec<usize>>, domain: Option<(f64, f64)> },
-    Output { name: String, dim: usize },
+    /// `output y: R1`, or a range `output y1..y128: R1` (one scalar output each).
+    Output { names: Vec<String>, dim: usize },
     Crease { name: String, plane: PlaneSpec, anchor: Anchor },
     /// `crease NAME: ramp along DIR [above E]`: relu(DIR . x - E).
     RampCrease { name: String, ramp: Ramp },
@@ -86,12 +91,14 @@ pub struct Stmt {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Source {
     pub stmts: Vec<Stmt>,
+    /// Coded `{...}` vectors seen, if the program names a codebook.
+    pub codes: Option<Codes>,
 }
 
 pub const KEYWORDS: &[&str] = &[
     "wir", "input", "output", "crease", "assert", "solve", "over", "hinge", "left", "at", "turn", "zero",
     "on", "line", "plane", "normal", "offset", "through", "between", "and", "equals", "ramp", "along",
-    "above", "gate", "silu", "times", "patch", "in",
+    "above", "gate", "silu", "times", "patch", "in", "codebook",
 ];
 
 /// Names of the 3x3 patch basis, in canonical order. Component (i, j) is

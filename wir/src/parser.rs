@@ -1,26 +1,41 @@
 //! Recursive-descent parser: WIR text -> `ast::Source`.
 
 use crate::ast::*;
+use crate::codebook::{codebook, Codebook, Codes, NAMES};
 use crate::error::{Result, WirError};
 use crate::lexer::{split_statements, Statement, Tok, Token};
 
 pub fn parse(src: &str) -> Result<Source> {
     let mut stmts = Vec::new();
+    let mut codes: Option<Codes> = None;
     for st in split_statements(src)? {
-        stmts.push(Cursor::new(&st).statement()?);
+        let mut c = Cursor::new(&st, codes.take());
+        let stmt = c.statement()?;
+        codes = c.codes;
+        if let StmtKind::Codebook { name } = &stmt.kind {
+            if codes.is_some() {
+                return Err(WirError::at(st.line, &st.text, "a program names at most one codebook"));
+            }
+            let book = codebook(name).ok_or_else(|| {
+                WirError::at(st.line, &st.text, format!("unknown codebook `{name}` (known: {})", NAMES.join(", ")))
+            })?;
+            codes = Some(Codes::new(book));
+        }
+        stmts.push(stmt);
     }
-    Ok(Source { stmts })
+    Ok(Source { stmts, codes })
 }
 
 struct Cursor<'a> {
     st: &'a Statement,
     toks: &'a [Token],
     pos: usize,
+    codes: Option<Codes>,
 }
 
 impl<'a> Cursor<'a> {
-    fn new(st: &'a Statement) -> Self {
-        Self { st, toks: &st.tokens, pos: 0 }
+    fn new(st: &'a Statement, codes: Option<Codes>) -> Self {
+        Self { st, toks: &st.tokens, pos: 0, codes }
     }
 
     fn err(&self, msg: impl Into<String>) -> WirError {
@@ -120,6 +135,9 @@ impl<'a> Cursor<'a> {
     /// `[ NUM NUM ... ] [/ NUM]`: entries separated by spaces (commas allowed),
     /// all divided by the optional scale.
     fn vector(&mut self) -> Result<Vec<f64>> {
+        if self.peek() == Some(&Tok::LBrace) {
+            return self.coded();
+        }
         self.expect(Tok::LBracket)?;
         let mut v = Vec::new();
         while self.peek() != Some(&Tok::RBracket) {
@@ -143,6 +161,43 @@ impl<'a> Cursor<'a> {
             }
             v.iter_mut().for_each(|x| *x /= q);
         }
+        Ok(v)
+    }
+
+    /// `{ WORD WORD ... } [/ NUM]`: each word's codebook entry, end to end, divided
+    /// by the optional scale.
+    fn coded(&mut self) -> Result<Vec<f64>> {
+        self.expect(Tok::LBrace)?;
+        let Some(book): Option<&'static Codebook> = self.codes.as_ref().map(|c| c.book) else {
+            return Err(self.err("`{...}` vectors need a `codebook` line after the header"));
+        };
+        let mut idx = Vec::new();
+        loop {
+            match self.next() {
+                Some(Tok::RBrace) => break,
+                Some(Tok::Ident(w)) => match book.index(&w) {
+                    Some(i) => idx.push(i),
+                    None => return Err(self.err(format!("`{w}` is not a word of codebook {}", book.name))),
+                },
+                None => return Err(self.err("unclosed `{` vector")),
+                Some(t) => return Err(self.err(format!("expected a codebook word, found {}", t.describe()))),
+            }
+        }
+        if idx.is_empty() {
+            return Err(self.err("empty vector `{}`"));
+        }
+        let q = if self.peek() == Some(&Tok::Slash) {
+            self.pos += 1;
+            let q = self.number()?;
+            if !(q != 0.0 && q.is_finite()) {
+                return Err(self.err("vector scale must be a finite non-zero number"));
+            }
+            q
+        } else {
+            1.0
+        };
+        let v = book.expand(&idx, q);
+        self.codes.as_mut().unwrap().insert(&v, q, idx);
         Ok(v)
     }
 
@@ -184,9 +239,9 @@ impl<'a> Cursor<'a> {
         Ok(Ramp { along, above })
     }
 
-    /// `( NUM {, NUM} )`, a `[...]` vector, or a bare number as a 1D point.
+    /// `( NUM {, NUM} )`, a `[...]` or `{...}` vector, or a bare number as a 1D point.
     fn point(&mut self) -> Result<Vec<f64>> {
-        if self.peek() == Some(&Tok::LBracket) {
+        if matches!(self.peek(), Some(Tok::LBracket | Tok::LBrace)) {
             return self.vector();
         }
         if self.peek() != Some(&Tok::LParen) {
@@ -246,10 +301,27 @@ impl<'a> Cursor<'a> {
                     self.pos += 1;
                     StmtKind::Header { version: self.number()? }
                 }
+                "codebook" => {
+                    self.pos += 1;
+                    match self.next() {
+                        Some(Tok::Ident(name)) => StmtKind::Codebook { name },
+                        _ => {
+                            self.pos -= 1;
+                            return Err(self.err(format!("expected a codebook name, found {}", self.found())));
+                        }
+                    }
+                }
                 "input" | "output" => {
                     let is_input = s == "input";
                     self.pos += 1;
                     let name = self.name()?;
+                    let names = if !is_input && self.peek() == Some(&Tok::DotDot) {
+                        self.pos += 1;
+                        let last = self.name()?;
+                        self.name_range(&name, &last)?
+                    } else {
+                        vec![name.clone()]
+                    };
                     self.expect(Tok::Colon)?;
                     let (dim, shape) = self.dim()?;
                     if is_input {
@@ -272,7 +344,7 @@ impl<'a> Cursor<'a> {
                         if shape.is_some() {
                             return Err(self.err("outputs are scalar in v0; declare `output <name>: R1` components"));
                         }
-                        StmtKind::Output { name, dim }
+                        StmtKind::Output { names, dim }
                     }
                 }
                 "crease" => {
@@ -429,7 +501,7 @@ impl<'a> Cursor<'a> {
             self.pos += 1;
             coef = -coef;
         }
-        if self.peek() == Some(&Tok::LBracket) {
+        if matches!(self.peek(), Some(Tok::LBracket | Tok::LBrace)) {
             let coefs = self.vector()?;
             self.expect(Tok::Dot)?;
             self.expect(Tok::LParen)?;
@@ -450,6 +522,10 @@ impl<'a> Cursor<'a> {
                 }
             }
             self.expect(Tok::RParen)?;
+            let coefs = match self.codes.as_mut().and_then(|c| c.truncate(&coefs, names.len())) {
+                Some(cut) => cut,
+                None => coefs,
+            };
             if coefs.len() != names.len() {
                 return Err(self.err(format!("{} coefficients for {} names", coefs.len(), names.len())));
             }

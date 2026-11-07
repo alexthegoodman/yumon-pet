@@ -144,7 +144,7 @@ pub fn scale_value(m: i64, e: i32) -> f64 {
 }
 
 /// `990`, `4.1e4`, `0.12`: integers up to 4 digits plainly, otherwise mantissa form.
-fn scale_text(m: i64, e: i32) -> String {
+pub fn scale_text(m: i64, e: i32) -> String {
     match e {
         0..=2 => format!("{}", m * 10i64.pow(e as u32)),
         -2..=-1 => format_exact(scale_value(m, e)),

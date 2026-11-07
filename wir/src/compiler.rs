@@ -7,6 +7,7 @@
 //! v / delta, and it keeps weights exact when points are simple (XOR compiles
 //! to W1 = [[1,1],[1,1]], not 1.0000000000000002).
 
+use crate::codebook::Codes;
 use crate::ast::*;
 use crate::error::{Result, Warning, WirError};
 use crate::linalg::lstsq;
@@ -135,6 +136,11 @@ pub fn lower(src: &Source, opts: CompileOptions) -> Result<Lowered> {
         let err = |m: String| WirError::at(s.line, &s.text, m);
         match &s.kind {
             StmtKind::Header { .. } => return Err(err("duplicate `wir` header".into())),
+            StmtKind::Codebook { .. } => {
+                if !body.is_empty() {
+                    return Err(err("`codebook` must come before creases, readouts and asserts".into()));
+                }
+            }
             StmtKind::Input { name, dim, shape, domain } => {
                 if !body.is_empty() {
                     return Err(err("declarations must come before creases, readouts and asserts".into()));
@@ -144,7 +150,7 @@ pub fn lower(src: &Source, opts: CompileOptions) -> Result<Lowered> {
                 }
                 input = Some((name.clone(), *dim, shape.clone(), *domain));
             }
-            StmtKind::Output { name, dim } => {
+            StmtKind::Output { names, dim } => {
                 if !body.is_empty() {
                     return Err(err("declarations must come before creases, readouts and asserts".into()));
                 }
@@ -153,10 +159,12 @@ pub fn lower(src: &Source, opts: CompileOptions) -> Result<Lowered> {
                         "outputs are scalar in v0; declare {dim} separate `output <name>: R1` components"
                     )));
                 }
-                if outputs.iter().any(|o| &o.name == name) || input.as_ref().is_some_and(|i| &i.0 == name) {
-                    return Err(err(format!("`{name}` is already declared")));
+                for name in names {
+                    if outputs.iter().any(|o| &o.name == name) || input.as_ref().is_some_and(|i| &i.0 == name) {
+                        return Err(err(format!("`{name}` is already declared")));
+                    }
+                    outputs.push(Output { name: name.clone(), bias: 0.0 });
                 }
-                outputs.push(Output { name: name.clone(), bias: 0.0 });
             }
             _ => body.push(s),
         }
@@ -168,6 +176,7 @@ pub fn lower(src: &Source, opts: CompileOptions) -> Result<Lowered> {
         return Err(WirError::new("missing output declaration, e.g. `output y: R1`"));
     }
     let n_out = outputs.len();
+    let mut codes = src.codes.clone();
 
     let mut units: Vec<Unit> = Vec::new();
     let mut creases: Vec<(String, CreaseInfo)> = Vec::new();
@@ -202,10 +211,10 @@ pub fn lower(src: &Source, opts: CompileOptions) -> Result<Lowered> {
                 if taken(name, &creases) {
                     return Err(err(format!("`{name}` is already declared")));
                 }
-                let (w, b) = ramp_form(ramp, dim, shape.as_deref(), s)?;
+                let (w, b) = ramp_form(ramp, dim, shape.as_deref(), &mut codes, s)?;
                 let (up, params) = match &s.kind {
                     StmtKind::Gate { up, .. } => {
-                        let (u, c) = ramp_form(up, dim, shape.as_deref(), s)?;
+                        let (u, c) = ramp_form(up, dim, shape.as_deref(), &mut codes, s)?;
                         (Some(Up { u, c }), 2 * dim + 2 + n_out)
                     }
                     _ => {
@@ -366,7 +375,9 @@ pub fn lower(src: &Source, opts: CompileOptions) -> Result<Lowered> {
                     });
                 }
             }
-            StmtKind::Header { .. } | StmtKind::Input { .. } | StmtKind::Output { .. } => unreachable!(),
+            StmtKind::Header { .. } | StmtKind::Codebook { .. } | StmtKind::Input { .. } | StmtKind::Output { .. } => {
+                unreachable!()
+            }
         }
     }
 
@@ -412,7 +423,7 @@ pub fn lower(src: &Source, opts: CompileOptions) -> Result<Lowered> {
     }
 
     Ok(Lowered {
-        program: Program { input: input_name, dim, shape, domain, outputs, units, asserts },
+        program: Program { input: input_name, dim, shape, domain, outputs, units, asserts, codes },
         costs,
         solves,
         warnings,
@@ -527,10 +538,16 @@ pub fn box_max(w: &[f64], b: f64, lo: f64, hi: f64) -> f64 {
 }
 
 /// `along DIR [above E]` -> (DIR as a flat vector, -E).
-fn ramp_form(r: &Ramp, dim: usize, shape: Option<&[usize]>, s: &Stmt) -> Result<(Vec<f64>, f64)> {
+fn ramp_form(r: &Ramp, dim: usize, shape: Option<&[usize]>, codes: &mut Option<Codes>, s: &Stmt) -> Result<(Vec<f64>, f64)> {
     let err = |m: String| WirError::at(s.line, &s.text, m);
     if !r.above.is_finite() {
         return Err(err("`above` level is not finite".into()));
+    }
+    // A coded vector's last word may overhang the input dimension.
+    if let (Direction::Flat(v), Some(c)) = (&r.along, codes.as_mut())
+        && let Some(cut) = c.truncate(v, dim)
+    {
+        return Ok((cut, -r.above));
     }
     let v = expand_direction(&r.along, dim, shape).map_err(err)?;
     Ok((v, -r.above))

@@ -255,6 +255,19 @@ Real checkpoints made two things clear: point-anchored text does not scale past 
 
 Compression study (Nov 7) on the colorizer head and sunrise layer 0 at equal number budgets, scored by output change on real inputs: rounding to 3 significant digits costs 0.06-0.1%, dropping inactive units is free, 3x3 DCT terms work (3 of 9: 0.7%), while FFT of weight rows (72% error at half the numbers on sunrise), magnitude pruning (64%) and low rank (44%) do not: hidden-unit order carries no frequency structure and the trained matrices are near full rank (top 16 of 128 directions hold 27% of the energy). Tokens therefore stay roughly proportional to parameters, about 2 per weight in compact text.
 
+## Codebook vectors (Nov 7, 2026)
+
+The target reader is a Qwen model, and Qwen's tokenizer splits numbers into single digits: `[990 -495 122] / 990` is 18 Qwen tokens, and a compact sunrise layer is about 745k Qwen tokens (406k by `uvx count-tokens`, which uses tiktoken and keeps 3-digit groups whole). Numbers cost about 4 Qwen tokens per weight, so the fix is to write words, not digits.
+
+- **`codebook g4`** (after the header) names a fixed codebook; `{ts trend refresh ...} / 11` is then a vector: each word stands for 4 numbers, laid end to end and divided by the scale. `g4` has 4,096 words of 4 numbers (3 bits per weight, 4 weights per token); `g2` has 256 words of 2 numbers (4 bits, 2 per token). Every word is one Qwen2.5 token with its leading space. `{...}` works wherever `[...]` does.
+- The entries are k-means centroids of standard normal samples (`wir/scripts/make_codebook.py`, seeded), not of any model, so one codebook serves every program and never appears in the text. A fine-tuned model can learn the 4,096 words once. Weight rows are scaled to unit RMS (`/ q`, two significant digits) before coding. A model-specific codebook was barely better on sunrise (layer 0 relative error 0.069 vs 0.072 for the universal one). Words are taken in Qwen vocabulary order (frequent first) and paired with the most used entries; profanity, sexual, violent and identity words are blocked. The files are part of the language: changing them changes what existing text means, so a new codebook gets a new name.
+- A vector whose length is not a multiple of the word size ends in a word that overhangs it; the extra entries are dropped. An overhang of a whole word is still an error, and number vectors must match exactly.
+- `wir decompile --codebook g4 --calibrate probe.json` codes every direction and readout. With calibration inputs (default: the `--domain` probe) rounding is error-aware, as in GPTQ: each 4-number group's rounding error is pushed onto the not-yet-coded entries through the inverse input covariance, and readouts are coded against the outputs of the already-coded units. On sunrise layer 0 this halves the error of plain nearest-word rounding (0.063 vs 0.127). Biases stay numbers.
+- Coded text is a `print` fixed point and recompiles bit for bit. `canon` expands it back to numbers (renormalizing breaks the words), so re-code from weights rather than canonicalizing coded text.
+- `output y1..y128: R1` declares a range of outputs (the printer uses it), saving about 7 tokens per output.
+
+Quantization study first (Python, `--offset 1` eval samples that calibration never saw, all six sunrise MLPs replaced). Loss change and top-1 agreement: one digit per weight (10 levels, GPTQ) +0.015 / 98.8% at 1 Qwen token per weight; `g4` +0.019 / 98.7% at 1/4; `g2` +0.005 / 99.4% at 1/2. Plain rounding without error feedback has 1.5-3x the per-layer error of GPTQ rounding at the same size. Larger codebooks (16,384 entries, still single-token words): 4 numbers per word gives +0.008 / 99.1% at the same tokens as `g4` (a candidate `g4x16k`), while 8 numbers per word (1.75 bits per weight) costs +0.13 / 94.4%, so about 4 weights per token is the floor for this model.
+
 ## Real checkpoints (Nov 7, 2026)
 
 **Yumon Paint CNN colorizer** (`checkpoints/old/yumon-colorizer-256-a`, `src/vision/colorizer.rs`). The head `out_conv(relu(head_conv(f)))`, a 3x3 conv (64 -> 64) then a 1x1 conv (64 -> 313), is at every pixel a one-hidden-layer ReLU network over the 3x3 feature patch: R576 (channel*9 + ky*3 + kx, zero padding at the border), 64 creases, 313 outputs.
@@ -266,26 +279,37 @@ cargo run --release -- decompile ../tmp/wir-colorizer/head.json --domain ../tmp/
 cargo run --release -- verify ../tmp/wir-colorizer/head.wir ../tmp/wir-colorizer/probe.json
 ```
 
-| text | tokens | relative error | argmax same |
-| --- | --- | --- | --- |
-| point-anchored, 6 digits (first decompile) | 673,659 | 1.5e-6 | 4096/4096 |
-| compact | 125,353 | 2.6e-4 | 4085/4096 |
-| compact + `--domain` (26 inactive units dropped) | 78,681 | 2.6e-4 | 4085/4096 |
-| `--shape 64x3x3`, all 9 patch terms | 80,931 | 2.7e-4 | 4087/4096 |
-| 6 patch terms | 65,453 | 1.1e-3 | 4016/4096 |
-| 3 patch terms (level, dx, dy) | 50,081 | 7.1e-3 | 3666/4096 |
+| text | tokens (tiktoken) | Qwen tokens | relative error | argmax same |
+| --- | --- | --- | --- | --- |
+| point-anchored, 6 digits (first decompile) | 673,659 | | 1.5e-6 | 4096/4096 |
+| compact | 125,353 | | 2.6e-4 | 4085/4096 |
+| compact + `--domain` (26 inactive units dropped) | 76,500 | 140,076 | 2.6e-4 | 4085/4096 |
+| `--shape 64x3x3`, all 9 patch terms | 80,931 | | 2.7e-4 | 4087/4096 |
+| 6 patch terms | 65,453 | | 1.1e-3 | 4016/4096 |
+| 3 patch terms (level, dx, dy) | 50,081 | | 7.1e-3 | 3666/4096 |
+| `--domain --codebook g2` | 25,085 | 27,982 | 8.4e-3 | 3601/4096 |
+| `--domain --codebook g4` | 16,834 | 19,731 | 9.3e-3 | 3727/4096 |
 
 Errors are against the model's own logits (up to 7.7) from a Burn WGPU forward. `--exact` text matches within 3.6e-6, the f32/f64 floor.
 
-**yumon-base-dec-sunrise** (dense decoder, 128 wide, 6 layers, SwiGLU 128 -> 512 -> 128). Each block's MLP is a gate program: 512 gates, 128 outputs, about 407k tokens per layer.
+**yumon-base-dec-sunrise** (dense decoder, 128 wide, 6 layers, SwiGLU 128 -> 512 -> 128). Each block's MLP is a gate program: 512 gates, 128 outputs, 196,608 weights.
 
 ```
 cargo run --release --bin wir_decoder -- record    # tmp/wir-sunrise/layer{l}_swiglu.json + layer{l}_probe.json
 cd wir && cargo run --release -- decompile ../tmp/wir-sunrise/layer0_swiglu.json -o ../tmp/wir-sunrise/layer0.wir
 cargo run --release -- compile ../tmp/wir-sunrise/layer0.wir --quiet -o ../tmp/wir-sunrise/layer0.wir.json
 cd .. && cargo run --release --bin wir_decoder -- eval --mlp 0=tmp/wir-sunrise/layer0.wir.json   # ... up to --mlp 5=
+# coded: decompile ... --codebook g4 --calibrate ../tmp/wir-sunrise/layer0_probe.json, then eval with --offset 1
 ```
 
 On held-out MLP inputs (2,048 per layer) the canonical text is within 0.05-0.10% relative error of the SwiGLU output. With all six MLPs replaced by weights compiled from the WIR text, next-token loss on 256 cache samples (30,872 positions) is 4.1350 for both, the change is under 1e-4, and the argmax token is identical at every position.
+
+| text, per layer | tokens (tiktoken) | Qwen tokens | layer relative error | all six layers: loss change | top-1 same |
+| --- | --- | --- | --- | --- | --- |
+| compact numbers | 406k | 737k-748k | 0.05-0.10% | < 1e-4 | 100% |
+| `--codebook g2` | 112k | 114k | 1.4-5.8% | +0.0047 | 99.38% |
+| `--codebook g4` | 63k | 65k | 2.5-10.9% | +0.0189 | 98.72% |
+
+Coded rows are scored with `wir_decoder eval --offset 1`: 256 samples next to the ones the probes (and so the calibration) came from, 30,934 positions, base loss 4.0127. Layer 0 is the most sensitive (`g4` alone: +0.011); mixing `g2` there and `g4` elsewhere is an option. Decompiling and coding one layer takes 0.8 s.
 
 Not covered: the colorizer backbone (stacked ReLU convs and residual blocks need depth, v0.2), and the attention, norms and embeddings of the decoder (WIR states MLPs only).

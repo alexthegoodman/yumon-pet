@@ -34,8 +34,10 @@ in `../docs/WIR.md`.
 (slices of larger checkpoints), `--transpose` for `[in, out]` storage (Burn
 `Linear`), `--input`/`--outputs` to name things, `--exact` for lossless numbers,
 `--digits N` for vector precision (default 3), `--domain probe.json` to drop
-creases never active on the probe's inputs, `--shape 64x3x3` for patch directions
-and `--kernel-terms N` to keep only the first N patch components (lossy).
+creases never active on the probe's inputs, `--shape 64x3x3` for patch directions,
+`--kernel-terms N` to keep only the first N patch components (lossy), and
+`--codebook g4|g2` to write vectors as codebook words (lossy; rounding is
+error-aware on `--calibrate probe.json`, default the `--domain` probe).
 
 ## Compact syntax
 
@@ -53,6 +55,24 @@ y = [-115 -155 ...] / 1e4 . (c1..c64) + 0.0817                 # vector readout
 Vectors are integers over a two-significant-digit scale, so the largest entry
 lands at 900-999 (one token per entry). See `../docs/WIR.md` for semantics and the
 canonical form of gates.
+
+## Codebook vectors
+
+```
+wir 0.1
+codebook g4
+input  x: R128
+output y1..y128: R1
+gate c1: silu along {ts trend refresh ...} / 11, times along {...} / 2.5
+y1 = {...} / 66 . (c1..c512)
+```
+
+Each word is a fixed group of numbers from `codebooks/g4.txt` (4,096 words x 4,
+3 bits per weight) or `g2.txt` (256 x 2), divided by the scale. Words are single
+Qwen2.5 tokens, so g4 text costs about a quarter of a token per weight, against
+about 4 for digits under Qwen's digit-by-digit tokenizer. The entries are k-means
+centroids of Gaussian samples (`scripts/make_codebook.py`), shared by every model.
+A last word may overhang the vector. Sunrise: 745k -> 65k Qwen tokens per layer.
 
 ## Weight files
 
@@ -98,7 +118,7 @@ let text = wir::print(&p, wir::NumFormat::CANONICAL);      // or NumFormat::EXAC
 ## Tests
 
 ```
-cargo test                      # 61 tests, ~20 s debug (fuzz is the slow one)
+cargo test                      # 68 tests, ~25 s debug (fuzz is the slow one)
 uv run --project ../python-train python scripts/interop.py   # NumPy 2.5 / PyTorch 2.14 cross-check
 ```
 
@@ -109,4 +129,5 @@ through decompile, exact print and compile, each compared on 10,000 points.
 text unchanged; `tests/roundtrip.rs` checks `decompile(compile(src)) ==
 canonicalize(src)` on 600 generated programs. `tests/compact.rs` covers the compact
 syntax, gates, patches and domains, including 300 random D 4-9 ReLU and SwiGLU
-networks through exact and canonical compact text.
+networks through exact and canonical compact text. `tests/codebook.rs` covers coded
+vectors: parsing, bit-exact round trips, overhang and calibrated rounding.

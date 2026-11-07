@@ -16,6 +16,7 @@
 
 pub mod ast;
 pub mod canon;
+pub mod codebook;
 pub mod compiler;
 pub mod error;
 pub mod io;
@@ -27,6 +28,7 @@ pub mod parser;
 pub mod printer;
 
 pub use canon::{canonicalize, decompile, DecompileOptions, Tolerances};
+pub use codebook::{codebook, encode};
 pub use compiler::{compile, lower_str, CompileOptions, Compiled, CostLine};
 pub use error::{Result, Warning, WirError};
 pub use model::{Mat, Program, Unit, UnitKind, Weights};

@@ -46,6 +46,10 @@ struct Common {
     eval: usize,
     #[arg(long, default_value_t = 16)]
     batch: usize,
+    /// Shift every eval sample index by this much, to score on samples other than
+    /// the ones a probe (and anything calibrated on it) came from.
+    #[arg(long, default_value_t = 0)]
+    offset: usize,
 }
 
 #[derive(Subcommand, Debug)]
@@ -95,7 +99,7 @@ fn setup(c: &Common, device: &<B as Backend>::Device) -> Result<(YumonDecBrain<B
     let samples = load_cache(&c.cache, &tokenizer, config.training_stage, config.max_seq_len)?;
     let n = samples.len();
     ensure!(c.eval > 0 && c.eval <= n, "cache has {n} samples, asked for {}", c.eval);
-    let eval_idx: Vec<usize> = (0..c.eval).map(|i| (2 * i + 1) * n / (2 * c.eval)).collect();
+    let eval_idx: Vec<usize> = (0..c.eval).map(|i| ((2 * i + 1) * n / (2 * c.eval) + c.offset) % n).collect();
     let sep = tokenizer.encode(language_separator_for(&tokenizer));
     let seq = |i: &usize| {
         let s = &samples[*i];

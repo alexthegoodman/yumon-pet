@@ -47,14 +47,19 @@ pub fn render(p: &Program, fmt: NumFormat) -> String {
 
     let compact = p.dim > 3 || p.units.iter().any(|u| u.up.is_some());
     let mut out = String::from("wir 0.1\n");
+    if let Some(c) = &p.codes {
+        out += &format!("codebook {}\n", c.book.name);
+    }
     let space = match &p.shape {
         Some(s) => s.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("x"),
         None => p.dim.to_string(),
     };
     let domain = p.domain.map_or(String::new(), |(lo, hi)| format!(" in [{}, {}]", num(lo), num(hi)));
     out += &format!("input  {}: R{space}{domain}\n", p.input);
-    for o in &p.outputs {
-        out += &format!("output {}: R1\n", o.name);
+    let names: Vec<&str> = p.outputs.iter().map(|o| o.name.as_str()).collect();
+    match name_list(&names) {
+        range if range.contains("..") => out += &format!("output {range}: R1\n"),
+        _ => names.iter().for_each(|n| out += &format!("output {n}: R1\n")),
     }
 
     let decls: Vec<&Unit> = p.units.iter().filter(|u| !inline(u)).collect();
@@ -82,7 +87,7 @@ pub fn render(p: &Program, fmt: NumFormat) -> String {
             let names: Vec<&str> = decls.iter().map(|u| u.name.as_str()).collect();
             let bias = num(o.bias.abs());
             let bias = if bias == "0" { String::new() } else { format!(" {} {bias}", if o.bias < 0.0 { "-" } else { "+" }) };
-            out += &format!("{} = {} . ({}){bias}\n", o.name, format_vector(&coefs, fmt), name_list(&names));
+            out += &format!("{} = {} . ({}){bias}\n", o.name, vector_text(&coefs, p, fmt), name_list(&names));
             continue;
         }
         // (separator, body) pairs; the separator of the first term is folded in.
@@ -204,8 +209,16 @@ fn ramp_text(w: &[f64], b: f64, p: &Program, fmt: NumFormat) -> String {
     format!("along {}{above}", direction_text(w, p, fmt))
 }
 
+/// Codebook words if `v` was coded, else a number vector.
+fn vector_text(v: &[f64], p: &Program, fmt: NumFormat) -> String {
+    p.codes.as_ref().and_then(|c| c.text(v)).unwrap_or_else(|| format_vector(v, fmt))
+}
+
 /// A vector, or for `R<c>x3x3` inputs its `patch` components (zero ones omitted).
 fn direction_text(w: &[f64], p: &Program, fmt: NumFormat) -> String {
+    if let Some(t) = p.codes.as_ref().and_then(|c| c.text(w)) {
+        return t;
+    }
     let Some(&[c, 3, 3]) = p.shape.as_deref() else {
         return format_vector(w, fmt);
     };

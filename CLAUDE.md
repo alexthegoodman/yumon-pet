@@ -156,3 +156,14 @@ Colorizer head (`export_wir_colorizer`, `ColorizerModel::features`/`head()`): 67
 each SwiGLU layer is 512 gates (~407k tokens); all six WIR-compiled layers in the
 model change loss by < 1e-4 with identical argmax tokens. Tokens stay ~2 per weight:
 FFT/low-rank/pruning of trained weights tested poorly. Attention/norms are not WIR.
+
+WIR codebook vectors (2026-11-07): Qwen splits numbers into single digits, so compact
+text was ~4 Qwen tokens per weight (sunrise layer ~745k Qwen tokens). `codebook g4`
+plus `{word ...} / q` vectors (wir/src/codebook.rs, wir/codebooks/g4.txt and g2.txt
+from wir/scripts/make_codebook.py) write 4 (g4) or 2 (g2) weights per single-token word;
+entries are Gaussian k-means centroids, shared by every model. `wir decompile --codebook
+g4 --calibrate probe.json` rounds GPTQ style. A last word may overhang a vector;
+`output y1..y128: R1` ranges. Sunrise: 65k Qwen tokens per layer with g4 (+0.019 loss,
+98.7% top-1 with all six layers), 114k with g2 (+0.005, 99.4%); colorizer head 19.7k.
+`wir_decoder eval --offset N` scores on samples other than the probe's. `canon` expands
+coded text back to numbers. 68 wir tests.

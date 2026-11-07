@@ -204,3 +204,15 @@ fn gate_symmetries_canonicalize() {
         assert_eq!(text(&w), text(&v));
     }
 }
+
+#[test]
+fn output_ranges() {
+    let src = "wir 0.1\ninput x: R4\noutput y1..y3: R1\ncrease a: ramp along [1 0 0 0]\n\
+               y1 = a\ny2 = 2*a\ny3 = 3*a\n";
+    let p = lower_str(src).unwrap();
+    let names: Vec<&str> = p.outputs.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(names, ["y1", "y2", "y3"]);
+    assert!(print(&p, NumFormat::CANONICAL).contains("output y1..y3: R1\n"));
+    let dup = "wir 0.1\ninput x: R4\noutput y1..y3: R1\noutput y2: R1\ncrease a: ramp along [1 0 0 0]\ny1 = a\n";
+    assert!(compile(dup, Default::default()).unwrap_err().to_string().contains("`y2` is already declared"));
+}
