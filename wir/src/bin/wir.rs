@@ -4,13 +4,15 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use wir::io::{self, DType, LoadOptions};
+use wir::deep;
+use wir::games::{self, Pong};
 use wir::num::format_num;
 use wir::{
     canonicalize, codebook, compile, decompile, encode, lower_str, print, CompileOptions, DecompileOptions, NumFormat, Weights,
 };
 
 const USAGE: &str = "\
-wir - WIR v0 compiler and decompiler
+wir - WIR v0 / 0.2 compiler and decompiler
 
 usage:
   wir compile <file.wir> [-o weights.npz|.safetensors|.json] [--dtype f64|f32] [--tol 1e-6] [--quiet]
@@ -23,6 +25,11 @@ usage:
   wir eval <file.wir|weights> <x1,x2,...> [more points]
   wir verify <file.wir|weights> <probe.json> [--tol 1e-4]
                                         compare against reference inputs/outputs
+  wir pong [--width 16] [--height 12] [--paddle 3] [--speed 1] [--paddle-speed 1]
+           [-o pong.wir] [--check 2000000]
+  wir pong --variants N --out DIR [--seed 1] [--check 200000]
+                                        generate Pong step programs (0.2), each checked
+                                        against a reference simulator
 
 Weights use PyTorch nn.Linear layout: W1 [H, D], b1 [H], W2 [O, H], b2 [O]; SwiGLU
 networks add W3 [H, D], b3 [H]. --domain drops creases never active on the probe's
@@ -31,6 +38,10 @@ sets vector precision (default 3). --codebook writes vectors as codebook words
 (lossy, about 4 weights per token for g4), rounding error-aware on the
 --calibrate inputs (default: the --domain probe).
 .safetensors files use the nn.Sequential(Linear, ReLU, Linear) keys 0.weight ... 2.bias.
+
+`wir 0.2` programs (named scalar inputs, let/output expressions, combinators) compile
+to deep ReLU networks: .json (`layers`) or .safetensors (nn.Sequential keys 0, 2, 4, ...).
+compile, decompile and eval accept them; eval takes one value per input in order.
 ";
 
 struct Args {
@@ -91,6 +102,7 @@ fn main() -> ExitCode {
         "canon" => cmd_print(rest, true),
         "eval" => cmd_eval(rest),
         "verify" => cmd_verify(rest),
+        "pong" => cmd_pong(rest),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
@@ -140,7 +152,11 @@ fn cmd_compile(raw: &[String]) -> Result<(), String> {
         Some("f32") => DType::F32,
         Some(d) => return Err(format!("bad --dtype `{d}` (f64 or f32)")),
     };
-    let c = compile(&read(&path)?, opts).map_err(|e| format!("{}: {e}", path.display()))?;
+    let src = read(&path)?;
+    if deep::is_deep_source(&src) {
+        return compile_deep(&src, &path, &args, opts.tolerance, dtype);
+    }
+    let c = compile(&src, opts).map_err(|e| format!("{}: {e}", path.display()))?;
     for w in &c.warnings {
         eprintln!("{w}");
     }
@@ -173,6 +189,114 @@ fn cmd_compile(raw: &[String]) -> Result<(), String> {
         io::save(&c.weights, &PathBuf::from(out), dtype).map_err(|e| e.to_string())?;
         println!("wrote {out}");
     }
+    Ok(())
+}
+
+fn compile_deep(src: &str, path: &Path, args: &Args, tol: f64, dtype: DType) -> Result<(), String> {
+    let c = deep::compile(src, tol).map_err(|e| format!("{}: {e}", path.display()))?;
+    let w = &c.weights;
+    let hidden = w.hidden();
+    println!(
+        "cost report: {} input(s), {} output(s), {} hidden layer(s) {:?}, {} parameters",
+        w.input_dim(), w.output_dim(), hidden.len(), hidden, w.param_count()
+    );
+    let lines: Vec<&str> = src.lines().collect();
+    println!("  {:>5}  {:>5}  {:>5}  statement", "layer", "line", "units");
+    for cost in &c.costs {
+        let (line, text) = match cost.line {
+            Some(l) => (l.to_string(), lines.get(l - 1).map_or("", |t| t.split('#').next().unwrap().trim())),
+            None => ("-".into(), "(carries values to a later layer)"),
+        };
+        println!("  {:>5}  {:>5}  {:>5}  {}", cost.layer, line, cost.units, text);
+    }
+    if !c.program.asserts.is_empty() {
+        println!("asserts: {} passed (tolerance {tol:.0e})", c.program.asserts.len());
+    }
+    if let Some(out) = args.get("-o") {
+        deep::save(w, Path::new(out), dtype).map_err(|e| e.to_string())?;
+        println!("wrote {out}");
+    }
+    Ok(())
+}
+
+fn cmd_pong(raw: &[String]) -> Result<(), String> {
+    let valued = ["--width", "--height", "--paddle", "--speed", "--paddle-speed", "-o", "--check", "--variants", "--out", "--seed"];
+    let args = Args::parse(raw, &valued)?;
+    args.check(&valued)?;
+    let int = |k: &str, d: i64| -> Result<i64, String> { args.get(k).map_or(Ok(d), |v| v.parse().map_err(|_| format!("bad {k} `{v}`"))) };
+    let check = |g: &Pong, src: &str, limit: u64, seed: u64| -> Result<wir::games::PongCheck, String> {
+        let c = games::pong_check(g, src, limit, seed).map_err(|e| format!("{}: {e}", g.tag()))?;
+        if c.mismatches > 0 {
+            return Err(format!("{}: {} of {} states disagree with the simulator", g.tag(), c.mismatches, c.states));
+        }
+        Ok(c)
+    };
+    let Some(n) = args.get("--variants") else {
+        let g = Pong {
+            width: int("--width", 16)?,
+            height: int("--height", 12)?,
+            paddle: int("--paddle", 3)?,
+            speed: int("--speed", 1)?,
+            paddle_speed: int("--paddle-speed", 1)?,
+        };
+        let src = games::pong_program(&g).map_err(|e| e.to_string())?;
+        let c = check(&g, &src, int("--check", 2_000_000)? as u64, 1)?;
+        eprintln!(
+            "{}: hidden {:?}, {} parameters; {} {} states match the simulator (worst |diff| {:.1e})",
+            g.tag(), c.hidden, c.params, if c.exhaustive { "all" } else { "a sample of" }, c.states, c.worst
+        );
+        return match args.get("-o") {
+            Some(out) => std::fs::write(out, &src).map_err(|e| format!("{out}: {e}")),
+            None => {
+                print!("{src}");
+                Ok(())
+            }
+        };
+    };
+    let n: usize = n.parse().map_err(|_| format!("bad --variants `{n}`"))?;
+    let dir = PathBuf::from(args.get("--out").ok_or("--variants needs --out DIR")?);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let limit = int("--check", 200_000)? as u64;
+    let mut rng = (int("--seed", 1)? as u64).max(1);
+    let mut below = |lo: i64, hi: i64| -> i64 {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        lo + (rng % (hi - lo + 1) as u64) as i64
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut manifest = String::new();
+    let mut tries = 0;
+    while seen.len() < n {
+        tries += 1;
+        if tries > 100 * n + 1000 {
+            return Err(format!("only {} distinct variants found", seen.len()));
+        }
+        let (width, height) = (below(8, 32), below(6, 24));
+        let paddle = below(1, 6.min(height - 1));
+        let speed = below(1, 3.min(height - 1).min(width - 3));
+        let paddle_speed = below(1, 2.min(height - paddle));
+        let g = Pong { width, height, paddle, speed, paddle_speed };
+        if !seen.insert(g.tag()) {
+            continue;
+        }
+        let src = games::pong_program(&g).map_err(|e| e.to_string())?;
+        let c = check(&g, &src, limit, seen.len() as u64)?;
+        let file = format!("{}.wir", g.tag());
+        std::fs::write(dir.join(&file), &src).map_err(|e| format!("{file}: {e}"))?;
+        let line = serde_json::json!({
+            "file": file, "game": "pong",
+            "params": { "width": width, "height": height, "paddle": paddle, "speed": speed, "paddle_speed": paddle_speed },
+            "inputs": games::PONG_INPUTS, "outputs": games::PONG_OUTPUTS,
+            "hidden": c.hidden, "parameters": c.params, "bytes": src.len(),
+            "states_checked": c.states, "exhaustive": c.exhaustive, "worst_diff": c.worst,
+        });
+        manifest.push_str(&format!("{line}
+"));
+        eprintln!("{file}: hidden {:?}, {} states checked{}", c.hidden, c.states, if c.exhaustive { " (all)" } else { "" });
+    }
+    std::fs::write(dir.join("manifest.jsonl"), manifest).map_err(|e| e.to_string())?;
+    eprintln!("wrote {n} programs and manifest.jsonl to {}", dir.display());
     Ok(())
 }
 
@@ -224,6 +348,17 @@ fn cmd_decompile(raw: &[String]) -> Result<(), String> {
     allowed.extend(["--exact", "--transpose"]);
     args.check(&allowed)?;
     let path = args.file("weights file")?;
+    if let Some(d) = deep::load(&path).map_err(|e| e.to_string())? {
+        let text = deep::decompile(&d, number_format(&args)).map_err(|e| e.to_string())?;
+        eprintln!("decompiled a deep network, hidden layers {:?}", d.hidden());
+        return match args.get("-o") {
+            Some(out) => std::fs::write(out, &text).map_err(|e| format!("{out}: {e}")),
+            None => {
+                print!("{text}");
+                Ok(())
+            }
+        };
+    }
     let w = load_weights(&path, &args)?;
     let opts = DecompileOptions {
         input: args.get("--input").map(String::from),
@@ -277,7 +412,30 @@ fn cmd_eval(raw: &[String]) -> Result<(), String> {
     let args = Args::parse(raw, &valued)?;
     args.check(&["--keys", "--transpose"])?;
     let path = args.file("program or weights file")?;
-    let w = if path.extension().is_some_and(|e| e == "wir") {
+    let is_wir = path.extension().is_some_and(|e| e == "wir");
+    let deep_net = if is_wir {
+        let src = read(&path)?;
+        deep::is_deep_source(&src)
+            .then(|| deep::compile(&src, 1e-6).map(|c| c.weights).map_err(|e| format!("{}: {e}", path.display())))
+            .transpose()?
+    } else {
+        deep::load(&path).map_err(|e| e.to_string())?
+    };
+    if let Some(d) = deep_net {
+        for spec in &args.positional[1..] {
+            for p in parse_points(spec)? {
+                if p.len() != d.input_dim() {
+                    return Err(format!("point has {} values but the program has {} inputs", p.len(), d.input_dim()));
+                }
+                let y = d.eval(&p);
+                let pt = p.iter().map(|x| format_num(*x, NumFormat::EXACT)).collect::<Vec<_>>().join(", ");
+                let ys: Vec<String> = d.outputs.iter().zip(y).map(|(n, v)| format!("{n} = {}", format_num(v, NumFormat::EXACT))).collect();
+                println!("({pt}): {}", ys.join(", "));
+            }
+        }
+        return Ok(());
+    }
+    let w = if is_wir {
         compile(&read(&path)?, CompileOptions::default()).map_err(|e| format!("{}: {e}", path.display()))?.weights
     } else {
         load_weights(&path, &args)?

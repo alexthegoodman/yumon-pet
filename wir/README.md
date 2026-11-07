@@ -90,6 +90,33 @@ SwiGLU weights add `W3 b3` (`w3.weight`/`w3.bias` in safetensors, which then use
 All three accept any of these names on read. f64 by default, `--dtype f32` on
 compile. F16/BF16 safetensors and `<f2` npy are readable.
 
+## WIR 0.2: deep programs
+
+A `wir 0.2` header switches to deep ReLU programs written with combinators
+(`src/deep.rs`, spec in `../docs/WIR.md`):
+
+```
+wir 0.2
+input bx: R1 in [1, 14]                       # named scalar inputs, optional interval
+input pl, ul: R1 in [0, 9]
+let hit = and(lt(bx - 1, 1), ge(bx, pl))      # relu abs max min clip step gt ge lt le eq and or not select
+output pl2 = clip(pl + ul, 0, 9)
+output bx2 = select(hit, 2, bx - 1)
+assert bx2(1, 0, 0) == 2                      # one value per input, in order
+```
+
+```
+cargo run -- compile examples/pong.wir -o pong.safetensors   # per-layer cost report, asserts
+cargo run -- eval examples/pong.wir "1,5,-1,1,4,0,0,0"
+cargo run -- decompile pong.safetensors                      # flat 0.2: one `let hK_U = relu(...)` per unit
+cargo run -- pong --width 20 --height 14 --paddle 4 --speed 2 -o p.wir   # generated + checked
+cargo run -- pong --variants 50 --out ../tmp/wir-pong                 # batch + manifest.jsonl
+```
+
+Deep weights are `.json` (`{"format": "wir-deep-weights", inputs, outputs, layers:
+[{W, b}]}`) or `.safetensors` with `nn.Sequential(Linear, ReLU, ..., Linear)` keys
+`0.weight`, `2.weight`, ... and `wir.inputs` / `wir.outputs` metadata.
+
 ## Library
 
 ```rust
@@ -118,7 +145,7 @@ let text = wir::print(&p, wir::NumFormat::CANONICAL);      // or NumFormat::EXAC
 ## Tests
 
 ```
-cargo test                      # 68 tests, ~25 s debug (fuzz is the slow one)
+cargo test                      # 81 tests, ~25 s debug (fuzz is the slow one)
 uv run --project ../python-train python scripts/interop.py   # NumPy 2.5 / PyTorch 2.14 cross-check
 ```
 
@@ -131,3 +158,7 @@ canonicalize(src)` on 600 generated programs. `tests/compact.rs` covers the comp
 syntax, gates, patches and domains, including 300 random D 4-9 ReLU and SwiGLU
 networks through exact and canonical compact text. `tests/codebook.rs` covers coded
 vectors: parsing, bit-exact round trips, overhang and calibrated rounding.
+`tests/deep.rs` covers 0.2: combinators against their definitions, layering against
+the program's own graph off the integer grid, `examples/pong.wir` against an
+independent simulator on 181,440 states, generated variants, and 500 random deep
+networks through exact 0.2 text.

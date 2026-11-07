@@ -18,6 +18,8 @@ pub mod ast;
 pub mod canon;
 pub mod codebook;
 pub mod compiler;
+pub mod deep;
+pub mod games;
 pub mod error;
 pub mod io;
 pub mod lexer;

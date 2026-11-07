@@ -175,3 +175,15 @@ writes a wir weights JSON for `decompile --codebook g4`. Sunrise at 32 gates + g
 8.5k Qwen tokens per layer, 92.1% top-1 with all six layers replaced (16 gates: 83%).
 `wir_decoder record --mlp l=path` takes probe inputs from the model with those MLPs
 replaced (outputs stay original); sequential fitting with it did not help top-1.
+
+WIR 0.2 (2026-11-07): `wir 0.2` programs (`wir/src/deep.rs`, docs/WIR.md "WIR 0.2"):
+named scalar inputs with intervals, `let`/`output` affine expressions, combinators
+(relu abs max min clip step gt ge lt le eq and or not select) lowered exactly to
+relu + affine nodes. Intervals give select's big-M and drop relus that cannot bend
+(valid only inside the declared domains). The compiler picks depth and adds carry
+units; deep weights are .json `layers` or nn.Sequential safetensors. Any ReLU MLP
+decompiles to flat 0.2 (`let hK_U = relu(...)`, rationals up to /1000).
+`wir/src/games.rs` + `wir pong [--variants N --out DIR]` generate Pong step programs
+checked against a simulator; `examples/pong.wir` is the generator default (4 hidden
+layers, 1,084 params, all 604,800 states exact, 1,160 Qwen tokens; 42 of 64 units
+are carries). 81 wir tests.

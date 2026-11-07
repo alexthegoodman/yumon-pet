@@ -175,7 +175,7 @@ One function has many weight settings; the canonical form picks exactly one, so 
 
 **Not in v0:** depth, smooth activations, convolutions or attention, training, a hypernetwork. Smooth activations would make "crease" an approximate statement, so they wait until the exact ReLU semantics are solid.
 
-**Planned for v0.2, depth via combinators:** `max(f,g)`, `min(f,g)`, `clip(f,lo,hi)`, `and(...)` of half-spaces, compiled to known ReLU constructions (for example max(f,g) = g + relu(f − g), with an identity passthrough for g). The author stays in input space and the compiler chooses depth. A raw feature-space escape hatch (`in space(a,b,c): crease ...`) comes alongside.
+**Planned for v0.2, depth via combinators** (built Nov 7, see "WIR 0.2" at the end): `max(f,g)`, `min(f,g)`, `clip(f,lo,hi)`, `and(...)` of half-spaces, compiled to known ReLU constructions (for example max(f,g) = g + relu(f − g), with an identity passthrough for g). The author stays in input space and the compiler chooses depth. A raw feature-space escape hatch (`in space(a,b,c): crease ...`) comes alongside.
 
 **Open questions**
 
@@ -344,3 +344,34 @@ What did not help:
 - **Sequential fitting** (`wir_decoder record --mlp ...`: inputs from the model with earlier layers already replaced, targets from the original) lowered the six-layer loss change to +0.430 but top-1 fell to 90.11%. Its targets only undo MLP drift, not attention drift.
 
 At 32 gates the readouts are about 45% of the text: 128 output lines, each an 8-word vector, a scale and a 6-digit bias. Writing one `writes` vector per gate (128 entries, 32 words) plus one coded bias vector would bring layer 0 from 8.5k to about 5.0k Qwen tokens (estimated by tokenizing synthesized text; the syntax does not exist yet and coding the biases is untested).
+
+## WIR 0.2: combinators and depth (Nov 7, 2026)
+
+Small programs whose behaviour can be checked, such as one step of a game, are the near-term data for the Qwen fine-tune: they fit in a context, and a generated program can be compiled, run and scored. They need depth and logic, which v0 lacks. A `wir 0.2` header selects a separate language (`wir/src/deep.rs`); v0 programs are unchanged.
+
+```
+wir 0.2
+input bx: R1 in [1, 14]            # named scalar inputs, each with an optional interval
+input vx: R1 in [-1, 1]
+let nx = bx + vx                   # affine arithmetic; * and / by constants only
+let at_l = lt(nx, 1)
+output bx2 = select(at_l, 2, nx)
+assert bx2(1, -1) == 2             # one value per input, in declaration order
+```
+
+- **Combinators**, each an exact composition of relu and affine maps: `relu`, `abs`, `max`/`min` (n-ary; max(a, b) = b + relu(a - b)), `clip(a, lo, hi)` with constant bounds, `step(a)` = clip(a, 0, 1), comparisons `gt ge lt le eq` (steps of a - b, so exact when a - b is an integer: `ge(a, b)` = step(a - b + 1)), `and`/`or`/`not` (exact on bits: and = relu(sum - (n - 1)), or = sum - relu(sum - 1)), and `select(c, a, b)` for a bit c, via the big-M product c d = relu(d - M+ (1 - c)) - relu(-d - M- (1 - c)).
+- **Intervals.** Every node carries a sound interval computed from the input domains. `select` takes its M from them (and refuses unbounded values), and a relu whose argument is never negative becomes the argument, one never positive becomes 0. Both hold only while inputs stay in their domains; the compiled network is wrong outside them.
+- **Depth is chosen by the compiler.** Relu nodes are shared when identical (after scaling to max coefficient 1), each sits one layer above the deepest node it reads, and values read more than one layer later ride on carry units: relu(v - lo) + lo, one unit when v has a lower bound, two (relu(v) - relu(-v)) when unbounded. `wir compile` reports units per layer and statement, carries separately.
+- **Decompiler.** Any ReLU MLP (`.json` with `layers`, or `nn.Sequential` safetensors with 3+ linear layers) decompiles to flat 0.2 text, one `let hK_U = relu(...)` per hidden unit. The canonical form scales each unit to max incoming weight 1, folds constant units into the next bias, drops unread units, merges duplicates and sorts each layer, so scaling and permuting hidden units leave the text unchanged. Numbers snap to rationals with denominators up to 1,000 (`35/72`), which integer-grid programs produce and six digits cannot hold.
+- Not built: v0 plane/anchor creases inside 0.2, vector inputs, codebook vectors in 0.2 text, and the `in space(...)` escape hatch (relu of any expression covers its use so far).
+
+**Pong** (`wir/examples/pong.wir`, written by `wir pong`, `wir/src/games.rs`). One step on a 16 x 12 integer grid: inputs ball position and velocity, both paddles and both controls; outputs the next state and two scoring bits. Walls reflect, paddles clip, a paddle hit reflects the ball, a miss scores and restarts it in the middle. It compiles to 4 hidden layers [12, 20, 14, 18], 1,084 parameters, and matches a reference simulator on all 604,800 states in its domain (worst |diff| 1.8e-15). The source is 1,160 Qwen tokens; the decompiled flat text is 1,801. PyTorch 2.14.1 loads the f32 safetensors as a plain `nn.Sequential` with the same outputs. Of the 64 units, 42 are carries, the main inefficiency left.
+
+`wir pong --variants N --out DIR` draws field sizes (8-32 x 6-24), paddle sizes 1-6, ball speeds 1-3 and paddle speeds 1-2, writes each program with asserts from the simulator, checks it (all states up to 200k, else a 200k sample) and writes `manifest.jsonl`. 50 variants (seed 7): 1,084-1,604 parameters, all depth 4, 2.1-2.2 KB each, 9.0M states checked, no mismatches, 5.5 s.
+
+```
+cd wir
+cargo run --release -- pong -o examples/pong.wir                       # default game, all states checked
+cargo run --release -- pong --variants 50 --out ../tmp/wir-pong --seed 7
+cargo test --test deep                                                 # 13 tests, ~4 s
+```

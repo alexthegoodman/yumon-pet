@@ -284,20 +284,11 @@ pub fn to_safetensors(w: &Weights, dtype: DType) -> Vec<u8> {
     } else {
         &["0.weight", "0.bias", "2.weight", "2.bias"]
     };
-    let mut header = serde_json::Map::new();
-    let mut data = Vec::new();
-    for ((_, shape, values), name) in layer_tensors(w).into_iter().zip(torch_names.iter().copied()) {
-        let start = data.len();
-        encode(values, dtype, &mut data);
-        header.insert(
-            name.into(),
-            json!({
-                "dtype": if dtype == DType::F64 { "F64" } else { "F32" },
-                "shape": shape,
-                "data_offsets": [start, data.len()],
-            }),
-        );
-    }
+    let tensors: Vec<(String, Vec<usize>, &[f64])> = layer_tensors(w)
+        .into_iter()
+        .zip(torch_names.iter().copied())
+        .map(|((_, shape, values), name)| (name.to_string(), shape, values))
+        .collect();
     let mut meta = serde_json::Map::new();
     if let Some(i) = &w.input {
         meta.insert("wir.input".into(), json!(i));
@@ -308,7 +299,26 @@ pub fn to_safetensors(w: &Weights, dtype: DType) -> Vec<u8> {
     if let Some(sh) = &w.shape {
         meta.insert("wir.input_shape".into(), json!(serde_json::to_string(sh).unwrap()));
     }
-    header.insert("__metadata__".into(), Value::Object(meta));
+    safetensors_bytes(&tensors, Value::Object(meta), dtype)
+}
+
+/// A safetensors file of named tensors with string `__metadata__`.
+pub fn safetensors_bytes(tensors: &[(String, Vec<usize>, &[f64])], meta: Value, dtype: DType) -> Vec<u8> {
+    let mut header = serde_json::Map::new();
+    let mut data = Vec::new();
+    for (name, shape, values) in tensors {
+        let start = data.len();
+        encode(values, dtype, &mut data);
+        header.insert(
+            name.clone(),
+            json!({
+                "dtype": if dtype == DType::F64 { "F64" } else { "F32" },
+                "shape": shape,
+                "data_offsets": [start, data.len()],
+            }),
+        );
+    }
+    header.insert("__metadata__".into(), meta);
     let mut h = serde_json::to_string(&Value::Object(header)).unwrap().into_bytes();
     while !h.len().is_multiple_of(8) {
         h.push(b' ');
@@ -317,6 +327,16 @@ pub fn to_safetensors(w: &Weights, dtype: DType) -> Vec<u8> {
     out.extend(h);
     out.extend(data);
     out
+}
+
+/// The `__metadata__` object of a safetensors file (empty if absent or unreadable).
+pub fn safetensors_metadata(bytes: &[u8]) -> serde_json::Map<String, Value> {
+    let header = bytes
+        .get(..8)
+        .map(|n| u64::from_le_bytes(n.try_into().unwrap()) as usize)
+        .and_then(|n| bytes.get(8..8usize.checked_add(n)?))
+        .and_then(|h| serde_json::from_slice::<Value>(h).ok());
+    header.and_then(|h| h.get("__metadata__").and_then(|m| m.as_object().cloned())).unwrap_or_default()
 }
 
 fn from_safetensors(bytes: &[u8]) -> Result<TensorFile> {
