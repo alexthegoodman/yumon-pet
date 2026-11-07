@@ -1167,6 +1167,8 @@ mod desktop {
                         };
                         anyhow::ensure!(!reply.is_empty(), "Yumon returned an empty reply");
 
+                        println!("[DEBUG reply] {:?}", reply);
+
                         let decompressed_reply = if use_yumon_talk {
                             if let Some(dec) = &dec_clone {
                                 let vocab = yumon_talk::get_global_vocab();
