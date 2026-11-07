@@ -208,7 +208,8 @@ impl Graph {
         (lo, hi)
     }
 
-    /// relu(a), scaled so its largest coefficient is 1 and shared with any identical node.
+    /// relu(a), scaled so its smallest coefficient is 1 in magnitude (integer programs keep
+    /// integer weights, exact in f32) and shared with any identical node.
     pub fn relu(&mut self, a: &Affine, line: usize) -> Affine {
         let (lo, hi) = self.range_of(a);
         if lo >= 0.0 {
@@ -217,7 +218,7 @@ impl Graph {
         if hi <= 0.0 {
             return Affine::default();
         }
-        let s = a.terms.values().fold(0.0f64, |m, v| m.max(v.abs()));
+        let s = a.terms.values().fold(f64::INFINITY, |m, v| m.min(v.abs()));
         let unit = a.scale(1.0 / s);
         let key: Vec<u64> = unit.terms.iter().flat_map(|(&n, v)| [n as u64, v.to_bits()]).chain([unit.c.to_bits()]).collect();
         let id = match self.dedupe.get(&key) {
@@ -320,10 +321,39 @@ pub struct DeepAssert {
 /// A parsed and lowered 0.2 program.
 #[derive(Debug, Clone)]
 pub struct DeepProgram {
+    /// Scalar inputs; in a grid program, one per tap (`d[-1,0]`) in first-read order.
     pub inputs: Vec<(String, (f64, f64))>,
     pub outputs: Vec<(String, Affine)>,
     pub graph: Graph,
     pub asserts: Vec<DeepAssert>,
+    /// Present when the inputs are grids: the program is one cell's rule.
+    pub grid: Option<GridSpec>,
+}
+
+/// A grid input: one channel of the field, with the value read outside the grid.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GridChannel {
+    pub name: String,
+    pub range: (f64, f64),
+    pub pad: f64,
+}
+
+/// Channels plus the taps the rule reads: tap k is channel `taps[k].0` at row offset
+/// `taps[k].1` and column offset `taps[k].2`, and is scalar input k of the cell network.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GridSpec {
+    pub channels: Vec<GridChannel>,
+    pub taps: Vec<(usize, i64, i64)>,
+}
+
+impl GridSpec {
+    pub fn radius(&self) -> usize {
+        self.taps.iter().map(|&(_, dy, dx)| dy.unsigned_abs().max(dx.unsigned_abs()) as usize).max().unwrap_or(0)
+    }
+}
+
+pub fn tap_name(channel: &str, dy: i64, dx: i64) -> String {
+    if dy == 0 && dx == 0 { channel.to_string() } else { format!("{channel}[{dy},{dx}]") }
 }
 
 impl DeepProgram {
@@ -380,8 +410,9 @@ fn point_text(p: &[f64]) -> String {
 /// Parse and lower to the graph.
 pub fn lower(src: &str) -> Result<DeepProgram> {
     let stmts = split_statements(src)?;
-    let mut prog = DeepProgram { inputs: vec![], outputs: vec![], graph: Graph::default(), asserts: vec![] };
+    let mut prog = DeepProgram { inputs: vec![], outputs: vec![], graph: Graph::default(), asserts: vec![], grid: None };
     let mut env: HashMap<String, Affine> = HashMap::new();
+    let mut taps: HashMap<(usize, i64, i64), Affine> = HashMap::new();
     for (i, s) in stmts.iter().enumerate() {
         let mut p = Cursor { t: &s.tokens, i: 0, s };
         let head = p.ident()?;
@@ -403,8 +434,13 @@ pub fn lower(src: &str) -> Result<DeepProgram> {
                     names.push(p.ident()?);
                 }
                 p.expect(&Tok::Colon)?;
-                if p.ident()? != "R1" {
-                    return Err(p.err("0.2 inputs are scalars: `input a, b: R1 [in [lo, hi]]`"));
+                let grid = match p.ident()?.as_str() {
+                    "R1" => false,
+                    "grid" => true,
+                    _ => return Err(p.err("0.2 inputs are scalars or grids: `input a, b: R1 [in [lo, hi]]` or `input d: grid [in [lo, hi]] [pad v]`")),
+                };
+                if grid && !prog.inputs.is_empty() || !grid && prog.grid.is_some() {
+                    return Err(p.err("a program's inputs are either all R1 or all grid"));
                 }
                 let mut range = (f64::NEG_INFINITY, f64::INFINITY);
                 if p.eat_ident("in") {
@@ -418,9 +454,28 @@ pub fn lower(src: &str) -> Result<DeepProgram> {
                     }
                     range = (lo, hi);
                 }
+                let mut pad = 0.0;
+                if grid && p.eat_ident("pad") {
+                    pad = p.signed()?;
+                    if !(range.0 <= pad && pad <= range.1) {
+                        return Err(p.err("the pad value must lie in the input's interval"));
+                    }
+                } else if grid && (range.0 > 0.0 || range.1 < 0.0) {
+                    return Err(p.err("the default pad 0 is outside the interval: add `pad v`"));
+                }
                 p.end()?;
-                if !prog.outputs.is_empty() || env.len() > prog.inputs.len() {
+                let declared = prog.grid.as_ref().map_or(prog.inputs.len(), |g| g.channels.len());
+                if !prog.outputs.is_empty() || env.len() > declared {
                     return Err(p.err("declare inputs before `let` and `output`"));
+                }
+                if grid {
+                    let spec = prog.grid.get_or_insert_with(|| GridSpec { channels: vec![], taps: vec![] });
+                    for n in names {
+                        p.fresh(&n, &env)?;
+                        env.insert(n.clone(), Affine::default());
+                        spec.channels.push(GridChannel { name: n, range, pad });
+                    }
+                    continue;
                 }
                 for n in names {
                     p.fresh(&n, &env)?;
@@ -433,13 +488,15 @@ pub fn lower(src: &str) -> Result<DeepProgram> {
                 let name = p.ident()?;
                 p.fresh(&name, &env)?;
                 p.expect(&Tok::Eq)?;
-                let v = p.expr(&mut prog.graph, &env)?;
+                let mut sc = Scope { g: &mut prog.graph, env: &env, grid: prog.grid.as_mut(), inputs: &mut prog.inputs, taps: &mut taps };
+                let v = p.expr(&mut sc)?;
                 p.end()?;
                 if head == "output" {
                     prog.outputs.push((name.clone(), v.clone()));
                 }
                 env.insert(name, v);
             }
+            "assert" if prog.grid.is_some() => return Err(p.err("grid programs do not take asserts yet (check them against a simulator)")),
             "assert" => loop {
                 let name = p.ident()?;
                 let output = prog.outputs.iter().position(|(n, _)| *n == name).ok_or_else(|| p.err(&format!("`{name}` is not an output")))?;
@@ -471,10 +528,44 @@ pub fn lower(src: &str) -> Result<DeepProgram> {
     if stmts.is_empty() {
         return Err(WirError::new("empty program"));
     }
-    if prog.inputs.is_empty() || prog.outputs.is_empty() {
+    if prog.inputs.is_empty() && prog.grid.is_none() || prog.outputs.is_empty() {
         return Err(WirError::new("a 0.2 program needs at least one input and one output"));
     }
+    if let Some(spec) = prog.grid.as_mut()
+        && spec.taps.is_empty()
+    {
+        // A rule that reads nothing still needs one input to be a network.
+        let c = &spec.channels[0];
+        prog.graph.input(0, c.range, 0);
+        prog.inputs.push((c.name.clone(), c.range));
+        spec.taps.push((0, 0, 0));
+    }
     Ok(prog)
+}
+
+/// What expressions can see while parsing.
+struct Scope<'a> {
+    g: &'a mut Graph,
+    env: &'a HashMap<String, Affine>,
+    grid: Option<&'a mut GridSpec>,
+    inputs: &'a mut Vec<(String, (f64, f64))>,
+    taps: &'a mut HashMap<(usize, i64, i64), Affine>,
+}
+
+impl Scope<'_> {
+    /// The scalar input for channel `c` at an offset, made on first read.
+    fn tap(&mut self, c: usize, dy: i64, dx: i64, line: usize) -> Affine {
+        if let Some(a) = self.taps.get(&(c, dy, dx)) {
+            return a.clone();
+        }
+        let spec = self.grid.as_mut().unwrap();
+        let ch = &spec.channels[c];
+        let a = self.g.input(self.inputs.len(), ch.range, line);
+        self.inputs.push((tap_name(&ch.name, dy, dx), ch.range));
+        spec.taps.push((c, dy, dx));
+        self.taps.insert((c, dy, dx), a.clone());
+        a
+    }
 }
 
 struct Cursor<'a> {
@@ -551,36 +642,36 @@ impl Cursor<'_> {
         Ok(())
     }
 
-    fn expr(&mut self, g: &mut Graph, env: &HashMap<String, Affine>) -> Result<Affine> {
+    fn expr(&mut self, sc: &mut Scope) -> Result<Affine> {
         let mut acc = if self.eat(&Tok::Minus) {
-            self.term(g, env)?.scale(-1.0)
+            self.term(sc)?.scale(-1.0)
         } else {
             self.eat(&Tok::Plus);
-            self.term(g, env)?
+            self.term(sc)?
         };
         loop {
             if self.eat(&Tok::Plus) {
-                acc = acc.add(&self.term(g, env)?);
+                acc = acc.add(&self.term(sc)?);
             } else if self.eat(&Tok::Minus) {
-                acc = acc.sub(&self.term(g, env)?);
+                acc = acc.sub(&self.term(sc)?);
             } else {
                 return Ok(acc);
             }
         }
     }
 
-    fn term(&mut self, g: &mut Graph, env: &HashMap<String, Affine>) -> Result<Affine> {
-        let mut acc = self.unary(g, env)?;
+    fn term(&mut self, sc: &mut Scope) -> Result<Affine> {
+        let mut acc = self.unary(sc)?;
         loop {
             if self.eat(&Tok::Star) {
-                let rhs = self.unary(g, env)?;
+                let rhs = self.unary(sc)?;
                 acc = match (acc.as_const(), rhs.as_const()) {
                     (Some(k), _) => rhs.scale(k),
                     (_, Some(k)) => acc.scale(k),
                     _ => return Err(self.err("`*` needs a constant on one side (for bit * value use select(c, v, 0))")),
                 };
             } else if self.eat(&Tok::Slash) {
-                let rhs = self.unary(g, env)?;
+                let rhs = self.unary(sc)?;
                 match rhs.as_const() {
                     Some(k) if k != 0.0 => acc = acc.scale(1.0 / k),
                     _ => return Err(self.err("`/` needs a nonzero constant divisor")),
@@ -591,30 +682,54 @@ impl Cursor<'_> {
         }
     }
 
-    fn unary(&mut self, g: &mut Graph, env: &HashMap<String, Affine>) -> Result<Affine> {
+    fn unary(&mut self, sc: &mut Scope) -> Result<Affine> {
         if self.eat(&Tok::Minus) {
-            return Ok(self.unary(g, env)?.scale(-1.0));
+            return Ok(self.unary(sc)?.scale(-1.0));
         }
         match self.next()? {
             Tok::Num(v) => Ok(Affine::constant(v)),
             Tok::LParen => {
-                let v = self.expr(g, env)?;
+                let v = self.expr(sc)?;
                 self.expect(&Tok::RParen)?;
                 Ok(v)
             }
-            Tok::Ident(name) if self.peek() == Some(&Tok::LParen) => self.call(&name, g, env),
-            Tok::Ident(name) => env.get(&name).cloned().ok_or_else(|| self.err(&format!("unknown name `{name}`"))),
+            Tok::Ident(name) if self.peek() == Some(&Tok::LParen) => self.call(&name, sc),
+            Tok::Ident(name) => {
+                let channel = sc.grid.as_ref().and_then(|g| g.channels.iter().position(|c| c.name == name));
+                let Some(c) = channel else {
+                    if self.peek() == Some(&Tok::LBracket) {
+                        return Err(self.err(&format!("only grid inputs take offsets; `{name}` is not one")));
+                    }
+                    return sc.env.get(&name).cloned().ok_or_else(|| self.err(&format!("unknown name `{name}`")));
+                };
+                let (mut dy, mut dx) = (0, 0);
+                if self.eat(&Tok::LBracket) {
+                    let int = |p: &mut Self| -> Result<i64> {
+                        let v = p.signed()?;
+                        if v.fract() != 0.0 || v.abs() > 16.0 {
+                            return Err(p.err("grid offsets are integers in -16..16"));
+                        }
+                        Ok(v as i64)
+                    };
+                    dy = int(self)?;
+                    self.expect(&Tok::Comma)?;
+                    dx = int(self)?;
+                    self.expect(&Tok::RBracket)?;
+                }
+                Ok(sc.tap(c, dy, dx, self.s.line))
+            }
             t => Err(self.err(&format!("expected an expression, found {}", t.describe()))),
         }
     }
 
-    fn call(&mut self, f: &str, g: &mut Graph, env: &HashMap<String, Affine>) -> Result<Affine> {
+    fn call(&mut self, f: &str, sc: &mut Scope) -> Result<Affine> {
         self.expect(&Tok::LParen)?;
-        let mut args = vec![self.expr(g, env)?];
+        let mut args = vec![self.expr(sc)?];
         while self.eat(&Tok::Comma) {
-            args.push(self.expr(g, env)?);
+            args.push(self.expr(sc)?);
         }
         self.expect(&Tok::RParen)?;
+        let g = &mut *sc.g;
         let line = self.s.line;
         let arity = |n: usize| -> Result<()> {
             if args.len() == n { Ok(()) } else { Err(self.err(&format!("{f} takes {n} argument(s), got {}", args.len()))) }
@@ -843,6 +958,11 @@ pub fn decompile(w: &DeepWeights, fmt: NumFormat) -> Result<String> {
     for name in &c.inputs {
         out.push_str(&format!("input {name}: R1\n"));
     }
+    decompile_body(&c, fmt, &mut out);
+    Ok(out)
+}
+
+fn decompile_body(c: &DeepWeights, fmt: NumFormat, out: &mut String) {
     let mut prev: Vec<String> = c.inputs.clone();
     let hidden = c.layers.len() - 1;
     for (k, l) in c.layers.iter().enumerate() {
@@ -858,7 +978,6 @@ pub fn decompile(w: &DeepWeights, fmt: NumFormat) -> Result<String> {
         }
         prev = names;
     }
-    Ok(out)
 }
 
 fn affine_text(w: &[f64], b: f64, names: &[String], fmt: NumFormat) -> String {
@@ -941,6 +1060,9 @@ pub fn load(path: &Path) -> Result<Option<DeepWeights>> {
     let w = match Format::from_path(path)? {
         Format::Json => {
             let v: Value = serde_json::from_slice(&bytes).map_err(|e| bad(format!("invalid JSON: {e}")))?;
+            if v.get("format").and_then(|f| f.as_str()) == Some(STENCIL_FORMAT) {
+                return Ok(None);
+            }
             let Some(layers) = v.get("layers").and_then(|l| l.as_array()) else { return Ok(None) };
             let mut out = Vec::new();
             for (k, l) in layers.iter().enumerate() {
@@ -956,6 +1078,9 @@ pub fn load(path: &Path) -> Result<Option<DeepWeights>> {
             named(out, names("inputs"), names("outputs"))
         }
         Format::Safetensors => {
+            if io::safetensors_metadata(&bytes).get("wir.kind").and_then(|k| k.as_str()) == Some("stencil") {
+                return Ok(None);
+            }
             let file = io::read_tensors(&bytes, Format::Safetensors).map_err(|e| bad(e.message))?;
             let mut out = Vec::new();
             for k in (0..).step_by(2) {
@@ -985,5 +1110,296 @@ fn named(layers: Vec<Layer>, inputs: Option<Vec<String>>, outputs: Option<Vec<St
         inputs: inputs.filter(|v| v.len() == d).unwrap_or_else(|| (1..=d).map(|i| format!("x{i}")).collect()),
         outputs: outputs.filter(|v| v.len() == o).unwrap_or_else(|| (1..=o).map(|i| format!("y{i}")).collect()),
         layers,
+    }
+}
+
+// ---------------------------------------------------------------- stencils
+
+/// Zero-skipping evaluator for networks whose layers are mostly zeros (compiled
+/// programs), with reused buffers. Same arithmetic as `DeepWeights::eval`.
+#[derive(Debug, Clone)]
+pub struct SparseNet {
+    layers: Vec<(Vec<Vec<(usize, f64)>>, Vec<f64>)>,
+    bufs: [Vec<f64>; 2],
+}
+
+impl SparseNet {
+    pub fn new(w: &DeepWeights) -> Self {
+        let layers = w
+            .layers
+            .iter()
+            .map(|l| ((0..l.w.rows).map(|r| l.w.row(r).iter().copied().enumerate().filter(|(_, v)| *v != 0.0).collect()).collect(), l.b.clone()))
+            .collect();
+        Self { layers, bufs: [vec![], vec![]] }
+    }
+
+    /// Outputs for `x`, valid until the next call.
+    pub fn eval(&mut self, x: &[f64]) -> &[f64] {
+        let [a, b] = &mut self.bufs;
+        a.clear();
+        a.extend_from_slice(x);
+        let n = self.layers.len();
+        for (k, (rows, bias)) in self.layers.iter().enumerate() {
+            b.clear();
+            for (row, c) in rows.iter().zip(bias) {
+                let z = row.iter().fold(*c, |s, &(j, v)| s + v * a[j]);
+                b.push(if k + 1 == n { z } else { z.max(0.0) });
+            }
+            std::mem::swap(a, b);
+        }
+        a
+    }
+}
+
+/// A cell network run at every cell of a grid: input k of `net` is channel
+/// `taps[k].0` read at (row + taps[k].1, column + taps[k].2), and `pads[c]` outside
+/// the grid. With every tap in the first layer this is a Conv2d stack: a
+/// (2r+1) x (2r+1) convolution, then 1 x 1 convolutions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StencilWeights {
+    pub net: DeepWeights,
+    pub channels: Vec<String>,
+    pub pads: Vec<f64>,
+    pub taps: Vec<(usize, i64, i64)>,
+}
+
+pub const STENCIL_FORMAT: &str = "wir-stencil-weights";
+
+impl StencilWeights {
+    pub fn from_compiled(c: &DeepCompiled) -> Option<Self> {
+        let g = c.program.grid.as_ref()?;
+        Some(Self {
+            net: c.weights.clone(),
+            channels: g.channels.iter().map(|ch| ch.name.clone()).collect(),
+            pads: g.channels.iter().map(|ch| ch.pad).collect(),
+            taps: g.taps.clone(),
+        })
+    }
+
+    pub fn radius(&self) -> usize {
+        self.taps.iter().map(|&(_, dy, dx)| dy.unsigned_abs().max(dx.unsigned_abs()) as usize).max().unwrap_or(0)
+    }
+
+    /// Parameters as stored in Conv2d form (the first kernel is (2r+1)^2 per channel).
+    pub fn param_count(&self) -> usize {
+        self.conv_layers().iter().map(|(_, w, b)| w.len() + b.len()).sum()
+    }
+
+    /// One field per channel (row-major, h * w) in, one field per output out.
+    pub fn apply(&self, fields: &[Vec<f64>], h: usize, w: usize) -> Vec<Vec<f64>> {
+        let mut net = SparseNet::new(&self.net);
+        self.apply_with(&mut net, fields, h, w)
+    }
+
+    pub fn apply_with(&self, net: &mut SparseNet, fields: &[Vec<f64>], h: usize, w: usize) -> Vec<Vec<f64>> {
+        let mut out = vec![vec![0.0; h * w]; self.net.outputs.len()];
+        let mut x = vec![0.0; self.taps.len()];
+        let (h, w) = (h as i64, w as i64);
+        for r in 0..h {
+            for c in 0..w {
+                for (v, &(ch, dy, dx)) in x.iter_mut().zip(&self.taps) {
+                    let (y, z) = (r + dy, c + dx);
+                    *v = if y < 0 || z < 0 || y >= h || z >= w { self.pads[ch] } else { fields[ch][(y * w + z) as usize] };
+                }
+                for (o, v) in out.iter_mut().zip(net.eval(&x)) {
+                    o[(r * w + c) as usize] = *v;
+                }
+            }
+        }
+        out
+    }
+
+    /// The same network with taps in (channel, row, column) order.
+    pub fn sorted(&self) -> Self {
+        let mut order: Vec<usize> = (0..self.taps.len()).collect();
+        order.sort_by_key(|&t| self.taps[t]);
+        let mut s = self.clone();
+        let first = &self.net.layers[0];
+        let mut w = Mat::zeros(first.w.rows, order.len());
+        for r in 0..first.w.rows {
+            for (to, &from) in order.iter().enumerate() {
+                w.set(r, to, first.w.get(r, from));
+            }
+        }
+        s.net.layers[0].w = w;
+        s.net.inputs = order.iter().map(|&t| self.net.inputs[t].clone()).collect();
+        s.taps = order.iter().map(|&t| self.taps[t]).collect();
+        s
+    }
+
+    /// Conv2d tensors (weight shape, weight, bias) per layer: [U, C, k, k] first, then [O, I, 1, 1].
+    pub fn conv_layers(&self) -> Vec<(Vec<usize>, Vec<f64>, Vec<f64>)> {
+        let r = self.radius() as i64;
+        let k = (2 * r + 1) as usize;
+        let c = self.channels.len();
+        let first = &self.net.layers[0];
+        let mut w0 = vec![0.0; first.w.rows * c * k * k];
+        for u in 0..first.w.rows {
+            for (t, &(ch, dy, dx)) in self.taps.iter().enumerate() {
+                w0[((u * c + ch) * k + (dy + r) as usize) * k + (dx + r) as usize] += first.w.get(u, t);
+            }
+        }
+        let mut out = vec![(vec![first.w.rows, c, k, k], w0, first.b.clone())];
+        for l in &self.net.layers[1..] {
+            out.push((vec![l.w.rows, l.w.cols, 1, 1], l.w.data.clone(), l.b.clone()));
+        }
+        out
+    }
+
+    /// From Conv2d tensors; taps are the kernel positions with any nonzero weight.
+    pub fn from_conv(
+        layers: &[(Vec<usize>, Vec<f64>, Vec<f64>)],
+        channels: Vec<String>,
+        pads: Vec<f64>,
+        outputs: Option<Vec<String>>,
+    ) -> Result<Self> {
+        let (shape, w0, b0) = layers.first().ok_or_else(|| WirError::new("network has no layers"))?;
+        let [u, c, k, k2] = shape[..] else { return Err(WirError::new("the first layer must be a 4-d convolution kernel")) };
+        if k != k2 || k % 2 == 0 || c != channels.len() || c != pads.len() {
+            return Err(WirError::new(format!(
+                "first kernel {shape:?} must be square and odd, with one channel per input ({} named)",
+                channels.len()
+            )));
+        }
+        let r = (k / 2) as i64;
+        let at = |unit: usize, ch: usize, dy: i64, dx: i64| w0[((unit * c + ch) * k + (dy + r) as usize) * k + (dx + r) as usize];
+        let mut taps = Vec::new();
+        for ch in 0..c {
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    if (0..u).any(|unit| at(unit, ch, dy, dx) != 0.0) {
+                        taps.push((ch, dy, dx));
+                    }
+                }
+            }
+        }
+        let mut first = Mat::zeros(u, taps.len());
+        for unit in 0..u {
+            for (t, &(ch, dy, dx)) in taps.iter().enumerate() {
+                first.set(unit, t, at(unit, ch, dy, dx));
+            }
+        }
+        let mut net_layers = vec![Layer { w: first, b: b0.clone() }];
+        for (i, (shape, w, b)) in layers[1..].iter().enumerate() {
+            let [o, n, 1, 1] = shape[..] else {
+                return Err(WirError::new(format!("layer {}: later layers must be 1x1 convolutions, got {shape:?}", i + 1)));
+            };
+            net_layers.push(Layer { w: Mat { rows: o, cols: n, data: w.clone() }, b: b.clone() });
+        }
+        let inputs = taps.iter().map(|&(ch, dy, dx)| tap_name(&channels[ch], dy, dx)).collect();
+        let net = named(net_layers, Some(inputs), outputs);
+        net.check()?;
+        Ok(Self { net, channels, pads, taps })
+    }
+}
+
+/// Canonical grid text: `input c: grid pad v` per channel, then the flat cell network
+/// with taps written `c[dy,dx]`.
+pub fn decompile_stencil(s: &StencilWeights, fmt: NumFormat) -> Result<String> {
+    s.net.check()?;
+    let c = canonicalize(&s.sorted().net, 1e-12);
+    let mut out = String::from("wir 0.2\n");
+    for (name, pad) in s.channels.iter().zip(&s.pads) {
+        out.push_str(&format!("input {name}: grid pad {}\n", number(*pad, fmt)));
+    }
+    decompile_body(&c, fmt, &mut out);
+    Ok(out)
+}
+
+/// .json: {"format": "wir-stencil-weights", channels, pads, taps, outputs, layers}
+/// (layers over the taps). .safetensors: nn.Sequential(Conv2d, ReLU, ..., Conv2d) keys
+/// `0.weight` [U, C, k, k], ... with metadata wir.kind = stencil, wir.inputs, wir.pads,
+/// wir.outputs. Pad each input channel with its own value before the first convolution.
+pub fn save_stencil(s: &StencilWeights, path: &Path, dtype: DType) -> Result<()> {
+    let bytes = match Format::from_path(path)? {
+        Format::Json => {
+            let layers: Vec<Value> = s.net.layers.iter().map(|l| json!({ "W": l.w.to_rows(), "b": l.b })).collect();
+            let taps: Vec<Value> = s.taps.iter().map(|&(c, dy, dx)| json!([c, dy, dx])).collect();
+            let v = json!({
+                "format": STENCIL_FORMAT, "channels": s.channels, "pads": s.pads, "taps": taps,
+                "outputs": s.net.outputs, "layers": layers,
+            });
+            serde_json::to_string_pretty(&v).unwrap().into_bytes()
+        }
+        Format::Safetensors => {
+            let conv = s.conv_layers();
+            let mut tensors: Vec<(String, Vec<usize>, &[f64])> = Vec::new();
+            for (k, (shape, w, b)) in conv.iter().enumerate() {
+                tensors.push((format!("{}.weight", 2 * k), shape.clone(), w));
+                tensors.push((format!("{}.bias", 2 * k), vec![b.len()], b));
+            }
+            let meta = json!({
+                "wir.kind": "stencil",
+                "wir.inputs": serde_json::to_string(&s.channels).unwrap(),
+                "wir.pads": serde_json::to_string(&s.pads).unwrap(),
+                "wir.outputs": serde_json::to_string(&s.net.outputs).unwrap(),
+            });
+            io::safetensors_bytes(&tensors, meta, dtype)
+        }
+        Format::Npz => return Err(WirError::new("stencil networks save as .json or .safetensors")),
+    };
+    std::fs::write(path, bytes).map_err(|e| WirError::new(format!("{}: {e}", path.display())))
+}
+
+/// Read a stencil network, or `None` when the file holds something else.
+pub fn load_stencil(path: &Path) -> Result<Option<StencilWeights>> {
+    let bytes = std::fs::read(path).map_err(|e| WirError::new(format!("{}: {e}", path.display())))?;
+    let bad = |m: String| WirError::new(format!("{}: {m}", path.display()));
+    match Format::from_path(path)? {
+        Format::Json => {
+            let v: Value = serde_json::from_slice(&bytes).map_err(|e| bad(format!("invalid JSON: {e}")))?;
+            if v.get("format").and_then(|f| f.as_str()) != Some(STENCIL_FORMAT) {
+                return Ok(None);
+            }
+            let strings = |key: &str| -> Option<Vec<String>> {
+                v.get(key)?.as_array()?.iter().map(|s| s.as_str().map(String::from)).collect()
+            };
+            let channels = strings("channels").ok_or_else(|| bad("missing `channels`".into()))?;
+            let pads: Vec<f64> =
+                v["pads"].as_array().and_then(|p| p.iter().map(|x| x.as_f64()).collect()).ok_or_else(|| bad("missing `pads`".into()))?;
+            let taps: Vec<(usize, i64, i64)> = v["taps"]
+                .as_array()
+                .and_then(|t| t.iter().map(|t| Some((t.get(0)?.as_u64()? as usize, t.get(1)?.as_i64()?, t.get(2)?.as_i64()?))).collect())
+                .ok_or_else(|| bad("`taps` must be [channel, dy, dx] triples".into()))?;
+            if pads.len() != channels.len() || taps.iter().any(|t| t.0 >= channels.len()) {
+                return Err(bad("pads and taps must match the channels".into()));
+            }
+            let mut layers = Vec::new();
+            for (k, l) in v["layers"].as_array().ok_or_else(|| bad("missing `layers`".into()))?.iter().enumerate() {
+                let rows: Vec<Vec<f64>> = l["W"]
+                    .as_array()
+                    .and_then(|r| r.iter().map(|row| row.as_array()?.iter().map(|x| x.as_f64()).collect()).collect())
+                    .ok_or_else(|| bad(format!("layer {k}: W must be a matrix")))?;
+                let b: Vec<f64> = l["b"]
+                    .as_array()
+                    .and_then(|b| b.iter().map(|x| x.as_f64()).collect())
+                    .ok_or_else(|| bad(format!("layer {k}: b must be a vector")))?;
+                layers.push(Layer { w: Mat::from_rows(&rows).map_err(|e| bad(e.message))?, b });
+            }
+            let inputs = taps.iter().map(|&(ch, dy, dx)| tap_name(&channels[ch], dy, dx)).collect();
+            let net = named(layers, Some(inputs), strings("outputs"));
+            net.check().map_err(|e| bad(e.message))?;
+            Ok(Some(StencilWeights { net, channels, pads, taps }))
+        }
+        Format::Safetensors => {
+            let meta = io::safetensors_metadata(&bytes);
+            if meta.get("wir.kind").and_then(|k| k.as_str()) != Some("stencil") {
+                return Ok(None);
+            }
+            let names = |key: &str| -> Option<Vec<String>> { serde_json::from_str(meta.get(key)?.as_str()?).ok() };
+            let channels = names("wir.inputs").ok_or_else(|| bad("missing wir.inputs".into()))?;
+            let pads: Vec<f64> = meta
+                .get("wir.pads")
+                .and_then(|p| serde_json::from_str(p.as_str()?).ok())
+                .ok_or_else(|| bad("missing wir.pads".into()))?;
+            let file = io::read_tensors(&bytes, Format::Safetensors).map_err(|e| bad(e.message))?;
+            let mut layers = Vec::new();
+            for k in (0..).step_by(2) {
+                let (Some(w), Some(b)) = (file.tensors.get(&format!("{k}.weight")), file.tensors.get(&format!("{k}.bias"))) else { break };
+                layers.push((w.shape.clone(), w.data.clone(), b.data.clone()));
+            }
+            StencilWeights::from_conv(&layers, channels, pads, names("wir.outputs")).map(Some).map_err(|e| bad(e.message))
+        }
+        Format::Npz => Ok(None),
     }
 }

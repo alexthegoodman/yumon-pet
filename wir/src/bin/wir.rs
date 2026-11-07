@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use wir::io::{self, DType, LoadOptions};
 use wir::deep;
-use wir::games::{self, Pong};
+use wir::games::{self, PathRule, Pong};
 use wir::num::format_num;
 use wir::{
     canonicalize, codebook, compile, decompile, encode, lower_str, print, CompileOptions, DecompileOptions, NumFormat, Weights,
@@ -30,6 +30,12 @@ usage:
   wir pong --variants N --out DIR [--seed 1] [--check 200000]
                                         generate Pong step programs (0.2), each checked
                                         against a reference simulator
+  wir path [--moves 4|8] [--ceiling 64] [--terrain 1] [-o path.wir] [--flat HxW]
+           [--local 20000000] [--grids 200] [--size 12x12] [--all-mazes 4x4] [--seed 1]
+  wir path --variants N --out DIR [--seed 1]
+                                        generate a pathfinding step (a grid program run
+                                        at every cell), checked cell by cell and on
+                                        random grids against Dijkstra
 
 Weights use PyTorch nn.Linear layout: W1 [H, D], b1 [H], W2 [O, H], b2 [O]; SwiGLU
 networks add W3 [H, D], b3 [H]. --domain drops creases never active on the probe's
@@ -42,6 +48,9 @@ sets vector precision (default 3). --codebook writes vectors as codebook words
 `wir 0.2` programs (named scalar inputs, let/output expressions, combinators) compile
 to deep ReLU networks: .json (`layers`) or .safetensors (nn.Sequential keys 0, 2, 4, ...).
 compile, decompile and eval accept them; eval takes one value per input in order.
+Programs with `grid` inputs are one cell's rule, read with offsets (`d[-1, 0]`); they
+compile to Conv2d stacks (.safetensors keys 0.weight [U, C, k, k], 2.weight [.., 1, 1]
+... with per-channel pad values in the metadata) or .json.
 ";
 
 struct Args {
@@ -103,6 +112,7 @@ fn main() -> ExitCode {
         "eval" => cmd_eval(rest),
         "verify" => cmd_verify(rest),
         "pong" => cmd_pong(rest),
+        "path" => cmd_path(rest),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
@@ -212,10 +222,133 @@ fn compile_deep(src: &str, path: &Path, args: &Args, tol: f64, dtype: DType) -> 
     if !c.program.asserts.is_empty() {
         println!("asserts: {} passed (tolerance {tol:.0e})", c.program.asserts.len());
     }
+    if let Some(s) = deep::StencilWeights::from_compiled(&c) {
+        let k = 2 * s.radius() + 1;
+        println!(
+            "grid program: {} channel(s) {:?}, {} taps; as convolutions a {k}x{k} kernel then 1x1, {} parameters",
+            s.channels.len(), s.channels, s.taps.len(), s.param_count()
+        );
+        if let Some(out) = args.get("-o") {
+            deep::save_stencil(&s, Path::new(out), dtype).map_err(|e| e.to_string())?;
+            println!("wrote {out}");
+        }
+        return Ok(());
+    }
     if let Some(out) = args.get("-o") {
         deep::save(w, Path::new(out), dtype).map_err(|e| e.to_string())?;
         println!("wrote {out}");
     }
+    Ok(())
+}
+
+fn grid_size(s: &str) -> Result<(usize, usize), String> {
+    let (h, w) = s.split_once('x').ok_or(format!("bad size `{s}` (use HxW)"))?;
+    let p = |v: &str| v.parse::<usize>().ok().filter(|v| (1..=256).contains(v)).ok_or(format!("bad size `{s}`"));
+    Ok((p(h)?, p(w)?))
+}
+
+fn cmd_path(raw: &[String]) -> Result<(), String> {
+    let valued = [
+        "--moves", "--ceiling", "--terrain", "-o", "--flat", "--local", "--grids", "--size", "--all-mazes", "--variants", "--out",
+        "--seed",
+    ];
+    let args = Args::parse(raw, &valued)?;
+    args.check(&valued)?;
+    let int = |k: &str, d: i64| -> Result<i64, String> { args.get(k).map_or(Ok(d), |v| v.parse().map_err(|_| format!("bad {k} `{v}`"))) };
+    let seed = int("--seed", 1)? as u64;
+    let (h, w) = grid_size(args.get("--size").unwrap_or("12x12"))?;
+    let check = |g: &PathRule, src: &str, local: u64, grids: u64, seed: u64| -> Result<games::PathCheck, String> {
+        let c = games::path_check(g, src, local, grids, h, w, seed).map_err(|e| format!("{}: {e}", g.tag()))?;
+        eprintln!(
+            "{}: cell network hidden {:?}, {} conv parameters; {} {} cell inputs match the rule; {} random {h}x{w} grids, {} steps match the simulator, settled fields match Dijkstra (at most {} steps)",
+            g.tag(), c.hidden, c.conv_params, if c.local_exhaustive { "all" } else { "a sample of" }, c.local_cases, c.grids, c.steps, c.max_steps
+        );
+        if c.local_mismatches + c.step_mismatches + c.solve_mismatches > 0 {
+            return Err(format!(
+                "{}: {} cell inputs, {} steps and {} settled grids disagree with the reference",
+                g.tag(), c.local_mismatches, c.step_mismatches, c.solve_mismatches
+            ));
+        }
+        Ok(c)
+    };
+    let Some(n) = args.get("--variants") else {
+        let moves = int("--moves", 4)?;
+        let g = PathRule { moves: if moves == 8 { 8 } else if moves == 4 { 4 } else { 0 }, ceiling: int("--ceiling", 64)?, terrain: int("--terrain", 1)? };
+        let src = games::path_program(&g).map_err(|e| e.to_string())?;
+        check(&g, &src, int("--local", 20_000_000)? as u64, int("--grids", 200)? as u64, seed)?;
+        if let Some(size) = args.get("--all-mazes") {
+            let (mh, mw) = grid_size(size)?;
+            let t = std::time::Instant::now();
+            let (count, bad, most) = games::path_all_mazes(&g, &src, mh, mw).map_err(|e| e.to_string())?;
+            eprintln!(
+                "all {mh}x{mw} wall layouts x goal cells: {count} grids settled in at most {most} steps, {bad} differ from Dijkstra ({:.1} s)",
+                t.elapsed().as_secs_f64()
+            );
+            if bad > 0 {
+                return Err(format!("{bad} grids disagree with Dijkstra"));
+            }
+        }
+        let text = match args.get("--flat") {
+            Some(size) => {
+                let (fh, fw) = grid_size(size)?;
+                let (hidden, params, bad) = games::path_flat_check(&g, fh, fw, 2000, seed).map_err(|e| e.to_string())?;
+                eprintln!("flat {fh}x{fw} program: hidden {hidden:?}, {params} parameters; {bad} of 2000 random states disagree with the simulator");
+                if bad > 0 {
+                    return Err("the flat program disagrees with the simulator".into());
+                }
+                games::path_flat_program(&g, fh, fw).map_err(|e| e.to_string())?
+            }
+            None => src,
+        };
+        return match args.get("-o") {
+            Some(out) => std::fs::write(out, &text).map_err(|e| format!("{out}: {e}")),
+            None => {
+                print!("{text}");
+                Ok(())
+            }
+        };
+    };
+    let n: usize = n.parse().map_err(|_| format!("bad --variants `{n}`"))?;
+    let dir = PathBuf::from(args.get("--out").ok_or("--variants needs --out DIR")?);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut rng = seed.max(1);
+    let mut below = |lo: i64, hi: i64| -> i64 {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        lo + (rng % (hi - lo + 1) as u64) as i64
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut manifest = String::new();
+    let mut tries = 0;
+    while seen.len() < n {
+        tries += 1;
+        if tries > 100 * n + 1000 {
+            return Err(format!("only {} distinct variants found", seen.len()));
+        }
+        let moves = if below(0, 1) == 0 { 4 } else { 8 };
+        let terrain = if below(0, 1) == 0 { 1 } else { below(2, 9) };
+        let ceiling = below(8, 256);
+        let g = PathRule { moves, ceiling, terrain };
+        if !seen.insert(g.tag()) {
+            continue;
+        }
+        let src = games::path_program(&g).map_err(|e| e.to_string())?;
+        let c = check(&g, &src, 2_000_000, 20, seen.len() as u64)?;
+        let file = format!("{}.wir", g.tag());
+        std::fs::write(dir.join(&file), &src).map_err(|e| format!("{file}: {e}"))?;
+        let line = serde_json::json!({
+            "file": file, "game": "path",
+            "params": { "moves": moves, "ceiling": ceiling, "terrain": terrain },
+            "channels": &games::PATH_CHANNELS[..g.channels()], "outputs": ["d2"],
+            "hidden": c.hidden, "conv_parameters": c.conv_params, "bytes": src.len(),
+            "local_cases": c.local_cases, "local_exhaustive": c.local_exhaustive,
+            "grids_checked": c.grids, "steps_checked": c.steps,
+        });
+        manifest.push_str(&format!("{line}\n"));
+    }
+    std::fs::write(dir.join("manifest.jsonl"), manifest).map_err(|e| e.to_string())?;
+    eprintln!("wrote {n} programs and manifest.jsonl to {}", dir.display());
     Ok(())
 }
 
@@ -348,6 +481,17 @@ fn cmd_decompile(raw: &[String]) -> Result<(), String> {
     allowed.extend(["--exact", "--transpose"]);
     args.check(&allowed)?;
     let path = args.file("weights file")?;
+    if let Some(s) = deep::load_stencil(&path).map_err(|e| e.to_string())? {
+        let text = deep::decompile_stencil(&s, number_format(&args)).map_err(|e| e.to_string())?;
+        eprintln!("decompiled a grid network: {} taps, hidden layers {:?}", s.taps.len(), s.net.hidden());
+        return match args.get("-o") {
+            Some(out) => std::fs::write(out, &text).map_err(|e| format!("{out}: {e}")),
+            None => {
+                print!("{text}");
+                Ok(())
+            }
+        };
+    }
     if let Some(d) = deep::load(&path).map_err(|e| e.to_string())? {
         let text = deep::decompile(&d, number_format(&args)).map_err(|e| e.to_string())?;
         eprintln!("decompiled a deep network, hidden layers {:?}", d.hidden());

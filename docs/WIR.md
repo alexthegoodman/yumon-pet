@@ -361,7 +361,7 @@ assert bx2(1, -1) == 2             # one value per input, in declaration order
 
 - **Combinators**, each an exact composition of relu and affine maps: `relu`, `abs`, `max`/`min` (n-ary; max(a, b) = b + relu(a - b)), `clip(a, lo, hi)` with constant bounds, `step(a)` = clip(a, 0, 1), comparisons `gt ge lt le eq` (steps of a - b, so exact when a - b is an integer: `ge(a, b)` = step(a - b + 1)), `and`/`or`/`not` (exact on bits: and = relu(sum - (n - 1)), or = sum - relu(sum - 1)), and `select(c, a, b)` for a bit c, via the big-M product c d = relu(d - M+ (1 - c)) - relu(-d - M- (1 - c)).
 - **Intervals.** Every node carries a sound interval computed from the input domains. `select` takes its M from them (and refuses unbounded values), and a relu whose argument is never negative becomes the argument, one never positive becomes 0. Both hold only while inputs stay in their domains; the compiled network is wrong outside them.
-- **Depth is chosen by the compiler.** Relu nodes are shared when identical (after scaling to max coefficient 1), each sits one layer above the deepest node it reads, and values read more than one layer later ride on carry units: relu(v - lo) + lo, one unit when v has a lower bound, two (relu(v) - relu(-v)) when unbounded. `wir compile` reports units per layer and statement, carries separately.
+- **Depth is chosen by the compiler.** Relu nodes are shared when identical (after scaling to smallest coefficient 1, so integer programs get integer weights; max coefficient 1 until Nov 7), each sits one layer above the deepest node it reads, and values read more than one layer later ride on carry units: relu(v - lo) + lo, one unit when v has a lower bound, two (relu(v) - relu(-v)) when unbounded. `wir compile` reports units per layer and statement, carries separately.
 - **Decompiler.** Any ReLU MLP (`.json` with `layers`, or `nn.Sequential` safetensors with 3+ linear layers) decompiles to flat 0.2 text, one `let hK_U = relu(...)` per hidden unit. The canonical form scales each unit to max incoming weight 1, folds constant units into the next bias, drops unread units, merges duplicates and sorts each layer, so scaling and permuting hidden units leave the text unchanged. Numbers snap to rationals with denominators up to 1,000 (`35/72`), which integer-grid programs produce and six digits cannot hold.
 - Not built: v0 plane/anchor creases inside 0.2, vector inputs, codebook vectors in 0.2 text, and the `in space(...)` escape hatch (relu of any expression covers its use so far).
 
@@ -374,4 +374,83 @@ cd wir
 cargo run --release -- pong -o examples/pong.wir                       # default game, all states checked
 cargo run --release -- pong --variants 50 --out ../tmp/wir-pong --seed 7
 cargo test --test deep                                                 # 13 tests, ~4 s
+```
+
+## Grid programs and pathfinding (Nov 7, 2026)
+
+Pong is one fixed board. A pathfinding step is the same small rule at every cell of a grid, so writing it out per cell (as flat 0.2) repeats the rule hundreds of times. Inputs typed `grid` make a 0.2 program **one cell's rule**: grid inputs are read at integer offsets, outside reads take the input's `pad` value, and the compiler builds one cell network that runs at every cell.
+
+```
+wir 0.2
+input d: grid in [0, 64] pad 64        # distance field; outside the grid reads 64
+input wall: grid in [0, 1] pad 1
+input goal: grid in [0, 1] pad 0
+let best = min(min(d[-1, 0], d[1, 0]), min(d[0, -1], d[0, 1]))
+output d2 = clip(1 + best + 64*wall - 129*goal, 0, 64)
+```
+
+- **Lowering.** Each (input, offset) pair read becomes one scalar input of the cell network (a *tap*, `d[-1,0]`), in first-read order; everything else is ordinary 0.2. All taps are read in the first layer, so the cell network is a Conv2d stack: one (2r+1) x (2r+1) kernel over the channels, then 1 x 1 kernels. `StencilWeights` (`src/deep.rs`) holds the cell network plus taps and pads; `apply` runs it over a grid, `conv_layers` / `from_conv` convert, `.safetensors` files are `nn.Sequential(Conv2d, ReLU, ..., Conv2d)` keys with `wir.kind = stencil` and per-channel pads in the metadata (pad each channel before the first convolution), `.json` stores the layers over taps. Grid programs do not take asserts yet.
+- **Decompiler.** Any such conv stack (including a trained one) decompiles to grid text: `input c: grid pad v` per channel, then flat `let hK_U = relu(...)` units over taps written `d[-1,0]`. Taps are sorted (channel, row, column) before canonicalization, so the text is a fixed point.
+- **Integer weights.** Relu nodes are now normalized to smallest coefficient 1 (was largest), so integer programs compile to integer weights. The pathfinding nets went from 1/129 weights (f32 drift: 58 of 200 settled grids wrong) to exact in f32; Pong's worst error went from 1.8e-15 to 0.
+
+**The rule** (`wir path`, `src/games.rs`). One step of value iteration: a goal is 0, a wall is the ceiling M, every other cell is one step past its cheapest neighbour, capped at M. A goal's coefficient exceeds anything the rest of the sum can reach, and the clip handles walls and the cap together. The rule never reads a cell's own old distance, so it repairs itself: stale low values rise by at least one step per iteration, and moving the goal or a wall needs no reset. From any field in [0, M] the iteration converges to the Dijkstra distances capped at M (the capped distances are a fixed point; with positive costs it is the only one). Variants: `--moves 8` (orthogonal steps cost 2, diagonal 3; a diagonal only counts when both cells beside it are open, `max(d[-1, 1], M*(wall[-1, 0] + wall[0, 1]))`), `--terrain C` (a `cost` channel in [1, C]; leaving a cell costs its terrain), `--ceiling M`.
+
+| rule | cell network | conv weights | flat 6 x 6 MLP |
+|---|---|---|---|
+| 4 moves, M 64 | 6 taps, [6, 5, 2] | 218 | [158, 156, 72], 55,958 |
+| 4 moves + terrain 5 | 7 taps, [7, 6, 2] | 324 | |
+| 8 moves, M 128 | 14 taps, [14, 12, 10, 6, 2] | 785 | [266, 280, 257, 198, 72], 244,011 |
+| 8 moves + terrain 4, M 200 | 15 taps, [15, 13, 11, 7, 2] | 1,020 | |
+
+**Checks** (`wir path` runs them on every program it writes; `path_check`):
+
+- **Every cell input.** The cell network against the rule written as plain code (`path_cell`) on every combination of tap values. For the default 4-move rule that is 65^4 x 2 x 2 = 71,402,500 cases, all exact (8.6 s with the rest below, release). Since a grid step is the cell network at every cell with in-domain pads, this proves the step exact on every grid of every size. 8-move and terrain rules have too many combinations and are sampled (20-100M).
+- **Random grids.** 200 random 12 x 12 grids (open fields or carved mazes with loops, one or two goals, random starting fields): every step against the simulator, the settled field against Dijkstra. All variants above: 0 mismatches.
+- **Every small maze.** `--all-mazes 4x4`: all 65,536 wall layouts with each of 16 goal cells (1,048,576 grids) settle to the Dijkstra distances, at most 12 steps, 5.2 s.
+- **Flat expansion.** `--flat HxW` writes the same rule as a plain 0.2 program per cell and checks it against the simulator; `tests/path.rs` also checks it equals the stencil output on random grids.
+- **PyTorch.** `scripts/path_planner.py check` loads the conv safetensors into Conv2d layers with per-channel padding: one step exact on 2,000 random 8 x 8 fields, 200 random 12 x 12 grids settle to BFS (f64 and f32).
+
+## Written vs learned planners (Nov 7, 2026)
+
+The question: does a planner trained from scratch find the same weights, and how do weights relate to behaviour? `wir/scripts/path_planner.py train` fits the compiled network's own layout (Conv2d 3 x 3, then 1 x 1, inputs d / wall / goal, ceiling 64, 4 moves) from random weights on random 8 x 8 grids (PyTorch 2.14.1, CPU, f64, Adam 3e-3 cosine, batch 64). **step** mode shows random fields (half of them near the answer) and the rule's output; **unroll** mode starts from the ceiling, runs 48 steps and scores only the final field against BFS. All networks were then scored the same way (`summary.json` in `tmp/wir-path`, 100 fresh grids per size, run until the field stops changing or 138 steps; a path is optimal when walking downhill on the network's field reaches a goal in the BFS distance):
+
+| network | weights | one step exact | cells exact 8 x 8 / 32 x 32 | paths optimal 8 x 8 / 32 x 32 | train time |
+|---|---|---|---|---|---|
+| written in WIR | 218 | 100% | 100% / 100% | 100% / 100% | - |
+| written, fine-tuned unroll 2k steps (lr 3e-4) | 218 | 99.999% | 100% / 87.9% | 100% / 100% | 74 s |
+| 6+5+2 step, 20k (best of 3) | 218 | 40.0% | 10.8% / 1.9% | 46.3% / 4.6% | 31 s |
+| 6+5+2 unroll, 3k (best of 3) | 218 | 3.8% | 11.9% / 1.7% | 39.5% / 4.0% | 117 s |
+| 32+32 step, 20k (best of 3) | 1,985 | 91.4% | 61.7% / 26.7% | 99.0% / 47.9% | 43 s |
+| 32+32 step, 200k | 1,985 | 99.8% | 99.8% / 71.0% | 100% / 99.8% | 462 s |
+| 32+32 unroll, 3k (best of 3) | 1,985 | 11.2% | 17.0% / 3.2% | 38.9% / 3.9% | 241 s |
+| 32+32 unroll, 12k | 1,985 | 4.0% | 31.4% / 8.4% | 70.4% / 13.7% | 897 s |
+
+First-layer structure (`path_planner.py analyze`; weights scaled by input range): share of weight on taps the 4-move rule never reads (diagonal and centre distances, neighbours' walls and goals) / share of distance weight on the 4 neighbours / share of distance units whose weights cancel (relu(a - b), the min signature):
+
+| network | unread | orthogonal | difference units |
+|---|---|---|---|
+| written | 0% | 100% | 50% (2 of 4; the other 2 are carries) |
+| 32+32 step 20k (mean of 3) | 31.5% | 76.9% | 13.5% |
+| 32+32 step 200k | 6.3% | 95.6% | 31.2% |
+| 32+32 unroll 3k (mean of 3) | 67.7% | 48.3% | 8.3% |
+| 32+32 unroll 12k | 62.8% | 51.8% | 0% |
+
+Best of 3 means the seed with the highest 8 x 8 path score. Findings:
+
+- **The written shape is not found by gradient descent.** 0 of 6 runs at 6+5+2 learned the rule (best 51% of single steps exact; several collapsed to a constant output). The 218-weight solution exists and the compiler writes it directly; training from random weights did not reach it.
+- **Width plus a lot of training learns the step, and behaviour outlasts values.** At 9x the weights and 200k steps, 99.8% of single steps are exact and downhill paths are optimal on 99.8% of 32 x 32 starts, but only 71% of 32 x 32 cells hold the exact distance and the field never stops moving there. Small per-step errors compound over 60+ iterations and grow on grids larger than the 8 x 8 training ones; the ordering of neighbours survives longer than the numbers.
+- **Weights drift toward the program as training continues.** Weight on unread taps falls from 31% to 6%, orthogonal share rises from 77% to 96%, difference units from 13% to 31%. Same direction as the written network, not there yet.
+- **End-to-end training learns something else.** Scored only at step 48 from the ceiling, the network learns a 48-step transient, not a stable rule: most of its weight sits on taps the rule ignores, no unit is a clean difference, and it is worse on every behavioural measure despite a low training loss (4e-4 normalized MSE). Scoring it at exactly 48 steps instead of at rest barely changes this (8 x 8 paths 73%).
+- **Training only protects what it measures.** Fine-tuning the exact net started at loss 1.9e-33, but Adam still moved weights by up to 0.24 (output layer weights are up to 129). It stayed exact on 8 x 8 and lost exactness on larger grids (87.9% of 32 x 32 cells) while paths stayed optimal.
+
+For WIR this argues for programs as priors or as the answer itself rather than as a target for distillation from trained planners: the program's weights are 9x smaller than a learned net that nearly matches it, exact on all grids, and the learned nets that come close do so by drifting toward the program's structure. A trained planner can still be decompiled (`wir decompile planner.safetensors`) to inspect what it reads; its text is dense (27 taps per unit) and has no short form.
+
+**Demo.** "WIR Pathfinder" (claude.ai artifact, private) runs the written 4-move, 8-move and mud networks on a 25 x 17 grid in the browser with a JavaScript copy of the rule and Dijkstra as live checks, an editable map, downhill runners, a live view of one cell's network, and three of the learned networks for comparison.
+
+```
+cd wir
+cargo run --release -- path --local 100000000 --all-mazes 4x4 -o examples/path.wir
+uv run --project ../python-train python scripts/path_planner.py train --out ../tmp/wir-path/runs/step_wide_long --mode step --hidden 32,32 --steps 200000
+uv run --project ../python-train python scripts/path_planner.py analyze ../tmp/wir-path/runs/*/planner.safetensors
+cargo test --test path                                       # 11 tests, ~2 s
 ```

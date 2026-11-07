@@ -117,6 +117,43 @@ Deep weights are `.json` (`{"format": "wir-deep-weights", inputs, outputs, layer
 [{W, b}]}`) or `.safetensors` with `nn.Sequential(Linear, ReLU, ..., Linear)` keys
 `0.weight`, `2.weight`, ... and `wir.inputs` / `wir.outputs` metadata.
 
+### Grid programs
+
+Inputs typed `grid` make the program one cell's rule, applied at every cell. Grid
+inputs are read at integer offsets (`d[-1, 0]` is the cell above) and take a `pad`
+value for reads outside the grid. The compiled cell network reads every tap in its
+first layer, so it is a Conv2d stack: a (2r+1) x (2r+1) kernel, then 1 x 1 kernels.
+
+```
+wir 0.2
+input d: grid in [0, 64] pad 64
+input wall: grid in [0, 1] pad 1
+input goal: grid in [0, 1] pad 0
+let best = min(min(d[-1, 0], d[1, 0]), min(d[0, -1], d[0, 1]))
+output d2 = clip(1 + best + 64*wall - 129*goal, 0, 64)
+```
+
+```
+cargo run --release -- path -o examples/path.wir          # one value-iteration step, checked
+cargo run --release -- path --moves 8 --terrain 4 --ceiling 200 --all-mazes 4x4
+cargo run --release -- path --flat 6x6                     # the same rule as a plain 0.2 MLP
+cargo run --release -- path --variants 20 --out ../tmp/wir-path-variants
+cargo run -- compile examples/path.wir -o path.safetensors  # Conv2d weights
+cargo run -- decompile path.safetensors                     # grid text back
+uv run --project ../python-train python scripts/path_planner.py check path.safetensors
+```
+
+Stencil weights are `.json` (`{"format": "wir-stencil-weights", channels, pads,
+taps, outputs, layers}`, layers over the taps) or `.safetensors` with
+`nn.Sequential(Conv2d, ReLU, ..., Conv2d)` keys and `wir.kind = stencil`,
+`wir.inputs`, `wir.pads`, `wir.outputs` metadata. Pad each input channel with its
+own value before the first convolution (`scripts/path_planner.py` does `F.pad(x - p) + p`).
+`scripts/path_planner.py train` fits the same conv shape to the rule from scratch
+(one step at a time, or end to end through K unrolled steps) for comparison.
+
+Relu units are scaled so their smallest coefficient is 1, so programs with integer
+coefficients compile to integer weights, exact in f32.
+
 ## Library
 
 ```rust
@@ -145,7 +182,7 @@ let text = wir::print(&p, wir::NumFormat::CANONICAL);      // or NumFormat::EXAC
 ## Tests
 
 ```
-cargo test                      # 81 tests, ~25 s debug (fuzz is the slow one)
+cargo test                      # 92 tests, ~40 s debug (fuzz is the slow one)
 uv run --project ../python-train python scripts/interop.py   # NumPy 2.5 / PyTorch 2.14 cross-check
 ```
 
@@ -161,4 +198,7 @@ vectors: parsing, bit-exact round trips, overhang and calibrated rounding.
 `tests/deep.rs` covers 0.2: combinators against their definitions, layering against
 the program's own graph off the integer grid, `examples/pong.wir` against an
 independent simulator on 181,440 states, generated variants, and 500 random deep
-networks through exact 0.2 text.
+networks through exact 0.2 text. `tests/path.rs` covers grid programs: the 4-neighbour
+step on every cell input (ceiling 12), 4/8-neighbour and terrain variants against
+Dijkstra, all 3 x 3 mazes, self-healing after the goal moves, the flat expansion, and
+Conv2d / JSON files plus 100 random conv stacks through exact grid text.

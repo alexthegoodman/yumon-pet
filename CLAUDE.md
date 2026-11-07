@@ -187,3 +187,20 @@ decompiles to flat 0.2 (`let hK_U = relu(...)`, rationals up to /1000).
 checked against a simulator; `examples/pong.wir` is the generator default (4 hidden
 layers, 1,084 params, all 604,800 states exact, 1,160 Qwen tokens; 42 of 64 units
 are carries). 81 wir tests.
+
+WIR grid programs and pathfinding (2026-11-07): see docs/WIR.md "Grid programs and
+pathfinding" and "Written vs learned planners". `input d: grid in [lo, hi] pad v` makes a
+0.2 program one cell's rule; inputs are read at offsets (`d[-1, 0]`), each read is a tap
+(scalar input of the cell network), and the cell network is a Conv2d stack
+(`StencilWeights` in deep.rs: apply, conv_layers/from_conv, save/load_stencil,
+decompile_stencil; safetensors carry wir.kind = stencil and per-channel pads). Relu units
+now normalize to smallest coefficient 1, so integer programs give integer weights (exact
+in f32). `wir path` (games.rs: path_program, path_cell/path_step, path_distances =
+Dijkstra, path_check, path_all_mazes, path_flat_program) writes one value-iteration step:
+default 4-move, ceiling 64 is [6, 5, 2], 218 conv weights (flat 6 x 6 MLP: 55,958), exact
+on all 71,402,500 cell inputs and all 1,048,576 4x4 mazes; 8-move and terrain variants
+too. `wir/scripts/path_planner.py` (check/train/eval/analyze) trains the same conv shape
+from scratch: the 6+5+2 shape never learned it (0/6), 32+32 one-step training reaches
+99.8% steps exact but only 71% exact cells on 32 x 32, end-to-end training learns a
+48-step transient. Runs and summary.json in tmp/wir-path. Demo artifact "WIR Pathfinder":
+https://claude.ai/artifact/RSPLyZ7kbA5coemgbPfwHQ (private). 92 wir tests.

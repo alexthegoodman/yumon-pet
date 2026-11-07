@@ -4,6 +4,11 @@
 //! same step as ordinary branching code, and `pong_check` compiles the program and
 //! compares the network against the simulator on every state (or a random sample of
 //! them when there are too many).
+//!
+//! `path_program` writes one value-iteration step for grid pathfinding as a grid
+//! (stencil) program; `path_cell` / `path_step` are the rule as plain code,
+//! `path_distances` is Dijkstra, and `path_check` compares the compiled cell network
+//! with the rule on every cell input (or a sample) and whole random grids with both.
 
 use crate::deep;
 use crate::error::{Result, WirError};
@@ -230,4 +235,523 @@ pub fn pong_check(g: &Pong, src: &str, limit: u64, seed: u64) -> Result<PongChec
         mismatches += (d > 1e-6) as u64;
     }
     Ok(PongCheck { states: n, exhaustive, mismatches, worst, hidden: c.weights.hidden(), params: c.weights.param_count() })
+}
+
+// ---------------------------------------------------------------- pathfinding
+
+/// One value-iteration step on a grid, as a stencil program: every cell takes its
+/// cheapest neighbour plus the cost of the step, goals are 0, walls and anything at
+/// or beyond `ceiling` read `ceiling`. Repeating the step converges to the shortest
+/// path distances (capped at the ceiling) from any starting field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathRule {
+    /// 4 (orthogonal steps cost 1 per unit of terrain) or 8 (orthogonal 2, diagonal 3,
+    /// no cutting past a wall corner).
+    pub moves: u8,
+    /// Distance cap: unreachable cells and anything this far or farther read this value.
+    pub ceiling: i64,
+    /// Largest terrain cost; 1 means no cost input (every cell costs 1).
+    pub terrain: i64,
+}
+
+impl Default for PathRule {
+    fn default() -> Self {
+        Self { moves: 4, ceiling: 64, terrain: 1 }
+    }
+}
+
+const ORTH: [(i64, i64); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+const DIAG: [(i64, i64); 4] = [(-1, 1), (-1, -1), (1, 1), (1, -1)];
+
+/// Channels of a path grid, in program order.
+pub const PATH_CHANNELS: [&str; 4] = ["d", "wall", "goal", "cost"];
+
+impl PathRule {
+    pub fn validate(&self) -> Result<()> {
+        if (self.moves == 4 || self.moves == 8) && (2..=100_000).contains(&self.ceiling) && (1..=100).contains(&self.terrain) {
+            Ok(())
+        } else {
+            Err(WirError::new(format!("path needs moves 4 or 8, 2 <= ceiling <= 100000 and 1 <= terrain <= 100 (got {self:?})")))
+        }
+    }
+
+    pub fn tag(&self) -> String {
+        format!("path_n{}_m{}_t{}", self.moves, self.ceiling, self.terrain)
+    }
+
+    /// Channels the program reads (cost only with terrain).
+    pub fn channels(&self) -> usize {
+        if self.terrain > 1 { 4 } else { 3 }
+    }
+
+    /// Value outside the grid for each channel: far, wall, not a goal, cost 1.
+    pub fn pads(&self) -> [i64; 4] {
+        [self.ceiling, 1, 0, 1]
+    }
+
+    /// Cost multipliers of an orthogonal and a diagonal step.
+    fn step_costs(&self) -> (i64, i64) {
+        if self.moves == 8 { (2, 3) } else { (1, 0) }
+    }
+}
+
+/// The rule for one cell as plain code. `get(channel, dy, dx)` reads the field around
+/// the cell (pads outside the grid). Shared by the grid simulator and the local check.
+pub fn path_cell(g: &PathRule, get: impl Fn(usize, i64, i64) -> i64) -> i64 {
+    let m = g.ceiling;
+    if get(2, 0, 0) == 1 {
+        return 0;
+    }
+    if get(1, 0, 0) == 1 {
+        return m;
+    }
+    let c = if g.terrain > 1 { get(3, 0, 0) } else { 1 };
+    let (so, sd) = g.step_costs();
+    let mut best = m;
+    for (dy, dx) in ORTH {
+        best = best.min(so * c + get(0, dy, dx));
+    }
+    if g.moves == 8 {
+        for (dy, dx) in DIAG {
+            if get(1, dy, 0) == 0 && get(1, 0, dx) == 0 {
+                best = best.min(sd * c + get(0, dy, dx));
+            }
+        }
+    }
+    best
+}
+
+/// A grid state: one row-major field per channel (d, wall, goal, cost).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathGrid {
+    pub h: usize,
+    pub w: usize,
+    pub fields: [Vec<i64>; 4],
+}
+
+impl PathGrid {
+    pub fn new(g: &PathRule, h: usize, w: usize) -> Self {
+        let n = h * w;
+        Self { h, w, fields: [vec![g.ceiling; n], vec![0; n], vec![0; n], vec![1; n]] }
+    }
+
+    fn reader<'a>(&'a self, g: &'a PathRule, r: i64, c: i64) -> impl Fn(usize, i64, i64) -> i64 + 'a {
+        move |ch, dy, dx| {
+            let (y, x) = (r + dy, c + dx);
+            if y < 0 || x < 0 || y >= self.h as i64 || x >= self.w as i64 { g.pads()[ch] } else { self.fields[ch][y as usize * self.w + x as usize] }
+        }
+    }
+
+    /// The channels a program for `g` reads, as f64 fields.
+    pub fn inputs(&self, g: &PathRule) -> Vec<Vec<f64>> {
+        self.fields[..g.channels()].iter().map(|f| f.iter().map(|&v| v as f64).collect()).collect()
+    }
+}
+
+/// One step of the reference simulator: the new distance field.
+pub fn path_step(g: &PathRule, s: &PathGrid) -> Vec<i64> {
+    let mut out = Vec::with_capacity(s.h * s.w);
+    for r in 0..s.h as i64 {
+        for c in 0..s.w as i64 {
+            out.push(path_cell(g, s.reader(g, r, c)));
+        }
+    }
+    out
+}
+
+/// Shortest path distances to the nearest goal (Dijkstra), capped at the ceiling.
+/// A step out of a cell costs its terrain (times 2 orthogonally or 3 diagonally with
+/// 8 moves); walls are never entered, diagonals never pass a wall corner.
+pub fn path_distances(g: &PathRule, s: &PathGrid) -> Vec<i64> {
+    let (h, w) = (s.h as i64, s.w as i64);
+    let [_, wall, goal, cost] = &s.fields;
+    let at = |r: i64, c: i64| (r * w + c) as usize;
+    let inside = |r: i64, c: i64| r >= 0 && c >= 0 && r < h && c < w;
+    let free = |r: i64, c: i64| inside(r, c) && wall[at(r, c)] == 0;
+    let mut dist = vec![i64::MAX; s.h * s.w];
+    let mut heap = std::collections::BinaryHeap::new();
+    for i in 0..dist.len() {
+        if goal[i] == 1 {
+            dist[i] = 0;
+            heap.push(std::cmp::Reverse((0i64, i)));
+        }
+    }
+    let (so, sd) = g.step_costs();
+    while let Some(std::cmp::Reverse((d, i))) = heap.pop() {
+        if d > dist[i] {
+            continue;
+        }
+        let (r, c) = (i as i64 / w, i as i64 % w);
+        let mut moves: Vec<(i64, i64, i64)> = ORTH.iter().map(|&(dy, dx)| (dy, dx, so)).collect();
+        if g.moves == 8 {
+            moves.extend(DIAG.iter().map(|&(dy, dx)| (dy, dx, sd)));
+        }
+        for (dy, dx, k) in moves {
+            // The cell that would step into (r, c).
+            let (y, x) = (r + dy, c + dx);
+            if !free(y, x) || goal[at(y, x)] == 1 {
+                continue;
+            }
+            if dy != 0 && dx != 0 && !(free(y, c) && free(r, x)) {
+                continue;
+            }
+            let j = at(y, x);
+            let nd = d + k * if g.terrain > 1 { cost[j] } else { 1 };
+            if nd < dist[j] {
+                dist[j] = nd;
+                heap.push(std::cmp::Reverse((nd, j)));
+            }
+        }
+    }
+    dist.iter().zip(goal).map(|(&d, &gl)| if gl == 1 { 0 } else { d.min(g.ceiling) }).collect()
+}
+
+/// The stencil source of one step. Pads: d reads the ceiling outside the grid, wall 1,
+/// goal 0, cost 1.
+pub fn path_program(g: &PathRule) -> Result<String> {
+    g.validate()?;
+    let m = g.ceiling;
+    let tap = |ch: &str, dy: i64, dx: i64| if dy == 0 && dx == 0 { ch.to_string() } else { format!("{ch}[{dy}, {dx}]") };
+    let mut src = format!(
+        "wir 0.2
+# One value-iteration step for grid pathfinding ({tag}, generated by `wir path`).
+# The program is one cell's rule; the compiler runs it at every cell (a convolution).
+# d is the distance field: 0 at a goal, {m} for walls, unreachable cells and anything
+# {m} or more away. Repeating the step from any field converges to shortest paths.
+# Outside the grid, d reads {m} and wall reads 1.
+
+input d: grid in [0, {m}] pad {m}
+input wall: grid in [0, 1] pad 1
+input goal: grid in [0, 1] pad 0
+",
+        tag = g.tag()
+    );
+    if g.terrain > 1 {
+        src.push_str(&format!("input cost: grid in [1, {}] pad 1\n", g.terrain));
+    }
+    let c = if g.terrain > 1 { "cost" } else { "1" };
+    let times = |k: i64| if g.terrain > 1 { if k == 1 { "cost".to_string() } else { format!("{k}*cost") } } else { k.to_string() };
+    let near = |names: &[String]| -> String {
+        format!("min(min({}, {}), min({}, {}))", names[0], names[1], names[2], names[3])
+    };
+    let orth: Vec<String> = ORTH.iter().map(|&(dy, dx)| tap("d", dy, dx)).collect();
+    let (base, top) = if g.moves == 4 {
+        src.push_str(&format!("\n# the cheapest neighbour, as a two-level min tree\nlet best = {}\n", near(&orth)));
+        let top = m + g.terrain;
+        if g.terrain > 1 {
+            src.push_str("\n# leaving this cell costs its terrain\n");
+        }
+        (format!("{c} + best"), top)
+    } else {
+        src.push_str(&format!("\n# orthogonal steps cost 2, diagonal steps 3 (about 2 * sqrt 2)\nlet orth = {}\n", near(&orth)));
+        src.push_str("\n# a diagonal step only counts when both cells beside it are open:\n# a wall there pushes it to the ceiling or above\n");
+        let names = ["ne", "nw", "se", "sw"];
+        for (&(dy, dx), name) in DIAG.iter().zip(names) {
+            src.push_str(&format!("let {name} = max({}, {m}*({} + {}))\n", tap("d", dy, dx), tap("wall", dy, 0), tap("wall", 0, dx)));
+        }
+        let diag: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        src.push_str(&format!("let diag = {}\n", near(&diag)));
+        (format!("min({} + orth, {} + diag)", times(2), times(3)), m + 2 * g.terrain)
+    };
+    // base + m*wall lies in [1, top + m]; a goal subtracts more than that.
+    src.push_str(&format!(
+        "\n# goals are 0, walls the ceiling, everything else one step past its best neighbour\noutput d2 = clip({base} + {m}*wall - {}*goal, 0, {m})\n",
+        top + m
+    ));
+    Ok(src)
+}
+
+/// The same rule written out cell by cell for an h x w grid, as a plain 0.2 program
+/// with scalar inputs `d_r_c`, `wall_r_c`, `goal_r_c` (and `cost_r_c`) and outputs
+/// `d2_r_c`. Reads outside the grid become the pad constants.
+pub fn path_flat_program(g: &PathRule, h: usize, w: usize) -> Result<String> {
+    let stencil = path_program(g)?;
+    let body: Vec<&str> = stencil.lines().filter(|l| l.starts_with("let ") || l.starts_with("output ")).collect();
+    let pads = g.pads();
+    let mut src = format!("wir 0.2\n# {} written out for a {h} x {w} grid (generated by `wir path --flat`).\n", g.tag());
+    let channels = &PATH_CHANNELS[..g.channels()];
+    for ch in channels {
+        let range = match *ch {
+            "d" => format!("[0, {}]", g.ceiling),
+            "cost" => format!("[1, {}]", g.terrain),
+            _ => "[0, 1]".into(),
+        };
+        let names: Vec<String> = (0..h).flat_map(|r| (0..w).map(move |c| format!("{ch}_{r}_{c}"))).collect();
+        src.push_str(&format!("input {}: R1 in {range}\n", names.join(", ")));
+    }
+    let lets: Vec<String> = body.iter().filter_map(|l| l.strip_prefix("let ")?.split(' ').next().map(String::from)).collect();
+    for r in 0..h as i64 {
+        for c in 0..w as i64 {
+            for line in &body {
+                src.push_str(&flat_line(line, channels, &lets, &pads, r, c, h as i64, w as i64));
+                src.push('\n');
+            }
+        }
+    }
+    Ok(src)
+}
+
+/// Rewrite one stencil statement for cell (r, c): taps become scalar names or pads,
+/// local names get the cell suffix.
+fn flat_line(line: &str, channels: &[&str], lets: &[String], pads: &[i64; 4], r: i64, c: i64, h: i64, w: i64) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !(bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+            i += 1;
+        }
+        let word = &line[start..i];
+        if let Some(ch) = channels.iter().position(|c| *c == word) {
+            let (mut dy, mut dx) = (0, 0);
+            if line[i..].starts_with('[') {
+                let end = i + line[i..].find(']').unwrap();
+                let (a, b) = line[i + 1..end].split_once(',').unwrap();
+                (dy, dx) = (a.trim().parse().unwrap(), b.trim().parse().unwrap());
+                i = end + 1;
+            }
+            let (y, x) = (r + dy, c + dx);
+            if y < 0 || x < 0 || y >= h || x >= w {
+                out.push_str(&pads[ch].to_string());
+            } else {
+                out.push_str(&format!("{word}_{y}_{x}"));
+            }
+        } else if lets.iter().any(|l| l == word) || word == "d2" {
+            out.push_str(&format!("{word}_{r}_{c}"));
+        } else {
+            out.push_str(word);
+        }
+    }
+    out
+}
+
+/// Random grids for checks: open fields with scattered walls, or carved mazes with
+/// long corridors; one or two goals; random terrain. The distance field starts random.
+pub fn path_random_grid(g: &PathRule, h: usize, w: usize, rng: &mut u64) -> PathGrid {
+    let mut next = |n: u64| -> u64 {
+        *rng ^= *rng << 13;
+        *rng ^= *rng >> 7;
+        *rng ^= *rng << 17;
+        *rng % n
+    };
+    let mut s = PathGrid::new(g, h, w);
+    let n = h * w;
+    if next(2) == 0 {
+        let density = next(45);
+        for v in s.fields[1].iter_mut() {
+            *v = (next(100) < density) as i64;
+        }
+    } else {
+        // Depth-first maze on odd cells: walls everywhere, carve passages.
+        s.fields[1].iter_mut().for_each(|v| *v = 1);
+        let mut stack = vec![(0usize, 0usize)];
+        s.fields[1][0] = 0;
+        while let Some(&(r, c)) = stack.last() {
+            let mut options = vec![];
+            for (dy, dx) in [(-2i64, 0i64), (2, 0), (0, -2), (0, 2)] {
+                let (y, x) = (r as i64 + dy, c as i64 + dx);
+                if y >= 0 && x >= 0 && (y as usize) < h && (x as usize) < w && s.fields[1][y as usize * w + x as usize] == 1 {
+                    options.push((y as usize, x as usize));
+                }
+            }
+            if options.is_empty() {
+                stack.pop();
+                continue;
+            }
+            let (y, x) = options[next(options.len() as u64) as usize];
+            s.fields[1][((r + y) / 2) * w + (c + x) / 2] = 0;
+            s.fields[1][y * w + x] = 0;
+            stack.push((y, x));
+        }
+        // Knock out a few extra walls so there are loops.
+        for _ in 0..n / 16 {
+            s.fields[1][next(n as u64) as usize] = 0;
+        }
+    }
+    for _ in 0..1 + next(2) {
+        s.fields[2][next(n as u64) as usize] = 1;
+    }
+    if g.terrain > 1 {
+        for v in s.fields[3].iter_mut() {
+            *v = 1 + next(g.terrain as u64) as i64;
+        }
+    }
+    for v in s.fields[0].iter_mut() {
+        *v = next(g.ceiling as u64 + 1) as i64;
+    }
+    s
+}
+
+/// Outcome of `path_check`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathCheck {
+    /// Cell-rule inputs compared with `path_cell`, and whether that covered all of them.
+    pub local_cases: u64,
+    pub local_exhaustive: bool,
+    pub local_mismatches: u64,
+    /// Random grids: steps compared with `path_step`, and fixed points with Dijkstra.
+    pub grids: u64,
+    pub steps: u64,
+    pub step_mismatches: u64,
+    pub solve_mismatches: u64,
+    /// Most steps any grid needed to settle.
+    pub max_steps: u64,
+    pub hidden: Vec<usize>,
+    pub conv_params: usize,
+}
+
+/// Run the compiled step until the field stops changing (at most `limit` steps).
+pub fn path_settle(s: &deep::StencilWeights, net: &mut deep::SparseNet, g: &PathRule, grid: &PathGrid, limit: u64) -> (Vec<i64>, u64) {
+    let mut fields = grid.inputs(g);
+    for k in 1..=limit {
+        let next: Vec<i64> = s.apply_with(net, &fields, grid.h, grid.w).remove(0).iter().map(|v| v.round() as i64).collect();
+        let done = next.iter().zip(&fields[0]).all(|(a, b)| *a as f64 == *b);
+        fields[0] = next.iter().map(|&v| v as f64).collect();
+        if done {
+            return (next, k);
+        }
+    }
+    (fields[0].iter().map(|&v| v as i64).collect(), limit)
+}
+
+/// Compile a stencil program for `g` and check it: the cell network against
+/// `path_cell` on every tap combination (or `local_limit` random ones), then `grids`
+/// random grids of size h x w, every step against `path_step` and the settled field
+/// against Dijkstra.
+pub fn path_check(g: &PathRule, src: &str, local_limit: u64, grids: u64, h: usize, w: usize, seed: u64) -> Result<PathCheck> {
+    let c = deep::compile(src, 1e-6)?;
+    let s = deep::StencilWeights::from_compiled(&c).ok_or_else(|| WirError::new("not a grid program"))?;
+    let mut net = deep::SparseNet::new(&s.net);
+    let mut rng = seed.max(1);
+    let mut next = |n: u64| -> u64 {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng % n
+    };
+    // Local: each tap ranges over its channel's integer interval.
+    let span = |ch: usize| -> (i64, i64) {
+        match ch {
+            0 => (0, g.ceiling),
+            3 => (1, g.terrain),
+            _ => (0, 1),
+        }
+    };
+    let sizes: Vec<u64> = s.taps.iter().map(|&(ch, _, _)| (span(ch).1 - span(ch).0 + 1) as u64).collect();
+    let total = sizes.iter().try_fold(1u64, |a, &b| a.checked_mul(b));
+    let local_exhaustive = total.is_some_and(|t| t <= local_limit);
+    let local_cases = if local_exhaustive { total.unwrap() } else { local_limit };
+    let mut local_mismatches = 0;
+    let mut x = vec![0.0; s.taps.len()];
+    for i in 0..local_cases {
+        let mut k = i;
+        for (t, &(ch, _, _)) in s.taps.iter().enumerate() {
+            let n = sizes[t];
+            let digit = if local_exhaustive {
+                let d = k % n;
+                k /= n;
+                d
+            } else {
+                next(n)
+            };
+            x[t] = (span(ch).0 + digit as i64) as f64;
+        }
+        let want = path_cell(g, |ch, dy, dx| {
+            match s.taps.iter().position(|&t| t == (ch, dy, dx)) {
+                Some(t) => x[t] as i64,
+                // Taps the program never reads: the rule must not need them either.
+                None => span(ch).0,
+            }
+        });
+        let got = net.eval(&x)[0];
+        local_mismatches += ((got - want as f64).abs() > 1e-6) as u64;
+    }
+    // Grids.
+    let (mut steps, mut step_mismatches, mut solve_mismatches, mut max_steps) = (0, 0, 0, 0);
+    let limit = 4 * (h * w) as u64 * g.terrain as u64 + 4 * g.ceiling as u64;
+    for _ in 0..grids {
+        let mut grid = path_random_grid(g, h, w, &mut next_seed(&mut next));
+        for k in 0.. {
+            let want = path_step(g, &grid);
+            let got = s.apply_with(&mut net, &grid.inputs(g), h, w).remove(0);
+            steps += 1;
+            step_mismatches += got.iter().zip(&want).any(|(a, b)| (a - *b as f64).abs() > 1e-6) as u64;
+            let done = want == grid.fields[0];
+            grid.fields[0] = want;
+            if done || k >= limit {
+                max_steps = max_steps.max(k);
+                break;
+            }
+        }
+        solve_mismatches += (grid.fields[0] != path_distances(g, &grid)) as u64;
+    }
+    Ok(PathCheck {
+        local_cases,
+        local_exhaustive,
+        local_mismatches,
+        grids,
+        steps,
+        step_mismatches,
+        solve_mismatches,
+        max_steps,
+        hidden: s.net.hidden(),
+        conv_params: s.param_count(),
+    })
+}
+
+fn next_seed(next: &mut impl FnMut(u64) -> u64) -> u64 {
+    next(u64::MAX - 1) + 1
+}
+
+/// Every wall layout of an h x w grid with every single goal cell (2^(h*w) * h * w
+/// grids, no terrain): settle the compiled step from the ceiling everywhere and
+/// compare with Dijkstra. Returns (grids, mismatches, most steps to settle).
+pub fn path_all_mazes(g: &PathRule, src: &str, h: usize, w: usize) -> Result<(u64, u64, u64)> {
+    let n = h * w;
+    if n > 20 {
+        return Err(WirError::new("--all-mazes is for grids of at most 20 cells"));
+    }
+    let c = deep::compile(src, 1e-6)?;
+    let s = deep::StencilWeights::from_compiled(&c).ok_or_else(|| WirError::new("not a grid program"))?;
+    let mut net = deep::SparseNet::new(&s.net);
+    let (mut count, mut bad, mut most) = (0, 0, 0);
+    let limit = 4 * n as u64 + 4 * g.ceiling as u64;
+    for walls in 0u64..1 << n {
+        for goal in 0..n {
+            let mut grid = PathGrid::new(g, h, w);
+            for i in 0..n {
+                grid.fields[1][i] = (walls >> i & 1) as i64;
+            }
+            grid.fields[2][goal] = 1;
+            let (field, steps) = path_settle(&s, &mut net, g, &grid, limit);
+            most = most.max(steps);
+            count += 1;
+            bad += (field != path_distances(g, &grid)) as u64;
+        }
+    }
+    Ok((count, bad, most))
+}
+
+/// Compile the flat program for an h x w grid and compare one step with `path_step`
+/// on `states` random grids. Returns (hidden layers, parameters, mismatching states).
+pub fn path_flat_check(g: &PathRule, h: usize, w: usize, states: u64, seed: u64) -> Result<(Vec<usize>, usize, u64)> {
+    let src = path_flat_program(g, h, w)?;
+    let c = deep::compile(&src, 1e-6)?;
+    let mut net = deep::SparseNet::new(&c.weights);
+    let mut rng = seed.max(1);
+    let mut bad = 0;
+    for _ in 0..states {
+        let grid = path_random_grid(g, h, w, &mut rng);
+        // Inputs are channel-major, row-major within a channel.
+        let x: Vec<f64> = grid.fields[..g.channels()].iter().flatten().map(|&v| v as f64).collect();
+        let want = path_step(g, &grid);
+        bad += net.eval(&x).iter().zip(&want).any(|(a, b)| (a - *b as f64).abs() > 1e-6) as u64;
+    }
+    Ok((c.weights.hidden(), c.weights.param_count(), bad))
 }
