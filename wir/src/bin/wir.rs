@@ -8,6 +8,7 @@ use wir::deep;
 use wir::fluid::{self, FluidRule};
 use wir::swarm::{self, Species};
 use wir::ant;
+use wir::park;
 use wir::tactics::{self, Archetype};
 use wir::games::{self, PathRule, Pong};
 use wir::num::format_num;
@@ -65,6 +66,10 @@ usage:
                                         program and a utility brain with action bits
                                         and an emote), checked with the 4-move path
                                         step on random inputs against the rule
+  wir park [--out DIR] [--cases 200000] [--seed 1] [--export demo.json] [--vectors 256]
+                                        generate the Yumon Park brain (one utility
+                                        program for every species, 8 option keys),
+                                        checked on random inputs against the rule
 
 Weights use PyTorch nn.Linear layout: W1 [H, D], b1 [H], W2 [O, H], b2 [O]; SwiGLU
 networks add W3 [H, D], b3 [H]. --domain drops creases never active on the probe's
@@ -146,6 +151,7 @@ fn main() -> ExitCode {
         "swarm" => cmd_swarm(rest),
         "tactics" => cmd_tactics(rest),
         "ant" => cmd_ant(rest),
+        "park" => cmd_park(rest),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
@@ -533,6 +539,33 @@ fn cmd_ant(raw: &[String]) -> Result<(), String> {
     }
     if let Some(out) = args.get("--export") {
         let json = ant::export_json(int("--vectors", 256)? as u64, int("--seed", 1)? as u64 + 7).map_err(|e| e.to_string())?;
+        std::fs::write(out, json).map_err(|e| format!("{out}: {e}"))?;
+        eprintln!("wrote {out}");
+    }
+    Ok(())
+}
+
+fn cmd_park(raw: &[String]) -> Result<(), String> {
+    let valued = ["--out", "--cases", "--seed", "--export", "--vectors"];
+    let args = Args::parse(raw, &valued)?;
+    args.check(&valued)?;
+    let int = |k: &str, d: i64| -> Result<i64, String> { args.get(k).map_or(Ok(d), |v| v.parse().map_err(|_| format!("bad {k} `{v}`"))) };
+    let t = std::time::Instant::now();
+    let c = park::park_check(int("--cases", 200_000)? as u64, int("--seed", 1)? as u64).map_err(|e| e.to_string())?;
+    eprintln!("brain: hidden {:?}, {} parameters ({} non-zero)", c.shape.0, c.shape.1, c.shape.2);
+    eprintln!("written choices ({}): {:?}", park::OPTIONS.join(" "), c.options);
+    eprintln!("{} inputs: {} key mismatches, worst |diff| {:.1e} ({:.1} s)", c.cases, c.key_mismatches, c.worst, t.elapsed().as_secs_f64());
+    if c.key_mismatches > 0 {
+        return Err("the network disagrees with the rule".into());
+    }
+    if let Some(dir) = args.get("--out") {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
+        let path = std::path::Path::new(dir).join("park_brain.wir");
+        std::fs::write(&path, park::brain_program()).map_err(|e| format!("{}: {e}", path.display()))?;
+        eprintln!("wrote {}", path.display());
+    }
+    if let Some(out) = args.get("--export") {
+        let json = park::export_json(int("--vectors", 256)? as u64, int("--seed", 1)? as u64 + 7).map_err(|e| e.to_string())?;
         std::fs::write(out, json).map_err(|e| format!("{out}: {e}"))?;
         eprintln!("wrote {out}");
     }

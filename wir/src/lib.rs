@@ -15,6 +15,7 @@
 #![allow(clippy::neg_cmp_op_on_partial_ord, clippy::type_complexity)]
 
 pub mod ant;
+pub mod park;
 pub mod ast;
 pub mod canon;
 pub mod codebook;

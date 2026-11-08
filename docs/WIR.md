@@ -648,3 +648,52 @@ python demos/ant/build.py ../tmp/wir-ant/ant_demo.json ../tmp/wir-ant/yumon-ant.
 node demos/ant/harness.js 10000 1 check ../tmp/wir-ant/ant_demo.json
 cargo test --test ant
 ```
+
+## Yumon Park: an ecosystem that learns (Nov 8, 2026)
+
+A side-view park with four bands (sky, trees, ground, water, top to bottom) and 30 species. Every Yumon carries its own copy of one WIR brain. Founders start with the compiled weights, so at first they decide exactly as written. After that each one learns from its own life, and a child starts from its mother's weights. `wir park` (`src/park.rs`) writes and checks the brain. The host is plain JavaScript (`wir/demos/park/park_core.js`).
+
+**Capabilities and species.** 17 capabilities, each carried by a limb whose size gene sets how well it works: swim (fins), walk (legs), climb (claws), fly (wings), bite (jaws), claw (claws), sting (stinger), horn (horns), shell, spines, camouflage (skin), social, and five diets (graze grass, browse fruit, filter plankton, hawk gnats, scavenge meat). Claws carry both climbing and clawing, so one gene moves both. Species are permutations: every 1- and 2-way movement set (10) cycled across species, a weapon set, a guard, diets from the plants in their bands, social at 30%. Roles fix the shape of the food web: half plant eaters, a quarter omnivores, a quarter hunters. Fliers stay light (size <= 1.15) because wings must lift the body (`wings / (0.5 + 0.35 m + 0.4 shell) >= 0.9`); a lineage that outgrows its wings is grounded. Every limb adds upkeep. A Yumon can eat another species up to 1.3x its mass (2x with venom). Plant eaters are prey only; juveniles start at 55% size, so young hunters are prey too.
+
+**Brain** (0.2 program, 20 inputs: current option, hunger, fatigue, hurt, fertile, threat / food / prey / mate distance buckets 0..3, refuge, kin, camo, social):
+
+```
+let hunt = select(and(gt(pd, 0), ge(hunger, 3)), hunger + 2*pd - 2, 0)
+let flee = select(scared, 3*td + 2*refuge + 2*hurt + 2, 0)
+let hide = select(and(camo, scared, lt(td, 3)), 3*td + 6, 0)
+let sleep = select(scared, 0, 2*clip(fatigue - 3, 0, 7))
+let roam = 2 + select(and(eq(fd, 0), eq(pd, 0)), min(hunger, 5), 0)
+output key1 = 8*hunt + 16*o1 + 6
+```
+
+Hidden [34, 24, 21], 2,255 weights (227 non-zero), all dyadic, so a Float32 copy is exact (8.8 KB per Yumon; the cache keeps the current weights plus the birth weights). The host samples an option from softmax(keys / 4); a drive unit is 8 key units.
+
+**Learning.** Reward is homeostatic: each tick pays 20 x the drop in need = 4 hunger^2 + 2 fatigue^2 + 6 hurt^2 (fractions of max), plus 1 for mating and 1 for giving birth. Each Yumon keeps up to 360 (input, option, reward) steps. When it falls asleep it takes one REINFORCE step (returns with gamma 0.97, normalized advantages, lr 0.003, gradient norm clipped at 2) plus a pull of 0.002 toward its birth weights, then clears the buffer. A child copies its mother's current weights and they become its anchor. At death the weights leave the cache. Learning costs ~1.8 ms per tick at 600-900 Yumon.
+
+**Genes.** Size, eyes, hue and the species' limbs. A child takes, gene by gene, a uniform blend of its parents' values, then one gene mutates (x exp(0.08 N(0,1)); hue +-8 degrees). Traits (speeds per band, attack, armour, sense radius, upkeep, lift) are recomputed from genes while young.
+
+**Checks.** `wir park`: 200,000 random inputs, 0 key mismatches, worst |diff| 0. The page carries 256 test vectors; its rule port and the compiled weights match all of them on load, and every untrained brain is checked live: 0 of 4.6M untrained decisions off the rule (seed 3, no learning). `tests/park.rs` checks written choices (hungry hunter with prey in view hunts, camouflaged freezes, close threat flees, tired and threatened never sleeps).
+
+**What happened** (`node demos/park/harness.js 10000 <mode> <seed>`, Node 24, i5-12500):
+
+| seed | no learning: species / Yumon | learning: species / Yumon | trained decisions off the rule |
+|---|---|---|---|
+| 1 | 11 / 750 | 8 / 466 | 16.4% |
+| 2 | 12 / 677 | 14 / 891 | 20.9% |
+| 3 | 9 / 718 | 11 / 647 | 17.6% |
+
+About two thirds of the 30 species go extinct by tick 10,000 either way, mostly early starvation of hunters and of species crowded off a shared plant. Learning changes behaviour a lot: most common changes (seed 3) are sleeping where the rule would eat, eating through a threat the rule would flee, roaming instead of eating, fleeing where the rule would eat, and hunting where the rule would eat. With learning on, 81% of sampled decisions match the rule's top option, vs 96% with sampling alone.
+
+Learning did not measurably help survival. In a mixed run (half the founders of each species learn, the trait passes mother to child) learner lineages ended at 40.7%, 50.0% and 48.5% of the population at tick 12,000 (seeds 1-3). At lr 0.01 they fell to 10.2%, 28.5% and 15.3%; at lr 0.03, 63.6%, 24.4% and 10.5%. So at the default rate learning is about neutral, and stronger learning loses to the written brain.
+
+**What did not work.** The first species mix (most species armed) ran out of prey: 22 of 30 species died out by tick 6,000 and hunters made 2 kills. Predators then starved with prey in view because the written rule let hunger raise roaming above hunting whenever no plant food was in sight; roaming now grows with hunger only when neither food nor prey is visible. Prey was faster than the bigger hunters until hunters got a tiring pounce (1.4x speed). Litters of two let small species fill the park. A reward of energy eaten minus damage taught brains to skip sleep and ignore threats (sleep never paid); the homeostatic reward fixed that. A Yumon that dies never learns from its death, since its buffer goes with it: only near misses (damage survived) teach caution.
+
+**Demo.** "Yumon Park" (private artifact, link in the cc-manager card `yumon-park`): pan and zoom, inspect a Yumon (feelings, its brain's option probabilities with the rule's choice tagged, genes against its species' founders, whether its brain is still exact), plant food, toggle learning and its rate, reintroduce extinct species, population lines, most common learned changes.
+
+```
+cd wir
+cargo run --release -- park --out examples --export ../tmp/wir-park/park_demo.json
+python demos/park/build.py ../tmp/wir-park/park_demo.json ../tmp/wir-park/yumon-park.html
+node demos/park/harness.js 10000 mixed 1 ../tmp/wir-park/park_demo.json
+cargo test --test park
+```

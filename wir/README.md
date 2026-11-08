@@ -216,6 +216,21 @@ python demos/ant/build.py ant_demo.json yumon-ant.html
 node demos/ant/harness.js 8000 1 check ant_demo.json               # headless colony, network = rule
 ```
 
+### Yumon Park
+
+`wir park` writes one **brain** for every species (`examples/park_brain.wir`): response
+curves over hunger, fatigue, hurt, fertility and the nearest threat / food / prey / mate /
+kin give a key per option (eat hunt flee hide mate sleep flock roam). `demos/park/` holds
+the ecosystem: 30 species from capability permutations, genes on limbs, four bands, and
+per-Yumon learning (REINFORCE on its own copy of the weights at each sleep; children copy
+their mother's weights).
+
+```
+cargo run --release -- park --out examples --export park_demo.json  # 200k inputs, exact keys
+python demos/park/build.py park_demo.json yumon-park.html
+node demos/park/harness.js 10000 learn|nolearn|mixed 1 park_demo.json
+```
+
 ## Library
 
 ```rust

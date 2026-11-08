@@ -260,3 +260,16 @@ sand kept out of planned tunnels. Headless 10k ticks: 846k decisions, 71M field 
 0 differences; pop 70-130; 3.7 ms/tick (i5-12500, Node 24). Thinking every Nth tick
 starved the colony, so the page thinks every tick. Demo artifact "Yumon Ant"
 (https://claude.ai/artifact/9EEF76QG5QgoLB1NfoPhsD, private). `tests/ant.rs`: 3 tests.
+
+Yumon Park (2026-11-08): see docs/WIR.md "Yumon Park: an ecosystem that learns". `wir park`
+(wir/src/park.rs) writes `examples/park_brain.wir`, one 0.2 utility brain for every species
+(20 inputs; keys for eat hunt flee hide mate sleep flock roam; hidden [34, 24, 21], 2,255
+dyadic weights, exact on 200k inputs). The host is `wir/demos/park/` (park_core.js, park_ui.js,
+template, build.py, harness.js `TICKS learn|nolearn|mixed SEED JSON`, env PARK_TUNE overrides
+tuning): 17 capabilities on 10 limbs, 30 species from permutations (half plant eaters),
+four bands, genes blended from both parents with one mutation, softmax(keys/4) sampling, per-Yumon
+REINFORCE at each sleep on a homeostatic reward, anchored to birth weights; children copy the
+mother's weights, death drops them. Untrained brains: 0 of 4.6M decisions off the rule. Learning
+changes ~18% of trained decisions but did not help survival (mixed runs: learners ended
+41/50/49%; at lr 0.01, 10-29%). Demo artifact "Yumon Park" (https://claude.ai/artifact/8dGTNMcvmx2XiVZFr735TN, private). `tests/park.rs`: 2 tests.
+
