@@ -601,3 +601,50 @@ cargo run --release -- tactics --out examples --export ../tmp/wir-tactics/tactic
 cargo run --release -- tactics --rule-only --arenas 8 --steps 600 --no-fear                    # a control, rule only
 cargo test --test tactics
 ```
+
+## Yumon Ant: a colony of networks (Nov 7, 2026)
+
+A side-view ant colony on ground that extends without bound, where each ant is a pair of WIR networks. Nothing is trained. `wir ant` (`src/ant.rs`) writes and checks the programs; the colony host is plain JavaScript (`wir/demos/ant/ant_core.js`) and runs the exported weights.
+
+**World.** Rows 0..72, sky above a noise surface, soil with rock patches and embedded pebbles, generated in 32-column chunks on demand. A cell is walkable when it is open and touches something solid, so ants walk on floors, walls and ceilings. Five distance fields run with the 4-move `wir path` step (ceiling 120, 3 iterations per tick) over the walkable cells near each colony: `dn` to the nest chamber, `df` to food one ant can lift, `dg` to cells next to soil the colony plans to dig, `dm` to the dump beside the entrance, `dh` to heavy items still short of ants. `dn`, `dg`, `dm` are per colony.
+
+**Senses** (grid program at the ant's cell, 10 channels, 46 taps): each field graded per heading (sign of the difference: 1 nearer, -1 farther), blocked headings (no footing), the fear grade, at the nest / at the dump, which of dn, df, dg, dh are below the ceiling, whether light food, a heavy item short of ants, or dig soil is next to it, the fear here and the nest distance.
+
+**Brain** (0.2 program, 57 inputs): drives as response curves, then the task is the strongest drive and the ant follows that task's field.
+
+```
+let home = select(kn, 6*cf + select(hs, 2*min(hungry, 4), 0) + 4*and(free, ge(dns, 60)), 0)
+let forage = select(fb, 5 - store + 2*old + 3*r1, 0) + select(fb2, min(hungry, 4), 0)
+let dig = select(and(free, kg, not(starving)), 4 - 2*old + 3*r0, 0)
+let help = select(and(free, kh, not(starving)), 3 + 3*r2, 0)
+let explore = 3*or(idle, not(kn))
+let flee = 8*scared
+let tkey0 = 7*home + 6                        # task: argmax of the tkeys
+let s0 = 4*(task0*gn0 + task1*gf0 + task2*gg0 + task3*gm0 + task4*gh0 + task5*w0 + task6*fg0) + k0
+output dig2 = and(free, ld, not(starving), not(scared))
+output em4 = and(ew4_5, ...)                   # straining: the strongest feeling
+```
+
+Roles r0..r2 (digger 45%, forager 35%, helper 20%, set at birth) are individual response thresholds; age (old after 55% of a lifespan of 2,600-4,400 ticks) moves ants from digging to foraging, as in real colonies. Emotes: calm, hungry, working, carrying, straining, scared, curious; the page colours each ant by it.
+
+**Host.** Picking, digging (a pebble becomes a heavy item of 2-3), gripping, dropping (food into the store, sand onto the dump, where it slides like sand and settles into the hill), eating. A heavy item moves one cell every 2 ticks along the nest field (food) or dump field (pebbles) only while at least its weight in ants grip it; one that makes no progress for 40 ticks slips and rests 300 ticks. The queen lays while the store holds 3 + pop/3 and the planned tunnels have room (capacity 6 + open/3); a full colony plans a branch with a chamber. Hunger +1 per 45 ticks, starvation at 15. Loose sand never enters planned tunnels.
+
+| network | shape | parameters (non-zero) |
+|---|---|---|
+| path step (4 moves, ceiling 120) | 6 taps, [6, 5, 2] | 218 conv (28) |
+| senses | 46 taps, [126] | 16,419 conv (358) |
+| brain | 57 inputs, [68, 83, 83, 125, 132, 60, 77, 21, 36, 21] | 60,033 (1,356) |
+
+**Checks.** `wir ant`: 200,000 random inputs each for path, senses and brain against the rule as plain code, 0 mismatches, 0 blocked headings picked (1.6 s). The page carries 256 sense and 256 brain test vectors from the Rust rule; its JavaScript port of the rule matches all 512 before the colony starts, then checks every decision and field cell live. Headless (`demos/ant/harness.js`, Node 24, i5-12500): 10,000 ticks, 846,167 decisions and 70,966,980 field cells, 0 differences. Population peaked at 129 and cycled between about 70 and 130 on spawned food; 284 born, 192 died (175 of old age, 17 starved); 506 cells dug, 68 branches, a hill 22 cells high. Mean tick over the 10,000 ticks: 3.7 ms with the check off, 5.2 ms with it (70-130 ants); a CPU profile puts the fields at ~47% of a tick and senses plus brains at ~23%.
+
+**What did not work.** Summed utilities (every drive times its field's grade, added up) froze ants: with unit-step fields every non-best heading grades -1, so three drives pointing three ways scored every heading below holding. Picking one task fixed it. With the same thresholds everywhere, one heavy item in range sent all 41 free ants to help; roles fixed that. A one-cell shaft, a three-row chamber (its middle row touches nothing, so it is not walkable) and a per-cell ant cap deadlocked traffic: in side view every surface is a one-cell lane, so ants now pass one another and the shaft is two cells wide. Repose sliding filled the shaft from the dump and cut the nest off until loose sand was kept out of planned cells. A field ceiling of 64 left most food out of reach of the nest once the hill and tunnels grew. Staggering thoughts (each ant thinks every 2nd or 3rd tick) starved the colony both ways tried: walking on the old heading overshoots goals, and waiting makes ants slower than their hunger clock; since thinking is about a quarter of a tick, the page has every ant think every tick.
+
+**Demo.** "Yumon Ant" (https://claude.ai/artifact/9EEF76QG5QgoLB1NfoPhsD, private): pan and zoom the endless ground, watch (inspect an ant's feeling, task, decision, drives and network = rule), drop food (crumb 1, seed 2, berry 3, grasshopper 5 ants), pour sand (it buries the entrance; the diggers clear it), dig, scare, found new colonies, overlay any field, live check, WIR sources.
+
+```
+cd wir
+cargo run --release -- ant --out examples --export ../tmp/wir-ant/ant_demo.json
+python demos/ant/build.py ../tmp/wir-ant/ant_demo.json ../tmp/wir-ant/yumon-ant.html
+node demos/ant/harness.js 10000 1 check ../tmp/wir-ant/ant_demo.json
+cargo test --test ant
+```

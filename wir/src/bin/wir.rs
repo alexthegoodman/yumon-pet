@@ -7,6 +7,7 @@ use wir::io::{self, DType, LoadOptions};
 use wir::deep;
 use wir::fluid::{self, FluidRule};
 use wir::swarm::{self, Species};
+use wir::ant;
 use wir::tactics::{self, Archetype};
 use wir::games::{self, PathRule, Pong};
 use wir::num::format_num;
@@ -59,6 +60,11 @@ usage:
                                         checked on random inputs and enemy for enemy in
                                         arenas; reports behaviour (the --no-* controls
                                         zero one part of every archetype)
+  wir ant [--out DIR] [--cases 200000] [--seed 1] [--export demo.json] [--vectors 256]
+                                        generate the Yumon Ant programs (a sense grid
+                                        program and a utility brain with action bits
+                                        and an emote), checked with the 4-move path
+                                        step on random inputs against the rule
 
 Weights use PyTorch nn.Linear layout: W1 [H, D], b1 [H], W2 [O, H], b2 [O]; SwiGLU
 networks add W3 [H, D], b3 [H]. --domain drops creases never active on the probe's
@@ -139,6 +145,7 @@ fn main() -> ExitCode {
         "fluid" => cmd_fluid(rest),
         "swarm" => cmd_swarm(rest),
         "tactics" => cmd_tactics(rest),
+        "ant" => cmd_ant(rest),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
@@ -494,6 +501,40 @@ fn cmd_swarm(raw: &[String]) -> Result<(), String> {
                 eprintln!("wrote {}", path.display());
             }
         }
+    }
+    Ok(())
+}
+
+fn cmd_ant(raw: &[String]) -> Result<(), String> {
+    let valued = ["--out", "--cases", "--seed", "--export", "--vectors"];
+    let args = Args::parse(raw, &valued)?;
+    args.check(&valued)?;
+    let int = |k: &str, d: i64| -> Result<i64, String> { args.get(k).map_or(Ok(d), |v| v.parse().map_err(|_| format!("bad {k} `{v}`"))) };
+    let t = std::time::Instant::now();
+    let c = ant::ant_check(int("--cases", 200_000)? as u64, int("--seed", 1)? as u64).map_err(|e| e.to_string())?;
+    eprintln!("path: {} taps, hidden {:?}, {} conv parameters", c.path_shape.0, c.path_shape.1, c.path_shape.2);
+    eprintln!("sense: {} taps, hidden {:?}, {} conv parameters", c.sense_shape.0, c.sense_shape.1, c.sense_shape.2);
+    eprintln!("brain: hidden {:?}, {} parameters; blocked penalty {}", c.brain_shape.0, c.brain_shape.1, ant::blocked_penalty());
+    eprintln!("options picked (E N W S hold): {:?}; emotes ({}): {:?}", c.options, ant::EMOTES.join(" "), c.emotes);
+    eprintln!(
+        "{} inputs each: path {} / sense {} / brain {} mismatches, {} blocked picks ({:.1} s)",
+        c.cases, c.path_mismatches, c.sense_mismatches, c.brain_mismatches, c.blocked_picks, t.elapsed().as_secs_f64()
+    );
+    if c.path_mismatches + c.sense_mismatches + c.brain_mismatches + c.blocked_picks > 0 {
+        return Err("the networks disagree with the rule".into());
+    }
+    if let Some(dir) = args.get("--out") {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
+        for (name, src) in [("ant_sense.wir", ant::sense_program()), ("ant_brain.wir", ant::brain_program())] {
+            let path = std::path::Path::new(dir).join(name);
+            std::fs::write(&path, src).map_err(|e| format!("{}: {e}", path.display()))?;
+            eprintln!("wrote {}", path.display());
+        }
+    }
+    if let Some(out) = args.get("--export") {
+        let json = ant::export_json(int("--vectors", 256)? as u64, int("--seed", 1)? as u64 + 7).map_err(|e| e.to_string())?;
+        std::fs::write(out, json).map_err(|e| format!("{out}: {e}"))?;
+        eprintln!("wrote {out}");
     }
     Ok(())
 }

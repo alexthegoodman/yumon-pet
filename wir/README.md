@@ -201,6 +201,21 @@ The check compares the networks with the rule on random inputs, then runs arenas
 networks and rule in lockstep, and reports behaviour (retreat to cover when hurt or
 empty, step-and-reverse moves, spread around the player).
 
+### Yumon Ant
+
+`wir ant` writes an ant's **sense** grid program (5 field grades, blocked headings, fear
+grade, at-nest / at-dump, which fields it smells, what is next to it) and its **brain**:
+drives over hunger, age, role and the colony store, the strongest drive as the task, a
+heading along that task's field, five action bits (pick, dig, grip, drop, eat) and a
+one-hot emote. `demos/ant/` holds the page: the colony host in plain JavaScript
+(`ant_core.js`), the UI, and `build.py`, which inlines the exported weights.
+
+```
+cargo run --release -- ant --out examples --export ant_demo.json   # 200k inputs each, exact
+python demos/ant/build.py ant_demo.json yumon-ant.html
+node demos/ant/harness.js 8000 1 check ant_demo.json               # headless colony, network = rule
+```
+
 ## Library
 
 ```rust
@@ -258,3 +273,5 @@ flocking with and without the alignment term. `tests/tactics.rs` covers the tact
 networks against the rule and in lockstep arenas, holding beating every blocked heading,
 small-integer products (and the refusal of two wide factors), and the fear and inertia
 curves changing behaviour against their controls.
+`tests/ant.rs` covers the ant networks against the rule, holding beating every blocked
+heading, and roles choosing the task (a digger follows the dig field, a forager food).

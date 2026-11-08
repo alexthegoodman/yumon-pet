@@ -1217,7 +1217,7 @@ pub fn tactics_behaviour(archetypes: &[Archetype], arenas: u64, steps: u64, h: u
     behaviour
 }
 
-fn sparse_layers(w: &deep::DeepWeights) -> serde_json::Value {
+pub(crate) fn sparse_layers(w: &deep::DeepWeights) -> serde_json::Value {
     let layers: Vec<serde_json::Value> = w
         .layers
         .iter()
@@ -1231,7 +1231,7 @@ fn sparse_layers(w: &deep::DeepWeights) -> serde_json::Value {
     serde_json::Value::Array(layers)
 }
 
-fn stencil_json(s: &deep::StencilWeights, src: &str) -> serde_json::Value {
+pub(crate) fn stencil_json(s: &deep::StencilWeights, src: &str) -> serde_json::Value {
     serde_json::json!({
         "channels": s.channels,
         "pads": s.pads,

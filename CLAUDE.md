@@ -246,3 +246,17 @@ seen hurt/empty grunt and sniper decisions step toward cover (vs 16-18% without)
 0.6% step-and-reverse vs 7.4%; spacing and ally cost did not produce pincers. `--export`
 writes weights for a page; demo artifact "WIR Skirmish"
 (https://claude.ai/artifact/CvH96ywotgdD56qR2gCtxD, private). 106 wir tests.
+
+Yumon Ant (2026-11-07): see docs/WIR.md "Yumon Ant: a colony of networks". `wir ant`
+(wir/src/ant.rs) writes `examples/ant_sense.wir` (grid program: 5 field grades over
+dn/df/dg/dm/dh, blocked = no footing, fear grade, at nest/dump, smell bits, next-to
+bits) and `examples/ant_brain.wir` (drives with role thresholds r0..r2 and age, task =
+argmax drive, heading along that task's field, action bits pick/dig2/grip/drop/eat,
+one-hot emote em0..em6). 4-move path ceiling 120. 200k inputs each exact; `--export`
+adds 256 sense/brain test vectors for the page's JS rule port. The colony host lives
+in `wir/demos/ant/` (ant_core.js, ant_ui.js, template, build.py, harness.js): side view,
+32-column chunks, heavy items move only with weight-many grippers, queen/eggs/hunger/age,
+sand kept out of planned tunnels. Headless 10k ticks: 846k decisions, 71M field cells,
+0 differences; pop 70-130; 3.7 ms/tick (i5-12500, Node 24). Thinking every Nth tick
+starved the colony, so the page thinks every tick. Demo artifact "Yumon Ant"
+(https://claude.ai/artifact/9EEF76QG5QgoLB1NfoPhsD, private). `tests/ant.rs`: 3 tests.
