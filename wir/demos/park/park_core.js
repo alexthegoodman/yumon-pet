@@ -48,7 +48,18 @@
 
   // ---------------------------------------------------------------- tuning
   const DEFAULTS = {
-    temp: 4, // softmax temperature in key units (a drive unit is 8 key units)
+    temp: 8, // softmax temperature in key units (a drive unit is 16 key units)
+    // Rewards on top of the homeostatic one: a kill, a blow landed (hunting or fighting
+    // back), getting away from an attacker alive. A killer gorges on up to gorge of the body.
+    killR: 3, hitR: 0.3, escapeR: 1, gorge: 0.5,
+    // Evolution: every gene x exp(mutSmall N), one gene x exp(mutBig N), hue +- hueStep;
+    // a capability is gained or lost with probability capRate per birth. Every splitEvery
+    // ticks a group of at least splitMin (both sexes) with another capability set, or a
+    // gene cluster splitDist away (log units), becomes a new species.
+    mutSmall: 0.03, mutBig: 0.15, hueStep: 6, capRate: 0.06,
+    splitEvery: 250, splitMin: 5, splitDist: 0.3, maxSpecies: 160,
+    wallLife: 0, // ticks a wall stands; 0 until removed
+    breedCd: 400, twinSize: 0.85, // mating cooldown at size 1; unarmed Yumon smaller than twinSize have twins
     gamma: 0.85, lr: 0.003, anchor: 0.002, clip: 2.0, minBuf: 16, maxBuf: 360, epochs: 1,
     foodE: 25, popCap: 900, needScale: 20,
     speed: 1.4, // all band speeds
@@ -147,20 +158,23 @@
 
   // ---------------------------------------------------------------- the written rule
   function ruleKeys(x, C) {
-    const opt = x.slice(0, 8).indexOf(1);
-    const [hunger, fatigue, hurt, fertile, td, refuge, fd, pd, md, kc, camo, social] = x.slice(8);
+    const N = C.options.length;
+    const opt = x.slice(0, N).indexOf(1);
+    const [hunger, fatigue, hurt, fertile, td, refuge, fd, pd, md, kc, camo, social, hit, odds, armed, guard] = x.slice(N);
     const scared = td > 0;
     const d = [
       fd > 0 && hunger >= 2 ? hunger + 2 * fd - 1 : 0,
-      pd > 0 && hunger >= 3 ? hunger + 2 * pd - 2 : 0,
+      pd > 0 && hunger >= 3 ? hunger + 3 * pd + 1 : 0,
       scared ? 3 * td + 2 * refuge + 2 * hurt + 2 : 0,
       camo === 1 && scared && td < C.near ? 3 * td + 6 : 0,
-      fertile === 1 && md > 0 && hunger < 6 && !scared ? 4 + 2 * md : 0,
+      fertile === 1 && md > 0 && hunger < 6 && td < 2 ? 6 + 2 * md : 0,
       scared ? 0 : 2 * Math.min(7, Math.max(0, fatigue - 3)),
       social === 1 ? 2 + td - Math.min(kc, 2) : 0,
       2 + (fd === 0 && pd === 0 ? Math.min(hunger, 5) : 0),
+      armed === 1 && hit > 0 ? Math.max(0, 4 * hit + 4 * odds - 2 * hurt - 2) : 0,
+      guard === 1 && hit >= 2 ? 3 * hit + 3 : 0,
     ];
-    return d.map((v, o) => C.key_scale * (v + C.inertia * (o === opt ? 1 : 0)) + (7 - o));
+    return d.map((v, o) => C.key_scale * (v + C.inertia * (o === opt ? 1 : 0)) + (N - 1 - o));
   }
   const argmax = (a) => { let b = 0; for (let k = 1; k < a.length; k++) if (a[k] > a[b]) b = k; return b; };
 
@@ -211,18 +225,40 @@
       const genes = { size: lo + rnd() * span, eyes: 0.7 + rnd() * 0.6, hue: (out.length * 137.5) % 360 };
       for (const l of LIMBS) genes[l] = 0;
       for (const c of caps) if (CAP[c].limb) genes[CAP[c].limb] = 0.75 + rnd() * 0.5;
-      let name;
-      for (let t = 0; t < 20; t++) {
-        const tailKey = weapons[0] || guards[0] || 'none';
-        name = pick(SYL[loco[loco.length - 1]]) + pick(TAIL[tailKey]);
-        if (!names.has(name)) break;
-      }
-      if (names.has(name)) name += out.length;
-      names.add(name);
-      out.push({ id: out.length, name, role, caps: new Set(caps), diet, genes, carn, alive: 0, born: 0, extinctAt: null, maxGen: 0 });
+      const cs = new Set(caps);
+      out.push({ id: out.length, name: nameFor(cs, rnd, names), role, caps: cs, caps0: new Set(cs), diet: dietOf(cs), genes, carn, alive: 0, born: 0, extinctAt: null, maxGen: 0, parent: null, since: 0 });
     }
     return out;
   }
+  // A name from the capabilities: a syllable for how it moves, a tail for its weapon or guard.
+  function nameFor(caps, rnd, names) {
+    const pick = (a) => a[Math.floor(rnd() * a.length)];
+    const loco = ['swim', 'walk', 'climb', 'fly'].filter((c) => caps.has(c));
+    const tailKey = ['bite', 'claw', 'sting', 'horn', 'shell', 'spines', 'camo'].find((c) => caps.has(c)) || 'none';
+    let name;
+    for (let t = 0; t < 30; t++) {
+      name = pick(SYL[loco[loco.length - 1] || 'walk']) + pick(TAIL[tailKey]);
+      if (!names.has(name)) break;
+    }
+    for (let k = 2; names.has(name); k++) if (!names.has(name + ' ' + roman(k))) name += ' ' + roman(k);
+    names.add(name);
+    return name;
+  }
+  const roman = (n) => ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X'][n] || String(n);
+  // What a capability set can eat: the plants of its diet capabilities, and meat with a
+  // weapon or scavenging.
+  function dietOf(caps) {
+    const d = new Set();
+    for (const c of caps) if (CAP[c].food && CAP[c].food !== 'meat') d.add(CAP[c].food);
+    if (caps.has('scavenge') || [...caps].some((c) => CAP[c].kind === 'weapon')) d.add('meat');
+    return d;
+  }
+  function roleOf(caps) {
+    const armed = [...caps].some((c) => CAP[c].kind === 'weapon');
+    const plants = [...caps].some((c) => CAP[c].food && CAP[c].food !== 'meat');
+    return !armed ? 'herb' : plants ? 'omni' : 'carn';
+  }
+  const sigOf = (caps) => [...caps].sort().join('+');
   function bandsFor(cap) {
     return cap === 'swim' ? [3] : cap === 'walk' ? [2] : cap === 'climb' ? [1, 2] : cap === 'fly' ? [0, 1, 2] : [];
   }
@@ -230,9 +266,9 @@
   // ---------------------------------------------------------------- traits
   // Quantities from genes and growth. Every limb costs upkeep; size buys reach and
   // strength at the cost of speed and food.
-  function traits(sp, g, age, life) {
+  function traits(caps, g, age, life) {
     const grow = 0.55 + 0.45 * Math.min(1, age / (0.18 * life));
-    const s = g.size * grow, m = s * s, has = (c) => sp.caps.has(c);
+    const s = g.size * grow, m = s * s, has = (c) => caps.has(c);
     const drag = 0.6 + 0.4 * m + 0.5 * g.shell, k = 1 / Math.sqrt(drag);
     const lift = g.wings / (0.5 + 0.35 * m + 0.4 * g.shell);
     const fly = has('fly') && lift >= 0.9 ? 2.2 * g.wings * k : 0;
@@ -271,6 +307,11 @@
     let learn = opts.learn !== false;
     const gauss = () => Math.sqrt(-2 * Math.log(1 - rnd())) * Math.cos(2 * Math.PI * rnd());
     const species = makeSpecies(rnd, opts.species || 30, opts.diets || 'mixed');
+    const names = new Set(species.map((sp) => sp.name));
+    const events = []; // [tick, text]: new species, capability changes that spread
+    // Walls the observer draws: { id, x, y0, y1, until }. Nothing crosses or sees through.
+    const walls = [];
+    let nextWall = 1, aliveN = 0;
     const moving = opts.movingPatches !== false;
     const yumon = [];
     const byId = new Map();
@@ -279,8 +320,8 @@
     const food = [];
     let nextId = 1;
     const stats = {
-      tick: 0, born: 0, died: 0, causes: { eaten: 0, starved: 0, old: 0, poison: 0, thorns: 0 }, sleeps: 0, trainSteps: 0, trainMs: 0,
-      hunts: 0, attacks: 0, reformed: 0, decisions: 0, written: 0, untrained: 0, exactMiss: 0, drift: 0, driftN: 0,
+      tick: 0, born: 0, died: 0, causes: { eaten: 0, fought: 0, starved: 0, old: 0, poison: 0, thorns: 0 }, sleeps: 0, trainSteps: 0, trainMs: 0,
+      hunts: 0, attacks: 0, kills: 0, fights: 0, braces: 0, escapes: 0, gained: 0, lost: 0, splits: 0, reformed: 0, decisions: 0, written: 0, untrained: 0, exactMiss: 0, drift: 0, driftN: 0,
     };
     const history = []; // [tick, pops per species]
     const changes = new Map(); // "rule->net" option pairs from learned brains
@@ -348,13 +389,16 @@
     for (const f of food) if (f.patch && !patchList.includes(f.patch)) patchList.push(f.patch);
 
     // ---------------------------------------------------------------- yumon
-    function spawn(sp, genes, x, y, mother, father) {
+    function spawn(sp, genes, x, y, mother, father, caps) {
       const life = 3500 * (0.7 + 0.3 * genes.size) * (0.85 + 0.3 * rnd());
       const y0 = { id: nextId++, sp: sp.id, s: sp, sex: rnd() < 0.5 ? 0 : 1, genes, x: wrapX(x), y, vx: 0, vy: 0, age: 0, life, alive: true,
         option: 7, sleeping: false, fatigue: rnd() * 4, poison: 0, mateCd: 300, preg: null, atkCd: 0, wander: rnd() * Math.PI * 2,
         gen: mother ? Math.max(mother.gen, father ? father.gen : 0) + 1 : 0, learned: mother ? mother.learned : 0, sleeps: 0,
         learns: mother ? mother.learns : opts.mixed ? rnd() < 0.5 : true, buf: [], r: 0, keys: null, rule: null, exact: true, lastEat: 0, kills: 0, children: 0, mom: mother ? mother.id : 0 };
-      y0.t = traits(sp, genes, 0, life);
+      y0.caps = caps || new Set(sp.caps);
+      y0.diet = dietOf(y0.caps);
+      y0.hitBy = 0; y0.hitAt = -1e9; y0.attacker = null; y0.wasHit = 0; y0.bracing = false; y0.blockedAt = -1;
+      y0.t = traits(y0.caps, genes, 0, life);
       y0.energy = y0.t.emax * (mother ? 0.7 : 0.8);
       y0.hp = y0.t.hpmax;
       // The child's brain is a copy of its mother's at birth; founders get the compiled weights.
@@ -379,11 +423,12 @@
     // Founders arrive in small mixed-sex groups of 2-3, each group somewhere else in the
     // park, so species start spread out and still find mates.
     function founders(sp, n) {
-      const t = traits(sp, sp.genes, 3000, 3500);
+      const t = traits(sp.caps, sp.genes, 3000, 3500);
       const hb = homeBand(t);
       let cx = 0, left = 0;
       for (let i = 0; i < n; i++) {
-        if (left === 0) { cx = rnd() * WORLD_W; left = n - i === 4 ? 2 : Math.min(n - i, 2 + (rnd() < 0.4 ? 1 : 0)); }
+        // Hunters start as packs of 4 so they still find mates while they chase prey.
+        if (left === 0) { cx = rnd() * WORLD_W; left = sp.carn ? Math.min(n - i, 4) : n - i === 4 ? 2 : Math.min(n - i, 2 + (rnd() < 0.4 ? 1 : 0)); }
         left--;
         const g = { ...sp.genes };
         for (const k of Object.keys(g)) if (k !== 'hue' && g[k] > 0) g[k] *= Math.exp(0.05 * gauss());
@@ -391,14 +436,14 @@
         const a = spawn(sp, g, cx + (rnd() - 0.5) * 60, y, null, null);
         a.sex = i % 2;
         a.age = a.life * (0.2 + 0.3 * rnd());
-        a.t = traits(sp, a.genes, a.age, a.life);
+        a.t = traits(a.caps, a.genes, a.age, a.life);
         a.energy = a.t.emax * 0.8; a.hp = a.t.hpmax;
       }
     }
     for (const sp of species) {
-      const t = traits(sp, sp.genes, 3000, 3500);
+      const t = traits(sp.caps, sp.genes, 3000, 3500);
       sp.adult = t;
-      const n = sp.role === 'herb' ? Math.max(6, Math.min(16, 14 / t.m)) : sp.role === 'omni' ? 6 : 5;
+      const n = sp.role === 'herb' ? Math.max(9, Math.min(24, 21 / t.m)) : sp.role === 'omni' ? 8 : 8;
       founders(sp, Math.round(n));
     }
 
@@ -429,6 +474,7 @@
       near(grid, a.x, a.y, RC, (o) => {
         if (o === a || !o.alive) return;
         const dx = dxw(a.x, o.x), dy = o.y - a.y, d = Math.hypot(dx, dy);
+        if (walls.length && walled(a.x, a.y, dx, dy)) return;
         if (d > R) {
           if (d <= RC && o.sp === a.sp && o.sex !== a.sex && d < mdist && isFertile(o)) { mate = o; mdist = d; }
           return;
@@ -446,29 +492,52 @@
       });
       let fdist = Infinity, fd = null;
       near(fgrid, a.x, a.y, R, (f) => {
-        if (f.amt < 0.3 || !a.s.diet.has(f.kind) || !mask[f.band]) return;
-        const d = Math.hypot(dxw(a.x, f.x), f.y - a.y);
+        if (f.amt < 0.3 || !a.diet.has(f.kind) || !mask[f.band]) return;
+        const dx = dxw(a.x, f.x), d = Math.hypot(dx, f.y - a.y);
+        if (d >= fdist || (walls.length && walled(a.x, a.y, dx, f.y - a.y))) return;
         if (d < fdist) { fdist = d; fd = f; }
       });
       let refuge = 0;
       if (threat) { const tm = maskOf(threat.t); for (let b = 0; b < 4; b++) if (mask[b] && !tm[b]) refuge = 1; }
       a.threat = threat; a.prey = prey; a.mate = mate; a.food = fd; a.kin = kin ? [kx / kin, ky / kin] : null;
+      // The attacker: who struck last, if it is alive and still in sight.
+      let hit = 0, odds = 0;
+      const at = a.hitBy ? byId.get(a.hitBy) : null;
+      a.attacker = null;
+      if (at && at.alive) {
+        const dx = dxw(a.x, at.x), dy = at.y - a.y, ago = stats.tick - a.hitAt;
+        if (Math.hypot(dx, dy) <= R && !(walls.length && walled(a.x, a.y, dx, dy))) {
+          hit = ago <= 12 ? 3 : ago <= 40 ? 2 : ago <= 100 ? 1 : 0;
+          if (hit) {
+            a.attacker = at;
+            // Odds: how long it takes me to finish it against how long it takes it to finish me.
+            const mine = at.hp / Math.max(1e-6, blow(a, at)), theirs = a.hp / Math.max(1e-6, blow(at, a));
+            odds = !weaponOf(t) ? 0 : theirs >= 1.5 * mine ? 2 : theirs >= 0.67 * mine ? 1 : 0;
+          }
+        }
+      }
+      if (a.wasHit && !hit && a.hitBy) { a.r += T.escapeR; stats.escapes++; a.hitBy = 0; } // got away alive
+      a.wasHit = hit;
       const contact = (o) => t.r + (o ? o.t.r : 4) + 4;
       const hunger = Math.max(0, Math.min(C.level, Math.round(C.level * (1 - a.energy / t.emax))));
-      const x = new Array(8 + 12).fill(0);
+      const O = NOPT, x = new Array(O + 16).fill(0);
       x[a.option] = 1;
-      x[8] = hunger;
-      x[9] = Math.min(C.level, Math.floor(a.fatigue));
-      x[10] = Math.min(C.hurt, Math.floor(4 * (1 - a.hp / t.hpmax)));
-      x[11] = fertile ? 1 : 0;
-      x[12] = threat ? bucket(td, R, contact(threat) + 20) : 0;
-      x[13] = refuge;
-      x[14] = fd ? bucket(fdist, R, t.r + 6) : 0;
-      x[15] = prey ? bucket(pdist, R, contact(prey)) : 0;
-      x[16] = mate ? bucket(mdist, RC, contact(mate)) : 0;
-      x[17] = Math.min(3, kin);
-      x[18] = a.s.caps.has('camo') ? 1 : 0;
-      x[19] = a.s.caps.has('social') ? 1 : 0;
+      x[O] = hunger;
+      x[O + 1] = Math.min(C.level, Math.floor(a.fatigue));
+      x[O + 2] = Math.min(C.hurt, Math.floor(4 * (1 - a.hp / t.hpmax)));
+      x[O + 3] = fertile ? 1 : 0;
+      x[O + 4] = threat ? bucket(td, R, contact(threat) + 20) : 0;
+      x[O + 5] = refuge;
+      x[O + 6] = fd ? bucket(fdist, R, t.r + 6) : 0;
+      x[O + 7] = prey ? bucket(pdist, R, contact(prey)) : 0;
+      x[O + 8] = mate ? bucket(mdist, RC, contact(mate)) : 0;
+      x[O + 9] = Math.min(3, kin);
+      x[O + 10] = a.caps.has('camo') ? 1 : 0;
+      x[O + 11] = a.caps.has('social') ? 1 : 0;
+      x[O + 12] = hit;
+      x[O + 13] = odds;
+      x[O + 14] = weaponOf(t) ? 1 : 0;
+      x[O + 15] = t.armor > 0 || t.thorn > 0 ? 1 : 0;
       return x;
     }
     // The reward is homeostatic: what a tick does to a convex need over hunger, fatigue
@@ -478,7 +547,7 @@
       return 4 * hu * hu + 2 * fa * fa + 6 * hr * hr;
     }
     function isFertile(a) {
-      return a.age > 0.18 * a.life && !a.preg && a.mateCd <= 0 && a.energy > 0.55 * a.t.emax && yumon.length < T.popCap;
+      return a.age > 0.18 * a.life && !a.preg && a.mateCd <= 0 && a.energy > 0.55 * a.t.emax && aliveN < T.popCap;
     }
 
     // ---------------------------------------------------------------- learning
@@ -529,7 +598,9 @@
       models.delete(a.id); // the model cache keeps only the living
       a.buf = [];
       const fy = bandOf(a.y) === 3 ? a.y : Math.min(395, Math.max(a.y, 340 + rnd() * 50));
-      food.push({ kind: 'meat', x: a.x, y: fy, amt: 4 * a.t.m + 1, cap: 0, regrow: -0.004, vx: 0, band: bandOf(fy) });
+      const body = { kind: 'meat', x: a.x, y: fy, amt: 4 * a.t.m + 1, cap: 0, regrow: -0.004, vx: 0, band: bandOf(fy) };
+      food.push(body);
+      return body;
     }
 
     function steer(a, tx, ty, frac) {
@@ -540,8 +611,11 @@
 
     function tick() {
       stats.tick++;
+      for (let i = walls.length - 1; i >= 0; i--) if (walls[i].until && walls[i].until <= stats.tick) walls.splice(i, 1);
+      if (stats.tick % T.splitEvery === 0) speciate();
       rebuild();
       const alive = yumon.filter((a) => a.alive);
+      aliveN = alive.length;
       for (const a of alive) {
         if (!a.alive) continue; // killed earlier this tick
         a.need0 = need(a);
@@ -567,7 +641,7 @@
         a.ruleBest = rb; a.netBest = nb;
         let opt;
         softmax(keys, T.temp, p);
-        if (a.fatigue >= C.level) { opt = 5; a.commit = 0; } // exhausted: falls asleep, not a decision
+        if (a.fatigue >= C.level && !a.attacker) { opt = 5; a.commit = 0; } // exhausted: falls asleep, not a decision
         else if (a.commit > 0 && p[a.option] >= T.drop) { opt = a.option; a.commit--; } // still committed
         else {
           a.commit = T.commit;
@@ -599,7 +673,7 @@
     }
 
     function act(a) {
-      a.dvx = 0; a.dvy = 0;
+      a.dvx = 0; a.dvy = 0; a.bracing = false;
       const t = a.t;
       switch (a.option) {
         case 0: { // eat
@@ -649,6 +723,15 @@
           steer(a, a.x + a.kin[0], a.y + a.kin[1], 0.6);
           break;
         }
+        case 8: { // fight: turn on the attacker
+          const o = a.attacker;
+          if (!o || !o.alive) break;
+          const d = Math.hypot(dxw(a.x, o.x), o.y - a.y);
+          if (d > t.r + o.t.r + 4) { steer(a, o.x, o.y, 1.2); a.fatigue += 0.015; }
+          else if (a.atkCd <= 0) { stats.fights++; attack(a, o, true); }
+          break;
+        }
+        case 9: a.bracing = true; stats.braces++; break; // brace: hold still behind shell or spines
         default: roam(a);
       }
     }
@@ -657,6 +740,7 @@
     // Yumon with nothing to do travels instead of milling about.
     function roam(a) {
       const t = a.t, g = a.goal, m = maskOf(t);
+      if (g && a.blockedAt >= stats.tick - 1) g.dir = -g.dir, g.until = 0; // walked into a wall: turn back
       if (!g || stats.tick > g.until || !m[bandOf(g.y)] || Math.hypot(dxw(a.x, g.x), g.y - a.y) < 25) {
         const [lo, hi] = T.roamFar, dist = lo + rnd() * (hi - lo);
         const dir = g && rnd() < 0.7 ? g.dir : rnd() < 0.5 ? -1 : 1; // mostly keep going the same way
@@ -668,56 +752,198 @@
       steer(a, a.goal.x, a.goal.y + Math.sin(a.wander) * 12, T.roamPace);
     }
 
-    function attack(a, o) {
+    // One blow from a to o. A braced shell takes less and braced spines hurt more.
+    function blow(a, o) {
+      const t = a.t, armor = o.bracing && o.t.armor > 0 ? Math.min(0.9, o.t.armor + 0.3) : o.t.armor;
+      return (t.bite + t.claw + t.horn) * (1 - armor) + 0.3 * t.venom;
+    }
+    function attack(a, o, back) {
       const t = a.t;
       a.atkCd = 12;
       stats.attacks++;
-      const dmg = (t.bite + t.claw + t.horn) * (1 - o.t.armor) + 0.3 * t.venom;
-      o.hp -= dmg;
+      o.hp -= blow(a, o);
       o.poison += t.venom;
-      if (o.t.thorn > 0) { a.hp -= o.t.thorn; if (a.hp <= 0) die(a, 'thorns'); }
-      if (o.hp <= 0) { die(o, 'eaten'); a.kills++; }
+      o.hitBy = a.id; o.hitAt = stats.tick;
+      a.r += T.hitR;
+      if (o.t.thorn > 0) {
+        a.hp -= o.t.thorn * (o.bracing ? 2 : 1);
+        if (a.hp <= 0) { die(a, 'thorns'); o.r += T.killR; return; }
+      }
+      if (o.hp > 0) return;
+      const body = die(o, back ? 'fought' : 'eaten');
+      a.kills++; stats.kills++;
+      a.r += T.killR;
+      // The killer eats first: up to gorge of the body, as far as it has room.
+      if (a.diet.has('meat') && body) {
+        const e = Math.min(a.t.emax - a.energy, T.gorge * body.amt * T.foodE);
+        if (e > 0) { a.energy += e; body.amt -= e / T.foodE; }
+      }
     }
 
     function conceive(mom, dad) {
-      mom.preg = { dad: dad.id, dadGenes: { ...dad.genes }, dadGen: dad.gen, at: stats.tick + 80 };
+      mom.preg = { dad: dad.id, dadGenes: { ...dad.genes }, dadCaps: new Set(dad.caps), dadGen: dad.gen, at: stats.tick + 80 };
       mom.energy -= 0.25 * mom.t.emax;
-      mom.mateCd = 400; dad.mateCd = 400;
+      // Small Yumon breed sooner (r-strategists); big ones wait longer.
+      mom.mateCd = T.breedCd * (0.45 + 0.55 * mom.genes.size); dad.mateCd = T.breedCd * (0.45 + 0.55 * dad.genes.size);
       mom.r += 1; dad.r += 1;
     }
 
-    // Child genes: each gene a random blend of the parents', then one small mutation.
-    function childGenes(sp, a, b) {
-      const g = {};
+    // A child's genome: each gene a random blend of the parents', a little noise on every
+    // gene and one bigger step on one of them. Capabilities both parents carry pass on;
+    // one parent's pass half the time. Now and then a capability is gained (likelier on a
+    // limb it already has, so claws for climbing make clawing easy) or lost.
+    function childGenome(mom, pr) {
+      const a = mom.genes, b = pr.dadGenes, g = {};
       for (const k of Object.keys(a)) {
         const u = rnd();
         g[k] = k === 'hue' ? a.hue + (((b.hue - a.hue + 540) % 360) - 180) * u : a[k] * (1 - u) + b[k] * u;
       }
-      const keys = Object.keys(g).filter((k) => k === 'hue' || g[k] > 0);
+      const caps = new Set();
+      for (const c of new Set([...mom.caps, ...pr.dadCaps])) if ((mom.caps.has(c) && pr.dadCaps.has(c)) || rnd() < 0.5) caps.add(c);
+      if (![...caps].some((c) => CAP[c].kind === 'move')) caps.add([...mom.caps].find((c) => CAP[c].kind === 'move'));
+      let event = null;
+      if (rnd() < T.capRate) event = rnd() < 0.55 ? gainCap(caps, g) : loseCap(caps, g);
+      fitLimbs(caps, g);
+      const keys = Object.keys(g).filter((k) => k !== 'hue' && g[k] > 0);
+      for (const k of keys) g[k] *= Math.exp(T.mutSmall * gauss());
       const k = keys[Math.floor(rnd() * keys.length)];
-      if (k === 'hue') g.hue = (g.hue + 8 * gauss() + 360) % 360;
-      else g[k] = Math.min(k === 'size' ? 2.6 : 2.5, Math.max(k === 'size' ? 0.4 : 0.2, g[k] * Math.exp(0.08 * gauss())));
-      g.mutated = k;
-      return g;
+      g[k] *= Math.exp(T.mutBig * gauss());
+      for (const k of keys) g[k] = Math.min(k === 'size' ? 2.6 : 2.5, Math.max(k === 'size' ? 0.4 : 0.15, g[k]));
+      g.hue = (g.hue + T.hueStep * gauss() + 360) % 360;
+      // A limb that has withered away takes its capabilities with it (never the last way to move).
+      for (const c of [...caps]) {
+        const L = CAP[c].limb;
+        if (L && g[L] < 0.22 && !(CAP[c].kind === 'move' && moveCount(caps) === 1)) { caps.delete(c); event = event || '-' + c; }
+      }
+      fitLimbs(caps, g);
+      return { g, caps, event, mutated: k };
+    }
+    const moveCount = (caps) => [...caps].filter((c) => CAP[c].kind === 'move').length;
+    // Limbs follow capabilities: a limb no capability uses is gone, a new one starts small.
+    function fitLimbs(caps, g) {
+      const used = new Set([...caps].map((c) => CAP[c].limb).filter(Boolean));
+      for (const L of LIMBS) {
+        if (!used.has(L)) g[L] = 0;
+        else if (g[L] < 0.3) g[L] = 0.3 + 0.15 * rnd();
+      }
+    }
+    function gainCap(caps, g) {
+      const pool = CAPS.filter((c) => !caps.has(c.id) && !(caps.size >= 9));
+      if (!pool.length) return null;
+      const wt = pool.map((c) => (c.limb && g[c.limb] > 0 ? 4 : 1));
+      let u = rnd() * wt.reduce((x, y) => x + y, 0), c = pool[pool.length - 1];
+      for (let i = 0; i < pool.length; i++) { u -= wt[i]; if (u <= 0) { c = pool[i]; break; } }
+      caps.add(c.id);
+      if (c.limb && !(g[c.limb] > 0)) g[c.limb] = 0.35 + 0.2 * rnd();
+      return '+' + c.id;
+    }
+    function loseCap(caps, g) {
+      const pool = [...caps].filter((c) => !(CAP[c].kind === 'move' && moveCount(caps) === 1));
+      if (!pool.length) return null;
+      const c = pool[Math.floor(rnd() * pool.length)];
+      caps.delete(c);
+      void g;
+      return '-' + c;
     }
 
     function birth(mom) {
       const pr = mom.preg;
       mom.preg = null;
-      const n = 1;
+      // Small unarmed Yumon have twins.
+      const n = Math.min(!weaponOf(mom.t) && mom.genes.size < T.twinSize ? 2 : 1, Math.max(0, T.popCap - aliveN));
       for (let i = 0; i < n; i++) {
-        const g = childGenes(mom.s, mom.genes, pr.dadGenes);
-        const mutated = g.mutated; delete g.mutated;
-        const c = spawn(mom.s, g, mom.x + (rnd() - 0.5) * 10, mom.y, mom, { gen: pr.dadGen });
-        c.mutated = mutated;
+        const G = childGenome(mom, pr);
+        const c = spawn(mom.s, G.g, mom.x + (rnd() - 0.5) * 10, mom.y, mom, { gen: pr.dadGen }, G.caps);
+        c.mutated = G.mutated;
+        c.capEvent = G.event;
+        if (G.event) stats[G.event[0] === '+' ? 'gained' : 'lost']++;
         stats.born++;
         mom.children++;
       }
       mom.r += 1;
     }
 
+    // ---------------------------------------------------------------- new species
+    // A group inside a species that carries another capability set, or a gene cluster far
+    // from the rest, splits off once it has splitMin members of both sexes. After the split
+    // the two can no longer mate. The species itself takes its majority's capabilities.
+    function speciate() {
+      for (const sp of species.slice()) {
+        if (!sp.alive) continue;
+        const live = yumon.filter((a) => a.alive && a.sp === sp.id);
+        const groups = new Map();
+        for (const a of live) { const k = sigOf(a.caps); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(a); }
+        const sorted = [...groups.values()].sort((x, y) => y.length - x.length);
+        for (const grp of sorted.slice(1)) if (grp.length >= T.splitMin && bothSexes(grp)) split(sp, grp, 'caps');
+        const rest = live.filter((a) => a.sp === sp.id);
+        if (rest.length >= 2 * T.splitMin) {
+          const [A, B, dist] = twoMeans(rest);
+          const small = A.length < B.length ? A : B;
+          if (dist > T.splitDist && A.length >= T.splitMin && B.length >= T.splitMin && bothSexes(A) && bothSexes(B)) split(sp, small, 'genes');
+        }
+        refresh(sp);
+      }
+    }
+    const bothSexes = (grp) => grp.some((a) => a.sex === 0) && grp.some((a) => a.sex === 1);
+    const geneVec = (g) => ['size', 'eyes', ...LIMBS].map((k) => Math.log(Math.max(0.1, g[k] || 0)));
+    // Two clusters of log genes (farthest-point start, a few Lloyd steps); the distance
+    // between their centres.
+    function twoMeans(live) {
+      const V = live.map((a) => geneVec(a.genes)), D = V[0].length;
+      const dist = (u, v) => { let s = 0; for (let k = 0; k < D; k++) s += (u[k] - v[k]) ** 2; return Math.sqrt(s); };
+      let c0 = V[0], c1 = V[0];
+      for (const v of V) if (dist(v, c0) > dist(c1, c0)) c1 = v;
+      for (const v of V) if (dist(v, c1) > dist(c0, c1)) c0 = v;
+      let lab = [];
+      for (let it = 0; it < 6; it++) {
+        lab = V.map((v) => (dist(v, c0) <= dist(v, c1) ? 0 : 1));
+        const m = [new Array(D).fill(0), new Array(D).fill(0)], n = [0, 0];
+        V.forEach((v, i) => { n[lab[i]]++; for (let k = 0; k < D; k++) m[lab[i]][k] += v[k]; });
+        if (!n[0] || !n[1]) return [live, [], 0];
+        c0 = m[0].map((x) => x / n[0]); c1 = m[1].map((x) => x / n[1]);
+      }
+      return [live.filter((_, i) => lab[i] === 0), live.filter((_, i) => lab[i] === 1), dist(c0, c1)];
+    }
+    function meanGenes(grp) {
+      const g = {};
+      for (const k of Object.keys(grp[0].genes)) g[k] = grp.reduce((s, a) => s + a.genes[k], 0) / grp.length;
+      g.hue = grp[0].genes.hue;
+      return g;
+    }
+    function split(sp, grp, why) {
+      if (species.length >= T.maxSpecies) return;
+      const caps = new Set(grp[0].caps);
+      const shift = (rnd() < 0.5 ? -1 : 1) * (35 + 50 * rnd()); // a new species looks new
+      for (const a of grp) a.genes.hue = (a.genes.hue + shift + 360) % 360;
+      const genes = meanGenes(grp);
+      const ns = { id: species.length, name: nameFor(caps, rnd, names), role: roleOf(caps), caps, caps0: new Set(caps), diet: dietOf(caps), genes,
+        carn: [...caps].some((c) => CAP[c].kind === 'weapon'), alive: 0, born: grp.length, extinctAt: null, maxGen: 0, parent: sp.id, since: stats.tick, why };
+      ns.adult = traits(caps, genes, 3000, 3500);
+      species.push(ns);
+      for (const a of grp) { a.sp = ns.id; a.s = ns; sp.alive--; ns.alive++; ns.maxGen = Math.max(ns.maxGen, a.gen); }
+      const diff = [...caps].filter((c) => !sp.caps.has(c)).map((c) => '+' + CAP[c].label).concat([...sp.caps].filter((c) => !caps.has(c)).map((c) => '-' + CAP[c].label));
+      events.push([stats.tick, `${ns.name} split from ${sp.name} (${why === 'caps' ? diff.join(' ') : 'genes drifted apart'})`]);
+      stats.splits++;
+    }
+    // A species shows its majority's capabilities and adult body.
+    function refresh(sp) {
+      const live = yumon.filter((a) => a.alive && a.sp === sp.id);
+      if (!live.length) return;
+      const n = new Map();
+      for (const a of live) { const k = sigOf(a.caps); n.set(k, (n.get(k) || 0) + 1); }
+      const top = [...n.entries()].sort((x, y) => y[1] - x[1])[0][0];
+      const caps = new Set(live.find((a) => sigOf(a.caps) === top).caps);
+      if (sigOf(caps) !== sigOf(sp.caps)) {
+        const diff = [...caps].filter((c) => !sp.caps.has(c)).map((c) => '+' + CAP[c].label).concat([...sp.caps].filter((c) => !caps.has(c)).map((c) => '-' + CAP[c].label));
+        events.push([stats.tick, `${sp.name} changed: ${diff.join(' ')}`]);
+      }
+      sp.caps = caps; sp.diet = dietOf(caps); sp.role = roleOf(caps); sp.carn = [...caps].some((c) => CAP[c].kind === 'weapon');
+      sp.adult = traits(caps, meanGenes(live), 3000, 3500);
+    }
+
     function move(a) {
       a.vx += (a.dvx - a.vx) * 0.3; a.vy += (a.dvy - a.vy) * 0.3;
+      const x0 = a.x;
       a.x = wrapX(a.x + a.vx);
       let y = a.y + a.vy;
       const m = maskOf(a.t);
@@ -729,6 +955,27 @@
       if (y > ymax) y = ymax;
       if (a.y < ymin) y = Math.min(a.y + 3, ymax);
       a.y = y;
+      if (walls.length) wallBlock(a, x0);
+    }
+    // A wall stops anything that would cross it or end up inside it, on the side it came from.
+    function wallBlock(a, x0) {
+      for (const w of walls) {
+        if (a.y < w.y0 - a.t.r || a.y > w.y1 + a.t.r) continue;
+        const pad = a.t.r + 2, o0 = dxw(x0, w.x), o1 = dxw(a.x, w.x);
+        const side = o0 > 0 ? 1 : o0 < 0 ? -1 : a.vx > 0 ? 1 : -1; // 1: the wall is to its right
+        if (Math.sign(o1) !== side || Math.abs(o1) < pad) { a.x = wrapX(w.x - side * pad); a.vx = 0; a.blockedAt = stats.tick; }
+      }
+    }
+    // Does a wall stand between (x, y) and (x + dx, y + dy)?
+    function walled(x, y, dx, dy) {
+      if (dx === 0) return false;
+      for (const w of walls) {
+        const off = dxw(x, w.x);
+        if (off * dx <= 0 || Math.abs(off) >= Math.abs(dx)) continue;
+        const yy = y + (dy * off) / dx;
+        if (yy >= w.y0 && yy <= w.y1) return true;
+      }
+      return false;
     }
 
     function body(a) {
@@ -744,7 +991,7 @@
       if (a.age > a.life) return die(a, 'old');
       if (a.age < 0.2 * a.life && a.age % 50 === 0) {
         const f = a.energy / t.emax, h = a.hp / t.hpmax;
-        a.t = traits(a.s, a.genes, a.age, a.life);
+        a.t = traits(a.caps, a.genes, a.age, a.life);
         a.energy = f * a.t.emax; a.hp = h * a.t.hpmax;
       }
       if (a.preg && stats.tick >= a.preg.at) birth(a);
@@ -807,13 +1054,25 @@
         return kind;
       },
       reintroduce(sp) { if (sp.alive === 0) { sp.extinctAt = null; founders(sp, 6); } },
+      walls, events,
+      addWall(x, y0, y1) {
+        const w = { id: nextWall++, x: wrapX(x), y0: Math.max(0, Math.min(y0, y1)), y1: Math.min(WORLD_H, Math.max(y0, y1)), until: T.wallLife ? stats.tick + T.wallLife : 0 };
+        walls.push(w);
+        return w;
+      },
+      removeWall(x, y, R) {
+        let best = -1, bd = R;
+        walls.forEach((w, i) => { const d = Math.abs(dxw(x, w.x)) + (y < w.y0 ? w.y0 - y : y > w.y1 ? y - w.y1 : 0); if (d < bd) { bd = d; best = i; } });
+        return best >= 0 ? walls.splice(best, 1)[0] : null;
+      },
+      clearWalls() { walls.length = 0; },
       setLearn(v) { learn = !!v; },
       get learn() { return learn; },
       byId,
     };
   }
 
-  const api = { createPark, makeSpecies, traits, CAPS, LIMBS, BANDS };
+  const api = { createPark, makeSpecies, traits, dietOf, CAPS, LIMBS, BANDS };
   if (typeof module !== 'undefined' && module.exports) module.exports = { ParkCore: api };
   else root.ParkCore = api;
 })(typeof window !== 'undefined' ? window : globalThis);

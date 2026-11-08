@@ -220,9 +220,11 @@ node demos/ant/harness.js 8000 1 check ant_demo.json               # headless co
 
 `wir park` writes one **brain** for every species (`examples/park_brain.wir`): response
 curves over hunger, fatigue, hurt, fertility and the nearest threat / food / prey / mate /
-kin give a key per option (eat hunt flee hide mate sleep flock roam). `demos/park/` holds
-the ecosystem: 30 species from capability permutations, genes on limbs, four bands, and
-per-Yumon learning (REINFORCE on its own copy of the weights at each sleep; children copy
+kin, plus whether an attacker struck and the odds against it, give a key per option (eat
+hunt flee hide mate sleep flock roam fight brace). `demos/park/` holds the ecosystem: 30
+species from capability permutations, per-Yumon capabilities that mutate and split off new
+species, genes on limbs, four bands, drawable walls, and per-Yumon learning (REINFORCE on
+its own copy of the weights at each sleep, with kill and escape rewards; children copy
 their mother's weights).
 
 ```

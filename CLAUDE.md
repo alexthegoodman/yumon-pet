@@ -286,4 +286,12 @@ Diet setups (Nov 8): `createPark` options `diets` (mixed | hunters | carnivores)
 `movingPatches`, `tune` (per-park copy of DEFAULTS). All carnivores go extinct by tick 5,000 (no
 energy source); all hunters keep 5-8 species, 158-304 Yumon at 10k. The page has an Ecosystem
 setup tab with Save & restart (settings in localStorage). harness.js reads `PARK_SETUP` JSON.
+Fifth pass (Nov 8): brain has 10 options (fight, brace) and 26 inputs (hit, odds, armed, guard);
+hunting beats plants when prey is near; [41, 30, 24], 3,361 weights, exact. Rewards: kill 3
+(T.killR), blow 0.3, escape 1; killers gorge. Capabilities are per Yumon (`a.caps`, `a.diet`,
+`traits(caps, ...)`), gained/lost at birth (T.capRate) and `speciate()` splits groups with another
+capability set or a gene cluster into new species (`sp.parent`, `sim.events`). Walls:
+`addWall/removeWall/clearWalls`, block movement and sight (`walled`, `wallBlock`). Hunter packs of
+4, twins for small unarmed, size-scaled mating cooldown. Mixed at 10k with learning: 6-27 species
+alive, mostly evolved here, 814-1,322 kills. Setup adds kill reward and evolution strength.
 

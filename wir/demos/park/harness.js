@@ -13,13 +13,15 @@ for (let t = 1; t <= ticks; t++) {
   if (t % 1000 === 0 || t === ticks) {
     const s = sim.stats, alive = sim.yumon.filter((a) => a.alive);
     const ext = sim.species.filter((sp) => sp.alive === 0).length;
-    const opts = new Array(8).fill(0); alive.forEach((a) => opts[a.option]++);
+    const opts = new Array(sim.brain.layers[sim.brain.layers.length - 1].rows).fill(0); alive.forEach((a) => opts[a.option]++);
     const L = alive.filter((a) => a.learns).length;
     const spMix = sim.species.filter((sp) => sp.alive > 0).map((sp) => { const l = alive.filter((a) => a.sp === sp.id); return l.filter((a) => a.learns).length / l.length; });
     if (mixed) console.log(`  learners ${L}/${alive.length} (${(100 * L / Math.max(1, alive.length)).toFixed(1)}%), species mostly learners ${spMix.filter((v) => v > 0.5).length}/${spMix.length}, all-learner ${spMix.filter((v) => v === 1).length}, no-learner ${spMix.filter((v) => v === 0).length}`);
     console.log(`t ${t} pop ${alive.length} models ${sim.models.size} species ${sim.species.length - ext}/${sim.species.length} born ${s.born} died ${s.died} ${JSON.stringify(s.causes)} sleeps ${s.sleeps} written ${(100 * s.written / s.decisions).toFixed(1)}% drift ${(100 * s.drift / Math.max(1, s.driftN)).toFixed(1)}% exactMiss ${s.exactMiss}/${s.untrained} maxGen ${Math.max(...sim.species.map((x) => x.maxGen))} opts ${opts} trainMs ${s.trainMs.toFixed(0)} ms/tick ${((Date.now() - t0) / t).toFixed(2)}`);
+    console.log(`    kills ${s.kills} fights ${s.fights} braces ${s.braces} escapes ${s.escapes} caps +${s.gained} -${s.lost} splits ${s.splits} walls ${sim.walls.length}`);
   }
 }
 const top = [...sim.changes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
 console.log('changes', JSON.stringify(top));
+for (const [t, e] of sim.events.slice(-12)) console.log('  event', t, e);
 console.log('species', sim.species.map((sp) => `${sp.name}:${sp.alive}${sp.extinctAt ? '(x' + sp.extinctAt + ')' : ''}`).join(' '));

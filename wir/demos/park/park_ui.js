@@ -2,18 +2,18 @@
   'use strict';
   const DATA = JSON.parse(document.getElementById('park-data').textContent);
   // Ecosystem setup: saved per viewer, applied by Save & restart.
-  const DEFAULT_SETUP = { seed: 11, species: 30, diets: 'mixed', plantRate: 1.25, moving: true, call: 2.5, learn: true, lr: 0.003 };
+  const DEFAULT_SETUP = { seed: 11, species: 30, diets: 'mixed', plantRate: 1.25, moving: true, call: 2.5, learn: true, lr: 0.003, evolution: 'default', killR: 3 };
+  const EVOLUTION = { gentle: { mutSmall: 0.02, mutBig: 0.08, capRate: 0.02 }, default: { mutSmall: 0.03, mutBig: 0.15, capRate: 0.06 }, wild: { mutSmall: 0.05, mutBig: 0.25, capRate: 0.15 } };
   let setup = { ...DEFAULT_SETUP };
   try { setup = { ...DEFAULT_SETUP, ...JSON.parse(localStorage.getItem('yumon-park-setup') || '{}') }; } catch (e) { /* storage blocked: defaults */ }
   const makeSim = (st) => ParkCore.createPark(DATA, { seed: st.seed, species: st.species, diets: st.diets, movingPatches: st.moving, learn: st.learn,
-    tune: { plantRate: st.plantRate, call: st.call, lr: st.lr } });
+    tune: { plantRate: st.plantRate, call: st.call, lr: st.lr, killR: st.killR, ...(EVOLUTION[st.evolution] || EVOLUTION.default) } });
   let sim = makeSim(setup);
   const C = DATA.consts;
   const $ = (id) => document.getElementById(id);
   const canvas = $('world'), ctx = canvas.getContext('2d');
-  const OPT_LABEL = { eat: 'Eat', hunt: 'Hunt', flee: 'Flee', hide: 'Hide', mate: 'Mate', sleep: 'Sleep', flock: 'Flock', roam: 'Roam' };
+  const OPT_LABEL = { eat: 'Eat', hunt: 'Hunt', flee: 'Flee', hide: 'Hide', mate: 'Mate', sleep: 'Sleep', flock: 'Flock', roam: 'Roam', fight: 'Fight', brace: 'Brace' };
   const W0 = sim.WORLD_W, H0 = sim.WORLD_H;
-  let founder = new Map(sim.species.map((sp) => [sp.id, { ...sp.genes }]));
   const hue = (sp, a) => `hsl(${(a ? a.genes.hue : sp.genes.hue).toFixed(0)} 62% ${dark() ? 62 : 48}%)`;
   const dark = () => getComputedStyle(document.documentElement).colorScheme === 'dark';
 
@@ -21,7 +21,8 @@
   function readPalette() {
     const cs = getComputedStyle(document.documentElement), v = (n) => cs.getPropertyValue(n).trim();
     pal = { skyTop: v('--sky-top'), skyBot: v('--sky-bot'), canopy: v('--canopy'), canopy2: v('--canopy-2'), trunk: v('--trunk'), ground: v('--ground'),
-      grass: v('--grass'), waterTop: v('--water-top'), waterBot: v('--water-bot'), ink: v('--ink'), accent: v('--accent'), bad: v('--bad'), line: v('--line'), muted: v('--muted'), panel: v('--panel') };
+      grass: v('--grass'), waterTop: v('--water-top'), waterBot: v('--water-bot'), ink: v('--ink'), accent: v('--accent'), bad: v('--bad'), line: v('--line'), muted: v('--muted'), panel: v('--panel'),
+      wall: v('--wall'), wallEdge: v('--wall-edge'), warn: v('--warn') };
   }
   readPalette();
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', readPalette);
@@ -119,10 +120,27 @@
     }
   }
 
+  // Walls: a stone strip, full or part height; a fading top edge when it has a lifetime.
+  function drawWalls() {
+    const s = scale(), list = sim.walls.slice();
+    if (wallDraft) list.push({ ...wallDraft, draft: true });
+    for (const w of list) for (const X of copies(w.x, 8)) {
+      const y0 = sy(w.y0), y1 = sy(w.y1), wd = Math.max(4, 7 * s);
+      ctx.globalAlpha = w.draft ? 0.55 : w.until ? 0.6 + 0.4 * Math.min(1, (w.until - sim.stats.tick) / 1500) : 1;
+      ctx.fillStyle = pal.wall; ctx.fillRect(X - wd / 2, y0, wd, y1 - y0);
+      ctx.strokeStyle = pal.wallEdge; ctx.lineWidth = 1;
+      ctx.strokeRect(X - wd / 2 + 0.5, y0 + 0.5, wd - 1, y1 - y0 - 1);
+      ctx.beginPath();
+      for (let y = w.y0 + 14; y < w.y1; y += 14) { ctx.moveTo(X - wd / 2, sy(y)); ctx.lineTo(X + wd / 2, sy(y)); }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
   // A Yumon: body by size and hue, with the limbs its species has, sized by its genes.
   function drawYumon(a, X, Y, now) {
     const s = scale(), R = a.t.r * s, g = a.genes, face = a.vx >= 0 ? 1 : -1, sp = a.s;
-    const hidden = a.option === 3 || (a.sleeping && sp.caps.has('camo'));
+    const hidden = a.option === 3 || (a.sleeping && a.caps.has('camo'));
     ctx.globalAlpha = hidden ? 0.45 : 1;
     const col = hue(sp, a);
     ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = Math.max(1, 0.18 * R);
@@ -145,6 +163,10 @@
     if (a.sleeping) { ctx.strokeStyle = '#10181a'; ctx.beginPath(); ctx.moveTo(X + face * 0.3 * R, Y - 0.2 * R); ctx.lineTo(X + face * 0.65 * R, Y - 0.2 * R); ctx.stroke(); }
     if (g.jaws) { ctx.strokeStyle = '#10181a'; ctx.lineWidth = Math.max(1, 0.12 * R); ctx.beginPath(); ctx.moveTo(X + face * 0.95 * R, Y + 0.15 * R); ctx.lineTo(X + face * 0.5 * R, Y + 0.25 * R); ctx.stroke(); }
     ctx.globalAlpha = 1;
+    if (a.option === 8 || a.bracing) { // fighting back: red ring; bracing: a thick amber ring
+      ctx.strokeStyle = a.bracing ? pal.warn : pal.bad; ctx.lineWidth = Math.max(1.5, (a.bracing ? 0.3 : 0.16) * R);
+      ctx.beginPath(); ctx.arc(X, Y, R * 1.35, 0, 7); ctx.stroke();
+    }
     if (a.sleeping && s > 1.4) { ctx.fillStyle = pal.ink; ctx.font = `700 ${Math.round(9 + 2 * s)}px ${getComputedStyle(document.body).fontFamily}`; ctx.fillText('z', X + R, Y - R); }
   }
 
@@ -154,6 +176,7 @@
     clampCam();
     drawScene();
     drawFood();
+    drawWalls();
     for (const a of sim.yumon) {
       if (!a.alive) continue;
       for (const X of copies(a.x, 20)) {
@@ -169,19 +192,42 @@
   }
 
   // ---------------------------------------------------------------- input
-  let drag = null;
-  canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY, cx: cam.x, cy: cam.y, moved: false }; canvas.setPointerCapture(e.pointerId); });
+  let drag = null, wallDraft = null;
+  const clampY = (y) => Math.max(0, Math.min(H0, y));
+  canvas.addEventListener('pointerdown', (e) => {
+    drag = { x: e.clientX, y: e.clientY, cx: cam.x, cy: cam.y, moved: false };
+    canvas.setPointerCapture(e.pointerId);
+    if (state.tool === 'wall') {
+      const r = canvas.getBoundingClientRect(), [wx, wy] = toWorld(e.clientX - r.left, e.clientY - r.top);
+      drag.wall = { x: ((wx % W0) + W0) % W0, y: clampY(wy) };
+    }
+  });
   canvas.addEventListener('pointermove', (e) => {
     const r = canvas.getBoundingClientRect(), [wx, wy] = toWorld(e.clientX - r.left, e.clientY - r.top);
     $('hover').textContent = `x ${Math.round(((wx % W0) + W0) % W0)} · ${sim.BANDS[sim.bandOf(Math.max(0, Math.min(H0 - 1, wy)))]}`;
     if (!drag) return;
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (drag.wall) { // drawing a wall: drag up or down sets its span
+      if (Math.abs(dy) > 6) { drag.moved = true; wallDraft = { x: drag.wall.x, y0: Math.min(drag.wall.y, clampY(wy)), y1: Math.max(drag.wall.y, clampY(wy)) }; }
+      if (!state.running) draw(performance.now());
+      return;
+    }
     if (Math.abs(dx) + Math.abs(dy) > 4) { drag.moved = true; state.follow = false; $('follow').checked = false; }
     cam.x = drag.cx - dx / scale(); cam.y = drag.cy - dy / scale();
     if (!state.running) draw(performance.now());
   });
   canvas.addEventListener('pointerup', (e) => {
     const d = drag; drag = null;
+    if (d && d.wall) {
+      const draft = wallDraft; wallDraft = null;
+      if (draft && draft.y1 - draft.y0 > 12) { sim.addWall(draft.x, draft.y0, draft.y1); toast(`Wall from ${bandName(draft.y0)} to ${bandName(draft.y1 - 1)}`); }
+      else if (!d.moved) {
+        if (sim.removeWall(d.wall.x, d.wall.y, 14 / scale() + 6)) toast('Wall removed');
+        else { sim.addWall(d.wall.x, 0, H0); toast('Wall across every band'); }
+      }
+      renderWalls();
+      return;
+    }
     if (!d || d.moved) return;
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top, [wx, wy] = toWorld(px, py);
     if (state.tool === 'feed') { toast(`Planted ${sim.feed(((wx % W0) + W0) % W0, Math.max(2, Math.min(H0 - 2, wy)))}`); return; }
@@ -194,7 +240,11 @@
   function zoom(f) { cam.z = Math.max(1, Math.min(6, cam.z * f)); if (!state.running) draw(performance.now()); }
   $('zin').onclick = () => zoom(1.4);
   $('zout').onclick = () => zoom(1 / 1.4);
-  document.querySelectorAll('input[name=tool]').forEach((r) => r.addEventListener('change', () => { state.tool = r.value; canvas.style.cursor = r.value === 'watch' ? 'grab' : 'crosshair'; }));
+  document.querySelectorAll('input[name=tool]').forEach((r) => r.addEventListener('change', () => { state.tool = r.value; canvas.style.cursor = r.value === 'watch' ? 'grab' : 'crosshair'; $('wall-opts').hidden = r.value !== 'wall'; $('wall-help').hidden = r.value !== 'wall'; }));
+  const bandName = (y) => sim.BANDS[sim.bandOf(Math.max(0, Math.min(H0 - 1, y)))];
+  $('wall-life').onchange = (e) => { sim.T.wallLife = +e.target.value; toast(+e.target.value ? `New walls stand ${fmt(+e.target.value)} ticks` : 'New walls stand until removed'); };
+  $('wall-clear').onclick = () => { sim.clearWalls(); renderWalls(); toast('Walls cleared'); if (!state.running) draw(performance.now()); };
+  function renderWalls() { $('wall-count').textContent = sim.walls.length ? `${sim.walls.length} wall${sim.walls.length > 1 ? 's' : ''}` : 'no walls'; }
   $('play').onclick = () => { state.running = !state.running; $('play').textContent = state.running ? 'Pause' : 'Play'; $('play').setAttribute('aria-pressed', String(!state.running)); };
   $('stepbtn').onclick = () => { step(); draw(performance.now()); renderAll(); };
   $('speed').onchange = (e) => (state.speed = +e.target.value);
@@ -208,7 +258,15 @@
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
   const fmt = (n) => n.toLocaleString('en-US');
   const bar = (v, warn) => `<span class="bar${warn ? ' warn' : ''}"><i style="width:${(100 * Math.max(0, Math.min(1, v))).toFixed(0)}%"></i></span>`;
-  const capChips = (sp) => `<span class="chips">${[...sp.caps].map((c) => { const k = sim.CAPS.find((x) => x.id === c); return `<span class="chip k-${k.kind}">${esc(k.label)}</span>`; }).join('')}</span>`;
+  const CAPL = Object.fromEntries(sim.CAPS.map((c) => [c.id, c]));
+  const capChips = (sp) => `<span class="chips">${[...sp.caps].map((c) => `<span class="chip k-${CAPL[c].kind}${sp.caps0 && !sp.caps0.has(c) ? ' new' : ''}"${sp.caps0 && !sp.caps0.has(c) ? ' title="evolved since the species began"' : ''}>${esc(CAPL[c].label)}</span>`).join('')}</span>`;
+  // An individual's capabilities against its species': gained ones marked +, lost ones struck.
+  const ownChips = (a) => {
+    const sp = a.s, out = [];
+    for (const c of a.caps) out.push(`<span class="chip k-${CAPL[c].kind}${sp.caps.has(c) ? '' : ' new'}"${sp.caps.has(c) ? '' : ' title="its species mostly lacks this"'}>${sp.caps.has(c) ? '' : '+'}${esc(CAPL[c].label)}</span>`);
+    for (const c of sp.caps) if (!a.caps.has(c)) out.push(`<span class="chip lost" title="its species mostly has this">${esc(CAPL[c].label)}</span>`);
+    return `<span class="chips">${out.join('')}</span>`;
+  };
   let eats = new Map(), eatenBy = new Map();
   function computeWeb() {
     eats = new Map(); eatenBy = new Map();
@@ -220,30 +278,34 @@
     const a = state.selected, el = $('inspector');
     if (!a) { el.innerHTML = '<p class="muted" style="margin:0">Click a Yumon in the park to see what it feels, what its brain says next to the written rule, and how its genes have moved from its species\' founders.</p>'; return; }
     const sp = a.s, t = a.t;
-    if (!a.alive) { el.innerHTML = `<p style="margin:0"><span class="dot" style="background:${hue(sp, a)}"></span> <b>${esc(sp.name)}</b> #${a.id} died (${esc({ eaten: 'eaten', starved: 'starved', old: 'old age', poison: 'poison', thorns: 'spines of its prey' }[a.cause] || a.cause)}) at generation ${a.gen}. Its brain has left the cache.</p>`; return; }
+    if (!a.alive) { el.innerHTML = `<p style="margin:0"><span class="dot" style="background:${hue(sp, a)}"></span> <b>${esc(sp.name)}</b> #${a.id} died (${esc({ eaten: 'eaten', fought: 'killed by the Yumon it attacked', starved: 'starved', old: 'old age', poison: 'poison', thorns: 'spines of its prey' }[a.cause] || a.cause)}) at generation ${a.gen}. Its brain has left the cache.</p>`; return; }
     const p = softmax(a.keys, sim.T.temp);
     const keyRows = C.options.map((o, k) => `<span${k === a.option ? ' style="font-weight:700"' : ''}>${OPT_LABEL[o]}</span>${bar(p[k])}<span class="num w">${k === a.ruleBest ? 'rule' : ''}</span>`).join('');
-    const f = founder.get(sp.id);
-    const genes = Object.keys(f).filter((k) => k !== 'hue' && f[k] > 0).map((k) => {
+    const f = sp.genes;
+    const genes = Object.keys(f).filter((k) => k !== 'hue' && f[k] > 0 && a.genes[k] > 0).map((k) => {
       const d = (a.genes[k] / f[k] - 1) * 100;
       return `<span class="chip"${k === a.mutated ? ' title="mutated at birth" style="border-color:var(--accent)"' : ''}>${k} ${a.genes[k].toFixed(2)} <span class="muted">${d >= 0 ? '+' : ''}${d.toFixed(0)}%</span></span>`;
     }).join('');
     const delta = sim.brainDelta(a);
-    const flyNote = sp.caps.has('fly') && t.spd[0] === 0 ? '<dt>Flight</dt><dd><span class="pill bad">grounded</span> wings no longer lift it</dd>' : '';
+    const at = a.attacker;
+    const fightNote = at ? `<dt>Struck</dt><dd><span class="pill bad">by ${esc(at.s.name)}</span> odds ${['worse', 'even', 'better'][a.x_in[C.options.length + 13]]}</dd>` : '';
+    const capNote = a.capEvent ? `<dt>At birth</dt><dd><span class="pill mid">${a.capEvent[0] === '+' ? 'gained' : 'lost'} ${esc(CAPL[a.capEvent.slice(1)].label)}</span></dd>` : '';
+    const flyNote = a.caps.has('fly') && t.spd[0] === 0 ? '<dt>Flight</dt><dd><span class="pill bad">grounded</span> wings no longer lift it</dd>' : '';
     el.innerHTML = `
       <p style="margin:0"><span class="dot" style="background:${hue(sp, a)}"></span> <b>${esc(sp.name)}</b> #${a.id} · ${a.sex ? 'male' : 'female'} · gen ${a.gen}${a.mom ? ` · mother #${a.mom}` : ' · founder'}</p>
-      <div style="margin-top:6px">${capChips(sp)}</div>
+      <div style="margin-top:6px">${ownChips(a)}</div>
       <dl class="kv">
         <dt>Doing</dt><dd><b>${OPT_LABEL[C.options[a.option]]}</b>${a.ruleBest !== a.netBest ? ` <span class="pill mid">rule: ${OPT_LABEL[C.options[a.ruleBest]]}</span>` : ''}</dd>
         <dt>Energy</dt><dd>${bar(a.energy / t.emax, a.energy < 0.25 * t.emax)}<span class="num">${Math.round(100 * a.energy / t.emax)}%</span></dd>
         <dt>Health</dt><dd>${bar(a.hp / t.hpmax, a.hp < 0.5 * t.hpmax)}<span class="num">${Math.round(100 * a.hp / t.hpmax)}%</span></dd>
         <dt>Fatigue</dt><dd>${bar(a.fatigue / C.level)}<span class="num">${a.fatigue.toFixed(1)}</span></dd>
         <dt>Age</dt><dd>${bar(a.age / a.life)}<span class="num">${Math.round(100 * a.age / a.life)}% of life</span></dd>
-        ${flyNote}
+        <dt>Kills</dt><dd class="num">${a.kills}</dd>
+        ${fightNote}${capNote}${flyNote}
       </dl>
       <h4>Its brain's options</h4>
       <div class="keys">${keyRows}</div>
-      <h4>Genes vs founders</h4>
+      <h4>Genes vs its species' founders</h4>
       <div class="chips">${genes}</div>
       <h4>Brain</h4>
       <p class="num" style="margin:0">${a.exact ? '<span class="pill good">exact</span> still the compiled weights' : `<span class="pill mid">learned</span> ${a.learned} sleep updates along its line, ${a.sleeps} its own · |change| ${delta.toFixed(2)}`}</p>
@@ -270,8 +332,9 @@
   }
 
   function renderSpecies() {
-    const rows = sim.species.map((sp) => {
-      const st = sim.speciesStats(sp), f = founder.get(sp.id);
+    const order = sim.species.slice().sort((x, y) => (y.alive > 0) - (x.alive > 0) || y.alive - x.alive || (x.extinctAt || 0) - (y.extinctAt || 0));
+    const rows = order.map((sp) => {
+      const st = sim.speciesStats(sp), f = sp.genes;
       let drift = '';
       if (st.n) {
         let bk = null, bv = 0;
@@ -280,8 +343,9 @@
       }
       const learned = sp.dN ? `${(100 * (sp.dD || 0) / sp.dN).toFixed(0)}%` : '-';
       const status = sp.alive ? '<span class="pill good">alive</span>' : `<span class="pill bad">extinct</span> <button type="button" data-re="${sp.id}">Reintroduce</button>`;
+      const from = sp.parent !== null && sp.parent !== undefined ? ` · from ${esc(sim.species[sp.parent].name)} at ${fmt(sp.since)}` : '';
       const sel = state.selected && state.selected.sp === sp.id ? ' class="sel"' : sp.alive ? '' : ' class="gone"';
-      return `<tr${sel}><td><span class="dot" style="background:${hue(sp)}"></span> <b>${esc(sp.name)}</b><br><span class="muted" style="font-size:12px">${sp.role === 'herb' ? 'plant eater' : sp.role === 'omni' ? 'omnivore' : 'hunter'} · ${[...sp.diet].join(', ')}</span></td><td>${capChips(sp)}</td><td class="num">${sp.alive}</td><td class="num">${sp.maxGen}</td><td class="num">${drift}</td><td class="num">${eats.get(sp.id) || 0} / ${eatenBy.get(sp.id) || 0}</td><td class="num">${learned}</td><td>${status}</td></tr>`;
+      return `<tr${sel}><td><span class="dot" style="background:${hue(sp)}"></span> <b>${esc(sp.name)}</b><br><span class="muted" style="font-size:12px">${sp.role === 'herb' ? 'plant eater' : sp.role === 'omni' ? 'omnivore' : 'hunter'} · ${[...sp.diet].join(', ') || 'nothing it can eat'}${from}</span></td><td>${capChips(sp)}</td><td class="num">${sp.alive}</td><td class="num">${sp.maxGen}</td><td class="num">${drift}</td><td class="num">${eats.get(sp.id) || 0} / ${eatenBy.get(sp.id) || 0}</td><td class="num">${learned}</td><td>${status}</td></tr>`;
     });
     $('species').innerHTML = rows.join('');
   }
@@ -312,11 +376,13 @@
     sim.species.forEach((sp, i) => {
       pctx.strokeStyle = hue(sp); pctx.lineWidth = state.selected && state.selected.sp === sp.id ? 2.6 : 1.3;
       pctx.beginPath();
-      hist.forEach(([t, pops], j) => (j ? pctx.lineTo(X(t), Y(pops[i])) : pctx.moveTo(X(t), Y(pops[i]))));
+      let on = false;
+      hist.forEach(([t, pops]) => { const v = pops[i]; if (v === undefined) return; if (on) pctx.lineTo(X(t), Y(v)); else { pctx.moveTo(X(t), Y(v)); on = true; } });
       pctx.stroke();
     });
     const alive = sim.species.filter((s) => s.alive).length;
-    $('pop-note').textContent = `${alive} of ${sim.species.length} species alive. One line per species in its colour; the selected Yumon's species is drawn thicker.`;
+    const born = sim.species.filter((s) => s.parent !== null && s.parent !== undefined).length;
+    $('pop-note').textContent = `${alive} of ${sim.species.length} species alive, ${born} of them evolved here. One line per species in its colour; the selected Yumon's species is drawn thicker.`;
   }
 
   function renderStats() {
@@ -329,11 +395,21 @@
     $('s-models').textContent = `${fmt(sim.models.size)} · ${((sim.models.size * sim.brain.size * 8) / 1048576).toFixed(1)} MB`;
     $('s-tick').textContent = fmt(sim.stats.tick);
   }
-  function renderAll() { renderStats(); renderInspector(); renderLearned(); renderSpecies(); renderPop(); }
+  function renderEvolution() {
+    const st = sim.stats, ev = sim.events.slice(-10).reverse();
+    $('evolution').innerHTML = `
+      <dl class="kv" style="grid-template-columns: 1fr auto">
+        <dt>Kills · fights back · escapes</dt><dd class="num">${fmt(st.kills)} · ${fmt(st.fights)} · ${fmt(st.escapes)}</dd>
+        <dt>Capabilities gained · lost at birth</dt><dd class="num">${fmt(st.gained)} · ${fmt(st.lost)}</dd>
+        <dt>New species</dt><dd class="num">${fmt(st.splits)}</dd>
+      </dl>
+      ${ev.length ? `<ul class="events">${ev.map(([t, e]) => `<li><span class="num muted">${fmt(t)}</span><span>${esc(e)}</span></li>`).join('')}</ul>` : '<p class="note">No new species yet. A group with another capability set, or genes drifted far from the rest, splits off once it has 5 members of both sexes.</p>'}`;
+  }
+  function renderAll() { renderStats(); renderInspector(); renderLearned(); renderEvolution(); renderSpecies(); renderPop(); renderWalls(); }
 
   // static cards
   function renderStatic() {
-  $('caps').innerHTML = sim.CAPS.map((c) => `<div><span class="chip k-${c.kind}">${esc(c.label)}</span><span class="muted" style="font-size:12px">${c.limb || (c.food ? c.food : 'mind')}</span><span class="num">${sim.species.filter((s) => s.caps.has(c.id)).length}</span></div>`).join('');
+  $('caps').innerHTML = sim.CAPS.map((c) => `<div><span class="chip k-${c.kind}">${esc(c.label)}</span><span class="muted" style="font-size:12px">${c.limb || (c.food ? c.food : 'mind')}</span><span class="num">${sim.species.filter((s) => s.caps.has(c.id) && (s.alive || !s.parent)).length}</span></div>`).join('');
   $('src').textContent = DATA.brain.source;
   $('net').textContent = `${DATA.brain.inputs.length} inputs, hidden ${JSON.stringify(DATA.brain.hidden)}, ${fmt(DATA.brain.params)} weights (${(DATA.brain.params * 4 / 1024).toFixed(1)} KB as float32)`;
   const port = sim.verifyPort();
@@ -346,28 +422,30 @@
     $('set-seed').value = st.seed; $('set-species').value = st.species; $('set-diets').value = st.diets;
     $('set-plants').value = String(st.plantRate); $('set-moving').value = st.moving ? 'moving' : 'fixed';
     $('set-call').value = String(st.call); $('set-learn').checked = st.learn; $('set-lr').value = String(st.lr);
+    $('set-evo').value = st.evolution; $('set-kill').value = String(st.killR);
     dietNote();
   }
   function readSetup() {
     const n = (id, lo, hi, d) => { const v = Math.round(+$(id).value); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : d; };
     return { seed: n('set-seed', 1, 999999, 11), species: n('set-species', 8, 40, 30), diets: $('set-diets').value, plantRate: +$('set-plants').value,
-      moving: $('set-moving').value === 'moving', call: +$('set-call').value, learn: $('set-learn').checked, lr: +$('set-lr').value };
+      moving: $('set-moving').value === 'moving', call: +$('set-call').value, learn: $('set-learn').checked, lr: +$('set-lr').value,
+      evolution: $('set-evo').value, killR: +$('set-kill').value };
   }
   const DIET_NOTES = {
-    mixed: 'Half the species eat only plants, a quarter are omnivores, a quarter hunt. In headless runs 5-9 of 30 species were alive at tick 10,000.',
-    hunters: 'Every species is armed and hunts, and still eats the plants of its bands. In headless runs 5 and 8 of 30 species were alive at tick 10,000, with fewer Yumon than the mixed park.',
-    carnivores: 'Meat only. No species can eat plants, so the only food is other Yumon and nothing brings new energy in. In headless runs every species was extinct by tick 5,000.',
+    mixed: 'Half the species eat only plants, a quarter are omnivores, a quarter hunt. In headless runs with learning, 6-27 species were alive at tick 10,000 (most of them evolved in the park), and on one seed the omnivores ate every plant eater.',
+    hunters: 'Every species is armed and hunts, and still eats the plants of its bands. In headless runs 3 and 7 species were alive at tick 10,000 (21 and 335 Yumon), with many fights.',
+    carnivores: 'Meat only. No species can eat plants, so the only food is other Yumon and nothing brings new energy in. In headless runs every species was extinct by tick 4,100-5,000.',
   };
   function dietNote() { $('diet-note').textContent = DIET_NOTES[$('set-diets').value]; }
   $('set-diets').addEventListener('change', dietNote);
   function describe(st) {
-    return `Seed ${st.seed} · ${st.species} species · ${{ mixed: 'mixed diets', hunters: 'all hunters', carnivores: 'all carnivores' }[st.diets]} · plants ${st.plantRate}x · ${st.moving ? 'moving' : 'fixed'} patches · mating calls ${st.call}x · learning ${st.learn ? 'on (' + st.lr + ')' : 'off'}`;
+    return `Seed ${st.seed} · ${st.species} species · ${{ mixed: 'mixed diets', hunters: 'all hunters', carnivores: 'all carnivores' }[st.diets]} · plants ${st.plantRate}x · ${st.moving ? 'moving' : 'fixed'} patches · mating calls ${st.call}x · learning ${st.learn ? 'on (' + st.lr + ')' : 'off'} · kill reward ${st.killR} · ${st.evolution} evolution`;
   }
   function restart(st) {
     setup = st;
     try { localStorage.setItem('yumon-park-setup', JSON.stringify(st)); } catch (e) { /* not saved: still applies now */ }
     sim = makeSim(st);
-    founder = new Map(sim.species.map((sp) => [sp.id, { ...sp.genes }]));
+    sim.T.wallLife = +$('wall-life').value;
     computeWeb();
     $('learn').checked = st.learn; $('lr').value = String(st.lr);
     if (![...$('lr').options].some((o) => o.value === String(st.lr))) $('lr').value = '0.003';
@@ -415,7 +493,7 @@
       while (acc >= 1 && performance.now() - t0 < 30) { step(); acc -= 1; }
       if (acc > 4) acc = 0;
     }
-    draw(now);
+    if (Hpx > 0 && !$('view-park').hidden) draw(now);
     if (now - panelT > 500 && !$('view-park').hidden) { panelT = now; renderAll(); }
     requestAnimationFrame(frame);
   }

@@ -11,6 +11,7 @@
   --accent: #1d6f86; --accent-ink: #ffffff; --frame: #1b2b2d; --frame-ink: #e7f1ef; --good: #2f7d4f; --bad: #b4412b; --warn: #b07a17;
   --sky-top: #a9d3ea; --sky-bot: #dcecf2; --canopy: #4f8a4a; --canopy-2: #3f7840; --trunk: #6b4a32;
   --ground: #8c6f45; --grass: #6aa84f; --water-top: #3d8fb0; --water-bot: #12425e;
+  --wall: #8b8f86; --wall-edge: #4c4f49;
   --display: "Fredoka", "Nunito", "Segoe UI", sans-serif;
   --body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
@@ -21,6 +22,7 @@
     --accent: #5bbcd6; --accent-ink: #062027; --frame: #0a1112; --frame-ink: #d9e8e5; --good: #5fc489; --bad: #ff7e62; --warn: #e2b04a;
     --sky-top: #0b1830; --sky-bot: #26395a; --canopy: #2f5c33; --canopy-2: #264f2b; --trunk: #4a3424;
     --ground: #5d4a2f; --grass: #43773a; --water-top: #1d5873; --water-bot: #061c2a;
+    --wall: #6f746c; --wall-edge: #2c2f2b;
     color-scheme: dark;
   }
 }
@@ -29,6 +31,7 @@
   --accent: #5bbcd6; --accent-ink: #062027; --frame: #0a1112; --frame-ink: #d9e8e5; --good: #5fc489; --bad: #ff7e62; --warn: #e2b04a;
   --sky-top: #0b1830; --sky-bot: #26395a; --canopy: #2f5c33; --canopy-2: #264f2b; --trunk: #4a3424;
   --ground: #5d4a2f; --grass: #43773a; --water-top: #1d5873; --water-bot: #061c2a;
+  --wall: #6f746c; --wall-edge: #2c2f2b;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -84,11 +87,15 @@ h4 { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.08em; color
 .chip.k-weapon { border-color: var(--bad); }
 .chip.k-guard { border-color: var(--warn); }
 .chip.k-diet { border-color: var(--good); }
+.chip.new { background: color-mix(in srgb, var(--accent) 16%, var(--bg)); }
+.chip.lost { text-decoration: line-through; color: var(--muted); border-style: dashed; }
+.events { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 5px; font-size: 13px; }
+.events li { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 8px; align-items: baseline; }
 .pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; color: var(--panel); }
 .pill.good { background: var(--good); }
 .pill.bad { background: var(--bad); }
 .pill.mid { background: var(--warn); }
-.keys { display: grid; grid-template-columns: 52px minmax(0, 1fr) 46px; gap: 2px 8px; font-size: 12.5px; align-items: center; margin-top: 4px; }
+.keys { display: grid; grid-template-columns: 56px minmax(0, 1fr) 46px; gap: 2px 8px; font-size: 12.5px; align-items: center; margin-top: 4px; }
 .keys .bar { max-width: none; }
 .keys .w { color: var(--muted); }
 .keys b { font-weight: 700; }
@@ -136,7 +143,7 @@ pre#src { margin: 0; max-height: 360px; overflow: auto; font-family: var(--mono)
   <header>
     <div>
       <h1>Yumon <span>Park</span></h1>
-      <p class="lede">Species built from permutations of capabilities, hunting and hiding across four bands. Every Yumon carries its own copy of one compiled WIR brain. It starts as the written rule, learns from its own life while it sleeps, and passes what it learned on to its children through its mother.</p>
+      <p class="lede">Species built from permutations of capabilities, hunting, fighting back and hiding across four bands. Every Yumon carries its own copy of one compiled WIR brain. It starts as the written rule, learns from its own life while it sleeps, and passes what it learned on to its children through its mother. Children can gain or lose a capability, and groups that drift apart become new species.</p>
     </div>
     <dl class="stats" aria-label="Park totals">
       <div><dt>Yumon</dt><dd id="s-pop">0</dd></div>
@@ -193,6 +200,20 @@ pre#src { margin: 0; max-height: 360px; overflow: auto; font-family: var(--mono)
             <option value="1">Off (mates found by sight)</option><option value="2.5">2.5x sense range (default)</option><option value="4">4x sense range</option>
           </select>
         </label>
+        <label for="set-kill">Kill reward
+          <select id="set-kill">
+            <option value="1">1 (small)</option><option value="3">3 (default)</option><option value="8">8 (large)</option>
+          </select>
+          <small>Added to the reward of the decision that led to a kill, on top of the meal. Blows landed add 0.3, getting away from an attacker 1.</small>
+        </label>
+        <label for="set-evo">Evolution
+          <select id="set-evo">
+            <option value="gentle">Gentle: small steps, a capability change in 1 of 50 births</option>
+            <option value="default">Default: bigger steps, 1 in 17 births</option>
+            <option value="wild">Wild: large steps, 1 in 7 births</option>
+          </select>
+          <small>Every gene moves a little at each birth and one moves more. A gained capability starts as a small limb; one parent's capability passes half the time.</small>
+        </label>
         <label for="set-lr">Learning rate
           <select id="set-lr">
             <option value="0.001">Gentle (0.001)</option><option value="0.003">Default (0.003)</option><option value="0.01">Strong (0.01)</option>
@@ -214,7 +235,15 @@ pre#src { margin: 0; max-height: 360px; overflow: auto; font-family: var(--mono)
         <div class="tools" role="radiogroup" aria-label="Tool">
           <label><input type="radio" name="tool" id="t-watch" value="watch" checked><span>Watch</span></label>
           <label><input type="radio" name="tool" id="t-feed" value="feed"><span>Plant food</span></label>
+          <label><input type="radio" name="tool" id="t-wall" value="wall"><span>Wall</span></label>
         </div>
+        <span id="wall-opts" class="bar-row" hidden>
+          <select id="wall-life" aria-label="How long new walls stand">
+            <option value="0">Walls stand until removed</option><option value="2000">Walls stand 2,000 ticks</option><option value="5000">Walls stand 5,000 ticks</option>
+          </select>
+          <button id="wall-clear" type="button">Clear walls</button>
+          <span class="tiny" id="wall-count"></span>
+        </span>
         <span class="spacer"></span>
         <label class="tiny"><input type="checkbox" id="learn" checked> Learn in sleep</label>
         <select id="lr" aria-label="Learning rate">
@@ -224,7 +253,7 @@ pre#src { margin: 0; max-height: 360px; overflow: auto; font-family: var(--mono)
         </select>
       </div>
       <div class="glass">
-        <canvas id="world" aria-label="Side view of the park: sky, trees, ground and water. Drag to pan, scroll to zoom, click a Yumon to inspect it."></canvas>
+        <canvas id="world" aria-label="Side view of the park: sky, trees, ground and water. Drag to pan, scroll to zoom, click a Yumon to inspect it. With the wall tool, click for a wall across every band, drag up or down for a shorter one, click a wall to remove it."></canvas>
         <div id="toast" role="status" hidden></div>
       </div>
       <div class="bar-row">
@@ -239,6 +268,7 @@ pre#src { margin: 0; max-height: 360px; overflow: auto; font-family: var(--mono)
         <span id="hover"></span>
       </div>
       <div class="bands" aria-label="Bands">
+        <span id="wall-help" hidden><b>Wall tool</b> click: a wall across every band · drag up or down: part height · click a wall: remove</span>
         <span><b>Sky</b> fliers, gnats</span><span><b>Trees</b> climbers and fliers, fruit</span><span><b>Ground</b> walkers, grass, carcasses</span><span><b>Water</b> swimmers, plankton</span>
       </div>
     </div>
@@ -247,6 +277,10 @@ pre#src { margin: 0; max-height: 360px; overflow: auto; font-family: var(--mono)
       <section class="card" aria-labelledby="h-insp">
         <h2 id="h-insp">Inspector</h2>
         <div id="inspector"></div>
+      </section>
+      <section class="card" aria-labelledby="h-evo">
+        <h2 id="h-evo">Evolution and fights</h2>
+        <div id="evolution"></div>
       </section>
       <section class="card" aria-labelledby="h-learn">
         <h2 id="h-learn">What they learned</h2>
@@ -264,7 +298,7 @@ pre#src { margin: 0; max-height: 360px; overflow: auto; font-family: var(--mono)
           <tbody id="species"></tbody>
         </table>
       </div>
-      <p class="note">Drift is the change in a gene's mean over the living, against the species' founders. Learned is the share of decisions where a trained brain's top option differs from the written rule's.</p>
+      <p class="note">Living species first. Drift is the change in a gene's mean over the living, against the species' founders. Shaded capabilities evolved after the species began. Learned is the share of decisions where a trained brain's top option differs from the written rule's.</p>
     </section>
     <section class="card" aria-labelledby="h-pop">
       <h2 id="h-pop">Populations</h2>
@@ -277,12 +311,12 @@ pre#src { margin: 0; max-height: 360px; overflow: auto; font-family: var(--mono)
     <section class="card" aria-labelledby="h-caps">
       <h2 id="h-caps">Capabilities</h2>
       <div class="caps" id="caps"></div>
-      <p class="note">Each capability is carried by a limb, and the limb's size gene sets how well it works. Claws carry both climbing and clawing, so one gene moves both. Every limb costs upkeep, and wings must lift the body: a lineage that grows too heavy for its wings stops flying.</p>
+      <p class="note">Each capability is carried by a limb, and the limb's size gene sets how well it works. Claws carry both climbing and clawing, so one gene moves both, and a capability on a limb a Yumon already has is four times likelier to appear. Every limb costs upkeep, a limb that shrinks away loses its capabilities, and wings must lift the body: a lineage that grows too heavy for its wings stops flying. Counts are species alive or founding.</p>
     </section>
     <section class="card" aria-labelledby="h-how">
       <h2 id="h-how">How a life works</h2>
-      <p class="note" style="margin-top:0">Each tick a Yumon senses the nearest threat, food, prey and mate as distance buckets, feeds them to its brain with its hunger, fatigue and hurt, and samples one of eight options from a softmax over the brain's keys. Its reward is how much the tick reduced its need (hunger, fatigue and hurt, squared), plus a bonus for mating and for giving birth.</p>
-      <p class="note">When it falls asleep it takes one policy-gradient step on its own weights over what happened since the last sleep, held near the weights it was born with. A child gets a blend of both parents' genes with one small mutation, and a copy of its mother's brain. When a Yumon dies its brain leaves the cache.</p>
+      <p class="note" style="margin-top:0">Each tick a Yumon senses the nearest threat, food, prey and mate as distance buckets, whether an attacker struck it and its odds against it, feeds them to its brain with its hunger, fatigue and hurt, and samples one of ten options from a softmax over the brain's keys. The written rule hunts before it grazes when prey is near. When struck, an armed Yumon fights back if its odds are even or better, and a shell or spines can brace. Its reward is how much the tick reduced its need (hunger, fatigue and hurt, squared), plus a kill reward, a little for each blow landed, 1 for getting away, and a bonus for mating and for giving birth. A killer eats first, up to half the body.</p>
+      <p class="note">When it falls asleep it takes one policy-gradient step on its own weights over what happened since the last sleep, held near the weights it was born with. A child gets a blend of both parents' genes, small changes to all of them and a bigger one to one, may gain or lose a capability, and gets a copy of its mother's brain. When a Yumon dies its brain leaves the cache. Walls you draw block movement, sight and mating calls.</p>
     </section>
     <section class="card" aria-labelledby="h-src">
       <h2 id="h-src">The brain</h2>

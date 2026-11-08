@@ -718,7 +718,26 @@ Moving food costs the ecosystem food (sprouts start part grown, eaters lose trac
 
 Meat only has no energy source: plants are the only way energy enters, so the founders' bodies are all there is and the largest species have no prey (prey can be at most 1.3x the hunter's mass, 2x with venom). All hunters is more direct competition and keeps fewer, leaner populations; kills stay low because prey must be smaller and everyone flees everyone. The page has an Ecosystem setup tab (diets, species 8-40, seed, plant growth, fixed or moving patches, mating-call range, learning) with Save & restart; settings stay in the viewer's browser.
 
-**Demo.** "Yumon Park" (private artifact, link in the cc-manager card `yumon-park`): pan and zoom, inspect a Yumon (feelings, its brain's option probabilities with the rule's choice tagged, genes against its species' founders, whether its brain is still exact), plant food, toggle learning and its rate, reintroduce extinct species, population lines, most common learned changes.
+**Hunting, fighting back, walls and speciation (fifth pass, Nov 8).**
+
+- Brain: 10 options (adds `fight`, `brace`) and 26 inputs (adds `hit` 0..3, how recently an attacker still in sight struck; `odds` 0..2, my blows to finish it against its blows to finish me; `armed`; `guard` = shell or spines). Hunting comes first: `hunt = hunger + 3*pd + 1` from hunger 3 beats near plants (`eat = hunger + 2*fd - 1`). `fight = max(4*hit + 4*odds - 2*hurt - 2, 0)` for the armed, `brace = 3*hit + 3` from hit 2 for shell or spines (a braced shell takes armour + 0.3, braced spines hurt twice). Mating is no longer blocked by a far threat (`td < 2`, drive 6 + 2*md). KEY_SCALE 16 (temperature 8). Hidden [41, 30, 24], 3,361 weights, exact on 200,000 inputs.
+- Rewards on top of the homeostatic one: 3 for a kill (setup: 1/3/8), 0.3 per blow landed, 1 for getting away from an attacker alive. A killer gorges on up to half the body at once.
+- Ecology to keep hunters breeding: armed founders start as packs of 4 (8 per species), plant-eater founders 1.5x, mating cooldown scales with size (400 x (0.45 + 0.55 size)), unarmed Yumon under size 0.85 have twins. Without these, hunting first ate half the park by tick 1,000 and hunters then died out (13 hunter births in 3,000 ticks: they were scared 57% of the time and the rule never mated under any threat).
+- Walls (wall tool): full or part height, permanent or 2,000/5,000 ticks. They block movement, sight, mating calls and the attacker check; roaming turns back at a wall. Two full walls over 3,000 ticks: 0 crossings, 0 of 555,940 targets seen across. A water-only wall stopped every swimmer while fliers crossed above it.
+- Evolution: capabilities are per Yumon. A child keeps capabilities both parents carry and one parent's half the time; every gene moves x exp(0.03 N), one gene x exp(0.15 N), hue +-6; with probability 0.06 it gains a capability (4x likelier on a limb it already has, a new limb starts at 0.3-0.55) or loses one (never its last way to move); a limb that shrinks under 0.22 loses its capabilities. Diet and role follow the capabilities (a weapon brings meat). Every 250 ticks a group of at least 5 with both sexes that carries another capability set, or a 2-means gene cluster more than 0.3 log units from the rest, becomes a new species (new name, hue shifted 35-85 degrees) and can no longer mate with its parent species. Setup offers gentle/default/wild evolution.
+
+Results at tick 10,000 (`scratchpad table.js`, Node 24, i5-12500):
+
+| setup | species alive (evolved here) | Yumon | kills | fights back | new species | capabilities gained / lost |
+|---|---|---|---|---|---|---|
+| mixed, learning, seeds 1-3 | 27 (19), 6 (4), 14 (9) | 974, 627, 252 | 899, 1,322, 814 | 160, 95, 125 | 27, 16, 15 | 111/89, 80/51, 67/40 |
+| mixed, no learning | 19 (13), 3 (1), 4 (1) | 679, 531, 125 | 684, 847, 523 | 152, 100, 126 | 19, 12, 4 | 65/57, 47/44, 15/14 |
+| all hunters, learning, seeds 1-2 | 3 (0), 7 (5) | 21, 335 | 199, 323 | 189, 1,032 | 2, 13 | 5/1, 33/20 |
+| all carnivores, seed 1 | 0 (extinct at 4,100) | 0 | 197 | 165 | 0 | 1/0 |
+
+Kills went from 151-295 to 523-1,322 per 10,000 ticks. Dominance shows up: on seed 2 omnivores ate every plant eater (627 omnivores in 6 species with learning), and on seed 1 one plant eater held 769 of 974. With learning more species survived on all three seeds (and more new species formed), the first time learning has looked better than the written brain here, though three seeds are not enough to call it. Hunters still mostly die to other hunters (78 of ~200 armed deaths on seed 1 without learning). At ~970 Yumon with learning a tick costs ~13 ms (vs 1.5-6 ms at 125-680); the population cap (900) is soft, since pregnancies under way still give birth.
+
+**Demo.** "Yumon Park" (private artifact, link in the cc-manager card `yumon-park`): pan and zoom, inspect a Yumon (feelings, its brain's option probabilities with the rule's choice tagged, its own capabilities against its species', who struck it and its odds, genes against its species' founders, whether its brain is still exact), plant food, draw walls, an evolution log of new species, toggle learning and its rate, reintroduce extinct species, population lines, most common learned changes.
 
 ```
 cd wir
