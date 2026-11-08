@@ -49,8 +49,13 @@
   // ---------------------------------------------------------------- tuning
   const T = {
     temp: 4, // softmax temperature in key units (a drive unit is 8 key units)
-    gamma: 0.97, lr: 0.003, anchor: 0.002, clip: 2.0, minBuf: 40, maxBuf: 360, epochs: 1,
+    gamma: 0.85, lr: 0.003, anchor: 0.002, clip: 2.0, minBuf: 16, maxBuf: 360, epochs: 1,
     foodE: 25, popCap: 900, needScale: 20,
+    speed: 1.4, // all band speeds
+    // A sampled option is kept this many ticks (one decision) unless its probability
+    // falls below drop; rewards in between go to that decision.
+    commit: 12, drop: 0.05,
+    roamFar: [300, 900], roamTicks: 700, roamPace: 0.75,
   };
 
   function makeRng(s) {
@@ -280,10 +285,28 @@
     function addFood(kind, x, y, cap, regrow, drift) {
       food.push({ kind, x, y, amt: cap * (0.4 + 0.6 * rnd()), cap, regrow, vx: drift ? (rnd() - 0.5) * 0.3 : 0, band: bandOf(y) });
     }
-    for (let x = 10; x < WORLD_W; x += 24) addFood('grass', x + rnd() * 10, 340 + rnd() * 55, 6, 0.013, false);
-    for (let x = 0; x < WORLD_W; x += 40) addFood('fruit', x + rnd() * 20, 205 + rnd() * 110, 5, 0.012, false);
-    for (let i = 0; i < 70; i++) addFood('plankton', rnd() * WORLD_W, 410 + rnd() * 180, 5, 0.012, true);
-    for (let i = 0; i < 50; i++) addFood('gnats', rnd() * WORLD_W, 15 + rnd() * 165, 4, 0.010, true);
+    // Plants grow in patches with sparse stretches between them: meadows, fruit groves,
+    // drifting plankton blooms and gnat swarms. A patch eaten down sends its eaters on.
+    // Totals (items x regrowth) match an even carpet: grass 1.3, fruit 0.72, plankton
+    // 0.84, gnats 0.5 units per tick.
+    const groups = [];
+    function patches(kind, n, per, cap, total, spanLo, spanHi, y0, y1, drift) {
+      const regrow = total / (n * per);
+      for (let k = 0; k < n; k++) {
+        const cx = (k + 0.15 + 0.7 * rnd()) * (WORLD_W / n), span = spanLo + rnd() * (spanHi - spanLo);
+        const grp = drift ? { vx: (rnd() - 0.5) * 0.3, vy: 0, cy: y0 + rnd() * (y1 - y0) } : null;
+        if (grp) groups.push(grp);
+        for (let i = 0; i < per; i++) {
+          const y = grp ? Math.min(y1, Math.max(y0, grp.cy + (rnd() - 0.5) * 50)) : y0 + rnd() * (y1 - y0);
+          addFood(kind, wrapX(cx + (rnd() - 0.5) * span), y, cap, regrow, false);
+          food[food.length - 1].grp = grp;
+        }
+      }
+    }
+    patches('grass', 8, 13, 6, 1.3, 120, 240, 340, 395, false);
+    patches('fruit', 7, 9, 5, 0.72, 90, 180, 205, 315, false);
+    patches('plankton', 7, 10, 5, 0.84, 60, 120, 410, 590, true);
+    patches('gnats', 6, 8, 4, 0.5, 50, 100, 15, 180, true);
 
     // ---------------------------------------------------------------- yumon
     function spawn(sp, genes, x, y, mother, father) {
@@ -314,15 +337,20 @@
       a.y = BAND_Y[b][0] + 6 + rnd() * (BAND_Y[b][1] - BAND_Y[b][0] - 12);
     }
     function homeBand(t) { let b = 0; for (let k = 1; k < 4; k++) if (t.spd[k] > t.spd[b]) b = k; return b; }
+    // Founders arrive in small mixed-sex groups of 2-3, each group somewhere else in the
+    // park, so species start spread out and still find mates.
     function founders(sp, n) {
       const t = traits(sp, sp.genes, 3000, 3500);
       const hb = homeBand(t);
-      const cx = rnd() * WORLD_W;
+      let cx = 0, left = 0;
       for (let i = 0; i < n; i++) {
+        if (left === 0) { cx = rnd() * WORLD_W; left = n - i === 4 ? 2 : Math.min(n - i, 2 + (rnd() < 0.4 ? 1 : 0)); }
+        left--;
         const g = { ...sp.genes };
         for (const k of Object.keys(g)) if (k !== 'hue' && g[k] > 0) g[k] *= Math.exp(0.05 * gauss());
         const y = BAND_Y[hb][0] + 6 + rnd() * (BAND_Y[hb][1] - BAND_Y[hb][0] - 12);
-        const a = spawn(sp, g, cx + (rnd() - 0.5) * 300, y, null, null);
+        const a = spawn(sp, g, cx + (rnd() - 0.5) * 60, y, null, null);
+        a.sex = i % 2;
         a.age = a.life * (0.2 + 0.3 * rnd());
         a.t = traits(sp, a.genes, a.age, a.life);
         a.energy = a.t.emax * 0.8; a.hp = a.t.hpmax;
@@ -461,7 +489,7 @@
 
     function steer(a, tx, ty, frac) {
       const dx = dxw(a.x, tx), dy = ty - a.y, d = Math.hypot(dx, dy) || 1;
-      const sp = a.t.spd[bandOf(a.y)] * frac * (1 - 0.06 * Math.max(0, a.fatigue - 5)); // tired is slow
+      const sp = T.speed * a.t.spd[bandOf(a.y)] * frac * (1 - 0.06 * Math.max(0, a.fatigue - 5)); // tired is slow
       a.dvx = (dx / d) * sp; a.dvy = (dy / d) * sp;
     }
 
@@ -493,9 +521,11 @@
         }
         a.ruleBest = rb; a.netBest = nb;
         let opt;
-        if (a.fatigue >= C.level) opt = 5; // exhausted: falls asleep, not a decision
+        softmax(keys, T.temp, p);
+        if (a.fatigue >= C.level) { opt = 5; a.commit = 0; } // exhausted: falls asleep, not a decision
+        else if (a.commit > 0 && p[a.option] >= T.drop) { opt = a.option; a.commit--; } // still committed
         else {
-          softmax(keys, T.temp, p);
+          a.commit = T.commit;
           let u = rnd(); opt = NOPT - 1;
           for (let k = 0; k < NOPT; k++) { u -= p[k]; if (u <= 0) { opt = k; break; } }
           stats.decisions++;
@@ -570,16 +600,27 @@
         }
         case 5: break; // sleep
         case 6: { // flock
-          if (!a.kin) { a.wander += (rnd() - 0.5) * 0.4; steer(a, a.x + Math.cos(a.wander) * 50, a.y + Math.sin(a.wander) * 20, 0.5); break; }
+          if (!a.kin) { roam(a); break; }
           steer(a, a.x + a.kin[0], a.y + a.kin[1], 0.6);
           break;
         }
-        default: { // roam
-          a.wander += (rnd() - 0.5) * 0.35;
-          const hb = homeBand(t), cy = (BAND_Y[hb][0] + BAND_Y[hb][1]) / 2;
-          steer(a, a.x + Math.cos(a.wander) * 60, a.y + Math.sin(a.wander) * 25 + (cy - a.y) * 0.15, 0.5);
-        }
+        default: roam(a);
       }
+    }
+
+    // Roaming heads for a far goal and keeps it until it gets there or gives up, so a
+    // Yumon with nothing to do travels instead of milling about.
+    function roam(a) {
+      const t = a.t, g = a.goal, m = maskOf(t);
+      if (!g || stats.tick > g.until || !m[bandOf(g.y)] || Math.hypot(dxw(a.x, g.x), g.y - a.y) < 25) {
+        const [lo, hi] = T.roamFar, dist = lo + rnd() * (hi - lo);
+        const dir = g && rnd() < 0.7 ? g.dir : rnd() < 0.5 ? -1 : 1; // mostly keep going the same way
+        const ok = [0, 1, 2, 3].filter((b) => m[b]), hb = homeBand(t);
+        const b = rnd() < 0.6 ? hb : ok[Math.floor(rnd() * ok.length)];
+        a.goal = { x: wrapX(a.x + dir * dist), y: BAND_Y[b][0] + 8 + rnd() * (BAND_Y[b][1] - BAND_Y[b][0] - 16), dir, until: stats.tick + T.roamTicks };
+      }
+      a.wander += (rnd() - 0.5) * 0.2;
+      steer(a, a.goal.x, a.goal.y + Math.sin(a.wander) * 12, T.roamPace);
     }
 
     function attack(a, o) {
@@ -665,11 +706,13 @@
     }
 
     function plants() {
+      for (const g of groups) if (rnd() < 0.002) g.vx = (rnd() - 0.5) * 0.3;
       for (let i = food.length - 1; i >= 0; i--) {
         const f = food[i];
         if (f.kind === 'meat') { f.amt += f.regrow * (1 + f.amt * 0.2); if (f.amt <= 0.05) food.splice(i, 1); continue; }
         f.amt = Math.min(f.cap, f.amt + f.regrow);
         if (f.vx) { f.x = wrapX(f.x + f.vx); if (rnd() < 0.002) f.vx = (rnd() - 0.5) * 0.3; }
+        if (f.grp) f.x = wrapX(f.x + f.grp.vx);
       }
     }
 

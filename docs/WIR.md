@@ -688,6 +688,14 @@ Learning did not measurably help survival. In a mixed run (half the founders of 
 
 **What did not work.** The first species mix (most species armed) ran out of prey: 22 of 30 species died out by tick 6,000 and hunters made 2 kills. Predators then starved with prey in view because the written rule let hunger raise roaming above hunting whenever no plant food was in sight; roaming now grows with hunger only when neither food nor prey is visible. Prey was faster than the bigger hunters until hunters got a tiring pounce (1.4x speed). Litters of two let small species fill the park. A reward of energy eaten minus damage taught brains to skip sleep and ignore threats (sleep never paid); the homeostatic reward fixed that. A Yumon that dies never learns from its death, since its buffer goes with it: only near misses (damage survived) teach caution.
 
+**Spawning, patches and commitment (second pass, Nov 8).** Measured with a headless probe (seeds 1-2, no learning): species started in one spot (spread 0.02, where 0 is every member at one x and 1 is evenly round the ring) and the median Yumon moved 32-39 units of x per 500 ticks in a 2,400-wide world. Three changes:
+
+- Founders arrive in mixed-sex groups of 2-3, each group at its own random x: start spread 0.54-0.59.
+- Roaming keeps a goal 300-900 units away (70% in the same direction as the last one) for up to 700 ticks at 0.75 pace, and every band speed is 1.4x. Alone this left median travel at 30-45: roaming was ~6% of time because evenly carpeted food (a tuft every 24 units) kept everyone eating where they stood.
+- Plants grow in patches with sparse stretches between: 8 meadows, 7 fruit groves, 7 drifting plankton blooms, 6 drifting gnat swarms, with the same total regrowth. An option, once sampled, is kept for 12 ticks unless the brain gives it under 5% (a semi-MDP decision; rewards in between go to it; gamma 0.85 per decision, min buffer 16).
+
+Option switches fell from 11.5-12.3 to 5.1 per 100 ticks; the 90th percentile of travel went from 119-123 to 171-187 units per 500 ticks (max 806). The median stayed at 41-48: a fed plant eater stays in its meadow. At tick 10,000 (no learning) 12 and 10 species were alive (435 and 532 Yumon). Training per sleep covers whole decisions, about 10x cheaper (1.1 s of training over 10,000 ticks, seed 1). Mixed runs at tick 12,000: learners 66.3%, 55.0%, 39.2% (seeds 1-3), still about neutral on average. The table above is from the first pass.
+
 **Demo.** "Yumon Park" (private artifact, link in the cc-manager card `yumon-park`): pan and zoom, inspect a Yumon (feelings, its brain's option probabilities with the rule's choice tagged, genes against its species' founders, whether its brain is still exact), plant food, toggle learning and its rate, reintroduce extinct species, population lines, most common learned changes.
 
 ```

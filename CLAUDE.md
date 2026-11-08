@@ -272,4 +272,9 @@ REINFORCE at each sleep on a homeostatic reward, anchored to birth weights; chil
 mother's weights, death drops them. Untrained brains: 0 of 4.6M decisions off the rule. Learning
 changes ~18% of trained decisions but did not help survival (mixed runs: learners ended
 41/50/49%; at lr 0.01, 10-29%). Demo artifact "Yumon Park" (https://claude.ai/artifact/8dGTNMcvmx2XiVZFr735TN, private). `tests/park.rs`: 2 tests.
+Second pass (Nov 8): founders spawn in mixed-sex groups of 2-3 at random x (start spread
+0.02 -> 0.55), roaming keeps a far goal (300-900 units), band speeds x1.4 (`T.speed`), plants
+grow in patches (meadows, groves, drifting blooms/swarms; same total regrowth), and a sampled
+option is kept 12 ticks (`T.commit`) unless its probability falls under 5% (learning is per
+decision, gamma 0.85). Switches 12 -> 5 per 100 ticks; p90 travel 120 -> 180 units per 500 ticks.
 
