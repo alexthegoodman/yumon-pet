@@ -4,7 +4,8 @@ const data = JSON.parse(require('fs').readFileSync(process.argv[5] || 'park_demo
 const ticks = +process.argv[2] || 3000, learn = process.argv[3] !== 'nolearn', seed = +process.argv[4] || 1;
 const mixed = process.argv[3] === 'mixed';
 const tune = process.env.PARK_TUNE ? JSON.parse(process.env.PARK_TUNE) : {};
-const sim = createPark(data, { seed, learn: learn, mixed, tune });
+const setup = process.env.PARK_SETUP ? JSON.parse(process.env.PARK_SETUP) : {};
+const sim = createPark(data, { seed, learn: learn, mixed, tune, ...setup });
 console.log('port', JSON.stringify(sim.verifyPort()), 'species', sim.species.length, 'yumon', sim.yumon.length, 'params', sim.brain.size);
 const t0 = Date.now();
 for (let t = 1; t <= ticks; t++) {

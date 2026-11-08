@@ -1,13 +1,19 @@
 (function () {
   'use strict';
   const DATA = JSON.parse(document.getElementById('park-data').textContent);
-  const sim = ParkCore.createPark(DATA, { seed: 11, learn: true });
+  // Ecosystem setup: saved per viewer, applied by Save & restart.
+  const DEFAULT_SETUP = { seed: 11, species: 30, diets: 'mixed', plantRate: 1.25, moving: true, call: 2.5, learn: true, lr: 0.003 };
+  let setup = { ...DEFAULT_SETUP };
+  try { setup = { ...DEFAULT_SETUP, ...JSON.parse(localStorage.getItem('yumon-park-setup') || '{}') }; } catch (e) { /* storage blocked: defaults */ }
+  const makeSim = (st) => ParkCore.createPark(DATA, { seed: st.seed, species: st.species, diets: st.diets, movingPatches: st.moving, learn: st.learn,
+    tune: { plantRate: st.plantRate, call: st.call, lr: st.lr } });
+  let sim = makeSim(setup);
   const C = DATA.consts;
   const $ = (id) => document.getElementById(id);
   const canvas = $('world'), ctx = canvas.getContext('2d');
   const OPT_LABEL = { eat: 'Eat', hunt: 'Hunt', flee: 'Flee', hide: 'Hide', mate: 'Mate', sleep: 'Sleep', flock: 'Flock', roam: 'Roam' };
   const W0 = sim.WORLD_W, H0 = sim.WORLD_H;
-  const founder = new Map(sim.species.map((sp) => [sp.id, { ...sp.genes }]));
+  let founder = new Map(sim.species.map((sp) => [sp.id, { ...sp.genes }]));
   const hue = (sp, a) => `hsl(${(a ? a.genes.hue : sp.genes.hue).toFixed(0)} 62% ${dark() ? 62 : 48}%)`;
   const dark = () => getComputedStyle(document.documentElement).colorScheme === 'dark';
 
@@ -203,9 +209,12 @@
   const fmt = (n) => n.toLocaleString('en-US');
   const bar = (v, warn) => `<span class="bar${warn ? ' warn' : ''}"><i style="width:${(100 * Math.max(0, Math.min(1, v))).toFixed(0)}%"></i></span>`;
   const capChips = (sp) => `<span class="chips">${[...sp.caps].map((c) => { const k = sim.CAPS.find((x) => x.id === c); return `<span class="chip k-${k.kind}">${esc(k.label)}</span>`; }).join('')}</span>`;
-  const web = sim.foodWeb();
-  const eats = new Map(), eatenBy = new Map();
-  for (const [a, b] of web) { eats.set(a, (eats.get(a) || 0) + 1); eatenBy.set(b, (eatenBy.get(b) || 0) + 1); }
+  let eats = new Map(), eatenBy = new Map();
+  function computeWeb() {
+    eats = new Map(); eatenBy = new Map();
+    for (const [a, b] of sim.foodWeb()) { eats.set(a, (eats.get(a) || 0) + 1); eatenBy.set(b, (eatenBy.get(b) || 0) + 1); }
+  }
+  computeWeb();
 
   function renderInspector() {
     const a = state.selected, el = $('inspector');
@@ -323,18 +332,80 @@
   function renderAll() { renderStats(); renderInspector(); renderLearned(); renderSpecies(); renderPop(); }
 
   // static cards
+  function renderStatic() {
   $('caps').innerHTML = sim.CAPS.map((c) => `<div><span class="chip k-${c.kind}">${esc(c.label)}</span><span class="muted" style="font-size:12px">${c.limb || (c.food ? c.food : 'mind')}</span><span class="num">${sim.species.filter((s) => s.caps.has(c.id)).length}</span></div>`).join('');
   $('src').textContent = DATA.brain.source;
   $('net').textContent = `${DATA.brain.inputs.length} inputs, hidden ${JSON.stringify(DATA.brain.hidden)}, ${fmt(DATA.brain.params)} weights (${(DATA.brain.params * 4 / 1024).toFixed(1)} KB as float32)`;
   const port = sim.verifyPort();
   $('port').textContent = `Checked on load: the compiled weights and this page's copy of the rule give the Rust rule's keys on all ${port.vectors} test vectors (${port.netMismatches + port.ruleMismatches} differences). The cache holds one brain per living Yumon: a copy (current weights) plus the weights it was born with.`;
 
+  }
+
+  // ---------------------------------------------------------------- setup tab
+  function fillSetup(st) {
+    $('set-seed').value = st.seed; $('set-species').value = st.species; $('set-diets').value = st.diets;
+    $('set-plants').value = String(st.plantRate); $('set-moving').value = st.moving ? 'moving' : 'fixed';
+    $('set-call').value = String(st.call); $('set-learn').checked = st.learn; $('set-lr').value = String(st.lr);
+    dietNote();
+  }
+  function readSetup() {
+    const n = (id, lo, hi, d) => { const v = Math.round(+$(id).value); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : d; };
+    return { seed: n('set-seed', 1, 999999, 11), species: n('set-species', 8, 40, 30), diets: $('set-diets').value, plantRate: +$('set-plants').value,
+      moving: $('set-moving').value === 'moving', call: +$('set-call').value, learn: $('set-learn').checked, lr: +$('set-lr').value };
+  }
+  const DIET_NOTES = {
+    mixed: 'Half the species eat only plants, a quarter are omnivores, a quarter hunt. In headless runs 5-9 of 30 species were alive at tick 10,000.',
+    hunters: 'Every species is armed and hunts, and still eats the plants of its bands. In headless runs 5 and 8 of 30 species were alive at tick 10,000, with fewer Yumon than the mixed park.',
+    carnivores: 'Meat only. No species can eat plants, so the only food is other Yumon and nothing brings new energy in. In headless runs every species was extinct by tick 5,000.',
+  };
+  function dietNote() { $('diet-note').textContent = DIET_NOTES[$('set-diets').value]; }
+  $('set-diets').addEventListener('change', dietNote);
+  function describe(st) {
+    return `Seed ${st.seed} · ${st.species} species · ${{ mixed: 'mixed diets', hunters: 'all hunters', carnivores: 'all carnivores' }[st.diets]} · plants ${st.plantRate}x · ${st.moving ? 'moving' : 'fixed'} patches · mating calls ${st.call}x · learning ${st.learn ? 'on (' + st.lr + ')' : 'off'}`;
+  }
+  function restart(st) {
+    setup = st;
+    try { localStorage.setItem('yumon-park-setup', JSON.stringify(st)); } catch (e) { /* not saved: still applies now */ }
+    sim = makeSim(st);
+    founder = new Map(sim.species.map((sp) => [sp.id, { ...sp.genes }]));
+    computeWeb();
+    $('learn').checked = st.learn; $('lr').value = String(st.lr);
+    if (![...$('lr').options].some((o) => o.value === String(st.lr))) $('lr').value = '0.003';
+    renderStatic();
+    warm();
+    $('current-setup').textContent = describe(st);
+  }
+  $('setup-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    restart(readSetup());
+    showTab('park');
+    toast('Park restarted with the new setup');
+  });
+  $('set-defaults').addEventListener('click', () => fillSetup(DEFAULT_SETUP));
+  function showTab(name) {
+    for (const b of document.querySelectorAll('[role=tab][data-view]')) b.setAttribute('aria-selected', String(b.dataset.view === name));
+    $('view-park').hidden = name !== 'park';
+    $('view-setup').hidden = name !== 'setup';
+    if (name === 'setup') fillSetup(setup);
+    else { resize(); renderPop(); }
+    try { localStorage.setItem('yumon-park-tab', name); } catch (e) { /* ignore */ }
+  }
+  for (const b of document.querySelectorAll('[role=tab][data-view]')) b.addEventListener('click', () => showTab(b.dataset.view));
+
   // ---------------------------------------------------------------- loop
   // Start a little way in so the first view shows a living park.
-  for (let i = 0; i < 300; i++) sim.tick();
-  state.selected = sim.yumon.find((a) => a.alive && a.s.carn) || sim.yumon.find((a) => a.alive);
-  if (state.selected) { cam.x = state.selected.x; }
-  renderAll();
+  function warm() {
+    for (let i = 0; i < 300; i++) sim.tick();
+    state.selected = sim.yumon.find((a) => a.alive && a.s.carn) || sim.yumon.find((a) => a.alive) || null;
+    if (state.selected) cam.x = state.selected.x;
+    renderAll();
+  }
+  renderStatic();
+  $('current-setup').textContent = describe(setup);
+  warm();
+  let firstTab = 'park';
+  try { firstTab = location.hash === '#setup' ? 'setup' : localStorage.getItem('yumon-park-tab') || 'park'; } catch (e) { /* ignore */ }
+  showTab(firstTab === 'setup' ? 'setup' : 'park');
   let panelT = 0;
   function frame(now) {
     const dt = Math.min(100, now - last); last = now;
@@ -345,7 +416,7 @@
       if (acc > 4) acc = 0;
     }
     draw(now);
-    if (now - panelT > 500) { panelT = now; renderAll(); }
+    if (now - panelT > 500 && !$('view-park').hidden) { panelT = now; renderAll(); }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);

@@ -32,6 +32,7 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 15px; line-height: 1.5; }
 .wrap { max-width: 1440px; margin: 0 auto; padding-inline: 16px; padding-block: 18px 40px; display: grid; gap: 14px; }
 header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 10px 24px; }
@@ -111,6 +112,23 @@ p.note { font-size: 13px; color: var(--muted); margin: 8px 0 0; max-width: 70ch;
 .caps .num { margin-left: auto; color: var(--muted); }
 pre#src { margin: 0; max-height: 360px; overflow: auto; font-family: var(--mono); font-size: 11.5px; line-height: 1.45; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; white-space: pre; }
 .three { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; align-items: start; }
+/* view tabs and the setup form */
+.view { display: grid; gap: 14px; }
+.viewtabs { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.viewtabs button { font: inherit; font-family: var(--display); font-weight: 700; font-size: 15px; padding: 5px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+.viewtabs button[aria-selected="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.viewtabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.setup-now { font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 0; }
+.setup { max-width: 920px; }
+.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px 20px; margin-top: 12px; }
+.fields label { display: grid; gap: 4px; font-weight: 700; font-size: 14px; align-content: start; }
+.fields small { font-weight: 400; color: var(--muted); font-size: 12.5px; }
+.fields input[type=number], .fields select { font: inherit; font-weight: 400; font-size: 14px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); width: 100%; min-width: 0; }
+.fields input:focus-visible, .fields select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.actions button { font: inherit; font-weight: 700; font-size: 14px; padding: 7px 16px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+.actions button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
 </style>
 
@@ -118,7 +136,7 @@ pre#src { margin: 0; max-height: 360px; overflow: auto; font-family: var(--mono)
   <header>
     <div>
       <h1>Yumon <span>Park</span></h1>
-      <p class="lede">Thirty species built from permutations of capabilities, hunting and hiding across four bands. Every Yumon carries its own copy of one compiled WIR brain. It starts as the written rule, learns from its own life while it sleeps, and passes what it learned on to its children through its mother.</p>
+      <p class="lede">Species built from permutations of capabilities, hunting and hiding across four bands. Every Yumon carries its own copy of one compiled WIR brain. It starts as the written rule, learns from its own life while it sleeps, and passes what it learned on to its children through its mother.</p>
     </div>
     <dl class="stats" aria-label="Park totals">
       <div><dt>Yumon</dt><dd id="s-pop">0</dd></div>
@@ -131,6 +149,65 @@ pre#src { margin: 0; max-height: 360px; overflow: auto; font-family: var(--mono)
     </dl>
   </header>
 
+  <div class="viewtabs" role="tablist" aria-label="View">
+    <button type="button" role="tab" data-view="park" aria-selected="true" id="tab-park">Park</button>
+    <button type="button" role="tab" data-view="setup" aria-selected="false" id="tab-setup">Ecosystem setup</button>
+    <span class="setup-now" id="current-setup"></span>
+  </div>
+
+  <div id="view-setup" role="tabpanel" aria-labelledby="tab-setup" hidden>
+    <form class="card setup" id="setup-form">
+      <h2>Ecosystem setup</h2>
+      <p class="note" style="margin-top:0">Changes apply when you save: the park restarts from new founders with these settings. Settings are kept in this browser.</p>
+      <div class="fields">
+        <label for="set-diets">Diets
+          <select id="set-diets">
+            <option value="mixed">Mixed: plant eaters, omnivores and hunters</option>
+            <option value="hunters">All hunters: every species armed, still eats plants</option>
+            <option value="carnivores">All carnivores: meat only</option>
+          </select>
+          <small id="diet-note"></small>
+        </label>
+        <label for="set-species">Species
+          <input id="set-species" type="number" min="8" max="40" step="1" inputmode="numeric">
+          <small>8 to 40, built from capability permutations.</small>
+        </label>
+        <label for="set-seed">Seed
+          <input id="set-seed" type="number" min="1" max="999999" step="1" inputmode="numeric">
+          <small>The same seed and settings give the same species and founders.</small>
+        </label>
+        <label for="set-plants">Plant growth
+          <select id="set-plants">
+            <option value="0.75">0.75x (lean)</option><option value="1">1x</option><option value="1.25">1.25x (default)</option><option value="1.5">1.5x</option><option value="2">2x (lush)</option>
+          </select>
+          <small>Regrowth of grass, fruit, plankton and gnats.</small>
+        </label>
+        <label for="set-moving">Food patches
+          <select id="set-moving">
+            <option value="moving">Move: wither when eaten down or out of season, sprout elsewhere</option>
+            <option value="fixed">Stay put: regrow where they are</option>
+          </select>
+        </label>
+        <label for="set-call">Mating calls
+          <select id="set-call">
+            <option value="1">Off (mates found by sight)</option><option value="2.5">2.5x sense range (default)</option><option value="4">4x sense range</option>
+          </select>
+        </label>
+        <label for="set-lr">Learning rate
+          <select id="set-lr">
+            <option value="0.001">Gentle (0.001)</option><option value="0.003">Default (0.003)</option><option value="0.01">Strong (0.01)</option>
+          </select>
+          <span class="tiny"><input type="checkbox" id="set-learn"> Learn in sleep</span>
+        </label>
+      </div>
+      <div class="actions">
+        <button type="submit" class="primary">Save &amp; restart</button>
+        <button type="button" id="set-defaults">Defaults</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="view-park" role="tabpanel" aria-labelledby="tab-park" class="view">
   <div class="main">
     <div class="frame">
       <div class="bar-row">
@@ -213,6 +290,7 @@ pre#src { margin: 0; max-height: 360px; overflow: auto; font-family: var(--mono)
       <p class="note" id="port"></p>
       <pre id="src" tabindex="0"></pre>
     </section>
+  </div>
   </div>
 </div>
 

@@ -696,6 +696,28 @@ Learning did not measurably help survival. In a mixed run (half the founders of 
 
 Option switches fell from 11.5-12.3 to 5.1 per 100 ticks; the 90th percentile of travel went from 119-123 to 171-187 units per 500 ticks (max 806). The median stayed at 41-48: a fed plant eater stays in its meadow. At tick 10,000 (no learning) 12 and 10 species were alive (435 and 532 Yumon). Training per sleep covers whole decisions, about 10x cheaper (1.1 s of training over 10,000 ticks, seed 1). Mixed runs at tick 12,000: learners 66.3%, 55.0%, 39.2% (seeds 1-3), still about neutral on average. The table above is from the first pass.
 
+**Moving patches (third pass, Nov 8).** Fixed patches still let a group settle in one meadow. Now a patch withers when eaten below 10% of its full amount or when its season ends (2,000-4,000 ticks, 400-tick grace after sprouting), and sprouts at 35% full 150-450 units along its band (`reformPatches`; about 90-130 moves per 10,000 ticks). Results (no learning, tick 10,000, seeds 1-3):
+
+| version | travel per 500 ticks, median / p90 | species alive | Yumon |
+|---|---|---|---|
+| fixed patches (second pass, seeds 1-2) | 41-48 / 171-187 | 12, 10 | 435, 532 |
+| patches move anywhere, sprout at 10% | 54-61 / 202-233 | 5, 3 | 99, 265 |
+| moves 250-700, sprout 35%, plants x1.4 | 51-57 / 182-247 | 6, 3, 8 | 361, 580, 346 |
+| moves 150-450, plants x1.25 | 44-63 / 195-249 | 6, 2, 4 | 254, 720, 239 |
+| same plus mating calls (current) | 48-67 / 212-229 | 8, 9, 5 | 554, 553, 304 |
+
+Moving food costs the ecosystem food (sprouts start part grown, eaters lose track), so total plant growth is 1.25x the even-carpet figure. The bigger loss was demographic: scattered founders following moving food rarely met a mate, and small species died of old age without replacing themselves. Mating calls (a fertile Yumon hears fertile mates of its species at 2.5x its sense radius; the mate bucket uses that radius) brought survival back to 5-9 species, still below the 10-12 of fixed patches.
+
+**Diet setups (Nov 8).** `createPark` takes `diets`: `mixed` (default), `hunters` (every species armed, still eating the plants of its bands) or `carnivores` (armed, meat only), plus `movingPatches`, and tuning overrides (`plantRate`, `call`, `lr`; the tuning object is now per park). No learning, tick 10,000, seeds 1-2 (`PARK_SETUP='{"diets":"..."}' node harness.js 10000 nolearn SEED`):
+
+| diets | species alive | Yumon | kills | births |
+|---|---|---|---|---|
+| mixed (current, seeds 1-3) | 8, 9, 5 | 554, 553, 304 | 151, 295, 170 | 1,379, 1,529, 876 |
+| all hunters | 5, 8 | 158, 304 | 43, 66 | 407, 891 |
+| all carnivores | 0, 0 (extinct by tick 5,000) | 0 | 49, 42 | 6, 2 |
+
+Meat only has no energy source: plants are the only way energy enters, so the founders' bodies are all there is and the largest species have no prey (prey can be at most 1.3x the hunter's mass, 2x with venom). All hunters is more direct competition and keeps fewer, leaner populations; kills stay low because prey must be smaller and everyone flees everyone. The page has an Ecosystem setup tab (diets, species 8-40, seed, plant growth, fixed or moving patches, mating-call range, learning) with Save & restart; settings stay in the viewer's browser.
+
 **Demo.** "Yumon Park" (private artifact, link in the cc-manager card `yumon-park`): pan and zoom, inspect a Yumon (feelings, its brain's option probabilities with the rule's choice tagged, genes against its species' founders, whether its brain is still exact), plant food, toggle learning and its rate, reintroduce extinct species, population lines, most common learned changes.
 
 ```

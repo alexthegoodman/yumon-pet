@@ -47,7 +47,7 @@
   const GUARDS = [[], ['shell'], ['spines'], ['camo']];
 
   // ---------------------------------------------------------------- tuning
-  const T = {
+  const DEFAULTS = {
     temp: 4, // softmax temperature in key units (a drive unit is 8 key units)
     gamma: 0.85, lr: 0.003, anchor: 0.002, clip: 2.0, minBuf: 16, maxBuf: 360, epochs: 1,
     foodE: 25, popCap: 900, needScale: 20,
@@ -55,6 +55,11 @@
     // A sampled option is kept this many ticks (one decision) unless its probability
     // falls below drop; rewards in between go to that decision.
     commit: 12, drop: 0.05,
+    // Plant patches: a season lasts season[0..1] ticks; a patch eaten below wither of its
+    // full amount withers early; it sprouts at sprout of full, reformAway[0..1] along.
+    call: 2.5, // mating-call range, times the sense radius
+    plantRate: 1.25, // moving patches lose food (sprouts start small, eaters lose track)
+    season: [2000, 4000], wither: 0.1, sprout: 0.35, reformAway: [150, 450], grace: 400,
     roamFar: [300, 900], roamTicks: 700, roamPace: 0.75,
   };
 
@@ -168,10 +173,12 @@
 
   // Roles fix the shape of the food web: half the species eat only plants, a quarter
   // hunt and also eat plants, a quarter only hunt (and scavenge).
-  function makeSpecies(rnd, count) {
+  // diets: 'mixed' (half plant eaters, a quarter omnivores, a quarter hunters), 'hunters'
+  // (every species armed and still eating plants), 'carnivores' (armed, meat only).
+  function makeSpecies(rnd, count, diets = 'mixed') {
     const pick = (a) => a[Math.floor(rnd() * a.length)];
     const roles = [];
-    for (let i = 0; i < count; i++) roles.push(i % 4 < 2 ? 'herb' : i % 4 === 2 ? 'omni' : 'carn');
+    for (let i = 0; i < count; i++) roles.push(diets === 'hunters' ? 'omni' : diets === 'carnivores' ? 'carn' : i % 4 < 2 ? 'herb' : i % 4 === 2 ? 'omni' : 'carn');
     for (let i = roles.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [roles[i], roles[j]] = [roles[j], roles[i]]; }
     const out = [], seen = new Set(), names = new Set();
     let guard = 0;
@@ -257,13 +264,14 @@
   // ---------------------------------------------------------------- the park
   function createPark(data, opts = {}) {
     const C = data.consts;
-    Object.assign(T, opts.tune || {});
+    const T = Object.assign({}, DEFAULTS, opts.tune || {}); // per park, so a restart starts clean
     const NOPT = C.options.length;
     const brain = brainShape(data.brain);
     const rnd = makeRng(opts.seed || 1);
     let learn = opts.learn !== false;
     const gauss = () => Math.sqrt(-2 * Math.log(1 - rnd())) * Math.cos(2 * Math.PI * rnd());
-    const species = makeSpecies(rnd, opts.species || 30);
+    const species = makeSpecies(rnd, opts.species || 30, opts.diets || 'mixed');
+    const moving = opts.movingPatches !== false;
     const yumon = [];
     const byId = new Map();
     // The model cache: id -> { w, anchor }. One entry per living Yumon.
@@ -272,7 +280,7 @@
     let nextId = 1;
     const stats = {
       tick: 0, born: 0, died: 0, causes: { eaten: 0, starved: 0, old: 0, poison: 0, thorns: 0 }, sleeps: 0, trainSteps: 0, trainMs: 0,
-      hunts: 0, attacks: 0, decisions: 0, written: 0, untrained: 0, exactMiss: 0, drift: 0, driftN: 0,
+      hunts: 0, attacks: 0, reformed: 0, decisions: 0, written: 0, untrained: 0, exactMiss: 0, drift: 0, driftN: 0,
     };
     const history = []; // [tick, pops per species]
     const changes = new Map(); // "rule->net" option pairs from learned brains
@@ -290,23 +298,54 @@
     // Totals (items x regrowth) match an even carpet: grass 1.3, fruit 0.72, plankton
     // 0.84, gnats 0.5 units per tick.
     const groups = [];
+    // A patch withers when it is eaten down (below wither of its full amount) or its
+    // season ends, and sprouts small somewhere new in its band, so eaters must follow it.
+    const patchList = [];
     function patches(kind, n, per, cap, total, spanLo, spanHi, y0, y1, drift) {
-      const regrow = total / (n * per);
+      const regrow = (T.plantRate * total) / (n * per);
       for (let k = 0; k < n; k++) {
-        const cx = (k + 0.15 + 0.7 * rnd()) * (WORLD_W / n), span = spanLo + rnd() * (spanHi - spanLo);
-        const grp = drift ? { vx: (rnd() - 0.5) * 0.3, vy: 0, cy: y0 + rnd() * (y1 - y0) } : null;
-        if (grp) groups.push(grp);
+        const P = { kind, items: [], cx: (k + 0.15 + 0.7 * rnd()) * (WORLD_W / n), span: 0, y0, y1, spanLo, spanHi, grp: null, until: 0, moves: 0 };
+        if (drift) { P.grp = { vx: (rnd() - 0.5) * 0.3, cy: 0 }; groups.push(P.grp); }
         for (let i = 0; i < per; i++) {
-          const y = grp ? Math.min(y1, Math.max(y0, grp.cy + (rnd() - 0.5) * 50)) : y0 + rnd() * (y1 - y0);
-          addFood(kind, wrapX(cx + (rnd() - 0.5) * span), y, cap, regrow, false);
-          food[food.length - 1].grp = grp;
+          addFood(kind, 0, y0, cap, regrow, false);
+          const f = food[food.length - 1];
+          f.grp = P.grp; f.patch = P;
+          P.items.push(f);
         }
+        placePatch(P, P.cx, 0.4 + 0.6 * rnd());
+        P.until = stats.tick + T.season[0] * rnd() + T.season[0]; // stagger the first seasons
+      }
+    }
+    function placePatch(P, cx, fill) {
+      P.cx = wrapX(cx);
+      P.span = P.spanLo + rnd() * (P.spanHi - P.spanLo);
+      if (P.grp) P.grp.cy = P.y0 + rnd() * (P.y1 - P.y0);
+      for (const f of P.items) {
+        f.x = wrapX(P.cx + (rnd() - 0.5) * P.span);
+        f.y = P.grp ? Math.min(P.y1, Math.max(P.y0, P.grp.cy + (rnd() - 0.5) * 50)) : P.y0 + rnd() * (P.y1 - P.y0);
+        f.band = bandOf(f.y);
+        f.amt = f.cap * fill;
+      }
+      P.born = stats.tick;
+      P.until = stats.tick + T.season[0] + rnd() * (T.season[1] - T.season[0]);
+    }
+    function reformPatches() {
+      for (const P of patchList) {
+        let amt = 0, cap = 0;
+        for (const f of P.items) { amt += f.amt; cap += f.cap; }
+        if (P.grp) P.cx = wrapX(P.cx + P.grp.vx * 25);
+        if (stats.tick < P.until && (amt > T.wither * cap || stats.tick - P.born < T.grace)) continue;
+        const [lo, hi] = T.reformAway;
+        const cx = P.cx + (rnd() < 0.5 ? -1 : 1) * (lo + rnd() * (hi - lo));
+        placePatch(P, cx, T.sprout);
+        P.moves++; stats.reformed++;
       }
     }
     patches('grass', 8, 13, 6, 1.3, 120, 240, 340, 395, false);
     patches('fruit', 7, 9, 5, 0.72, 90, 180, 205, 315, false);
     patches('plankton', 7, 10, 5, 0.84, 60, 120, 410, 590, true);
     patches('gnats', 6, 8, 4, 0.5, 50, 100, 15, 180, true);
+    for (const f of food) if (f.patch && !patchList.includes(f.patch)) patchList.push(f.patch);
 
     // ---------------------------------------------------------------- yumon
     function spawn(sp, genes, x, y, mother, father) {
@@ -384,10 +423,16 @@
       const t = a.t, mask = maskOf(t), R = t.sense * (a.sleeping ? 0.35 : 1), myBand = bandOf(a.y);
       const fertile = isFertile(a);
       let threat = null, td = Infinity, prey = null, pdist = Infinity, mate = null, mdist = Infinity, kin = 0, kx = 0, ky = 0;
-      near(grid, a.x, a.y, R, (o) => {
+      // Mating calls carry farther than sight: a fertile Yumon hears fertile mates of its
+      // species out to call x its sense radius.
+      const RC = fertile && !a.sleeping ? R * T.call : R;
+      near(grid, a.x, a.y, RC, (o) => {
         if (o === a || !o.alive) return;
         const dx = dxw(a.x, o.x), dy = o.y - a.y, d = Math.hypot(dx, dy);
-        if (d > R) return;
+        if (d > R) {
+          if (d <= RC && o.sp === a.sp && o.sex !== a.sex && d < mdist && isFertile(o)) { mate = o; mdist = d; }
+          return;
+        }
         if (o.sp === a.sp) {
           if (d < 0.6 * R) { kin++; kx += dx; ky += dy; }
           if (fertile && o.sex !== a.sex && isFertile(o) && d < mdist) { mate = o; mdist = d; }
@@ -420,7 +465,7 @@
       x[13] = refuge;
       x[14] = fd ? bucket(fdist, R, t.r + 6) : 0;
       x[15] = prey ? bucket(pdist, R, contact(prey)) : 0;
-      x[16] = mate ? bucket(mdist, R, contact(mate)) : 0;
+      x[16] = mate ? bucket(mdist, RC, contact(mate)) : 0;
       x[17] = Math.min(3, kin);
       x[18] = a.s.caps.has('camo') ? 1 : 0;
       x[19] = a.s.caps.has('social') ? 1 : 0;
@@ -706,6 +751,7 @@
     }
 
     function plants() {
+      if (moving && stats.tick % 25 === 0) reformPatches();
       for (const g of groups) if (rnd() < 0.002) g.vx = (rnd() - 0.5) * 0.3;
       for (let i = food.length - 1; i >= 0; i--) {
         const f = food[i];

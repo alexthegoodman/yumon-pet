@@ -277,4 +277,13 @@ Second pass (Nov 8): founders spawn in mixed-sex groups of 2-3 at random x (star
 grow in patches (meadows, groves, drifting blooms/swarms; same total regrowth), and a sampled
 option is kept 12 ticks (`T.commit`) unless its probability falls under 5% (learning is per
 decision, gamma 0.85). Switches 12 -> 5 per 100 ticks; p90 travel 120 -> 180 units per 500 ticks.
+Third pass (Nov 8): plant patches wither (eaten below 10% or season 2,000-4,000 ticks over)
+and sprout at 35% full 150-450 units along their band (`reformPatches`, T.season/wither/
+sprout/reformAway/grace); plants x1.25 (`T.plantRate`); mating calls let fertile Yumon hear
+mates at 2.5x sense radius (`T.call`). Median travel 41-48 -> 48-67 per 500 ticks; species
+alive at 10k: 5-9 (fixed patches: 10-12).
+Diet setups (Nov 8): `createPark` options `diets` (mixed | hunters | carnivores),
+`movingPatches`, `tune` (per-park copy of DEFAULTS). All carnivores go extinct by tick 5,000 (no
+energy source); all hunters keep 5-8 species, 158-304 Yumon at 10k. The page has an Ecosystem
+setup tab with Save & restart (settings in localStorage). harness.js reads `PARK_SETUP` JSON.
 
