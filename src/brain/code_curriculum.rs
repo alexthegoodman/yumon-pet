@@ -298,13 +298,24 @@ fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<(Prepa
             metadata.seed == config.seed,
             "cache seed differs from config"
         );
-        let samples = sample_cache::load_cache_with_objective(
+        let mut samples = sample_cache::load_cache_with_objective(
             &config.cache,
             tokenizer,
             TrainingStage::Language,
             config.max_seq_len,
             metadata.objective,
         )?;
+        if config.drop_hardest_deciles > 0 {
+            ensure!(metadata.order.is_some(),
+                "drop_hardest_deciles needs a difficulty-sorted cache (cache_yumon_talk --order difficulty)");
+            let n = samples.len();
+            let mut keep = n * (10 - config.drop_hardest_deciles) / 10;
+            // DPO pairs (chosen, rejected) stay together.
+            if metadata.objective == CacheObjective::DpoPreference { keep -= keep % 2; }
+            samples.truncate(keep);
+            println!("Dropped the {} hardest difficulty deciles: kept {keep} of {n} samples",
+                config.drop_hardest_deciles);
+        }
         let held_out = code_corpus::validation_files(&samples, config)?;
         let (validation, training) = samples.into_iter().partition(|s| held_out.contains(&s.pair.0));
         return Ok((PreparedCode {
@@ -318,7 +329,8 @@ fn prepare_code(config: &CodeConfig, tokenizer: &TokenizerKind) -> Result<(Prepa
             objective: metadata.objective,
             shuffle: config.shuffle.unwrap_or(metadata.order.is_none()),
             identity: json!({"mode": "full-cache", "cache": metadata, "seed": config.seed,
-                "validation_fraction": config.validation_fraction}),
+                "validation_fraction": config.validation_fraction,
+                "drop_hardest_deciles": config.drop_hardest_deciles}),
         }, held_out));
     };
     use super::code_data::{self, Kind, TIERS};

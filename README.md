@@ -29,6 +29,10 @@ cargo run --release --bin build_kilo_vocab
 cargo run --release --bin cache_yumon_talk -- --vocab training-cache/kilo_talk_vocab.json --output training-cache/kilo_talk_samples.bin --max-seq-len 1024 --force
 ```
 
+The cache is sorted easiest first and prints mean features per difficulty decile.
+To train without the hardest deciles, set `"drop_hardest_deciles": 2` in the training
+config (keeps the easiest 80%, before the validation split; run names gain `_drophard2`).
+
 #### 4. Refresh the n-gram decompressor
 ```sh
 cargo run --release --bin build_decompressor

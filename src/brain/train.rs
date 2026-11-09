@@ -564,6 +564,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                     "_yumon_talk_v1".to_owned()
                 } else { String::new() })
                 + &config.overfit_samples.map_or(String::new(), |n| format!("_overfit{n}"))
+                + &if config.drop_hardest_deciles > 0 { format!("_drophard{}", config.drop_hardest_deciles) } else { String::new() }
                 // Separate directories so A/B/C/D experiments never resume each other.
                 + &config.adaptive_loss.as_ref().map_or(String::new(), |a| format!("_alw_{}", a.effective_mode().tag()))
                 + &config.kv_heads.filter(|&kv| kv != config.attn_heads).map_or(String::new(), |kv| format!("_gqa{kv}"))

@@ -135,6 +135,10 @@ pub struct CodeConfig {
     /// Johnson-Lindenstrauss projection experiment (docs/JL.md); architecture
     /// "decoder-only" only. `{"site": "none"}` is the baseline arm.
     pub jl: Option<super::jl::JlConfig>,
+    /// Drop this many of the hardest difficulty deciles (0-9) from a
+    /// difficulty-sorted cache before the validation split, e.g. 2 keeps the
+    /// easiest 80% (the deciles `cache_yumon_talk` prints). 0 keeps everything.
+    pub drop_hardest_deciles: usize,
 }
 
 impl Default for CodeConfig {
@@ -159,7 +163,7 @@ impl Default for CodeConfig {
             token_embed_dim: None,
             router: None,
             experts: None,
-            mamba: None, shuffle: None, jl: None,
+            mamba: None, shuffle: None, jl: None, drop_hardest_deciles: 0,
         }
     }
 }
@@ -236,6 +240,9 @@ impl CodeConfig {
         if let Some(init) = &self.init_checkpoint {
             ensure!(init.exists(), "init_checkpoint path does not exist: {}", init.display());
         }
+        ensure!(self.drop_hardest_deciles < 10, "drop_hardest_deciles must be 0-9");
+        ensure!(self.drop_hardest_deciles == 0 || self.curriculum.is_none(),
+            "drop_hardest_deciles applies to a difficulty-sorted cache, not a curriculum");
         if let Some(jl) = &self.jl {
             ensure!(self.architecture == CodeArchitecture::DecoderOnly, "jl requires architecture \"decoder-only\"");
             jl.validate(self.embed_dim, self.attn_heads, self.n_layers)?;

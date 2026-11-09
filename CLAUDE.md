@@ -130,7 +130,9 @@ surprisal) and complexity (clause punctuation + slot/name/num tokens),
 together. `sample_order.rs` holds the scoring. The cache header gets
 `order: "difficulty-v1"`, and full-cache configs then train in cache order every
 epoch with no shuffle (`PreparedCode.shuffle`); config `"shuffle": true/false`
-overrides. Rebuild caches to use it.
+overrides. Rebuild caches to use it. Config `drop_hardest_deciles: k` (0-9, 2026-11-09)
+truncates a sorted cache to its easiest (10-k)/10 before the validation split (pairs kept
+whole); run names gain `_drophard<k>`, and val loss is then not comparable to unfiltered runs.
 
 WIR v0 (2026-11-06): `wir/` is a standalone crate (own `[workspace]`, serde_json
 only, not part of the yumon-pet build) with the reference compiler and decompiler
