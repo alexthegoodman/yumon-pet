@@ -219,6 +219,20 @@ impl Graph {
         if hi <= 0.0 {
             return Affine::default();
         }
+        self.relu_node(a, line)
+    }
+
+    /// One hidden unit holding `a` even where relu cannot bend: relu(a - lo) + lo. Later
+    /// layers then carry this one value instead of the nodes it reads (packed carries).
+    pub fn unit(&mut self, a: &Affine, line: usize) -> Option<Affine> {
+        let (lo, _) = self.range_of(a);
+        if a.terms.is_empty() {
+            return Some(a.clone());
+        }
+        lo.is_finite().then(|| self.relu_node(&a.plus(-lo), line).plus(lo))
+    }
+
+    fn relu_node(&mut self, a: &Affine, line: usize) -> Affine {
         let s = a.terms.values().fold(f64::INFINITY, |m, v| m.min(v.abs()));
         let unit = a.scale(1.0 / s);
         let key: Vec<u64> = unit.terms.iter().flat_map(|(&n, v)| [n as u64, v.to_bits()]).chain([unit.c.to_bits()]).collect();
@@ -1045,6 +1059,10 @@ impl Cursor<'_> {
         Ok(match f {
             "relu" => { arity(1)?; g.relu(&args[0], line) }
             "abs" => { arity(1)?; g.abs(&args[0], line) }
+            "unit" => {
+                arity(1)?;
+                g.unit(&args[0], line).ok_or_else(|| self.err("unit needs a value with a lower bound"))?
+            }
             "step" => { arity(1)?; g.step(&args[0], line) }
             "not" => { arity(1)?; args[0].scale(-1.0).plus(1.0) }
             "max" | "min" => {
