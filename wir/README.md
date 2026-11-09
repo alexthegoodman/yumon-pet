@@ -201,6 +201,9 @@ The check compares the networks with the rule on random inputs, then runs arenas
 networks and rule in lockstep, and reports behaviour (retreat to cover when hurt or
 empty, step-and-reverse moves, spread around the player).
 
+The WIR Skirmish page lives in `demos/tactics/` (`skirmish_template.html`, the page with a
+`__DATA__` slot): `python demos/tactics/build.py demo.json skirmish.html`.
+
 ### Yumon Ant
 
 `wir ant` writes an ant's **sense** grid program (5 field grades, blocked headings, fear
@@ -233,6 +236,38 @@ python demos/park/build.py park_demo.json yumon-park.html
 node demos/park/harness.js 10000 learn|nolearn|mixed 1 park_demo.json
 ```
 
+### Superposition: `wir superpose-choice-layer`
+
+For **choice programs** (features, then key groups affine in them, then the largest key of
+each group wins or is sampled): squeezes the listed features through **one layer** of N
+shared neurons with no training. The encoder is weighted PCA (closed form), and the decoder
+is solved by one linear program (`microlp`) whose constraints are the choices: every
+group's winner leads by `--margin` (default 1, which keeps compiled `gt`/`ge` bits exact),
+or with `--preserve values` every key's value (for keys a host samples from). The tool
+reads each key's coefficient on each feature from the program itself, writes the
+bottleneck after the last feature, rewrites the keys to read the decoded features, adds
+renamed copies of lets in between (other readers keep exact values), and prints a
+certificate checked on every state. It fits the ant, fish/bird, grunt/rusher/sniper and
+park brains. Grid programs, Pong, path and fluid are exact-value programs and are rejected
+or out of scope. Background and colony results: `../docs/POLYSEMANTIC.md`, `../docs/WIR.md`
+"Superposition without training".
+
+```
+node scripts/superpose/colony.js ant_demo.json - 10000 7 ant_probe.json   # record states
+cargo run --release -- superpose-choice-layer examples/ant_brain.wir \
+  --features home,forage,dig,dump,help,lost,hungry,workem,carrying,grip \
+  --keys tkey0..tkey6 --keys ekey0..ekey6 --neurons 6 --states ant_probe.json \
+  -o examples/ant_brain_choice6.wir
+cargo run --release -- ant --export ant_demo.json --variant "Superposed, 6 neurons=examples/ant_brain_choice6.wir"
+```
+
+States come from `--states probe.json` (`inputs` [N][D], optional `weights` [N]) or
+`--sample N` (uniform over the declared input intervals, reachable or not). `--weight
+name=f` counts states where a let is on f times more, `--fidelity` (default 1e-4) keeps
+keys near their values so the decoded features keep their meaning, `--digits` sets the
+written precision. `wir ant` and `wir park` take `--variant label=brain.wir` (repeatable)
+to add brains to the page's brain selector.
+
 ## Library
 
 ```rust
@@ -257,11 +292,14 @@ let text = wir::print(&p, wir::NumFormat::CANONICAL);      // or NumFormat::EXAC
 - Tolerances are relative with a floor of 1 (`Tolerances`): dead weight/coeff
   1e-9, merge 1e-7, sort grid 1e-6; asserts and `solve` residuals 1e-6.
 - Rational snapping: within 1e-9 relative of p/q, q <= 16, |x| <= 1e6.
+- `unit(x)` (0.2): always one hidden unit holding x, `relu(x - lo) + lo`, even where interval
+  analysis would fold a relu away. Later layers then carry that one neuron instead of the
+  values it reads (packed carries, superposition bottlenecks).
 
 ## Tests
 
 ```
-cargo test                      # 106 tests, ~60 s debug (fuzz and fluid are the slow ones)
+cargo test                      # 118 tests, ~60 s debug (fuzz and fluid are the slow ones)
 uv run --project ../python-train python scripts/interop.py   # NumPy 2.5 / PyTorch 2.14 cross-check
 ```
 
@@ -292,3 +330,6 @@ small-integer products (and the refusal of two wide factors), and the fear and i
 curves changing behaviour against their controls.
 `tests/ant.rs` covers the ant networks against the rule, holding beating every blocked
 heading, and roles choosing the task (a digger follows the dig field, a forager food).
+`tests/superpose.rs` covers `superpose-choice-layer`: a full-width layer keeping every key
+value, renamed copies for lets between features and keys, the certificate, and the refusals
+(a key reading a feature through a relu, a key before its feature).

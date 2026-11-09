@@ -1,7 +1,12 @@
 (function () {
   'use strict';
   const DATA = JSON.parse(document.getElementById('ant-data').textContent);
-  const sim = AntCore.createSim(DATA, { seed: 7, check: true, thinkEvery: 1 });
+  // Brain: the exact compiled rule, or a variant from `wir ant --variant` (e.g. a
+  // superposed brain from `wir superpose-choice-layer`); picked by #brain=N, page reloads.
+  const BRAINS = [{ label: 'Exact (the rule, compiled)', spec: DATA.brain }, ...(DATA.brains || []).map((b) => ({ label: b.label, spec: b }))];
+  const PICK = Math.max(0, Math.min(BRAINS.length - 1, +((/brain=(\d+)/.exec(location.hash) || [])[1] || 0)));
+  const BRAIN = BRAINS[PICK].spec;
+  const sim = AntCore.createSim(DATA, { seed: 7, check: true, thinkEvery: 1, brain: BRAIN });
   const C = DATA.consts;
   const $ = (id) => document.getElementById(id);
   const canvas = $('world'), ctx = canvas.getContext('2d');
@@ -273,8 +278,9 @@
     counts.forEach((n, i) => ($('em-n-' + i).textContent = n));
     const ch = sim.check;
     const bad = ch.sense + ch.brain + ch.path;
+    const shared = PICK > 0 ? ` This brain shares neurons between features, so some decisions are expected to differ (${(100 * ch.brain / Math.max(1, ch.decisions)).toFixed(2)}% so far).` : '';
     $('check-out').innerHTML = ch.decisions
-      ? `<span class="pill ${bad ? 'bad' : 'good'}">${bad ? bad + ' differences' : 'No differences'}</span> ${fmt(ch.decisions)} decisions and ${fmt(ch.cells)} field cells checked against the rule as plain code. One tick takes ${tickMs.toFixed(1)} ms here.`
+      ? `<span class="pill ${bad ? 'bad' : 'good'}">${bad ? bad + ' differences' : 'No differences'}</span> ${fmt(ch.decisions)} decisions and ${fmt(ch.cells)} field cells checked against the rule as plain code.${shared} One tick takes ${tickMs.toFixed(1)} ms here.`
       : `Check is off. One tick takes ${tickMs.toFixed(1)} ms here.`;
     $('colonies').innerHTML = sim.colonies.map((c) => `<li><span class="sw" style="background:hsl(${c.hue} 55% 45%)"></span><span>Colony ${c.id + 1}</span><span class="num">${c.alive ? `${c.pop ?? 0} ants, ${c.eggs.length} eggs, ${c.store} food${c.queen ? '' : ', no queen'}` : 'gone'}</span></li>`).join('');
   }
@@ -315,10 +321,14 @@
   $('nets').innerHTML = [
     ['Path step (one per field)', `${DATA.path.taps.length} taps, hidden ${DATA.path.hidden.join('-')}`, DATA.path.params, nz(DATA.path)],
     ['Senses (grid program)', `${DATA.sense.taps.length} taps, hidden ${DATA.sense.hidden.join('-')}`, DATA.sense.params, nz(DATA.sense)],
-    ['Brain', `${DATA.brain.inputs.length} inputs, ${DATA.brain.hidden.length} hidden layers`, DATA.brain.params, nz(DATA.brain)],
+    ['Brain', `${BRAIN.inputs.length} inputs, hidden ${BRAIN.hidden.join('-')}`, BRAIN.params, nz(BRAIN)],
   ].map(([n, shape, p, z]) => `<tr><th scope="row">${n}<small>${shape}</small></th><td class="num">${fmt(p)}</td><td class="num">${fmt(z)}</td></tr>`).join('');
   $('port').textContent = `This page's JavaScript copy of the rule matched ${port.sense}/${port.senseTotal} sense and ${port.brain}/${port.brainTotal} brain test vectors from the Rust reference before the colony started.`;
-  const sources = { brain: DATA.brain.source, sense: DATA.sense.source, path: DATA.path.source };
+  const sources = { brain: BRAIN.source, sense: DATA.sense.source, path: DATA.path.source };
+  const pickEl = $('brain-pick');
+  pickEl.innerHTML = BRAINS.map((b, i) => `<option value="${i}"${i === PICK ? ' selected' : ''}>${b.label}</option>`).join('');
+  pickEl.disabled = BRAINS.length < 2;
+  pickEl.addEventListener('change', () => { location.hash = 'brain=' + pickEl.value; location.reload(); });
   function showSource(k) {
     $('src').textContent = sources[k];
     document.querySelectorAll('[data-src]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.src === k)));

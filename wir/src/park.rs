@@ -260,7 +260,9 @@ pub fn park_check(cases: u64, seed: u64) -> Result<ParkCheck> {
 
 /// The brain (sparse layers, source), the constants, and test vectors (inputs with the
 /// rule's keys) for the page's JavaScript port of the rule.
-pub fn export_json(vectors: u64, seed: u64) -> Result<String> {
+/// `variants`: extra brains for the page's brain selector, `(label, wir source)` (see
+/// `superpose::variants_json`).
+pub fn export_json(vectors: u64, seed: u64, variants: &[(String, String)]) -> Result<String> {
     let net = ParkNet::compile()?;
     let mut rng = seed.max(1);
     let vs: Vec<serde_json::Value> = (0..vectors)
@@ -282,6 +284,7 @@ pub fn export_json(vectors: u64, seed: u64) -> Result<String> {
             "layers": sparse_layers(&net.brain),
             "source": brain_program(),
         },
+        "brains": crate::superpose::variants_json(variants, &net.brain.inputs, &net.brain.outputs)?,
         "vectors": vs,
     });
     Ok(serde_json::to_string(&v).unwrap())

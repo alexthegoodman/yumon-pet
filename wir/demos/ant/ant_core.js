@@ -40,7 +40,7 @@
     const C = data.consts;
     const CEIL = C.ceiling, HUN = C.hunger, STARV = C.starving, PECK = C.peckish, FAR = C.far;
     const KEEP = C.keep, KEEP_HOLD = C.keep_hold, BIG = C.big, HOLD_BONUS = C.hold_bonus, PULL = C.pull, RB = C.role_bonus;
-    const pathNet = makeNet(data.path), senseNet = makeNet(data.sense), brainNet = makeNet(data.brain);
+    const pathNet = makeNet(data.path), senseNet = makeNet(data.sense), brainNet = makeNet(opts.brain || data.brain);
     const pathTaps = data.path.taps, senseTaps = data.sense.taps;
     const BI = {}; data.brain.inputs.forEach((n, i) => (BI[n] = i));
     const BO = {}; data.brain.outputs.forEach((n, i) => (BO[n] = i));

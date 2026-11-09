@@ -41,7 +41,8 @@ let forage = select(fb, 5 - store + 2*old + 3*r1, 0) + select(fb2, min(hungry, 4
 let dig = select(and(free, kg, not(starving)), 4 - 2*old + 3*r0, 0)
 let dump = 6*and(cs, kn)
 let help = select(and(free, kh, not(starving)), 3 + 3*r2, 0)
-let explore = 3*or(idle, not(kn))
+let lost = or(idle, not(kn))
+let explore = 3*lost
 let flee = 8*scared
 
 # --- actions ---
@@ -51,6 +52,9 @@ output grip = and(or(gr, and(free, lp)), not(starving), not(scared))
 output drop = or(and(cf, zn), and(cs, zm))
 output eat = or(and(zn, hs, ge(hunger, 6)), and(cf, starving))
 let work = or(gr, pick, dig2, grip, drop, eat)
+# what the emote keys read, named so `wir superpose-choice-layer` can take them as features
+let workem = or(cs, dig2, and(free, kg))
+let carrying = cf
 
 # --- task: the strongest drive (ties to the lower index) ---
 let tkey0 = 7*home + 6
@@ -130,11 +134,11 @@ output o2_4 = and(not(w0_4), not(w1_4), not(w2_4), not(w3_4))
 # --- emote: the strongest feeling (ties to the lower index) ---
 let ekey0 = 7*(1) + 6
 let ekey1 = 7*(hungry) + 5
-let ekey2 = 7*(3*or(cs, dig2, and(free, kg))) + 4
-let ekey3 = 7*(4*cf) + 3
+let ekey2 = 7*(3*workem) + 4
+let ekey3 = 7*(4*carrying) + 3
 let ekey4 = 7*(5*grip) + 2
 let ekey5 = 7*(9*scared) + 1
-let ekey6 = 7*(2*or(idle, not(kn))) + 0
+let ekey6 = 7*(2*lost) + 0
 let ew0_1 = gt(ekey0, ekey1)
 let ew0_2 = gt(ekey0, ekey2)
 let ew0_3 = gt(ekey0, ekey3)

@@ -302,7 +302,7 @@
     const C = data.consts;
     const T = Object.assign({}, DEFAULTS, opts.tune || {}); // per park, so a restart starts clean
     const NOPT = C.options.length;
-    const brain = brainShape(data.brain);
+    const brain = brainShape(opts.brain || data.brain);
     const rnd = makeRng(opts.seed || 1);
     let learn = opts.learn !== false;
     const gauss = () => Math.sqrt(-2 * Math.log(1 - rnd())) * Math.cos(2 * Math.PI * rnd());
@@ -622,6 +622,7 @@
         const x = perceive(a);
         const M = models.get(a.id);
         const keys = Array.from(brain.forward(M.w, x));
+        if (opts.onDecide) opts.onDecide(a, x, keys);
         const rule = ruleKeys(x, C);
         a.keys = keys; a.rule = rule; a.x_in = x;
         const rb = argmax(rule), nb = argmax(keys);

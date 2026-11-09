@@ -38,7 +38,7 @@ use crate::num::{format_num, NumFormat};
 pub const VERSION: f64 = 0.2;
 
 pub const FUNCTIONS: &[&str] =
-    &["relu", "abs", "max", "min", "clip", "step", "gt", "ge", "lt", "le", "eq", "and", "or", "not", "select"];
+    &["relu", "abs", "unit", "max", "min", "clip", "step", "gt", "ge", "lt", "le", "eq", "and", "or", "not", "select"];
 const RESERVED: &[&str] = &["wir", "input", "let", "output", "assert", "conserve", "in"];
 
 // ---------------------------------------------------------------- weights
@@ -160,6 +160,11 @@ impl Affine {
 
     pub fn plus(&self, c: f64) -> Affine {
         Affine { terms: self.terms.clone(), c: self.c + c }
+    }
+
+    /// Value at node values `v` (from `Graph::eval`).
+    pub fn eval(&self, v: &[f64]) -> f64 {
+        eval_affine(self, v)
     }
 }
 
@@ -381,6 +386,14 @@ pub struct DeepProgram {
     pub grid: Option<GridSpec>,
     /// `conserve` statements, each proven while lowering.
     pub conserves: Vec<Conservation>,
+    /// Every let and output in program order, with its value.
+    pub names: Vec<(String, Affine)>,
+}
+
+impl DeepProgram {
+    pub fn named(&self, name: &str) -> Option<&Affine> {
+        self.names.iter().find(|(n, _)| n == name).map(|(_, a)| a)
+    }
 }
 
 /// A grid input: one channel of the field, with the value read outside the grid.
@@ -634,8 +647,26 @@ fn point_text(p: &[f64]) -> String {
 
 /// Parse and lower to the graph.
 pub fn lower(src: &str) -> Result<DeepProgram> {
+    lower_with(src, &[])
+}
+
+/// Name prefix of the inputs `lower_with` makes for symbolic lets.
+pub const SYMBOL: &str = "__sym_";
+
+/// `lower`, except that each let or output named in `symbols` is replaced by a fresh input
+/// (`__sym_<name>`, after the declared inputs, with the let's interval), so what reads it
+/// shows its exact coefficient on that symbol.
+pub fn lower_with(src: &str, symbols: &[String]) -> Result<DeepProgram> {
     let stmts = split_statements(src)?;
-    let mut prog = DeepProgram { inputs: vec![], outputs: vec![], graph: Graph::default(), asserts: vec![], grid: None, conserves: vec![] };
+    let mut prog = DeepProgram {
+        inputs: vec![],
+        outputs: vec![],
+        graph: Graph::default(),
+        asserts: vec![],
+        grid: None,
+        conserves: vec![],
+        names: vec![],
+    };
     let mut env: HashMap<String, Affine> = HashMap::new();
     let mut taps: HashMap<(usize, i64, i64), Affine> = HashMap::new();
     // Grid programs: where each let's expression starts (statement, token), so it can be
@@ -729,8 +760,17 @@ pub fn lower(src: &str) -> Result<DeepProgram> {
                     shifted: &mut shifted,
                     shift: (0, 0),
                 };
-                let v = p.expr(&mut sc)?;
+                let mut v = p.expr(&mut sc)?;
                 p.end()?;
+                if symbols.contains(&name) {
+                    if prog.grid.is_some() {
+                        return Err(p.err("symbolic lets are for scalar programs"));
+                    }
+                    let range = prog.graph.range_of(&v);
+                    v = prog.graph.input(prog.inputs.len(), range, s.line);
+                    prog.inputs.push((format!("{SYMBOL}{name}"), range));
+                }
+                prog.names.push((name.clone(), v.clone()));
                 if head == "output" {
                     prog.outputs.push((name.clone(), v.clone()));
                 }

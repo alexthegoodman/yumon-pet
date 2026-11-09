@@ -9,6 +9,7 @@ use wir::fluid::{self, FluidRule};
 use wir::swarm::{self, Species};
 use wir::ant;
 use wir::park;
+use wir::superpose::{self, ChoiceLayerSpec, Preserve};
 use wir::tactics::{self, Archetype};
 use wir::games::{self, PathRule, Pong};
 use wir::num::format_num;
@@ -62,14 +63,27 @@ usage:
                                         arenas; reports behaviour (the --no-* controls
                                         zero one part of every archetype)
   wir ant [--out DIR] [--cases 200000] [--seed 1] [--export demo.json] [--vectors 256]
+          [--variant label=brain.wir ..]
                                         generate the Yumon Ant programs (a sense grid
                                         program and a utility brain with action bits
                                         and an emote), checked with the 4-move path
                                         step on random inputs against the rule
   wir park [--out DIR] [--cases 200000] [--seed 1] [--export demo.json] [--vectors 256]
+           [--variant label=brain.wir ..]
                                         generate the Yumon Park brain (one utility
                                         program for every species, 8 option keys),
                                         checked on random inputs against the rule
+  wir superpose-choice-layer <file.wir> --features a,b,.. --keys k0..k6 [--keys ..]
+           --neurons N (--states probe.json | --sample N) [--seed 1]
+           [--preserve winner|values] [--margin 1] [--fidelity 0.0001] [--digits 4]
+           [--weight name=f ..]
+           [-o out.wir]
+                                        squeeze the features a choice program's key
+                                        groups read through one layer of N shared
+                                        neurons (PCA encoder, decoder from one linear
+                                        program, no training) and print a certificate
+                                        checked on every state; probe `inputs` [N][D],
+                                        optional `weights` [N]
 
 Weights use PyTorch nn.Linear layout: W1 [H, D], b1 [H], W2 [O, H], b2 [O]; SwiGLU
 networks add W3 [H, D], b3 [H]. --domain drops creases never active on the probe's
@@ -152,6 +166,7 @@ fn main() -> ExitCode {
         "tactics" => cmd_tactics(rest),
         "ant" => cmd_ant(rest),
         "park" => cmd_park(rest),
+        "superpose-choice-layer" => cmd_superpose_choice_layer(rest),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
@@ -512,7 +527,7 @@ fn cmd_swarm(raw: &[String]) -> Result<(), String> {
 }
 
 fn cmd_ant(raw: &[String]) -> Result<(), String> {
-    let valued = ["--out", "--cases", "--seed", "--export", "--vectors"];
+    let valued = ["--out", "--cases", "--seed", "--export", "--vectors", "--variant"];
     let args = Args::parse(raw, &valued)?;
     args.check(&valued)?;
     let int = |k: &str, d: i64| -> Result<i64, String> { args.get(k).map_or(Ok(d), |v| v.parse().map_err(|_| format!("bad {k} `{v}`"))) };
@@ -538,7 +553,7 @@ fn cmd_ant(raw: &[String]) -> Result<(), String> {
         }
     }
     if let Some(out) = args.get("--export") {
-        let json = ant::export_json(int("--vectors", 256)? as u64, int("--seed", 1)? as u64 + 7).map_err(|e| e.to_string())?;
+        let json = ant::export_json(int("--vectors", 256)? as u64, int("--seed", 1)? as u64 + 7, &variants(&args)?).map_err(|e| e.to_string())?;
         std::fs::write(out, json).map_err(|e| format!("{out}: {e}"))?;
         eprintln!("wrote {out}");
     }
@@ -546,7 +561,7 @@ fn cmd_ant(raw: &[String]) -> Result<(), String> {
 }
 
 fn cmd_park(raw: &[String]) -> Result<(), String> {
-    let valued = ["--out", "--cases", "--seed", "--export", "--vectors"];
+    let valued = ["--out", "--cases", "--seed", "--export", "--vectors", "--variant"];
     let args = Args::parse(raw, &valued)?;
     args.check(&valued)?;
     let int = |k: &str, d: i64| -> Result<i64, String> { args.get(k).map_or(Ok(d), |v| v.parse().map_err(|_| format!("bad {k} `{v}`"))) };
@@ -565,7 +580,7 @@ fn cmd_park(raw: &[String]) -> Result<(), String> {
         eprintln!("wrote {}", path.display());
     }
     if let Some(out) = args.get("--export") {
-        let json = park::export_json(int("--vectors", 256)? as u64, int("--seed", 1)? as u64 + 7).map_err(|e| e.to_string())?;
+        let json = park::export_json(int("--vectors", 256)? as u64, int("--seed", 1)? as u64 + 7, &variants(&args)?).map_err(|e| e.to_string())?;
         std::fs::write(out, json).map_err(|e| format!("{out}: {e}"))?;
         eprintln!("wrote {out}");
     }
@@ -976,5 +991,124 @@ fn cmd_verify(raw: &[String]) -> Result<(), String> {
         return Err(format!("max |diff| {max_abs:.3e} exceeds tolerance {tol:.0e}"));
     }
     println!("ok (tolerance {tol:.0e})");
+    Ok(())
+}
+
+/// `--variant label=file.wir` flags: extra brains for a demo page's brain selector.
+fn variants(args: &Args) -> Result<Vec<(String, String)>, String> {
+    args.flags
+        .iter()
+        .filter(|(k, _)| k == "--variant")
+        .map(|(_, v)| {
+            let v = v.as_deref().unwrap_or("");
+            let (label, path) = v.split_once('=').ok_or(format!("--variant takes label=file.wir, not `{v}`"))?;
+            Ok((label.trim().to_string(), read(&PathBuf::from(path.trim()))?))
+        })
+        .collect()
+}
+
+/// `a,b,c` with `name3..name6` ranges expanded.
+fn name_list(text: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        match part.split_once("..") {
+            Some((a, b)) => {
+                let split = |s: &str| -> Option<(String, u32)> {
+                    let d = s.len() - s.chars().rev().take_while(|c| c.is_ascii_digit()).count();
+                    Some((s[..d].to_string(), s[d..].parse().ok()?))
+                };
+                let ((pa, ia), (pb, ib)) = (split(a).ok_or(format!("bad range `{part}`"))?, split(b).ok_or(format!("bad range `{part}`"))?);
+                if pa != pb || ib < ia {
+                    return Err(format!("bad range `{part}` (write name0..name6)"));
+                }
+                out.extend((ia..=ib).map(|i| format!("{pa}{i}")));
+            }
+            None => out.push(part.to_string()),
+        }
+    }
+    Ok(out)
+}
+
+fn cmd_superpose_choice_layer(raw: &[String]) -> Result<(), String> {
+    let valued = ["-o", "--features", "--keys", "--neurons", "--states", "--sample", "--seed", "--preserve", "--margin", "--digits", "--weight", "--fidelity"];
+    let args = Args::parse(raw, &valued)?;
+    args.check(&valued)?;
+    let path = args.file("input .wir file")?;
+    let src = read(&path)?;
+    let need = |k: &str| args.get(k).ok_or(format!("missing {k}"));
+    let num = |k: &str, d: f64| -> Result<f64, String> { args.get(k).map_or(Ok(d), |v| v.parse().map_err(|_| format!("bad {k} `{v}`"))) };
+    let features = name_list(need("--features")?)?;
+    let groups: Vec<Vec<String>> =
+        args.flags.iter().filter(|(k, _)| k == "--keys").map(|(_, v)| name_list(v.as_deref().unwrap_or(""))).collect::<Result<_, _>>()?;
+    if groups.is_empty() {
+        return Err("missing --keys (one per key group)".into());
+    }
+    let preserve = match args.get("--preserve").unwrap_or("winner") {
+        "winner" => Preserve::Winner { margin: num("--margin", 1.0)? },
+        "values" => Preserve::Values,
+        other => return Err(format!("--preserve is winner or values, not `{other}`")),
+    };
+    let weights = args
+        .flags
+        .iter()
+        .filter(|(k, _)| k == "--weight")
+        .map(|(_, v)| {
+            let v = v.as_deref().unwrap_or("");
+            let (n, f) = v.split_once('=').ok_or(format!("--weight takes name=factor, not `{v}`"))?;
+            Ok((n.trim().to_string(), f.trim().parse::<f64>().map_err(|_| format!("bad --weight factor `{f}`"))?))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let spec = ChoiceLayerSpec {
+        features,
+        groups,
+        neurons: num("--neurons", 0.0)? as usize,
+        preserve,
+        digits: num("--digits", 4.0)? as usize,
+        weights,
+        fidelity: num("--fidelity", 0.0001)?,
+    };
+    let t = std::time::Instant::now();
+    let states: Vec<superpose::State> = match (args.get("--states"), args.get("--sample")) {
+        (Some(p), None) => {
+            let p = Path::new(p);
+            let inputs = probe_inputs(p)?;
+            let v: serde_json::Value = serde_json::from_str(&read(&p.to_path_buf())?).map_err(|e| e.to_string())?;
+            let w: Vec<f64> = match v["weights"].as_array() {
+                Some(a) => a.iter().map(|x| x.as_f64().ok_or("`weights` must be numbers".to_string())).collect::<Result<_, _>>()?,
+                None => vec![1.0; inputs.len()],
+            };
+            if w.len() != inputs.len() {
+                return Err(format!("{}: {} inputs but {} weights", p.display(), inputs.len(), w.len()));
+            }
+            inputs.into_iter().zip(w).collect()
+        }
+        (None, Some(n)) => superpose::sample_states(&src, n.parse().map_err(|_| format!("bad --sample `{n}`"))?, num("--seed", 1.0)? as u64)
+            .map_err(|e| e.to_string())?,
+        _ => return Err("give exactly one of --states probe.json or --sample N".into()),
+    };
+    let r = superpose::choice_layer(&src, &spec, &states).map_err(|e| e.to_string())?;
+    eprintln!("{} states ({} distinct for the solve); encoder keeps {:.1}% of the feature variance", r.states, r.distinct, 100.0 * r.variance_kept);
+    for g in &r.groups {
+        eprintln!(
+            "  keys {}..{}: winner kept {:.3}%, mean |key diff| {:.3}, max {:.2}",
+            g.keys[0],
+            g.keys[g.keys.len() - 1],
+            100.0 * g.winner_kept,
+            g.mean_abs,
+            g.max_abs
+        );
+    }
+    if r.certified.is_finite() {
+        eprintln!("  certified (every winner kept, lead >= margin): {:.3}% of weighted states", 100.0 * r.certified);
+    }
+    eprintln!("  all outputs unchanged: {:.3}% of weighted states", 100.0 * r.outputs_kept);
+    eprintln!("hidden {:?}, {} params -> hidden {:?}, {} params ({:.1} s)", r.before.0, r.before.1, r.after.0, r.after.1, t.elapsed().as_secs_f64());
+    match args.get("-o") {
+        Some(out) => {
+            std::fs::write(out, &r.source).map_err(|e| format!("{out}: {e}"))?;
+            eprintln!("wrote {out}");
+        }
+        None => print!("{}", r.source),
+    }
     Ok(())
 }

@@ -2,11 +2,15 @@
   'use strict';
   const DATA = JSON.parse(document.getElementById('park-data').textContent);
   // Ecosystem setup: saved per viewer, applied by Save & restart.
-  const DEFAULT_SETUP = { seed: 11, species: 30, diets: 'mixed', plantRate: 1.25, moving: true, call: 2.5, learn: true, lr: 0.003, evolution: 'default', killR: 3 };
+  const DEFAULT_SETUP = { seed: 11, species: 30, diets: 'mixed', plantRate: 1.25, moving: true, call: 2.5, learn: true, lr: 0.003, evolution: 'default', killR: 3, brain: 0 };
+  // Brains: the exact compiled rule, or variants from `wir park --variant` (e.g. superposed
+  // brains from `wir superpose-choice-layer`).
+  const BRAINS = [{ label: 'Exact (the rule, compiled)', spec: DATA.brain }, ...(DATA.brains || []).map((b) => ({ label: b.label, spec: b }))];
+  const brainOf = (st) => BRAINS[Math.max(0, Math.min(BRAINS.length - 1, st.brain | 0))];
   const EVOLUTION = { gentle: { mutSmall: 0.02, mutBig: 0.08, capRate: 0.02 }, default: { mutSmall: 0.03, mutBig: 0.15, capRate: 0.06 }, wild: { mutSmall: 0.05, mutBig: 0.25, capRate: 0.15 } };
   let setup = { ...DEFAULT_SETUP };
   try { setup = { ...DEFAULT_SETUP, ...JSON.parse(localStorage.getItem('yumon-park-setup') || '{}') }; } catch (e) { /* storage blocked: defaults */ }
-  const makeSim = (st) => ParkCore.createPark(DATA, { seed: st.seed, species: st.species, diets: st.diets, movingPatches: st.moving, learn: st.learn,
+  const makeSim = (st) => ParkCore.createPark(DATA, { seed: st.seed, species: st.species, diets: st.diets, movingPatches: st.moving, learn: st.learn, brain: brainOf(st).spec,
     tune: { plantRate: st.plantRate, call: st.call, lr: st.lr, killR: st.killR, ...(EVOLUTION[st.evolution] || EVOLUTION.default) } });
   let sim = makeSim(setup);
   const C = DATA.consts;
@@ -410,10 +414,13 @@
   // static cards
   function renderStatic() {
   $('caps').innerHTML = sim.CAPS.map((c) => `<div><span class="chip k-${c.kind}">${esc(c.label)}</span><span class="muted" style="font-size:12px">${c.limb || (c.food ? c.food : 'mind')}</span><span class="num">${sim.species.filter((s) => s.caps.has(c.id) && (s.alive || !s.parent)).length}</span></div>`).join('');
-  $('src').textContent = DATA.brain.source;
-  $('net').textContent = `${DATA.brain.inputs.length} inputs, hidden ${JSON.stringify(DATA.brain.hidden)}, ${fmt(DATA.brain.params)} weights (${(DATA.brain.params * 4 / 1024).toFixed(1)} KB as float32)`;
+  const B = brainOf(setup);
+  $('src').textContent = B.spec.source;
+  $('net').textContent = `${B.label}: ${B.spec.inputs.length} inputs, hidden ${JSON.stringify(B.spec.hidden)}, ${fmt(B.spec.params)} weights (${(B.spec.params * 4 / 1024).toFixed(1)} KB as float32)`;
   const port = sim.verifyPort();
-  $('port').textContent = `Checked on load: the compiled weights and this page's copy of the rule give the Rust rule's keys on all ${port.vectors} test vectors (${port.netMismatches + port.ruleMismatches} differences). The cache holds one brain per living Yumon: a copy (current weights) plus the weights it was born with.`;
+  $('port').textContent = setup.brain > 0
+    ? `Checked on load: this page's copy of the rule gives the Rust rule's keys on all ${port.vectors} test vectors (${port.ruleMismatches} differences). This brain shares neurons between features, so its keys are close to the rule's but not equal (${port.netMismatches} of ${port.vectors} vectors differ by more than 1e-6). The cache holds one brain per living Yumon: a copy (current weights) plus the weights it was born with.`
+    : `Checked on load: the compiled weights and this page's copy of the rule give the Rust rule's keys on all ${port.vectors} test vectors (${port.netMismatches + port.ruleMismatches} differences). The cache holds one brain per living Yumon: a copy (current weights) plus the weights it was born with.`;
 
   }
 
@@ -423,13 +430,15 @@
     $('set-plants').value = String(st.plantRate); $('set-moving').value = st.moving ? 'moving' : 'fixed';
     $('set-call').value = String(st.call); $('set-learn').checked = st.learn; $('set-lr').value = String(st.lr);
     $('set-evo').value = st.evolution; $('set-kill').value = String(st.killR);
+    $('set-brain').innerHTML = BRAINS.map((b, i) => `<option value="${i}">${esc(b.label)}</option>`).join('');
+    $('set-brain').value = String(BRAINS.indexOf(brainOf(st)));
     dietNote();
   }
   function readSetup() {
     const n = (id, lo, hi, d) => { const v = Math.round(+$(id).value); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : d; };
     return { seed: n('set-seed', 1, 999999, 11), species: n('set-species', 8, 40, 30), diets: $('set-diets').value, plantRate: +$('set-plants').value,
       moving: $('set-moving').value === 'moving', call: +$('set-call').value, learn: $('set-learn').checked, lr: +$('set-lr').value,
-      evolution: $('set-evo').value, killR: +$('set-kill').value };
+      evolution: $('set-evo').value, killR: +$('set-kill').value, brain: +$('set-brain').value || 0 };
   }
   const DIET_NOTES = {
     mixed: 'Half the species eat only plants, a quarter are omnivores, a quarter hunt. In headless runs with learning, 6-27 species were alive at tick 10,000 (most of them evolved in the park), and on one seed the omnivores ate every plant eater.',
@@ -439,7 +448,7 @@
   function dietNote() { $('diet-note').textContent = DIET_NOTES[$('set-diets').value]; }
   $('set-diets').addEventListener('change', dietNote);
   function describe(st) {
-    return `Seed ${st.seed} · ${st.species} species · ${{ mixed: 'mixed diets', hunters: 'all hunters', carnivores: 'all carnivores' }[st.diets]} · plants ${st.plantRate}x · ${st.moving ? 'moving' : 'fixed'} patches · mating calls ${st.call}x · learning ${st.learn ? 'on (' + st.lr + ')' : 'off'} · kill reward ${st.killR} · ${st.evolution} evolution`;
+    return `Seed ${st.seed} · ${st.species} species · ${{ mixed: 'mixed diets', hunters: 'all hunters', carnivores: 'all carnivores' }[st.diets]} · plants ${st.plantRate}x · ${st.moving ? 'moving' : 'fixed'} patches · mating calls ${st.call}x · learning ${st.learn ? 'on (' + st.lr + ')' : 'off'} · kill reward ${st.killR} · ${st.evolution} evolution${st.brain > 0 ? ' · ' + brainOf(st).label : ''}`;
   }
   function restart(st) {
     setup = st;

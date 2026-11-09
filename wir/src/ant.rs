@@ -444,7 +444,8 @@ let forage = select(fb, 5 - store + 2*old + {rb}*r1, 0) + select(fb2, min(hungry
 let dig = select(and(free, kg, not(starving)), 4 - 2*old + {rb}*r0, 0)
 let dump = 6*and(cs, kn)
 let help = select(and(free, kh, not(starving)), 3 + {rb}*r2, 0)
-let explore = 3*or(idle, not(kn))
+let lost = or(idle, not(kn))
+let explore = 3*lost
 let flee = 8*scared
 
 # --- actions ---
@@ -454,6 +455,9 @@ output grip = and(or(gr, and(free, lp)), not(starving), not(scared))
 output drop = or(and(cf, zn), and(cs, zm))
 output eat = or(and(zn, hs, ge(hunger, {PECKISH})), and(cf, starving))
 let work = or(gr, pick, dig2, grip, drop, eat)
+# what the emote keys read, named so `wir superpose-choice-layer` can take them as features
+let workem = or(cs, dig2, and(free, kg))
+let carrying = cf
 
 # --- task: the strongest drive (ties to the lower index) ---
 ",
@@ -511,11 +515,11 @@ let work = or(gr, pick, dig2, grip, drop, eat)
     let levels = [
         "1".to_string(),
         "hungry".to_string(),
-        "3*or(cs, dig2, and(free, kg))".to_string(),
-        "4*cf".to_string(),
+        "3*workem".to_string(),
+        "4*carrying".to_string(),
         "5*grip".to_string(),
         "9*scared".to_string(),
-        "2*or(idle, not(kn))".to_string(),
+        "2*lost".to_string(),
     ];
     for (e, l) in levels.iter().enumerate() {
         src += &format!("let ekey{e} = 7*({l}) + {}\n", 6 - e);
@@ -712,7 +716,9 @@ pub fn ant_check(cases: u64, seed: u64) -> Result<AntCheck> {
 /// Everything the page needs: the three networks (sparse layers, taps, sources), the
 /// constants, and test vectors (inputs with the rule's outputs) so the page can check
 /// its JavaScript port of the rule before using it as the live reference.
-pub fn export_json(vectors: u64, seed: u64) -> Result<String> {
+/// `variants`: extra brains for the page's brain selector, `(label, wir source)` (see
+/// `superpose::variants_json`).
+pub fn export_json(vectors: u64, seed: u64, variants: &[(String, String)]) -> Result<String> {
     let nets = AntNets::compile()?;
     let mut rng = seed.max(1);
     let mut sense_vectors = Vec::new();
@@ -745,6 +751,7 @@ pub fn export_json(vectors: u64, seed: u64) -> Result<String> {
             "layers": sparse_layers(&nets.brain),
             "source": brain_program(),
         },
+        "brains": crate::superpose::variants_json(variants, &nets.brain.inputs, &nets.brain.outputs)?,
         "vectors": { "sense": sense_vectors, "brain": brain_vectors },
     });
     Ok(serde_json::to_string(&v).unwrap())
