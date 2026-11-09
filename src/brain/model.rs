@@ -278,6 +278,9 @@ pub struct MLPConfig {
     /// Std of the N(0, std) init on every projection.
     #[config(default = 0.02)]
     init_std:   f64,
+    /// Input width of w1/w3 when it differs from `d_model` (the output width).
+    #[config(default = "None")]
+    d_input:    Option<usize>,
 }
 
 impl MLPConfig {
@@ -286,8 +289,9 @@ impl MLPConfig {
         // Simple, fan-in-independent, and well-validated at this scale.
         let init = Initializer::Normal { mean: 0.0, std: self.init_std };
 
+        let d_input = self.d_input.unwrap_or(self.d_model);
         MLP {
-            w1: LinearConfig::new(self.d_model, self.d_hidden)
+            w1: LinearConfig::new(d_input, self.d_hidden)
                 .with_initializer(init.clone())
                 .with_bias(false)
                 .init(device),
@@ -295,7 +299,7 @@ impl MLPConfig {
                 .with_initializer(init.clone())
                 .with_bias(false)
                 .init(device),
-            w3: LinearConfig::new(self.d_model, self.d_hidden)
+            w3: LinearConfig::new(d_input, self.d_hidden)
                 .with_initializer(init.clone())
                 .with_bias(false)
                 .init(device),

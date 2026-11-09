@@ -39,6 +39,8 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
             num_experts: 2,
             top_k: 1,
         },
+        // Decoder with a frozen JL residual projection (width 16 -> 8 from block 1).
+        Architecture::DecoderOnly,
     ]
     .into_iter()
     .enumerate()
@@ -87,6 +89,7 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
             mamba: (architecture == Architecture::Mamba2).then(|| crate::brain::mamba2_model::Mamba2Settings {
                 d_state: 4, chunk_size: 4, ..Default::default()
             }),
+            jl: (index == 7).then(|| crate::brain::jl::JlConfig::parse("residual:8@1").unwrap()),
         };
         let path = directory.join(&run.name);
         std::fs::create_dir_all(&path)?;

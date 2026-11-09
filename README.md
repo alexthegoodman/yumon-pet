@@ -230,6 +230,19 @@ Optional `kv_heads` (MoE only) shares each key/value head across
 without it still load. At these model sizes it made no measurable speed difference
 (the cache is small), so the configs leave it unset.
 
+### Johnson-Lindenstrauss projections (experimental, decoder-only)
+
+An optional `jl` section ([design](docs/JL.md), `src/brain/jl.rs`) adds a fixed random
+Gaussian projection to the dense decoder at one site: `residual` (residual stream d -> K
+before block L; later blocks and the head run at K), `attention` (per-head q/k/v after
+RoPE, head_dim -> K) or `ffn` (MLP input d -> K). `none` is the baseline arm. `--jl
+SITE:K@L[+learned]` picks the arm, `+learned` trains the map. Run names gain `_jl_...`;
+older decoder checkpoints still load.
+
+```sh
+cargo run --release --bin train_code -- --config configs/yumon-dec-base-pretrain-jl.json --jl residual:64@3
+```
+
 ## Yumon Nano / InstaCode Edit:
 
 ```

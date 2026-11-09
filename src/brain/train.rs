@@ -266,6 +266,8 @@ pub struct RunConfig {
     pub expert_group: Option<crate::brain::optimizers::ParamGroupConfig>,
     /// Mamba-2 settings; None = defaults. Mamba2 runs only.
     pub mamba: Option<Mamba2Settings>,
+    /// Decoder-only JL projection experiment (brain::jl).
+    pub jl: Option<crate::brain::jl::JlConfig>,
 }
 
 /// Number of held-out prompts run through the model every time we do a
@@ -569,6 +571,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 + &config.token_embed_dim.filter(|&d| d != config.embed_dim).map_or(String::new(), |d| format!("_tok{d}"))
                 + &config.router.as_ref().map_or(String::new(), |g| g.tag(crate::brain::optimizers::ParamGroup::Router))
                 + &config.experts.as_ref().map_or(String::new(), |g| g.tag(crate::brain::optimizers::ParamGroup::Experts))
+                + &config.jl.as_ref().map_or(String::new(), |j| j.tag())
                 + if config.tie_embeddings { "_tied" } else { "" },
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
             n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
@@ -593,6 +596,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             router_group: config.router.clone(),
             expert_group: config.experts.clone(),
             mamba: config.mamba.clone(),
+            jl: config.jl.clone(),
         };
         let run_dir = config.out_dir.join(&run.name);
         std::fs::create_dir_all(&run_dir)?;
@@ -605,8 +609,8 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
         }
         std::fs::write(identity_path, serde_json::to_vec_pretty(&identity)?)?;
         let device = <TrainBackend as Backend>::Device::default();
-        if config.adaptive_loss.is_some() {
-            // Adaptive-loss experiment arms must share initialization and dropout streams.
+        if config.adaptive_loss.is_some() || config.jl.is_some() {
+            // Adaptive-loss and JL experiment arms must share initialization and dropout streams.
             <TrainBackend as Backend>::seed(&device, config.seed);
         }
         println!("Training precision: FP32; Flash Attention + BalancedCheckpointing.");
@@ -1483,16 +1487,23 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
             .with_embed_dim(run_cfg.embed_dim).with_hidden_units(run_cfg.hidden_units)
             .with_n_layers(run_cfg.n_layers).with_attn_heads(run_cfg.attn_heads)
             .with_ff_dim(run_cfg.ff_dim).with_max_seq_len(run_cfg.max_seq_len)
-            .with_dropout_rate(run_cfg.dropout_rate);
-        println!("Decoder-only: {:.1}M parameters, flash attention, BalancedCheckpointing.",
+            .with_dropout_rate(run_cfg.dropout_rate)
+            .with_jl(run_cfg.jl.clone());
+        println!("Decoder-only: {:.2}M parameters, flash attention, BalancedCheckpointing.",
             config.param_count() as f64 / 1e6);
+        if let Some(jl) = run_cfg.jl.as_ref().filter(|j| j.active()) {
+            println!("JL projection {:?} to {} from layer {} ({} weights, {}); residual width per layer {:?} then head {}.",
+                jl.site, jl.dim, jl.from_layer, config.jl_param_count(), if jl.trainable { "trained" } else { "frozen" },
+                (0..config.n_layers).map(|l| config.width_at(l)).collect::<Vec<_>>(), config.width_at(config.n_layers));
+        }
         if !run_dir.join("model.bin").exists() {
             if let Some(init_path) = &run_cfg.init_checkpoint {
                 println!("Initializing decoder weights from base checkpoint: {}", init_path.display());
                 let (m, checkpoint_tokenizer, saved) = Self::load(init_path.to_str().unwrap(), device)?;
                 anyhow::ensure!(saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
                     && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
-                    && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len,
+                    && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
+                    && saved.jl == config.jl,
                     "Base decoder checkpoint configuration differs from requested fine-tuning run");
                 ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
                 return Ok((m, 0));
@@ -1502,7 +1513,8 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
         let (m, checkpoint_tokenizer, saved) = Self::load(run_dir.to_str().unwrap(), device)?;
         anyhow::ensure!(saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
             && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
-            && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len,
+            && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
+            && saved.jl == config.jl,
             "decoder checkpoint configuration differs from requested run");
         ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
         let meta: DecMetadata = serde_json::from_str(&std::fs::read_to_string(run_dir.join("metadata.json"))?)?;
@@ -1528,6 +1540,7 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
             attn_heads:     p.run_cfg.attn_heads,
             ff_dim:         p.run_cfg.ff_dim,
             max_seq_len:    p.run_cfg.max_seq_len,
+            jl:             self.config.jl.clone(),
         };
         self.save(dir, tokenizer, &meta)
     }
@@ -2515,6 +2528,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     #[cfg(not(target_arch = "wasm32"))]
                                     expert_group: None,
                                     mamba: None,
+                                    jl: None,
                                 });
                             }
                         }
@@ -3881,10 +3895,14 @@ mod memory_probe_tests {
 
     fn dec<AD: AutodiffBackend<Device = WgpuDevice> + FlashAttention>(label: &str, s: &Shape) {
         let device = WgpuDevice::default();
+        // PROBE_JL=residual:64@3 etc. (brain::jl::JlConfig::parse); PROBE_FF overrides 4 * width.
+        let jl = std::env::var("PROBE_JL").ok().map(|s| crate::brain::jl::JlConfig::parse(&s).unwrap());
         let config = YumonDecBrainConfig::new(s.vocab, TrainingStage::Language)
             .with_embed_dim(s.width).with_hidden_units(s.width).with_n_layers(s.layers)
-            .with_attn_heads(s.heads).with_ff_dim(4 * s.width).with_max_seq_len(s.seq);
-        println!("{label}: {:.1}M parameters", config.param_count() as f64 / 1e6);
+            .with_attn_heads(s.heads).with_ff_dim(env("PROBE_FF", 4 * s.width)).with_max_seq_len(s.seq)
+            .with_jl(jl.clone());
+        println!("{label}: {:.3}M parameters, jl {}", config.param_count() as f64 / 1e6,
+            jl.map_or("none".into(), |j| j.tag()));
         let model: YumonDecBrain<AD> = config.init(&device);
         measure::<AD>(label, s, |i| {
             let (x, y) = tokens::<AD>(s, i, &device);

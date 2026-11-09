@@ -32,6 +32,11 @@ fn main() -> anyhow::Result<()> {
         /// Evaluation prompt stage: "base", "sft", "dpo", or "code".
         #[arg(long, alias = "eval-stage", alias = "eval_stage")]
         stage: Option<String>,
+        /// JL projection arm (docs/JL.md): `none`, `SITE:DIM` or `SITE:DIM@LAYER`,
+        /// SITE = residual | attention | ffn, optional `+learned` suffix.
+        /// Replaces site/dim/from_layer/trainable of the config's `jl` section.
+        #[arg(long)]
+        jl: Option<String>,
     }
     let args = Args::parse();
     if args.smoke_test {
@@ -55,6 +60,15 @@ fn main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--adaptive-mode needs an adaptive_loss section in the config"))?;
         adaptive.mode = serde_json::from_value(serde_json::Value::String(mode.clone()))?;
         adaptive.enabled = true;
+    }
+    if let Some(spec) = &args.jl {
+        let arm = yumon_pet::brain::jl::JlConfig::parse(spec)?;
+        config.jl = Some(match config.jl.take() {
+            // Keep the config's seed and narrow ff_dim.
+            Some(base) => yumon_pet::brain::jl::JlConfig { seed: base.seed, ff_dim: base.ff_dim, ..arm },
+            None => arm,
+        });
+        config.validate()?;
     }
     anyhow::ensure!(
         !args.require_curriculum || config.curriculum.is_some(),

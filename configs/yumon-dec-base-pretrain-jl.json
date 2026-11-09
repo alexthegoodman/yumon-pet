@@ -1,0 +1,30 @@
+{
+  "architecture": "decoder-only",
+  "source": "../rust-code",
+  "cache": "training-cache/pretrain/kilo_pretrain.bin",
+  "tokenizer": "training-cache/kilo_talk_tokenizer",
+  "max_seq_len": 256,
+  "exclude_dirs": [
+    ".git",
+    "target",
+    "node_modules"
+  ],
+  "seed": 4815162342,
+  "vocab_size": 8192,
+  "embed_dim": 128,
+  "n_layers": 6,
+  "attn_heads": 4,
+  "ff_dim": 512,
+  "batch_size": 16,
+  "epochs": 10,
+  "first_lr": 0.001,
+  "last_lr": 0.0001,
+  "validation_fraction": 0.01,
+  "out_dir": "checkpoints/yumon-base-dec-jl",
+  "tie_embeddings": true,
+  "eval_stage": "base",
+  "jl": {
+    "site": "none",
+    "seed": 1
+  }
+}

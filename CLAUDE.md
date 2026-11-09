@@ -346,3 +346,17 @@ files, totals via `mean(.., true)`, phase blend via a head), `reference`, `check
 JS twin, search; quantized scores), chess_ui.js, chess_template.html, build.py, harness.js
 (perft|vectors|lockstep|speed|twin|match). demos/tests/chess_page.{feature,mjs}: 12 checks.
 Artifact "WIR Chess" https://claude.ai/artifact/9u2N2Y2UBcU6f4yuS3gGtW (private). 129 wir tests.
+
+JL projections (2026-11-09): see docs/JL.md. Optional `jl` config (`src/brain/jl.rs`,
+decoder-only) puts a frozen Gaussian map R [d, K] (N(0, 1/K), seed + block) at one site:
+`residual` (d -> K before block `from_layer`; later blocks, norm and head at K; MLP width
+scaled unless `jl.ff_dim`), `attention` (per-head q/k/v after RoPE, head_dim -> K, q rescaled
+so scores keep 1/sqrt(head_dim); o reads heads * K; KV cache at K) or `ffn` (MLP input d -> K;
+`MLPConfig.d_input`). `none` = baseline arm; `trainable`/`+learned` = learned control.
+`train_code --jl SITE:K@L[+learned]` overrides the config's arm; a `jl` section seeds the
+backend. Maps live in `YumonDecBrain.jl` (last record field); `load_dec_record` picks the
+layout from metadata (`LegacyDecBrain` reads old and new non-JL records; BinBytesRecorder
+panics on short records). Config `yumon-dec-base-pretrain-jl.json` (sunrise shape, out_dir
+yumon-base-dec-jl). Step time on UHD 770 at the sunrise shape: none 679 ms, residual:64@3
+482, residual:64@0 344, attention:16 615, ffn:64 635 (`PROBE_JL` in training_memory_probe).
+Loss comparison runs are not done.

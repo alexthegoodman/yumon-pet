@@ -132,6 +132,9 @@ pub struct CodeConfig {
     /// header has an `order` (e.g. a difficulty-sorted `cache_yumon_talk` cache,
     /// trained easiest first each epoch).
     pub shuffle: Option<bool>,
+    /// Johnson-Lindenstrauss projection experiment (docs/JL.md); architecture
+    /// "decoder-only" only. `{"site": "none"}` is the baseline arm.
+    pub jl: Option<super::jl::JlConfig>,
 }
 
 impl Default for CodeConfig {
@@ -156,7 +159,7 @@ impl Default for CodeConfig {
             token_embed_dim: None,
             router: None,
             experts: None,
-            mamba: None, shuffle: None,
+            mamba: None, shuffle: None, jl: None,
         }
     }
 }
@@ -232,6 +235,10 @@ impl CodeConfig {
         }
         if let Some(init) = &self.init_checkpoint {
             ensure!(init.exists(), "init_checkpoint path does not exist: {}", init.display());
+        }
+        if let Some(jl) = &self.jl {
+            ensure!(self.architecture == CodeArchitecture::DecoderOnly, "jl requires architecture \"decoder-only\"");
+            jl.validate(self.embed_dim, self.attn_heads, self.n_layers)?;
         }
         Ok(())
     }

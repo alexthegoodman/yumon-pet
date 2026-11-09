@@ -20,6 +20,7 @@ use super::{
     bpe::{BpeTokenizer, TokenizerKind},
     fixer::fix_json_syntax,
     flash_attn::backend::{FlashAttention, causal_flash_attention},
+    jl::{JlConfig, JlProjection, JlSite},
     model::{GenerationResult, MLP, MLPConfig, RMSNorm, RMSNormConfig, TEMPERATURE, TOP_K},
     samples::{Action, CardinalDir, TrainingStage},
     tokenizer::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN},
@@ -45,6 +46,21 @@ struct DecBlock<B: Backend> {
     mlp: MLP<B>,
     heads: usize,
 }
+
+/// The JL map a block applies, if any (see jl.rs). Residual maps sit between
+/// blocks and are applied by the brain.
+enum BlockJl<'a, B: Backend> {
+    None,
+    /// head_dim -> dim for q, k (after RoPE) and v.
+    Attention(&'a JlProjection<B>),
+    /// Normed MLP input, width -> dim.
+    Ffn(&'a JlProjection<B>),
+}
+// Manual impls: a derive would require B: Copy.
+impl<B: Backend> Clone for BlockJl<'_, B> {
+    fn clone(&self) -> Self { *self }
+}
+impl<B: Backend> Copy for BlockJl<'_, B> {}
 /// RoPE base, as in burn::nn::RotaryEncodingConfig's default.
 const ROPE_THETA: f64 = 10_000.0;
 
@@ -168,16 +184,25 @@ pub struct KvCache<B: Backend> {
     layers: Vec<KvSlot<B>>,
     len: usize,
     rope: RopeTables<B>,
+    /// RoPE at the narrower head width of blocks after a JL residual projection.
+    narrow_rope: Option<RopeTables<B>>,
 }
 impl<B: Backend> KvCache<B> {
     pub fn new(layers: usize, max_seq_len: usize, head_dim: usize, device: &B::Device) -> Self {
-        Self { layers: (0..layers).map(|_| None).collect(), len: 0, rope: RopeTables::new(max_seq_len, head_dim, device) }
+        Self { layers: (0..layers).map(|_| None).collect(), len: 0, rope: RopeTables::new(max_seq_len, head_dim, device), narrow_rope: None }
     }
     pub fn new_mrope(layers: usize, coords: &[Vec<(f32, f32, f32)>], head_dim: usize, device: &B::Device) -> Self {
-        Self { layers: (0..layers).map(|_| None).collect(), len: 0, rope: RopeTables::new_mrope(coords, head_dim, device) }
+        Self { layers: (0..layers).map(|_| None).collect(), len: 0, rope: RopeTables::new_mrope(coords, head_dim, device), narrow_rope: None }
+    }
+    pub(super) fn with_narrow_rope(mut self, rope: RopeTables<B>) -> Self {
+        self.narrow_rope = Some(rope);
+        self
     }
     /// RoPE for the next `len` positions.
     pub(super) fn next_rope(&self, len: usize) -> RopeTables<B> { self.rope.slice(self.len, len) }
+    pub(super) fn next_narrow_rope(&self, len: usize) -> Option<RopeTables<B>> {
+        self.narrow_rope.as_ref().map(|r| r.slice(self.len, len))
+    }
     pub(super) fn layer(&mut self, layer: usize) -> &mut KvSlot<B> { &mut self.layers[layer] }
     pub(super) fn advance(&mut self, len: usize) { self.len += len; }
     pub fn len(&self) -> usize { self.len }
@@ -235,7 +260,9 @@ pub(super) fn cached_attention<B: FlashAttention>(
 }
 
 impl<B: FlashAttention> DecBlock<B> {
-    fn forward_cached(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, slot: &mut KvSlot<B>) -> Tensor<B, 3> {
+    /// Per-head q, k (RoPE applied) and v, [batch, heads, seq, dim], through the
+    /// block's attention JL map if it has one.
+    fn qkv(&self, x: &Tensor<B, 3>, rope: &RopeTables<B>, jl: BlockJl<B>) -> (Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 4>) {
         let [batch, seq, width] = x.dims();
         let hd = width / self.heads;
         let norm = self.attn_norm.forward(x.clone());
@@ -243,23 +270,39 @@ impl<B: FlashAttention> DecBlock<B> {
         let q = apply_rope(split(self.q.forward(norm.clone())), rope);
         let k = apply_rope(split(self.k.forward(norm.clone())), rope);
         let v = split(self.v.forward(norm));
-        let attn = cached_attention(q, k, v, slot).swap_dims(1, 2).reshape([batch, seq, width]);
-        let x = x + self.o.forward(attn);
-        x.clone() + self.mlp.forward(self.ffn_norm.forward(x))
+        match jl {
+            BlockJl::Attention(p) => {
+                // Attention scales scores by 1/sqrt(dim); this restores 1/sqrt(head_dim),
+                // so (qR).(kR) is scored like the unprojected q.k it estimates.
+                let rescale = (p.out_dim() as f64 / hd as f64).sqrt();
+                (p.forward(q) * rescale, p.forward(k), p.forward(v))
+            }
+            _ => (q, k, v),
+        }
     }
-    fn forward(&self, x: Tensor<B, 3>, rope: &RopeTables<B>) -> Tensor<B, 3> {
-        let [batch, seq, width] = x.dims();
-        let hd = width / self.heads;
-        let norm = self.attn_norm.forward(x.clone());
-        let split = |t: Tensor<B, 3>| t.reshape([batch, seq, self.heads, hd]).swap_dims(1, 2);
-        let q = apply_rope(split(self.q.forward(norm.clone())), rope);
-        let k = apply_rope(split(self.k.forward(norm.clone())), rope);
-        let v = split(self.v.forward(norm));
-        let attn = causal_flash_attention(q, k, v)
-            .swap_dims(1, 2)
-            .reshape([batch, seq, width]);
-        let x = x + self.o.forward(attn);
-        x.clone() + self.mlp.forward(self.ffn_norm.forward(x))
+    /// Residual add of the attention output [batch, heads, seq, dim], then the MLP
+    /// (or `mlp` in its place). Returns the block output, MLP input and MLP output.
+    fn finish(&self, x: Tensor<B, 3>, attn: Tensor<B, 4>, jl: BlockJl<B>, mlp: Option<&WirMlp<B>>)
+        -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>) {
+        let [batch, heads, seq, dim] = attn.dims();
+        let x = x + self.o.forward(attn.swap_dims(1, 2).reshape([batch, seq, heads * dim]));
+        let mut mlp_in = self.ffn_norm.forward(x.clone());
+        if let BlockJl::Ffn(p) = jl {
+            mlp_in = p.forward(mlp_in);
+        }
+        let mlp_out = match mlp {
+            Some(m) => m.forward(mlp_in.clone()),
+            None => self.mlp.forward(mlp_in.clone()),
+        };
+        (x + mlp_out.clone(), mlp_in, mlp_out)
+    }
+    fn forward_cached(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, jl: BlockJl<B>, slot: &mut KvSlot<B>) -> Tensor<B, 3> {
+        let (q, k, v) = self.qkv(&x, rope, jl);
+        self.finish(x, cached_attention(q, k, v, slot), jl, None).0
+    }
+    fn forward(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, jl: BlockJl<B>) -> Tensor<B, 3> {
+        let (q, k, v) = self.qkv(&x, rope, jl);
+        self.finish(x, causal_flash_attention(q, k, v), jl, None).0
     }
 }
 
@@ -286,29 +329,17 @@ impl<B: Backend> WirMlp<B> {
             }
         };
         let y = h.matmul(self.w2.clone().transpose()) + self.b2.clone().unsqueeze();
-        y.reshape([batch, seq, width])
+        y.reshape([batch, seq, self.w2.dims()[0]])
     }
 }
 
 impl<B: FlashAttention> DecBlock<B> {
     /// `forward` with the MLP optionally replaced; also returns the MLP's input and output.
-    fn forward_probe(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, mlp: Option<&WirMlp<B>>)
+    /// With an FFN JL map, the MLP input is the projected one.
+    fn forward_probe(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, jl: BlockJl<B>, mlp: Option<&WirMlp<B>>)
         -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>) {
-        let [batch, seq, width] = x.dims();
-        let hd = width / self.heads;
-        let norm = self.attn_norm.forward(x.clone());
-        let split = |t: Tensor<B, 3>| t.reshape([batch, seq, self.heads, hd]).swap_dims(1, 2);
-        let q = apply_rope(split(self.q.forward(norm.clone())), rope);
-        let k = apply_rope(split(self.k.forward(norm.clone())), rope);
-        let v = split(self.v.forward(norm));
-        let attn = causal_flash_attention(q, k, v).swap_dims(1, 2).reshape([batch, seq, width]);
-        let x = x + self.o.forward(attn);
-        let mlp_in = self.ffn_norm.forward(x.clone());
-        let mlp_out = match mlp {
-            Some(m) => m.forward(mlp_in.clone()),
-            None => self.mlp.forward(mlp_in.clone()),
-        };
-        (x + mlp_out.clone(), mlp_in, mlp_out)
+        let (q, k, v) = self.qkv(&x, rope, jl);
+        self.finish(x, causal_flash_attention(q, k, v), jl, mlp)
     }
 }
 
@@ -320,6 +351,37 @@ pub struct YumonDecBrain<B: Backend> {
     norm: RMSNorm<B>,
     dropout: Dropout,
     pub token_head: Linear<B>,
+    /// JL maps (config.jl): one for `residual`, one per affected block for
+    /// `attention`/`ffn`, none otherwise. Last field so older records load as
+    /// `LegacyDecBrain`.
+    jl: Vec<JlProjection<B>>,
+}
+
+/// Record layout before the JL experiment.
+#[derive(Module, Debug)]
+struct LegacyDecBrain<B: Backend> {
+    config: Ignored<YumonDecBrainConfig>,
+    embedding: Embedding<B>,
+    blocks: Vec<DecBlock<B>>,
+    norm: RMSNorm<B>,
+    dropout: Dropout,
+    token_head: Linear<B>,
+}
+
+/// Loads a record; `config.jl` picks the layout. Without JL maps the legacy layout
+/// reads both pre-JL records and current ones: `jl` is the record's last field and
+/// bincode ignores the trailing empty Vec. (Try-then-fall-back is not an option:
+/// BinBytesRecorder panics on a short record instead of returning an error.)
+fn load_dec_record<B: Backend, R: Recorder<B>>(recorder: &R, args: R::LoadArgs,
+    config: &YumonDecBrainConfig, device: &B::Device) -> Result<YumonDecBrainRecord<B>> {
+    if config.active_jl().is_some() {
+        return recorder.load(args, device).map_err(|e| anyhow::anyhow!("load: {e:?}"));
+    }
+    let old = recorder.load::<LegacyDecBrainRecord<B>>(args, device).map_err(|e| anyhow::anyhow!("load: {e:?}"))?;
+    Ok(YumonDecBrainRecord {
+        config: old.config, embedding: old.embedding, blocks: old.blocks,
+        norm: old.norm, dropout: old.dropout, token_head: old.token_head, jl: Vec::new(),
+    })
 }
 #[derive(Config, Debug)]
 pub struct YumonDecBrainConfig {
@@ -339,8 +401,36 @@ pub struct YumonDecBrainConfig {
     pub ff_dim: usize,
     #[config(default = 320)]
     pub max_seq_len: usize,
+    /// Johnson-Lindenstrauss projection experiment (jl.rs, docs/JL.md).
+    #[config(default = "None")]
+    pub jl: Option<JlConfig>,
 }
+
+/// Widths of one block: residual, MLP hidden, per-head attention, MLP input.
+struct BlockWidths { width: usize, ff: usize, head: usize, mlp_in: usize }
+
 impl YumonDecBrainConfig {
+    /// The JL config when it adds a projection.
+    fn active_jl(&self) -> Option<&JlConfig> { self.jl.as_ref().filter(|j| j.active()) }
+    fn jl_from(&self, site: JlSite) -> Option<usize> {
+        self.active_jl().filter(|j| j.site == site).map(|j| j.from_layer)
+    }
+    /// Residual width before block `layer` (`n_layers` = at the head).
+    pub fn width_at(&self, layer: usize) -> usize {
+        match self.jl_from(JlSite::Residual) {
+            Some(from) if layer >= from => self.jl.as_ref().unwrap().dim,
+            _ => self.embed_dim,
+        }
+    }
+    fn block_widths(&self, layer: usize) -> BlockWidths {
+        let width = self.width_at(layer);
+        let jl = self.active_jl();
+        let ff = if width != self.embed_dim { jl.unwrap().narrow_ff_dim(self.embed_dim, self.ff_dim) } else { self.ff_dim };
+        let in_site = |site| self.jl_from(site).is_some_and(|from| layer >= from);
+        let head = if in_site(JlSite::Attention) { jl.unwrap().dim } else { width / self.attn_heads };
+        let mlp_in = if in_site(JlSite::Ffn) { jl.unwrap().dim } else { width };
+        BlockWidths { width, ff, head, mlp_in }
+    }
     pub fn init<B: Backend>(&self, device: &B::Device) -> YumonDecBrain<B> {
         assert!(self.n_layers > 0 && self.max_seq_len > 0 && self.vocab_size > 0);
         assert!(self.attn_heads > 0 && self.embed_dim > 0 && self.embed_dim % self.attn_heads == 0);
@@ -348,36 +438,69 @@ impl YumonDecBrainConfig {
             (self.embed_dim / self.attn_heads) % 2 == 0,
             "RoPE requires even head width"
         );
-        let linear = || {
-            LinearConfig::new(self.embed_dim, self.embed_dim)
-                .with_bias(false)
-                .init(device)
+        if let Some(jl) = &self.jl {
+            jl.validate(self.embed_dim, self.attn_heads, self.n_layers).expect("invalid jl config");
+        }
+        let linear = |from: usize, to: usize| LinearConfig::new(from, to).with_bias(false).init(device);
+        let hd = self.embed_dim / self.attn_heads;
+        let jl = match self.active_jl() {
+            None => Vec::new(),
+            Some(j) => match j.site {
+                JlSite::Residual => vec![j.projection(self.embed_dim, j.from_layer, device)],
+                JlSite::Attention => (j.from_layer..self.n_layers).map(|l| j.projection(hd, l, device)).collect(),
+                JlSite::Ffn => (j.from_layer..self.n_layers).map(|l| j.projection(self.embed_dim, l, device)).collect(),
+                JlSite::None => unreachable!(),
+            },
         };
+        let out_width = self.width_at(self.n_layers);
         YumonDecBrain {
             config: Ignored(self.clone()),
             embedding: EmbeddingConfig::new(self.vocab_size, self.embed_dim).init(device),
             blocks: (0..self.n_layers)
-                .map(|_| DecBlock {
-                    attn_norm: RMSNormConfig::new(self.embed_dim).init(device),
-                    q: linear(),
-                    k: linear(),
-                    v: linear(),
-                    o: linear(),
-                    ffn_norm: RMSNormConfig::new(self.embed_dim).init(device),
-                    mlp: MLPConfig::new(self.embed_dim, self.ff_dim).init(device),
-                    heads: self.attn_heads,
+                .map(|layer| {
+                    let w = self.block_widths(layer);
+                    DecBlock {
+                        attn_norm: RMSNormConfig::new(w.width).init(device),
+                        q: linear(w.width, w.width),
+                        k: linear(w.width, w.width),
+                        v: linear(w.width, w.width),
+                        o: linear(self.attn_heads * w.head, w.width),
+                        ffn_norm: RMSNormConfig::new(w.width).init(device),
+                        mlp: MLPConfig::new(w.width, w.ff).with_d_input(Some(w.mlp_in)).init(device),
+                        heads: self.attn_heads,
+                    }
                 })
                 .collect(),
-            norm: RMSNormConfig::new(self.embed_dim).init(device),
+            norm: RMSNormConfig::new(out_width).init(device),
             dropout: DropoutConfig::new(self.dropout_rate).init(),
-            token_head: LinearConfig::new(self.embed_dim, self.vocab_size).init(device),
+            token_head: LinearConfig::new(out_width, self.vocab_size).init(device),
+            jl,
         }
     }
-    /// Weights in the model, embeddings and head included.
+    /// Weights in the model, embeddings, head and JL maps included.
     pub fn param_count(&self) -> usize {
-        let (d, f, v) = (self.embed_dim, self.ff_dim, self.vocab_size);
-        let block = 4 * d * d + 3 * d * f + 2 * d;
-        v * d + self.n_layers * block + d + d * v + v
+        let (d, v, h) = (self.embed_dim, self.vocab_size, self.attn_heads);
+        let blocks: usize = (0..self.n_layers).map(|layer| {
+            let w = self.block_widths(layer);
+            3 * w.width * w.width + h * w.head * w.width + 2 * w.width + 2 * w.mlp_in * w.ff + w.ff * w.width
+        }).sum();
+        let out = self.width_at(self.n_layers);
+        v * d + blocks + out + out * v + v + self.jl_param_count()
+    }
+    /// Weights in the JL maps (frozen unless jl.trainable).
+    pub fn jl_param_count(&self) -> usize {
+        let Some(j) = self.active_jl() else { return 0 };
+        let affected = self.n_layers - j.from_layer;
+        match j.site {
+            JlSite::Residual => self.embed_dim * j.dim,
+            JlSite::Attention => affected * (self.embed_dim / self.attn_heads) * j.dim,
+            JlSite::Ffn => affected * self.embed_dim * j.dim,
+            JlSite::None => 0,
+        }
+    }
+    /// Per-head width of blocks after a residual JL map, if any.
+    fn narrow_head_dim(&self) -> Option<usize> {
+        self.jl_from(JlSite::Residual).filter(|&from| from < self.n_layers).map(|_| self.jl.as_ref().unwrap().dim / self.attn_heads)
     }
 }
 impl<B: FlashAttention> YumonDecBrain<B> {
@@ -386,15 +509,44 @@ impl<B: FlashAttention> YumonDecBrain<B> {
     pub fn forward_probe(&self, tokens: Tensor<B, 2, Int>, mlps: &[Option<WirMlp<B>>])
         -> (Tensor<B, 3>, Vec<(Tensor<B, 3>, Tensor<B, 3>)>) {
         let [_, seq] = tokens.dims();
-        let rope = RopeTables::new(seq, self.config.embed_dim / self.config.attn_heads, &tokens.device());
+        let ropes = self.ropes(seq, &tokens.device());
         let mut x = self.embedding.forward(tokens);
         let mut trace = Vec::with_capacity(self.blocks.len());
         for (layer, block) in self.blocks.iter().enumerate() {
-            let (next, mlp_in, mlp_out) = block.forward_probe(x, &rope, mlps.get(layer).and_then(Option::as_ref));
+            x = self.residual_jl(layer, x);
+            let (next, mlp_in, mlp_out) = block.forward_probe(x, ropes.at(layer), self.block_jl(layer),
+                mlps.get(layer).and_then(Option::as_ref));
             trace.push((mlp_in, mlp_out));
             x = next;
         }
+        x = self.residual_jl(self.blocks.len(), x);
         (self.token_head.forward(self.norm.forward(x)), trace)
+    }
+
+    /// The JL map block `layer` applies itself.
+    fn block_jl(&self, layer: usize) -> BlockJl<'_, B> {
+        let Some(j) = self.config.active_jl() else { return BlockJl::None };
+        if layer < j.from_layer { return BlockJl::None; }
+        match j.site {
+            JlSite::Attention => BlockJl::Attention(&self.jl[layer - j.from_layer]),
+            JlSite::Ffn => BlockJl::Ffn(&self.jl[layer - j.from_layer]),
+            _ => BlockJl::None,
+        }
+    }
+    /// Applies the residual JL map when it sits before block `layer`
+    /// (`n_layers` = before the final norm).
+    fn residual_jl(&self, layer: usize, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        match self.config.jl_from(JlSite::Residual) {
+            Some(from) if from == layer => self.jl[0].forward(x),
+            _ => x,
+        }
+    }
+    fn ropes(&self, seq: usize, device: &B::Device) -> Ropes<B> {
+        Ropes {
+            wide: RopeTables::new(seq, self.config.embed_dim / self.config.attn_heads, device),
+            narrow: self.config.narrow_head_dim().map(|hd| RopeTables::new(seq, hd, device)),
+            from: self.config.jl_from(JlSite::Residual).unwrap_or(usize::MAX),
+        }
     }
 
     /// Block `layer`'s SwiGLU weights (w1, w3, w2), Burn `[in, out]` layout.
@@ -406,11 +558,13 @@ impl<B: FlashAttention> YumonDecBrain<B> {
     pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         let [_, seq] = tokens.dims();
         assert!(seq > 0 && seq <= self.config.max_seq_len);
-        let rope = RopeTables::new(seq, self.config.embed_dim / self.config.attn_heads, &tokens.device());
+        let ropes = self.ropes(seq, &tokens.device());
         let mut x = self.dropout.forward(self.embedding.forward(tokens));
-        for block in &self.blocks {
-            x = block.forward(x, &rope);
+        for (layer, block) in self.blocks.iter().enumerate() {
+            x = self.residual_jl(layer, x);
+            x = block.forward(x, ropes.at(layer), self.block_jl(layer));
         }
+        x = self.residual_jl(self.blocks.len(), x);
         self.token_head.forward(self.norm.forward(x))
     }
 
@@ -418,23 +572,37 @@ impl<B: FlashAttention> YumonDecBrain<B> {
     pub(crate) fn forward_cached(&self, tokens: Tensor<B, 2, Int>, cache: &mut KvCache<B>) -> Tensor<B, 3> {
         let [_, t] = tokens.dims();
         assert!(t > 0 && cache.len() + t <= self.config.max_seq_len);
-        let rope = cache.next_rope(t);
+        let ropes = Ropes {
+            wide: cache.next_rope(t),
+            narrow: cache.next_narrow_rope(t),
+            from: self.config.jl_from(JlSite::Residual).unwrap_or(usize::MAX),
+        };
         let mut x = self.embedding.forward(tokens);
         for (layer, block) in self.blocks.iter().enumerate() {
-            x = block.forward_cached(x, &rope, cache.layer(layer));
+            x = self.residual_jl(layer, x);
+            x = block.forward_cached(x, ropes.at(layer), self.block_jl(layer), cache.layer(layer));
         }
+        x = self.residual_jl(self.blocks.len(), x);
         cache.advance(t);
         self.token_head.forward(self.norm.forward(x))
     }
 
     pub fn new_kv_cache(&self, device: &B::Device) -> KvCache<B> {
-        KvCache::new(self.blocks.len(), self.config.max_seq_len,
-            self.config.embed_dim / self.config.attn_heads, device)
+        let cache = KvCache::new(self.blocks.len(), self.config.max_seq_len,
+            self.config.embed_dim / self.config.attn_heads, device);
+        match self.config.narrow_head_dim() {
+            Some(hd) => cache.with_narrow_rope(RopeTables::new(self.config.max_seq_len, hd, device)),
+            None => cache,
+        }
     }
 
     pub fn new_kv_cache_mrope(&self, coords: &[Vec<(f32, f32, f32)>], device: &B::Device) -> KvCache<B> {
-        KvCache::new_mrope(self.blocks.len(), coords,
-            self.config.embed_dim / self.config.attn_heads, device)
+        let cache = KvCache::new_mrope(self.blocks.len(), coords,
+            self.config.embed_dim / self.config.attn_heads, device);
+        match self.config.narrow_head_dim() {
+            Some(hd) => cache.with_narrow_rope(RopeTables::new_mrope(coords, hd, device)),
+            None => cache,
+        }
     }
 
     pub fn generate_unmasked_parsed(
@@ -444,8 +612,7 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         max_tokens: usize,
         device: &B::Device,
     ) -> GenerationResult {
-        let mut cache = KvCache::new(self.blocks.len(), self.config.max_seq_len,
-            self.config.embed_dim / self.config.attn_heads, device);
+        let mut cache = self.new_kv_cache(device);
         generate_causal_cached(
             |tokens| self.forward_cached(tokens, &mut cache),
             self.config.training_stage,
@@ -480,20 +647,8 @@ impl<B: FlashAttention> YumonDecBrain<B> {
             serde_json::from_str(&std::fs::read_to_string(dir.join("metadata.json"))?)?;
         let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load(directory)?);
         let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
-        let record = recorder
-            .load(dir.join("model").into(), device)
-            .map_err(|e| anyhow::anyhow!("load: {e:?}"))?;
-        let config = YumonDecBrainConfig {
-            vocab_size: metadata.vocab_size,
-            training_stage: metadata.training_stage,
-            dropout_rate: metadata.dropout_rate,
-            embed_dim: metadata.embed_dim,
-            hidden_units: metadata.hidden_units,
-            n_layers: metadata.n_layers,
-            attn_heads: metadata.attn_heads,
-            ff_dim: metadata.ff_dim,
-            max_seq_len: metadata.max_seq_len,
-        };
+        let config = metadata.config();
+        let record = load_dec_record(&recorder, dir.join("model"), &config, device)?;
         let model = config.init::<B>(device).load_record(record);
         Ok((model, tokenizer, config))
     }
@@ -507,20 +662,8 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         let metadata: DecMetadata = serde_json::from_str(metadata_json)?;
         let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load_from_bytes(tokenizer_bytes)?);
         let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
-        let record = recorder
-            .load(model_bytes.to_vec(), device)
-            .map_err(|e| anyhow::anyhow!("load from bytes: {e:?}"))?;
-        let config = YumonDecBrainConfig {
-            vocab_size: metadata.vocab_size,
-            training_stage: metadata.training_stage,
-            dropout_rate: metadata.dropout_rate,
-            embed_dim: metadata.embed_dim,
-            hidden_units: metadata.hidden_units,
-            n_layers: metadata.n_layers,
-            attn_heads: metadata.attn_heads,
-            ff_dim: metadata.ff_dim,
-            max_seq_len: metadata.max_seq_len,
-        };
+        let config = metadata.config();
+        let record = load_dec_record(&recorder, model_bytes.to_vec(), &config, device)?;
         let model = config.init::<B>(device).load_record(record);
         Ok((model, tokenizer, config))
     }
@@ -546,6 +689,37 @@ pub struct DecMetadata {
     pub attn_heads: usize,
     pub ff_dim: usize,
     pub max_seq_len: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jl: Option<JlConfig>,
+}
+impl DecMetadata {
+    pub fn config(&self) -> YumonDecBrainConfig {
+        YumonDecBrainConfig {
+            vocab_size: self.vocab_size,
+            training_stage: self.training_stage,
+            dropout_rate: self.dropout_rate,
+            embed_dim: self.embed_dim,
+            hidden_units: self.hidden_units,
+            n_layers: self.n_layers,
+            attn_heads: self.attn_heads,
+            ff_dim: self.ff_dim,
+            max_seq_len: self.max_seq_len,
+            jl: self.jl.clone(),
+        }
+    }
+}
+
+/// RoPE tables for the wide blocks and, after a residual JL map, the narrow ones.
+struct Ropes<B: Backend> {
+    wide: RopeTables<B>,
+    narrow: Option<RopeTables<B>>,
+    /// First narrow block.
+    from: usize,
+}
+impl<B: Backend> Ropes<B> {
+    fn at(&self, layer: usize) -> &RopeTables<B> {
+        if layer >= self.from { self.narrow.as_ref().unwrap_or(&self.wide) } else { &self.wide }
+    }
 }
 
 // ─── Generation (shared with the MoE decoder) ────────────────────────────────
@@ -1031,6 +1205,7 @@ mod tests {
             attn_heads: config.attn_heads,
             ff_dim: config.ff_dim,
             max_seq_len: config.max_seq_len,
+            jl: None,
         };
         model.save(path.to_str().unwrap(), &tokenizer, &meta).unwrap();
         let (restored, tok, restored_config) =
@@ -1069,6 +1244,96 @@ mod tests {
         }
         assert_close(cached, full, 1e-4, "cached logits");
     }
+    fn jl_configs() -> Vec<YumonDecBrainConfig> {
+        // tiny_config: width 16, 2 heads (head_dim 8), 2 layers.
+        ["residual:8@0", "residual:8@1", "residual:8@2", "attention:4", "attention:4@1", "ffn:8", "ffn:8@1+learned", "none"]
+            .iter()
+            .map(|spec| tiny_config().with_max_seq_len(16).with_jl(Some(JlConfig::parse(spec).unwrap())))
+            .collect()
+    }
+
+    #[test]
+    fn jl_param_count_and_cache() {
+        let device = Default::default();
+        let ids: Vec<i32> = (0..12).map(|i| 4 + (i * 5) % 28).collect();
+        let tensor = |ids: &[i32]| Tensor::<Inner, 2, Int>::from_ints(TensorData::new(ids.to_vec(), [1, ids.len()]), &device);
+        for config in jl_configs() {
+            let what = config.jl.as_ref().unwrap().tag();
+            let model: YumonDecBrain<Inner> = config.init(&device);
+            assert_eq!(model.num_params(), config.param_count(), "{what}");
+            let full = values(model.forward(tensor(&ids)));
+            assert_eq!(full.len(), 12 * 32, "{what}");
+            let mut cache = model.new_kv_cache(&device);
+            let mut cached = Vec::new();
+            let mut start = 0;
+            for n in [4, 1, 1, 3, 1, 2] {
+                cached.extend(values(model.forward_cached(tensor(&ids[start..start + n]), &mut cache)));
+                start += n;
+            }
+            assert_close(cached, full, 1e-4, &format!("cached logits {what}"));
+        }
+    }
+
+    /// Frozen maps get no gradient; `+learned` ones and every other weight do.
+    #[test]
+    fn jl_frozen_unless_trainable() {
+        let device = Default::default();
+        for config in jl_configs() {
+            let jl = config.jl.clone().unwrap();
+            let model: YumonDecBrain<Balanced> = config.init(&device);
+            let grads = model.forward(Tensor::from_ints([[1, 4, 5, 6]], &device)).powf_scalar(2.0).mean().backward();
+            for map in &model.jl {
+                assert_eq!(map.weight.val().grad(&grads).is_some(), jl.trainable, "{}", jl.tag());
+            }
+            assert!(model.token_head.weight.val().grad(&grads).is_some());
+            // An optimizer step leaves frozen maps alone.
+            let before: Vec<Vec<f32>> = model.jl.iter().map(|m| values(m.weight.val().inner())).collect();
+            let params = GradientsParams::from_grads(grads, &model);
+            let updated = AdamWConfig::new().init().step(1e-2, model, params);
+            for (map, old) in updated.jl.iter().zip(before) {
+                let changed = values(map.weight.val().inner()) != old;
+                assert_eq!(changed, jl.trainable, "{}", jl.tag());
+            }
+        }
+    }
+
+    /// Records saved before the JL field existed still load (no maps).
+    #[test]
+    fn decoder_loads_pre_jl_records() {
+        let device = Default::default();
+        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe").unwrap());
+        let mut config = tiny_config();
+        config.vocab_size = tokenizer.vocab_size();
+        let model: YumonDecBrain<Inner> = config.init(&device);
+        let legacy = LegacyDecBrain {
+            config: model.config.clone(), embedding: model.embedding.clone(), blocks: model.blocks.clone(),
+            norm: model.norm.clone(), dropout: model.dropout.clone(), token_head: model.token_head.clone(),
+        };
+        let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+        let tokenizer_bytes = match &tokenizer {
+            TokenizerKind::Bpe(t) => t.inner.to_string(false).unwrap().into_bytes(),
+            _ => unreachable!(),
+        };
+        let meta = |jl: Option<JlConfig>| serde_json::json!({
+            "dropout_rate": 0.0, "vocab_size": config.vocab_size, "epochs_trained": 1, "final_loss": 1.0,
+            "batch_size": 1, "training_stage": config.training_stage, "embed_dim": config.embed_dim,
+            "hidden_units": config.hidden_units, "n_layers": config.n_layers, "attn_heads": config.attn_heads,
+            "ff_dim": config.ff_dim, "max_seq_len": config.max_seq_len, "jl": jl,
+        }).to_string();
+        let input = || Tensor::<Inner, 2, Int>::from_ints([[1, 4, 5]], &device);
+        let bytes = recorder.record(legacy.into_record(), ()).unwrap();
+        let (restored, _, _) = YumonDecBrain::<Inner>::load_from_bytes(&bytes, &tokenizer_bytes, &meta(None), &device).unwrap();
+        assert!(restored.jl.is_empty());
+        assert_close(values(model.forward(input())), values(restored.forward(input())), 1e-6, "legacy load");
+        // A JL model round-trips with its frozen map.
+        let jl = JlConfig::parse("residual:8@1").unwrap();
+        let model: YumonDecBrain<Inner> = config.clone().with_jl(Some(jl.clone())).init(&device);
+        let bytes = recorder.record(model.clone().into_record(), ()).unwrap();
+        let (restored, _, restored_config) = YumonDecBrain::<Inner>::load_from_bytes(&bytes, &tokenizer_bytes, &meta(Some(jl.clone())), &device).unwrap();
+        assert_eq!(restored_config.jl, Some(jl));
+        assert_close(values(model.forward(input())), values(restored.forward(input())), 1e-6, "jl roundtrip");
+    }
+
     #[test]
     fn test_mrope_spatial_properties() {
         let device = Default::default();
