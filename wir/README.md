@@ -216,7 +216,7 @@ one-hot emote. `demos/ant/` holds the page: the colony host in plain JavaScript
 
 ```
 cargo run --release -- ant --out examples --export ant_demo.json   # 200k inputs each, exact
-python demos/ant/build.py ant_demo.json yumon-ant.html
+python demos/ant/build.py ant_demo.json yumon-ant.html   # built copy: demos/ant/yumon-ant.html
 node demos/ant/harness.js 8000 1 check ant_demo.json               # headless colony, network = rule
 ```
 
@@ -233,7 +233,7 @@ their mother's weights).
 
 ```
 cargo run --release -- park --out examples --export park_demo.json  # 200k inputs, exact keys
-python demos/park/build.py park_demo.json yumon-park.html
+python demos/park/build.py park_demo.json yumon-park.html   # built copy: demos/park/yumon-park.html
 node demos/park/harness.js 10000 learn|nolearn|mixed 1 park_demo.json
 ```
 

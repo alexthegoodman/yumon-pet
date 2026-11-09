@@ -1,0 +1,1926 @@
+<title>Yumon Park</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;700&family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a naturalist's cross-section. The four-band park is the hero, set in a dark
+   specimen frame; the field notebook (inspector, what was learned) sits beside it and the
+   census (species, populations, capabilities, the brain) runs underneath. */
+:root {
+  --bg: #e8eeec; --panel: #f6f9f8; --ink: #14201d; --muted: #556661; --line: #c9d5d1;
+  --accent: #1d6f86; --accent-ink: #ffffff; --frame: #1b2b2d; --frame-ink: #e7f1ef; --good: #2f7d4f; --bad: #b4412b; --warn: #b07a17;
+  --sky-top: #a9d3ea; --sky-bot: #dcecf2; --canopy: #4f8a4a; --canopy-2: #3f7840; --trunk: #6b4a32;
+  --ground: #8c6f45; --grass: #6aa84f; --water-top: #3d8fb0; --water-bot: #12425e;
+  --wall: #8b8f86; --wall-edge: #4c4f49;
+  --display: "Fredoka", "Nunito", "Segoe UI", sans-serif;
+  --body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1516; --panel: #152022; --ink: #e2ecea; --muted: #93a6a1; --line: #263638;
+    --accent: #5bbcd6; --accent-ink: #062027; --frame: #0a1112; --frame-ink: #d9e8e5; --good: #5fc489; --bad: #ff7e62; --warn: #e2b04a;
+    --sky-top: #0b1830; --sky-bot: #26395a; --canopy: #2f5c33; --canopy-2: #264f2b; --trunk: #4a3424;
+    --ground: #5d4a2f; --grass: #43773a; --water-top: #1d5873; --water-bot: #061c2a;
+    --wall: #6f746c; --wall-edge: #2c2f2b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1516; --panel: #152022; --ink: #e2ecea; --muted: #93a6a1; --line: #263638;
+  --accent: #5bbcd6; --accent-ink: #062027; --frame: #0a1112; --frame-ink: #d9e8e5; --good: #5fc489; --bad: #ff7e62; --warn: #e2b04a;
+  --sky-top: #0b1830; --sky-bot: #26395a; --canopy: #2f5c33; --canopy-2: #264f2b; --trunk: #4a3424;
+  --ground: #5d4a2f; --grass: #43773a; --water-top: #1d5873; --water-bot: #061c2a;
+  --wall: #6f746c; --wall-edge: #2c2f2b;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 15px; line-height: 1.5; }
+.wrap { max-width: 1440px; margin: 0 auto; padding-inline: 16px; padding-block: 18px 40px; display: grid; gap: 14px; }
+header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 10px 24px; }
+h1 { font-family: var(--display); font-weight: 700; font-size: clamp(32px, 4.6vw, 50px); letter-spacing: -0.01em; line-height: 1; margin: 0; text-wrap: balance; }
+h1 span { color: var(--accent); }
+.lede { margin: 6px 0 0; color: var(--muted); max-width: 66ch; }
+.stats { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0; }
+.stats div { display: grid; }
+.stats dt { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.stats dd { margin: 0; font-family: var(--mono); font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.main { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 14px; align-items: start; }
+@media (max-width: 1020px) { .main { grid-template-columns: minmax(0, 1fr); } }
+.frame { background: var(--frame); border-radius: 14px; padding: 10px; display: grid; gap: 8px; min-width: 0; color: var(--frame-ink); }
+.bar-row { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.tools { display: flex; flex-wrap: wrap; gap: 4px; }
+.tools label { position: relative; }
+.tools input { position: absolute; opacity: 0; pointer-events: none; }
+.tools span { display: inline-block; padding: 5px 11px; border-radius: 999px; background: color-mix(in srgb, var(--frame-ink) 14%, transparent); font-weight: 700; font-size: 13px; cursor: pointer; }
+.tools input:checked + span { background: var(--frame-ink); color: var(--frame); }
+.tools input:focus-visible + span { outline: 2px solid var(--frame-ink); outline-offset: 2px; }
+.bar-row select, .bar-row button { font: inherit; font-size: 13px; border-radius: 8px; border: 1px solid color-mix(in srgb, var(--frame-ink) 30%, transparent); background: color-mix(in srgb, var(--frame-ink) 8%, transparent); color: var(--frame-ink); padding: 4px 8px; }
+.bar-row select option { color: var(--ink); background: var(--panel); }
+.bar-row button { cursor: pointer; font-weight: 700; }
+.bar-row button:hover { background: color-mix(in srgb, var(--frame-ink) 18%, transparent); }
+.bar-row button:focus-visible, .bar-row select:focus-visible { outline: 2px solid var(--frame-ink); outline-offset: 1px; }
+.tiny { font-size: 12.5px; display: inline-flex; gap: 5px; align-items: center; }
+.spacer { flex: 1; }
+.glass { position: relative; border-radius: 6px; overflow: hidden; }
+canvas#world { display: block; width: 100%; height: clamp(320px, 60vh, 640px); touch-action: none; cursor: grab; }
+#toast { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); background: var(--panel); color: var(--ink); border: 1px solid var(--line); padding: 5px 12px; border-radius: 999px; font-size: 13px; font-weight: 700; }
+#hover { font-family: var(--mono); font-size: 12px; min-height: 1.4em; opacity: 0.85; }
+.bands { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; opacity: 0.9; }
+aside { display: grid; gap: 12px; min-width: 0; }
+section.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; min-width: 0; }
+h2 { font-family: var(--display); font-weight: 700; font-size: 18px; margin: 0 0 8px; }
+h4 { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 12px 0 4px; }
+.muted { color: var(--muted); }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+.dot { width: 11px; height: 11px; border-radius: 50%; flex: none; display: inline-block; vertical-align: -1px; }
+.kv { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 3px 10px; margin: 6px 0 0; font-size: 13.5px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; display: flex; gap: 8px; align-items: center; min-width: 0; flex-wrap: wrap; }
+.bar { flex: 1; height: 7px; background: var(--line); border-radius: 4px; overflow: hidden; max-width: 150px; min-width: 60px; }
+.bar i { display: block; height: 100%; background: var(--accent); }
+.bar.warn i { background: var(--bad); }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip { font-size: 11.5px; font-weight: 700; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); }
+.chip.k-move { border-color: var(--accent); }
+.chip.k-weapon { border-color: var(--bad); }
+.chip.k-guard { border-color: var(--warn); }
+.chip.k-diet { border-color: var(--good); }
+.chip.new { background: color-mix(in srgb, var(--accent) 16%, var(--bg)); }
+.chip.lost { text-decoration: line-through; color: var(--muted); border-style: dashed; }
+.events { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 5px; font-size: 13px; }
+.events li { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.pill { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; color: var(--panel); }
+.pill.good { background: var(--good); }
+.pill.bad { background: var(--bad); }
+.pill.mid { background: var(--warn); }
+.keys { display: grid; grid-template-columns: 56px minmax(0, 1fr) 46px; gap: 2px 8px; font-size: 12.5px; align-items: center; margin-top: 4px; }
+.keys .bar { max-width: none; }
+.keys .w { color: var(--muted); }
+.keys b { font-weight: 700; }
+.below { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+@media (max-width: 1020px) { .below { grid-template-columns: minmax(0, 1fr); } }
+.scroll { overflow-x: auto; max-height: 520px; overflow-y: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 5px 5px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+thead th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 700; position: sticky; top: 0; background: var(--panel); }
+td.num, thead th.num { text-align: right; }
+tr.gone td { color: var(--muted); }
+tr.sel td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+td button { font: inherit; font-size: 12px; font-weight: 700; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); padding: 1px 7px; cursor: pointer; }
+td button:focus-visible { outline: 2px solid var(--accent); }
+canvas#pop { display: block; width: 100%; height: 220px; }
+.learned { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.learned li { display: grid; grid-template-columns: minmax(0, 1fr) 54px; gap: 8px; font-size: 13.5px; align-items: center; }
+p.note { font-size: 13px; color: var(--muted); margin: 8px 0 0; max-width: 70ch; }
+.caps { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 12px; font-size: 13px; }
+.caps div { display: flex; gap: 6px; align-items: center; }
+.caps .num { margin-left: auto; color: var(--muted); }
+pre#src { margin: 0; max-height: 360px; overflow: auto; font-family: var(--mono); font-size: 11.5px; line-height: 1.45; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; white-space: pre; }
+.three { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; align-items: start; }
+/* view tabs and the setup form */
+.view { display: grid; gap: 14px; }
+.viewtabs { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.viewtabs button { font: inherit; font-family: var(--display); font-weight: 700; font-size: 15px; padding: 5px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+.viewtabs button[aria-selected="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.viewtabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.setup-now { font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 0; }
+.setup { max-width: 920px; }
+.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px 20px; margin-top: 12px; }
+.fields label { display: grid; gap: 4px; font-weight: 700; font-size: 14px; align-content: start; }
+.fields small { font-weight: 400; color: var(--muted); font-size: 12.5px; }
+.fields input[type=number], .fields select { font: inherit; font-weight: 400; font-size: 14px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); width: 100%; min-width: 0; }
+.fields input:focus-visible, .fields select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.actions button { font: inherit; font-weight: 700; font-size: 14px; padding: 7px 16px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+.actions button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Yumon <span>Park</span></h1>
+      <p class="lede">Species built from permutations of capabilities, hunting, fighting back and hiding across four bands. Every Yumon carries its own copy of one compiled WIR brain. It starts as the written rule, learns from its own life while it sleeps, and passes what it learned on to its children through its mother. Children can gain or lose a capability, and groups that drift apart become new species.</p>
+    </div>
+    <dl class="stats" aria-label="Park totals">
+      <div><dt>Yumon</dt><dd id="s-pop">0</dd></div>
+      <div><dt>Species</dt><dd id="s-sp">0</dd></div>
+      <div><dt>Born</dt><dd id="s-born">0</dd></div>
+      <div><dt>Died</dt><dd id="s-died">0</dd></div>
+      <div><dt>Generation</dt><dd id="s-gen">0</dd></div>
+      <div><dt>Brains held</dt><dd id="s-models">0</dd></div>
+      <div><dt>Tick</dt><dd id="s-tick">0</dd></div>
+    </dl>
+  </header>
+
+  <div class="viewtabs" role="tablist" aria-label="View">
+    <button type="button" role="tab" data-view="park" aria-selected="true" id="tab-park">Park</button>
+    <button type="button" role="tab" data-view="setup" aria-selected="false" id="tab-setup">Ecosystem setup</button>
+    <span class="setup-now" id="current-setup"></span>
+  </div>
+
+  <div id="view-setup" role="tabpanel" aria-labelledby="tab-setup" hidden>
+    <form class="card setup" id="setup-form">
+      <h2>Ecosystem setup</h2>
+      <p class="note" style="margin-top:0">Changes apply when you save: the park restarts from new founders with these settings. Settings are kept in this browser.</p>
+      <div class="fields">
+        <label for="set-diets">Diets
+          <select id="set-diets">
+            <option value="mixed">Mixed: plant eaters, omnivores and hunters</option>
+            <option value="hunters">All hunters: every species armed, still eats plants</option>
+            <option value="carnivores">All carnivores: meat only</option>
+          </select>
+          <small id="diet-note"></small>
+        </label>
+        <label for="set-species">Species
+          <input id="set-species" type="number" min="8" max="40" step="1" inputmode="numeric">
+          <small>8 to 40, built from capability permutations.</small>
+        </label>
+        <label for="set-seed">Seed
+          <input id="set-seed" type="number" min="1" max="999999" step="1" inputmode="numeric">
+          <small>The same seed and settings give the same species and founders.</small>
+        </label>
+        <label for="set-plants">Plant growth
+          <select id="set-plants">
+            <option value="0.75">0.75x (lean)</option><option value="1">1x</option><option value="1.25">1.25x (default)</option><option value="1.5">1.5x</option><option value="2">2x (lush)</option>
+          </select>
+          <small>Regrowth of grass, fruit, plankton and gnats.</small>
+        </label>
+        <label for="set-moving">Food patches
+          <select id="set-moving">
+            <option value="moving">Move: wither when eaten down or out of season, sprout elsewhere</option>
+            <option value="fixed">Stay put: regrow where they are</option>
+          </select>
+        </label>
+        <label for="set-call">Mating calls
+          <select id="set-call">
+            <option value="1">Off (mates found by sight)</option><option value="2.5">2.5x sense range (default)</option><option value="4">4x sense range</option>
+          </select>
+        </label>
+        <label for="set-kill">Kill reward
+          <select id="set-kill">
+            <option value="1">1 (small)</option><option value="3">3 (default)</option><option value="8">8 (large)</option>
+          </select>
+          <small>Added to the reward of the decision that led to a kill, on top of the meal. Blows landed add 0.3, getting away from an attacker 1.</small>
+        </label>
+        <label for="set-evo">Evolution
+          <select id="set-evo">
+            <option value="gentle">Gentle: small steps, a capability change in 1 of 50 births</option>
+            <option value="default">Default: bigger steps, 1 in 17 births</option>
+            <option value="wild">Wild: large steps, 1 in 7 births</option>
+          </select>
+          <small>Every gene moves a little at each birth and one moves more. A gained capability starts as a small limb; one parent's capability passes half the time.</small>
+        </label>
+        <label for="set-brain">Brain
+          <select id="set-brain"></select>
+          <small>The exact compiled rule, or a superposed brain: the ten option utilities squeezed through a few shared neurons (<code>wir superpose-choice-layer</code>, no training). Every species shares it; learning then trains each Yumon's own copy.</small>
+        </label>
+        <label for="set-lr">Learning rate
+          <select id="set-lr">
+            <option value="0.001">Gentle (0.001)</option><option value="0.003">Default (0.003)</option><option value="0.01">Strong (0.01)</option>
+          </select>
+          <span class="tiny"><input type="checkbox" id="set-learn"> Learn in sleep</span>
+        </label>
+      </div>
+      <div class="actions">
+        <button type="submit" class="primary">Save &amp; restart</button>
+        <button type="button" id="set-defaults">Defaults</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="view-park" role="tabpanel" aria-labelledby="tab-park" class="view">
+  <div class="main">
+    <div class="frame">
+      <div class="bar-row">
+        <div class="tools" role="radiogroup" aria-label="Tool">
+          <label><input type="radio" name="tool" id="t-watch" value="watch" checked><span>Watch</span></label>
+          <label><input type="radio" name="tool" id="t-feed" value="feed"><span>Plant food</span></label>
+          <label><input type="radio" name="tool" id="t-wall" value="wall"><span>Wall</span></label>
+        </div>
+        <span id="wall-opts" class="bar-row" hidden>
+          <select id="wall-life" aria-label="How long new walls stand">
+            <option value="0">Walls stand until removed</option><option value="2000">Walls stand 2,000 ticks</option><option value="5000">Walls stand 5,000 ticks</option>
+          </select>
+          <button id="wall-clear" type="button">Clear walls</button>
+          <span class="tiny" id="wall-count"></span>
+        </span>
+        <span class="spacer"></span>
+        <label class="tiny"><input type="checkbox" id="learn" checked> Learn in sleep</label>
+        <select id="lr" aria-label="Learning rate">
+          <option value="0.001">Gentle (0.001)</option>
+          <option value="0.003" selected>Default (0.003)</option>
+          <option value="0.01">Strong (0.01)</option>
+        </select>
+      </div>
+      <div class="glass">
+        <canvas id="world" aria-label="Side view of the park: sky, trees, ground and water. Drag to pan, scroll to zoom, click a Yumon to inspect it. With the wall tool, click for a wall across every band, drag up or down for a shorter one, click a wall to remove it."></canvas>
+        <div id="toast" role="status" hidden></div>
+      </div>
+      <div class="bar-row">
+        <button id="play" type="button" aria-pressed="false">Pause</button>
+        <button id="stepbtn" type="button">Step</button>
+        <select id="speed" aria-label="Speed">
+          <option value="0.5">0.5x</option><option value="1">1x</option><option value="2" selected>2x</option><option value="4">4x</option><option value="8">8x</option>
+        </select>
+        <button id="zout" type="button" aria-label="Zoom out">-</button>
+        <button id="zin" type="button" aria-label="Zoom in">+</button>
+        <label class="tiny"><input type="checkbox" id="follow"> Follow selected</label>
+        <span id="hover"></span>
+      </div>
+      <div class="bands" aria-label="Bands">
+        <span id="wall-help" hidden><b>Wall tool</b> click: a wall across every band · drag up or down: part height · click a wall: remove</span>
+        <span><b>Sky</b> fliers, gnats</span><span><b>Trees</b> climbers and fliers, fruit</span><span><b>Ground</b> walkers, grass, carcasses</span><span><b>Water</b> swimmers, plankton</span>
+      </div>
+    </div>
+
+    <aside>
+      <section class="card" aria-labelledby="h-insp">
+        <h2 id="h-insp">Inspector</h2>
+        <div id="inspector"></div>
+      </section>
+      <section class="card" aria-labelledby="h-evo">
+        <h2 id="h-evo">Evolution and fights</h2>
+        <div id="evolution"></div>
+      </section>
+      <section class="card" aria-labelledby="h-learn">
+        <h2 id="h-learn">What they learned</h2>
+        <div id="learned"></div>
+      </section>
+    </aside>
+  </div>
+
+  <div class="below">
+    <section class="card" aria-labelledby="h-sp">
+      <h2 id="h-sp">Species</h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Species</th><th>Capabilities</th><th class="num">Alive</th><th class="num">Gen</th><th>Largest drift</th><th class="num">Eats / eaten by</th><th class="num">Learned</th><th>Status</th></tr></thead>
+          <tbody id="species"></tbody>
+        </table>
+      </div>
+      <p class="note">Living species first. Drift is the change in a gene's mean over the living, against the species' founders. Shaded capabilities evolved after the species began. Learned is the share of decisions where a trained brain's top option differs from the written rule's.</p>
+    </section>
+    <section class="card" aria-labelledby="h-pop">
+      <h2 id="h-pop">Populations</h2>
+      <canvas id="pop" aria-label="Population of each species over time"></canvas>
+      <p class="note" id="pop-note"></p>
+    </section>
+  </div>
+
+  <div class="three">
+    <section class="card" aria-labelledby="h-caps">
+      <h2 id="h-caps">Capabilities</h2>
+      <div class="caps" id="caps"></div>
+      <p class="note">Each capability is carried by a limb, and the limb's size gene sets how well it works. Claws carry both climbing and clawing, so one gene moves both, and a capability on a limb a Yumon already has is four times likelier to appear. Every limb costs upkeep, a limb that shrinks away loses its capabilities, and wings must lift the body: a lineage that grows too heavy for its wings stops flying. Counts are species alive or founding.</p>
+    </section>
+    <section class="card" aria-labelledby="h-how">
+      <h2 id="h-how">How a life works</h2>
+      <p class="note" style="margin-top:0">Each tick a Yumon senses the nearest threat, food, prey and mate as distance buckets, whether an attacker struck it and its odds against it, feeds them to its brain with its hunger, fatigue and hurt, and samples one of ten options from a softmax over the brain's keys. The written rule hunts before it grazes when prey is near. When struck, an armed Yumon fights back if its odds are even or better, and a shell or spines can brace. Its reward is how much the tick reduced its need (hunger, fatigue and hurt, squared), plus a kill reward, a little for each blow landed, 1 for getting away, and a bonus for mating and for giving birth. A killer eats first, up to half the body.</p>
+      <p class="note">When it falls asleep it takes one policy-gradient step on its own weights over what happened since the last sleep, held near the weights it was born with. A child gets a blend of both parents' genes, small changes to all of them and a bigger one to one, may gain or lose a capability, and gets a copy of its mother's brain. When a Yumon dies its brain leaves the cache. Walls you draw block movement, sight and mating calls.</p>
+    </section>
+    <section class="card" aria-labelledby="h-src">
+      <h2 id="h-src">The brain</h2>
+      <p class="num" id="net"></p>
+      <p class="note" id="port"></p>
+      <pre id="src" tabindex="0"></pre>
+    </section>
+  </div>
+  </div>
+</div>
+
+<script type="application/json" id="park-data">{"brain":{"hidden":[43,30,24],"inputs":["o0","o1","o2","o3","o4","o5","o6","o7","o8","o9","hunger","fatigue","hurt","fertile","td","refuge","fd","pd","md","kc","camo","social","hit","odds","armed","guard"],"layers":[{"b":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,-1.0,-1.0,-1.0,-2.0,-1.0,-3.0,2.0,-1.0,6.0,5.0,1.0,-3.0,-2.0,1.0,1.0,-5.0,-1.0,-1.0,-2.0],"rows":[[0.0,1.0],[1.0,1.0],[2.0,1.0],[3.0,1.0],[4.0,1.0],[5.0,1.0],[6.0,1.0],[7.0,1.0],[8.0,1.0],[9.0,1.0],[10.0,1.0],[12.0,1.0],[13.0,1.0],[14.0,1.0],[15.0,1.0],[16.0,1.0],[17.0,1.0],[18.0,1.0],[19.0,1.0],[20.0,1.0],[21.0,1.0],[22.0,1.0],[24.0,1.0],[25.0,1.0],[14.0,1.0],[16.0,1.0],[10.0,1.0],[10.0,1.0],[17.0,1.0],[10.0,1.0],[14.0,-1.0],[18.0,1.0],[10.0,-1.0],[10.0,-1.0],[14.0,-1.0],[11.0,1.0],[19.0,1.0],[16.0,-1.0],[17.0,-1.0],[10.0,1.0],[22.0,1.0],[12.0,-1.0,22.0,2.0,23.0,2.0],[22.0,1.0]]},{"b":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,-1.0,-1.0,-8.5,1.0,-3.0,0.0,-7.0,-4.0,-3.0,-1.0,0.0,-1.0,0.0,-1.0],"rows":[[0.0,1.0],[1.0,1.0],[2.0,1.0],[3.0,1.0],[4.0,1.0],[5.0,1.0],[6.0,1.0],[7.0,1.0],[8.0,1.0],[9.0,1.0],[10.0,1.0],[13.0,1.0],[15.0,1.0],[16.0,1.0],[17.0,1.0],[21.0,1.0],[15.0,1.0,25.0,-1.0,26.0,1.0,27.0,-1.0],[16.0,1.0,27.0,1.0,28.0,-1.0,29.0,-1.0],[11.0,1.0,13.0,11.0,14.0,1.0,24.0,-9.5],[19.0,1.0,24.0,-1.0,30.0,-1.0],[12.0,1.0,17.0,1.0,30.0,1.0,31.0,-1.0,32.0,1.0,33.0,-1.0,34.0,-1.0],[35.0,1.0],[13.0,7.0,24.0,-7.0,35.0,1.0],[13.0,1.0,18.0,-1.0,20.0,6.0,36.0,1.0],[13.0,-1.0,18.0,1.0,20.0,1.0,36.0,-1.0],[37.0,1.0,38.0,1.0],[39.0,1.0],[21.0,1.0,22.0,1.0,40.0,-1.0],[41.0,1.0],[23.0,1.0,40.0,1.0,42.0,-1.0]]},{"b":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,-16.0,0.0,-19.0,0.0,-3.0,-3.0,0.0,0.0,0.0,0.0,-10.0,-5.0,-9.0,-3.0],"rows":[[0.0,1.0],[1.0,1.0],[2.0,1.0],[3.0,1.0],[4.0,1.0],[5.0,1.0],[6.0,1.0],[7.0,1.0],[8.0,1.0],[9.0,1.0],[10.0,1.0,12.0,2.0,16.0,15.0],[10.0,-1.0,12.0,-2.0,16.0,1.0],[10.0,1.0,13.0,3.0,17.0,20.0],[18.0,1.0],[11.0,1.0,19.0,5.0],[14.0,1.0,20.0,6.0],[21.0,1.0],[22.0,1.0],[23.0,1.0],[24.0,1.0],[10.0,1.0,25.0,10.0,26.0,-1.0],[10.0,-1.0,25.0,5.0,26.0,1.0],[27.0,9.0,28.0,1.0],[15.0,1.0,29.0,4.0]]},{"b":[9.0,8.0,7.0,6.0,5.0,4.0,3.0,34.0,1.0,0.0],"rows":[[0.0,32.0,10.0,16.0,11.0,-16.0],[1.0,32.0,12.0,16.0],[2.0,32.0,13.0,32.0],[3.0,32.0,14.0,48.0],[4.0,32.0,15.0,32.0],[5.0,32.0,16.0,32.0,17.0,-32.0],[6.0,32.0,18.0,16.0,19.0,-16.0],[7.0,32.0,20.0,16.0,21.0,-16.0],[8.0,32.0,22.0,32.0],[9.0,32.0,23.0,48.0]]}],"outputs":["key0","key1","key2","key3","key4","key5","key6","key7","key8","key9"],"params":3475,"source":"wir 0.2\n# Brain of a Yumon (generated by `wir park`), one program for every species. It scores\n# 10 options: eat hunt flee hide mate sleep flock roam fight brace. o is the current option. td fd pd md\n# are the nearest threat, food, prey and mate as distance buckets (0 none, 1 far, 2 near,\n# 3 close), kc the kin nearby; refuge = a band this Yumon can enter and the threat cannot.\n# hit = how recently an attacker still in sight struck (3 just now), odds against it\n# (0 worse, 1 even, 2 better). camo, social, armed and guard are traits. The host samples an option from a softmax over the\n# keys; every Yumon starts from these weights and then learns its own.\n\ninput o0, o1, o2, o3, o4, o5, o6, o7, o8, o9: R1 in [0, 1]\ninput hunger: R1 in [0, 10]\ninput fatigue: R1 in [0, 10]\ninput hurt: R1 in [0, 3]\ninput fertile: R1 in [0, 1]\ninput td: R1 in [0, 3]\ninput refuge: R1 in [0, 1]\ninput fd: R1 in [0, 3]\ninput pd: R1 in [0, 3]\ninput md: R1 in [0, 3]\ninput kc: R1 in [0, 3]\ninput camo: R1 in [0, 1]\ninput social: R1 in [0, 1]\ninput hit: R1 in [0, 3]\ninput odds: R1 in [0, 2]\ninput armed: R1 in [0, 1]\ninput guard: R1 in [0, 1]\n\nlet scared = gt(td, 0)\n# hunting comes first: prey in sight beats plants unless the prey is far and food close\nlet eat = select(and(gt(fd, 0), ge(hunger, 2)), hunger + 2*fd - 1, 0)\nlet hunt = select(and(gt(pd, 0), ge(hunger, 3)), hunger + 3*pd + 1, 0)\n# flee harder when the threat is close, a refuge is reachable, or already hurt\nlet flee = select(scared, 3*td + 2*refuge + 2*hurt + 2, 0)\n# camouflaged species freeze instead, until the threat is close\nlet hide = select(and(camo, scared, lt(td, 3)), 3*td + 6, 0)\n# a far threat does not stop mating\nlet mate = select(and(fertile, gt(md, 0), lt(hunger, 6), lt(td, 2)), 6 + 2*md, 0)\nlet sleep = select(scared, 0, 2*clip(fatigue - 3, 0, 7))\n# social species keep together, more so under threat\nlet flock = select(social, 2 + td - min(kc, 2), 0)\n# roam: wander farther when hungry and nothing to eat or hunt is in sight\nlet roam = 2 + select(and(eq(fd, 0), eq(pd, 0)), min(hunger, 5), 0)\n# struck: the armed fight back when the odds allow (less so when hurt); a shell or\n# spines can brace instead, unless a refuge or being hurt makes fleeing better\nlet fight = select(and(armed, gt(hit, 0)), max(4*hit + 4*odds - 2*hurt - 2, 0), 0)\nlet brace = select(and(guard, ge(hit, 2)), 3*hit + 3, 0)\n\n# keys: 16 * (drive + 2 on the current option) + a tie-break\noutput key0 = 16*eat + 32*o0 + 9\noutput key1 = 16*hunt + 32*o1 + 8\noutput key2 = 16*flee + 32*o2 + 7\noutput key3 = 16*hide + 32*o3 + 6\noutput key4 = 16*mate + 32*o4 + 5\noutput key5 = 16*sleep + 32*o5 + 4\noutput key6 = 16*flock + 32*o6 + 3\noutput key7 = 16*roam + 32*o7 + 2\noutput key8 = 16*fight + 32*o8 + 1\noutput key9 = 16*brace + 32*o9 + 0\n"},"brains":[{"hidden":[43,30,24,16],"inputs":["o0","o1","o2","o3","o4","o5","o6","o7","o8","o9","hunger","fatigue","hurt","fertile","td","refuge","fd","pd","md","kc","camo","social","hit","odds","armed","guard"],"label":"Superposed, 6 shared neurons","layers":[{"b":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,-1.0,-1.0,-1.0,-2.0,-1.0,-3.0,2.0,-1.0,6.0,5.0,1.0,-3.0,-2.0,1.0,1.0,-5.0,-1.0,-1.0,-2.0],"rows":[[0.0,1.0],[1.0,1.0],[2.0,1.0],[3.0,1.0],[4.0,1.0],[5.0,1.0],[6.0,1.0],[7.0,1.0],[8.0,1.0],[9.0,1.0],[10.0,1.0],[12.0,1.0],[13.0,1.0],[14.0,1.0],[15.0,1.0],[16.0,1.0],[17.0,1.0],[18.0,1.0],[19.0,1.0],[20.0,1.0],[21.0,1.0],[22.0,1.0],[24.0,1.0],[25.0,1.0],[14.0,1.0],[16.0,1.0],[10.0,1.0],[10.0,1.0],[17.0,1.0],[10.0,1.0],[14.0,-1.0],[18.0,1.0],[10.0,-1.0],[10.0,-1.0],[14.0,-1.0],[11.0,1.0],[19.0,1.0],[16.0,-1.0],[17.0,-1.0],[10.0,1.0],[22.0,1.0],[12.0,-1.0,22.0,2.0,23.0,2.0],[22.0,1.0]]},{"b":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,-1.0,-1.0,-8.5,1.0,-3.0,0.0,-7.0,-4.0,-3.0,-1.0,0.0,-1.0,0.0,-1.0],"rows":[[0.0,1.0],[1.0,1.0],[2.0,1.0],[3.0,1.0],[4.0,1.0],[5.0,1.0],[6.0,1.0],[7.0,1.0],[8.0,1.0],[9.0,1.0],[10.0,1.0],[13.0,1.0],[15.0,1.0],[16.0,1.0],[17.0,1.0],[21.0,1.0],[15.0,1.0,25.0,-1.0,26.0,1.0,27.0,-1.0],[16.0,1.0,27.0,1.0,28.0,-1.0,29.0,-1.0],[11.0,1.0,13.0,11.0,14.0,1.0,24.0,-9.5],[19.0,1.0,24.0,-1.0,30.0,-1.0],[12.0,1.0,17.0,1.0,30.0,1.0,31.0,-1.0,32.0,1.0,33.0,-1.0,34.0,-1.0],[35.0,1.0],[13.0,7.0,24.0,-7.0,35.0,1.0],[13.0,1.0,18.0,-1.0,20.0,6.0,36.0,1.0],[13.0,-1.0,18.0,1.0,20.0,1.0,36.0,-1.0],[37.0,1.0,38.0,1.0],[39.0,1.0],[21.0,1.0,22.0,1.0,40.0,-1.0],[41.0,1.0],[23.0,1.0,40.0,1.0,42.0,-1.0]]},{"b":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,-16.0,0.0,-19.0,0.0,-3.0,-3.0,0.0,0.0,0.0,0.0,-10.0,-5.0,-9.0,-3.0],"rows":[[0.0,1.0],[1.0,1.0],[2.0,1.0],[3.0,1.0],[4.0,1.0],[5.0,1.0],[6.0,1.0],[7.0,1.0],[8.0,1.0],[9.0,1.0],[10.0,1.0,12.0,2.0,16.0,15.0],[10.0,-1.0,12.0,-2.0,16.0,1.0],[10.0,1.0,13.0,3.0,17.0,20.0],[18.0,1.0],[11.0,1.0,19.0,5.0],[14.0,1.0,20.0,6.0],[21.0,1.0],[22.0,1.0],[23.0,1.0],[24.0,1.0],[10.0,1.0,25.0,10.0,26.0,-1.0],[10.0,-1.0,25.0,5.0,26.0,1.0],[27.0,9.0,28.0,1.0],[15.0,1.0,29.0,4.0]]},{"b":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,1695.6109374999999,49183.817829457366,327269.01428571437,8531.128691983122,4359.704565408252,4752.7708877284595],"rows":[[0.0,1.0],[1.0,1.0],[2.0,1.0],[3.0,1.0],[4.0,1.0],[5.0,1.0],[6.0,1.0],[7.0,1.0],[8.0,1.0],[9.0,1.0],[10.0,15.603124999999999,11.0,-15.603124999999999,12.0,49.38020833333333,13.0,75.31041666666667,14.0,-16.009375,15.0,-22.86145833333333,16.0,-15.644791666666666,17.0,15.644791666666666,18.0,9.850520833333333,19.0,-9.850520833333333,20.0,-1.0,21.0,1.0,22.0,72.52708333333334,23.0,104.40937499999998],[10.0,-49.769379844961236,11.0,49.769379844961236,12.0,-176.6782945736434,13.0,420.1240310077519,14.0,32.03488372093023,15.0,-65.18604651162791,16.0,-255.07751937984497,17.0,255.07751937984497,18.0,28.72674418604651,19.0,-28.72674418604651,20.0,0.9999999999999999,21.0,-0.9999999999999999,22.0,-10.996124031007751,23.0,16.825581395348834],[10.0,-399.78571428571433,11.0,399.78571428571433,12.0,-1005.4428571428572,13.0,-1480.4,14.0,-750.9,15.0,99.45714285714287,16.0,498.6571428571429,17.0,-498.6571428571429,18.0,-5.6,19.0,5.6,20.0,-1.0,21.0,1.0,22.0,3437.6571428571433,23.0,1953.7714285714285],[10.0,30.253867791842477,11.0,-30.253867791842477,12.0,-18.133263009845287,13.0,3.968354430379747,14.0,-21.31751054852321,15.0,-47.163150492264414,16.0,45.474683544303794,17.0,-45.474683544303794,18.0,-4.213431786216596,19.0,4.213431786216596,20.0,-1.0,21.0,1.0,22.0,-30.424050632911392,23.0,69.9240506329114],[10.0,-12.155838454784897,11.0,12.155838454784897,12.0,-2.0943810359964883,13.0,17.073748902546093,14.0,-47.145302897278306,15.0,101.12467076382792,16.0,17.00702370500439,17.0,-17.00702370500439,18.0,-6.438542581211588,19.0,6.438542581211588,20.0,-0.9999999999999999,21.0,0.9999999999999999,22.0,-39.180860403863036,23.0,112.496049165935],[10.0,75.25,11.0,-75.25,12.0,-15.95757180156658,13.0,9.984334203655353,14.0,96.1253263707572,15.0,105.60574412532637,16.0,-24.06919060052219,17.0,24.06919060052219,18.0,-1.0,19.0,1.0,20.0,-5.696475195822455,21.0,5.696475195822455,22.0,46.24281984334203,23.0,-62.75718015665797]]},{"b":[-809.1158948799998,3191.63173184,-1408.9010584,6.0,196.84821679999968,-202.69461087999974,-83.50473280000006,34.0,-1061.6170675200003,-2266.82987648],"rows":[[0.0,32.0,10.0,0.0334848,11.0,-0.008256,12.0,-0.0013776,13.0,0.147888,14.0,-0.0492048,15.0,0.11912832],[1.0,32.0,10.0,0.113664,11.0,-0.02939136,12.0,-0.0030688,13.0,-0.09191807999999999,14.0,-0.0065606399999999995,15.0,-0.02402176],[2.0,32.0,10.0,0.0878592,11.0,0.03599616,12.0,-0.0022064,13.0,0.006825599999999999,14.0,0.029522879999999998,15.0,0.00906944],[3.0,32.0],[4.0,32.0,10.0,-0.0258048,11.0,-0.00520128,12.0,0.0001456,13.0,-0.11831039999999998,14.0,0.16110016000000002,15.0,0.07794816],[5.0,32.0,10.0,-0.0165888,11.0,-0.018823680000000002,12.0,0.00084,13.0,0.10192896,14.0,0.03061632,15.0,-0.018384],[6.0,32.0,10.0,0.024268800000000004,11.0,0.0059443199999999995,12.0,-0.0002128,13.0,-0.01274112,14.0,-0.01385024,15.0,-0.0009804800000000002],[7.0,32.0],[8.0,32.0,10.0,0.08355839999999999,11.0,-0.0007430399999999999,12.0,0.0052976,13.0,-0.07599167999999999,14.0,-0.0656064,15.0,0.03407168],[9.0,32.0,10.0,0.081408,11.0,0.00008256000000000001,12.0,0.0020608000000000002,13.0,0.12195072,14.0,0.13376416000000002,15.0,-0.03823872]]}],"outputs":["key0","key1","key2","key3","key4","key5","key6","key7","key8","key9"],"params":3795,"source":"wir 0.2\n# superpose-choice-layer: eat, hunt, flee, hide, mate, sleep, flock, roam, fight, brace share 6 neurons (PCA encoder, LP decoder, no training).\n# On 92214 states (7751 distinct, weighted fight=30 brace=30 hide=10 mate=10): key0..key9 winner kept 93.12%; all outputs unchanged 0.00%.\n# Brain of a Yumon (generated by `wir park`), one program for every species. It scores\n# 10 options: eat hunt flee hide mate sleep flock roam fight brace. o is the current option. td fd pd md\n# are the nearest threat, food, prey and mate as distance buckets (0 none, 1 far, 2 near,\n# 3 close), kc the kin nearby; refuge = a band this Yumon can enter and the threat cannot.\n# hit = how recently an attacker still in sight struck (3 just now), odds against it\n# (0 worse, 1 even, 2 better). camo, social, armed and guard are traits. The host samples an option from a softmax over the\n# keys; every Yumon starts from these weights and then learns its own.\n\ninput o0, o1, o2, o3, o4, o5, o6, o7, o8, o9: R1 in [0, 1]\ninput hunger: R1 in [0, 10]\ninput fatigue: R1 in [0, 10]\ninput hurt: R1 in [0, 3]\ninput fertile: R1 in [0, 1]\ninput td: R1 in [0, 3]\ninput refuge: R1 in [0, 1]\ninput fd: R1 in [0, 3]\ninput pd: R1 in [0, 3]\ninput md: R1 in [0, 3]\ninput kc: R1 in [0, 3]\ninput camo: R1 in [0, 1]\ninput social: R1 in [0, 1]\ninput hit: R1 in [0, 3]\ninput odds: R1 in [0, 2]\ninput armed: R1 in [0, 1]\ninput guard: R1 in [0, 1]\n\nlet scared = gt(td, 0)\n# hunting comes first: prey in sight beats plants unless the prey is far and food close\nlet eat = select(and(gt(fd, 0), ge(hunger, 2)), hunger + 2*fd - 1, 0)\nlet hunt = select(and(gt(pd, 0), ge(hunger, 3)), hunger + 3*pd + 1, 0)\n# flee harder when the threat is close, a refuge is reachable, or already hurt\nlet flee = select(scared, 3*td + 2*refuge + 2*hurt + 2, 0)\n# camouflaged species freeze instead, until the threat is close\nlet hide = select(and(camo, scared, lt(td, 3)), 3*td + 6, 0)\n# a far threat does not stop mating\nlet mate = select(and(fertile, gt(md, 0), lt(hunger, 6), lt(td, 2)), 6 + 2*md, 0)\nlet sleep = select(scared, 0, 2*clip(fatigue - 3, 0, 7))\n# social species keep together, more so under threat\nlet flock = select(social, 2 + td - min(kc, 2), 0)\n# roam: wander farther when hungry and nothing to eat or hunt is in sight\nlet roam = 2 + select(and(eq(fd, 0), eq(pd, 0)), min(hunger, 5), 0)\n# struck: the armed fight back when the odds allow (less so when hurt); a shell or\n# spines can brace instead, unless a refuge or being hurt makes fleeing better\nlet fight = select(and(armed, gt(hit, 0)), max(4*hit + 4*odds - 2*hurt - 2, 0), 0)\nlet brace = select(and(guard, ge(hit, 2)), 3*hit + 3, 0)\n# --- superpose-choice-layer: 10 features share 6 neurons (PCA encoder, LP decoder) ---\nlet sp_z0 = unit(2.9958*eat + 9.481*hunt + 7.2298*flee - 1.0246*hide - 2.1947*mate - 1.5019*sleep + 1.8913*flock - 0.192*roam + 6.9626*fight + 6.6822*brace)\nlet sp_z1 = unit(-2.5681*eat - 9.1166*hunt + 10.8392*flee + 0.551*hide - 1.6818*mate - 6.581*sleep + 1.4823*flock + 0.0516*roam - 0.2837*fight + 0.2894*brace)\nlet sp_z2 = unit(-2.7985*eat - 7.0381*hunt - 5.1814*flee - 1.7521*hide + 0.3481*mate + 1.7453*sleep - 0.0392*flock - 0.007*roam + 12.0318*fight + 4.5588*brace)\nlet sp_z3 = unit(8.6042*eat - 5.1571*hunt + 0.5643*flee - 2.0209*hide - 6.7066*mate + 6.4665*sleep - 1.1983*flock - 0.2844*roam - 4.3263*fight + 6.6288*brace)\nlet sp_z4 = unit(-2.7691*eat - 0.4771*hunt + 1.9447*flee - 3.5799*hide + 11.5181*mate + 1.9371*sleep - 1.4667*flock - 0.2278*roam - 4.4627*fight + 8.5422*brace)\nlet sp_z5 = unit(11.5283*eat - 2.4447*hunt + 0.7648*flee + 4.9088*hide + 8.0894*mate - 1.8437*sleep - 0.1532*flock - 0.8727*roam + 3.5422*fight - 3.2048*brace)\nlet sp_eat = 0.0109*sp_z0 - 0.01*sp_z1 - 0.0123*sp_z2 + 0.0325*sp_z3 - 0.0135*sp_z4 + 0.0486*sp_z5 - 0.2055\nlet sp_hunt = 0.037*sp_z0 - 0.0356*sp_z1 - 0.0274*sp_z2 - 0.0202*sp_z3 - 0.0018*sp_z4 - 0.0098*sp_z5 - 0.0418\nlet sp_flee = 0.0286*sp_z0 + 0.0436*sp_z1 - 0.0197*sp_z2 + 0.0015*sp_z3 + 0.0081*sp_z4 + 0.0037*sp_z5 + 0.7336\nlet sp_hide = 0\nlet sp_mate = -0.0084*sp_z0 - 0.0063*sp_z1 + 0.0013*sp_z2 - 0.026*sp_z3 + 0.0442*sp_z4 + 0.0318*sp_z5 + 0.2722\nlet sp_sleep = -0.0054*sp_z0 - 0.0228*sp_z1 + 0.0075*sp_z2 + 0.0224*sp_z3 + 0.0084*sp_z4 - 0.0075*sp_z5 + 1.8748\nlet sp_flock = 0.0079*sp_z0 + 0.0072*sp_z1 - 0.0019*sp_z2 - 0.0028*sp_z3 - 0.0038*sp_z4 - 0.0004*sp_z5 + 0.225\nlet sp_roam = 2\nlet sp_fight = 0.0272*sp_z0 - 0.0009*sp_z1 + 0.0473*sp_z2 - 0.0167*sp_z3 - 0.018*sp_z4 + 0.0139*sp_z5 + 0.26\nlet sp_brace = 0.0265*sp_z0 + 0.0001*sp_z1 + 0.0184*sp_z2 + 0.0268*sp_z3 + 0.0367*sp_z4 - 0.0156*sp_z5 - 0.5153\n# --- end of superpose-choice-layer ---\n\n# keys: 16 * (drive + 2 on the current option) + a tie-break\noutput key0 = 16*sp_eat + 32*o0 + 9\noutput key1 = 16*sp_hunt + 32*o1 + 8\noutput key2 = 16*sp_flee + 32*o2 + 7\noutput key3 = 16*sp_hide + 32*o3 + 6\noutput key4 = 16*sp_mate + 32*o4 + 5\noutput key5 = 16*sp_sleep + 32*o5 + 4\noutput key6 = 16*sp_flock + 32*o6 + 3\noutput key7 = 16*sp_roam + 32*o7 + 2\noutput key8 = 16*sp_fight + 32*o8 + 1\noutput key9 = 16*sp_brace + 32*o9 + 0\n"}],"consts":{"hit":3,"hurt":3,"inertia":2,"key_scale":16,"level":10,"near":3,"odds":2,"options":["eat","hunt","flee","hide","mate","sleep","flock","roam","fight","brace"]},"format":"wir-park-demo","vectors":[[[0,0,0,0,0,0,0,0,1,0,4,1,0,0,2,1,1,1,0,3,1,1,1,0,0,0],[89,136,167,198,5,4,35,34,33,0]],[[0,0,0,1,0,0,0,0,0,0,4,9,2,0,1,1,3,0,0,1,0,0,0,1,0,1],[153,8,183,38,5,4,3,34,1,0]],[[0,0,0,0,1,0,0,0,0,0,4,3,1,0,1,1,3,0,3,2,0,0,0,1,0,0],[153,8,151,6,37,4,3,34,1,0]],[[1,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0,1,3,0,1,0,0,3,2,1,0],[41,8,7,6,5,4,3,34,289,0]],[[1,0,0,0,0,0,0,0,0,0,0,6,2,0,3,1,3,3,0,0,1,1,0,0,0,0],[41,8,279,6,5,4,83,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,7,5,2,1,3,1,3,0,1,3,1,0,0,2,0,0],[201,8,279,6,5,4,3,34,1,32]],[[0,0,0,0,0,0,0,1,0,0,10,5,0,1,1,0,2,0,2,1,1,1,0,2,1,1],[217,8,87,150,5,4,35,66,1,0]],[[0,0,0,0,0,0,0,0,0,1,6,6,3,1,0,0,2,0,1,1,0,1,0,1,0,0],[153,8,7,6,5,100,19,34,1,32]],[[0,1,0,0,0,0,0,0,0,0,3,6,0,1,0,0,2,3,3,1,1,0,1,1,1,0],[105,248,7,6,197,100,3,34,97,0]],[[0,0,0,0,0,0,0,1,0,0,5,9,0,0,0,0,0,2,2,3,0,0,0,0,1,0],[9,200,7,6,5,196,3,66,1,0]],[[0,0,0,0,1,0,0,0,0,0,10,10,0,1,0,0,3,0,0,2,0,0,0,1,0,0],[249,8,7,6,37,228,3,34,1,0]],[[0,0,1,0,0,0,0,0,0,0,6,0,3,0,2,0,1,2,0,2,0,1,0,2,0,1],[121,216,263,6,5,4,35,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,0,3,2,0,0,0,2,0,0,3,0,0,1,2,1,1],[9,8,7,6,5,4,3,34,97,32]],[[1,0,0,0,0,0,0,0,0,0,2,8,3,0,2,1,0,1,2,1,0,1,2,2,1,0],[41,8,263,6,5,4,51,34,129,0]],[[1,0,0,0,0,0,0,0,0,0,0,5,3,1,0,1,2,0,0,0,1,0,0,0,1,1],[41,8,7,6,5,68,3,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,1,6,0,1,0,1,1,2,1,2,1,1,0,0,0,0],[9,8,7,6,133,100,3,34,1,32]],[[0,0,0,0,0,0,1,0,0,0,2,0,0,1,2,1,2,0,0,3,0,0,2,0,1,1],[89,8,167,6,5,4,35,34,97,144]],[[1,0,0,0,0,0,0,0,0,0,2,2,0,1,0,1,3,1,0,0,0,0,2,2,1,0],[153,8,7,6,5,4,3,34,225,0]],[[0,1,0,0,0,0,0,0,0,0,4,9,0,0,0,0,0,1,3,2,1,1,2,1,1,1],[9,168,7,6,5,196,3,34,161,144]],[[0,0,0,0,0,0,0,1,0,0,4,6,3,1,0,0,1,0,2,3,0,1,0,0,0,1],[89,8,7,6,165,100,3,66,1,0]],[[0,0,0,0,1,0,0,0,0,0,0,1,0,0,3,0,1,2,0,0,1,1,1,1,0,1],[9,8,183,6,37,4,83,34,1,0]],[[0,1,0,0,0,0,0,0,0,0,1,9,0,1,0,1,1,0,0,0,1,0,0,0,1,1],[9,40,7,6,5,196,3,34,1,0]],[[0,0,0,1,0,0,0,0,0,0,2,7,0,1,0,1,0,1,3,2,1,1,0,2,0,0],[9,8,7,38,197,132,3,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,4,2,0,0,2,1,0,3,3,3,0,1,0,2,0,1],[9,232,167,6,5,4,35,34,1,32]],[[0,0,0,0,0,1,0,0,0,0,0,5,0,1,2,0,2,0,1,0,1,1,0,1,0,0],[9,8,135,198,5,36,67,34,1,0]],[[0,0,0,0,1,0,0,0,0,0,2,5,3,0,0,0,3,0,2,2,1,1,0,1,1,0],[121,8,7,6,37,68,3,34,1,0]],[[0,1,0,0,0,0,0,0,0,0,6,7,3,0,0,0,2,0,0,1,1,1,0,1,1,0],[153,40,7,6,5,132,19,34,1,0]],[[0,0,1,0,0,0,0,0,0,0,7,8,3,1,3,0,3,1,2,1,0,0,0,0,1,1],[201,184,311,6,5,4,3,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,7,4,1,0,0,1,0,0,1,3,0,1,0,0,1,1],[9,8,7,6,5,36,3,114,1,32]],[[0,0,0,0,0,0,0,0,0,1,7,1,3,1,3,0,3,2,2,0,1,1,1,2,1,1],[201,232,279,6,5,4,83,34,65,32]],[[0,0,0,1,0,0,0,0,0,0,9,5,0,0,3,0,0,0,3,1,1,0,0,1,0,1],[9,8,183,38,5,4,3,114,1,0]],[[0,0,0,0,0,0,0,0,0,1,2,9,1,0,1,1,2,3,0,2,0,1,0,2,1,0],[89,8,151,6,5,4,19,34,1,32]],[[0,0,0,0,0,0,0,0,0,1,10,9,3,0,0,1,3,0,0,0,1,1,0,0,0,0],[249,8,7,6,5,196,35,34,1,32]],[[0,0,0,0,1,0,0,0,0,0,9,5,2,0,0,1,1,1,3,3,0,1,0,2,0,0],[169,216,7,6,37,68,3,34,1,0]],[[0,1,0,0,0,0,0,0,0,0,9,7,0,0,0,0,0,1,1,3,1,0,0,1,1,0],[9,248,7,6,5,132,3,34,1,0]],[[0,0,0,0,0,0,1,0,0,0,10,2,2,0,1,1,0,3,1,3,0,0,0,0,1,0],[9,328,183,6,5,4,35,34,1,0]],[[1,0,0,0,0,0,0,0,0,0,9,10,0,1,0,0,2,2,2,3,1,0,0,0,0,0],[233,264,7,6,5,228,3,34,1,0]],[[0,1,0,0,0,0,0,0,0,0,9,4,0,1,2,0,2,1,1,0,0,1,0,1,0,0],[201,248,135,6,5,4,67,34,1,0]],[[0,0,0,0,0,0,0,0,1,0,9,9,2,0,3,1,0,2,0,3,0,1,1,2,0,1],[9,264,279,6,5,4,51,34,33,0]],[[1,0,0,0,0,0,0,0,0,0,8,2,0,0,0,0,1,1,1,1,1,0,0,2,1,1],[185,200,7,6,5,4,3,34,1,0]],[[1,0,0,0,0,0,0,0,0,0,7,1,0,1,0,0,0,2,3,2,1,1,0,0,1,0],[41,232,7,6,5,4,3,34,1,0]],[[0,0,0,1,0,0,0,0,0,0,10,8,0,1,0,1,3,2,3,3,0,1,0,0,1,1],[249,280,7,38,5,164,3,34,1,0]],[[0,0,0,1,0,0,0,0,0,0,6,0,0,0,0,1,0,2,0,3,0,0,0,2,0,0],[9,216,7,38,5,4,3,34,1,0]],[[0,0,0,1,0,0,0,0,0,0,6,3,0,0,0,0,0,0,2,1,1,0,3,2,1,1],[9,8,7,38,5,4,3,114,289,192]],[[0,1,0,0,0,0,0,0,0,0,10,9,3,1,3,1,0,1,3,3,0,0,0,1,1,0],[9,264,311,6,5,4,3,34,1,0]],[[1,0,0,0,0,0,0,0,0,0,6,8,2,1,0,1,3,2,1,0,1,1,0,0,0,1],[217,216,7,6,5,164,35,34,1,0]],[[1,0,0,0,0,0,0,0,0,0,1,2,3,1,1,0,2,3,0,2,0,0,0,0,1,1],[41,8,183,6,5,4,3,34,1,0]],[[0,0,0,0,0,0,0,0,1,0,10,5,0,1,0,0,0,0,1,1,1,0,1,0,0,0],[9,8,7,6,5,68,3,114,33,0]],[[0,0,0,0,0,1,0,0,0,0,8,0,2,0,0,0,1,3,0,1,1,1,0,2,1,0],[153,296,7,6,5,36,19,34,1,0]],[[0,0,1,0,0,0,0,0,0,0,6,4,2,1,3,0,0,2,2,2,0,0,0,2,0,1],[9,216,279,6,5,4,3,34,1,0]],[[0,0,0,0,0,0,1,0,0,0,7,4,0,1,0,1,3,0,2,2,1,1,3,0,1,0],[201,8,7,6,5,36,35,34,161,0]],[[0,0,0,0,0,0,1,0,0,0,3,1,0,1,0,1,0,2,0,1,1,0,0,0,0,1],[9,168,7,6,5,4,35,34,1,0]],[[0,0,0,0,1,0,0,0,0,0,7,9,1,0,0,1,3,1,1,3,1,1,0,0,1,0],[201,184,7,6,37,196,3,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,8,4,0,1,1,0,3,0,3,3,0,1,0,2,1,1],[217,8,87,6,5,4,19,34,1,32]],[[0,0,0,0,0,1,0,0,0,0,10,7,2,0,0,0,2,0,0,3,0,1,0,1,0,0],[217,8,7,6,5,164,3,34,1,0]],[[0,0,0,0,0,0,0,1,0,0,1,10,0,0,0,1,1,2,1,1,1,0,3,0,1,0],[9,8,7,6,5,228,3,66,161,0]],[[0,0,0,0,0,0,0,1,0,0,4,1,0,1,0,1,1,1,2,2,1,0,0,0,1,0],[89,136,7,6,165,4,3,66,1,0]],[[0,0,1,0,0,0,0,0,0,0,2,6,0,1,0,1,2,1,0,2,1,1,0,2,1,0],[89,8,39,6,5,100,3,34,1,0]],[[0,0,0,0,0,0,1,0,0,0,3,9,0,1,1,1,2,1,1,1,1,1,1,0,0,1],[105,120,119,150,133,4,67,34,1,0]],[[0,0,0,0,0,0,0,1,0,0,3,8,3,1,0,0,0,0,3,1,1,1,1,1,1,1],[9,8,7,6,197,164,19,114,1,0]],[[1,0,0,0,0,0,0,0,0,0,4,4,0,1,0,1,2,0,0,3,0,0,1,0,0,1],[153,8,7,6,5,36,3,34,1,0]],[[0,0,0,0,1,0,0,0,0,0,10,0,3,1,0,1,2,2,2,0,0,1,0,1,1,0],[217,280,7,6,37,4,35,34,1,0]],[[0,0,0,0,0,0,1,0,0,0,7,0,0,1,0,0,1,3,0,2,1,1,0,1,1,0],[137,280,7,6,5,4,35,34,1,0]],[[0,0,0,0,0,0,0,1,0,0,6,0,2,1,0,1,0,2,3,0,1,0,0,2,1,1],[9,216,7,6,5,4,3,66,1,0]],[[0,0,0,0,1,0,0,0,0,0,7,9,0,1,0,1,1,0,3,0,1,1,3,2,0,0],[137,8,7,6,37,196,35,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,4,0,0,0,0,1,0,1,2,3,0,0,0,1,1,1],[9,136,7,6,5,4,3,34,1,32]],[[0,0,0,0,0,0,0,1,0,0,8,0,3,1,0,0,2,2,2,0,1,0,0,2,1,0],[185,248,7,6,5,4,3,66,1,0]],[[0,0,0,0,0,0,0,0,1,0,0,1,0,0,0,1,0,3,1,2,0,0,0,0,1,0],[9,8,7,6,5,4,3,34,33,0]],[[0,0,0,0,0,0,0,1,0,0,8,10,0,0,0,1,2,2,1,1,0,0,0,2,0,0],[185,248,7,6,5,228,3,66,1,0]],[[0,1,0,0,0,0,0,0,0,0,7,9,0,0,0,0,0,0,0,0,1,0,3,0,1,1],[9,40,7,6,5,196,3,114,161,192]],[[0,0,0,0,0,0,0,1,0,0,4,0,0,0,0,0,1,3,0,0,0,0,0,2,1,1],[89,232,7,6,5,4,3,66,1,0]],[[0,0,0,0,0,0,0,0,0,1,8,5,0,1,0,1,1,3,3,0,0,1,0,2,0,1],[153,296,7,6,5,68,35,34,1,32]],[[0,0,0,0,0,0,0,0,1,0,8,2,0,1,0,0,2,0,3,0,1,1,0,0,1,1],[185,8,7,6,5,4,35,34,33,0]],[[0,0,1,0,0,0,0,0,0,0,9,7,3,0,3,0,1,3,0,0,0,1,0,1,1,1],[169,312,311,6,5,4,83,34,1,0]],[[0,0,0,0,0,1,0,0,0,0,3,6,0,0,0,1,0,0,2,0,1,1,0,2,1,1],[9,8,7,6,5,132,35,82,1,0]],[[0,0,0,0,0,0,0,1,0,0,4,9,0,0,0,1,3,3,2,2,1,1,0,1,1,1],[153,232,7,6,5,196,3,66,1,0]],[[0,1,0,0,0,0,0,0,0,0,5,10,0,0,1,0,0,0,0,3,0,1,3,1,1,0],[9,40,87,6,5,4,19,114,225,0]],[[0,0,1,0,0,0,0,0,0,0,2,10,0,1,0,0,0,3,3,0,1,1,2,0,1,1],[9,8,39,6,197,228,35,34,97,144]],[[1,0,0,0,0,0,0,0,0,0,2,10,0,0,0,0,0,0,3,2,1,1,0,0,1,1],[41,8,7,6,5,228,3,66,1,0]],[[0,0,1,0,0,0,0,0,0,0,8,9,0,0,3,1,1,0,0,1,0,0,0,1,0,1],[153,8,247,6,5,4,3,34,1,0]],[[0,1,0,0,0,0,0,0,0,0,6,7,0,1,2,1,0,2,1,3,0,0,0,1,1,0],[9,248,167,6,5,4,3,34,1,0]],[[0,0,0,0,1,0,0,0,0,0,8,0,1,1,1,1,0,2,0,0,1,1,0,1,1,1],[9,248,151,150,37,4,51,34,1,0]],[[0,0,0,0,0,0,0,0,1,0,0,10,0,1,0,1,1,0,0,1,0,0,0,1,1,1],[9,8,7,6,5,228,3,34,33,0]],[[0,0,0,0,0,0,0,1,0,0,7,2,0,1,1,0,1,0,2,0,1,0,0,2,1,0],[137,8,87,150,5,4,3,66,1,0]],[[0,0,0,0,0,0,1,0,0,0,6,2,1,0,1,0,3,1,1,0,1,1,1,0,0,1],[185,168,119,150,5,4,83,34,1,0]],[[1,0,0,0,0,0,0,0,0,0,1,4,0,1,0,1,3,1,2,0,0,0,0,1,1,1],[41,8,7,6,165,36,3,34,1,0]],[[0,0,0,0,0,1,0,0,0,0,1,4,0,1,1,1,1,0,3,2,1,1,0,0,1,1],[9,8,119,150,197,36,19,34,1,0]],[[0,0,0,1,0,0,0,0,0,0,4,5,0,1,3,0,0,2,1,3,0,0,1,2,1,0],[9,184,183,38,5,4,3,34,161,0]],[[1,0,0,0,0,0,0,0,0,0,5,7,0,0,2,0,2,0,0,3,0,1,2,0,0,1],[169,8,135,6,5,4,35,34,1,144]],[[0,1,0,0,0,0,0,0,0,0,7,9,0,0,0,0,2,1,0,2,0,0,2,2,0,1],[169,216,7,6,5,196,3,34,1,144]],[[0,0,0,0,1,0,0,0,0,0,7,2,3,1,0,0,1,1,1,3,1,1,0,2,0,1],[137,184,7,6,37,4,3,34,1,0]],[[0,0,0,0,0,0,0,1,0,0,4,0,3,0,3,1,0,0,2,2,1,0,0,2,0,0],[9,8,311,6,5,4,3,130,1,0]],[[0,1,0,0,0,0,0,0,0,0,3,8,1,0,3,1,1,2,0,1,0,0,0,0,1,1],[73,200,247,6,5,4,3,34,1,0]],[[0,0,0,0,0,0,1,0,0,0,4,8,3,0,0,1,0,0,3,0,0,1,0,1,0,0],[9,8,7,6,5,164,67,98,1,0]],[[0,0,0,0,1,0,0,0,0,0,3,6,3,1,0,0,2,0,3,0,0,1,1,2,1,0],[105,8,7,6,229,100,35,34,65,0]],[[0,0,0,0,0,0,0,0,1,0,6,2,0,0,0,1,2,3,0,3,0,0,0,0,0,0],[153,264,7,6,5,4,3,34,33,0]],[[0,0,0,0,0,0,1,0,0,0,9,10,0,0,1,1,1,3,2,3,0,0,1,2,1,0],[169,312,119,6,5,4,35,34,161,0]],[[0,0,0,0,0,0,0,0,0,1,5,9,0,0,1,1,0,3,2,0,0,0,2,1,0,1],[9,248,119,6,5,4,3,34,1,176]],[[0,0,0,0,0,0,1,0,0,0,8,3,0,0,0,0,3,1,2,3,1,1,2,1,0,0],[217,200,7,6,5,4,35,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,7,2,0,1,0,0,1,0,3,3,0,0,1,2,1,0],[137,8,7,6,5,4,3,34,161,32]],[[0,0,1,0,0,0,0,0,0,0,7,1,0,1,0,0,1,2,0,2,1,1,2,1,1,1],[137,232,39,6,5,4,3,34,161,144]],[[0,0,0,0,0,0,1,0,0,0,7,0,0,0,0,1,3,3,0,2,0,0,0,2,1,0],[201,280,7,6,5,4,35,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,7,5,0,0,3,1,1,0,2,2,1,1,0,0,0,0],[137,8,215,6,5,4,51,34,1,32]],[[0,0,0,0,0,0,0,0,1,0,10,7,0,0,3,0,1,3,3,3,1,1,0,1,0,1],[185,328,183,6,5,4,51,34,33,0]],[[1,0,0,0,0,0,0,0,0,0,4,6,3,1,0,0,2,2,3,3,1,1,1,2,1,1],[153,184,7,6,197,100,3,34,65,0]],[[0,0,0,0,1,0,0,0,0,0,5,5,0,1,0,1,3,3,0,2,0,1,0,0,0,1],[169,248,7,6,37,68,3,34,1,0]],[[0,0,0,0,0,0,1,0,0,0,10,6,0,0,0,1,0,0,0,3,0,1,0,0,0,0],[9,8,7,6,5,100,35,114,1,0]],[[0,0,0,0,0,0,0,0,1,0,5,6,0,1,0,1,0,3,2,3,1,1,0,2,0,0],[9,248,7,6,165,100,3,34,33,0]],[[1,0,0,0,0,0,0,0,0,0,1,0,0,0,1,1,0,3,2,0,0,1,0,2,1,0],[41,8,119,6,5,4,51,34,1,0]],[[0,0,0,0,0,0,0,1,0,0,10,8,0,1,0,1,2,3,3,0,0,1,0,1,0,1],[217,328,7,6,5,164,35,66,1,0]],[[0,0,0,0,0,1,0,0,0,0,1,9,0,1,0,1,0,2,3,2,1,1,0,0,0,1],[9,8,7,6,197,228,3,34,1,0]],[[1,0,0,0,0,0,0,0,0,0,10,0,0,1,2,0,3,2,0,1,1,1,0,2,0,1],[281,280,135,198,5,4,51,34,1,0]],[[0,0,0,0,0,0,1,0,0,0,5,10,0,0,1,1,1,3,0,2,0,1,2,2,1,0],[105,248,119,6,5,4,51,34,225,0]],[[0,0,0,0,0,0,0,0,1,0,1,4,0,1,3,0,1,0,1,3,0,0,1,2,1,1],[9,8,183,6,5,4,3,34,193,0]],[[0,0,0,0,0,1,0,0,0,0,10,9,3,0,0,1,1,2,0,3,1,0,0,0,1,0],[185,280,7,6,5,228,3,34,1,0]],[[0,0,1,0,0,0,0,0,0,0,7,2,1,1,0,1,2,2,3,3,0,1,0,1,0,1],[169,232,39,6,5,4,3,34,1,0]],[[0,0,0,0,0,0,1,0,0,0,2,1,0,1,0,0,0,0,1,3,0,0,1,2,1,0],[9,8,7,6,133,4,35,66,161,0]],[[0,1,0,0,0,0,0,0,0,0,0,5,3,0,0,1,2,1,2,3,0,0,2,2,1,0],[9,40,7,6,5,68,3,34,129,0]],[[0,0,0,1,0,0,0,0,0,0,5,9,0,1,1,0,3,2,0,3,1,1,2,1,0,1],[169,200,87,182,5,4,19,34,1,144]],[[0,0,0,0,0,0,0,0,1,0,6,4,0,1,2,0,0,3,2,0,0,1,0,0,1,1],[9,264,135,6,5,4,67,34,33,0]],[[0,0,0,0,0,0,1,0,0,0,3,7,0,1,3,0,2,3,0,0,1,0,0,2,1,1],[105,216,183,6,5,4,35,34,1,0]],[[1,0,0,0,0,0,0,0,0,0,2,6,0,1,2,1,0,1,2,3,1,0,3,0,1,0],[41,8,167,198,5,4,3,34,161,0]],[[1,0,0,0,0,0,0,0,0,0,8,7,0,1,1,1,0,3,2,3,1,1,0,0,1,1],[41,296,119,150,5,4,19,34,1,0]],[[0,0,0,0,0,1,0,0,0,0,6,0,2,1,0,0,1,3,0,0,1,1,0,2,1,0],[121,264,7,6,5,36,35,34,1,0]],[[0,0,0,1,0,0,0,0,0,0,2,1,0,0,0,0,1,0,0,1,0,1,0,2,1,1],[57,8,7,38,5,4,19,34,1,0]],[[0,0,0,0,1,0,0,0,0,0,8,0,2,0,0,0,3,0,3,3,0,0,0,1,0,0],[217,8,7,6,37,4,3,34,1,0]],[[0,0,0,1,0,0,0,0,0,0,0,4,1,0,3,0,2,0,0,3,1,0,0,0,0,0],[9,8,215,38,5,4,3,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,8,8,0,1,2,0,2,1,0,2,0,0,0,0,0,0],[185,200,135,6,5,4,3,34,1,32]],[[0,0,0,1,0,0,0,0,0,0,1,3,0,1,3,1,3,2,3,3,0,0,0,2,0,1],[9,8,215,38,5,4,3,34,1,0]],[[0,1,0,0,0,0,0,0,0,0,0,2,0,0,0,1,0,0,2,3,0,0,1,1,1,0],[9,40,7,6,5,4,3,34,97,0]],[[0,0,0,0,0,1,0,0,0,0,8,3,0,0,0,0,3,0,3,3,1,0,3,0,0,1],[217,8,7,6,5,36,3,34,1,192]],[[0,1,0,0,0,0,0,0,0,0,1,6,3,1,0,0,0,0,1,0,1,0,0,2,0,1],[9,40,7,6,133,100,3,50,1,0]],[[0,0,0,0,0,1,0,0,0,0,3,6,1,1,0,1,0,0,2,0,1,1,3,1,1,1],[9,8,7,6,165,132,35,82,193,192]],[[0,0,0,0,1,0,0,0,0,0,5,0,2,0,0,0,2,3,0,2,1,0,0,0,0,1],[137,248,7,6,37,4,3,34,1,0]],[[0,0,1,0,0,0,0,0,0,0,6,9,0,0,0,1,0,3,3,1,0,0,3,1,0,0],[9,264,39,6,5,196,3,34,1,0]],[[0,0,1,0,0,0,0,0,0,0,7,4,0,1,2,1,0,1,1,2,0,0,0,0,1,1],[9,184,199,6,5,4,3,34,1,0]],[[0,0,0,0,0,1,0,0,0,0,0,8,0,1,0,0,0,0,3,2,1,1,0,0,0,1],[9,8,7,6,197,196,3,34,1,0]],[[0,0,0,0,1,0,0,0,0,0,1,6,3,1,0,0,0,2,1,3,0,0,0,2,0,0],[9,8,7,6,165,100,3,34,1,0]],[[0,0,0,0,0,0,0,1,0,0,4,7,0,1,0,0,1,2,3,1,1,1,1,0,1,1],[89,184,7,6,197,132,19,66,33,0]],[[1,0,0,0,0,0,0,0,0,0,4,6,0,1,0,0,1,2,0,1,1,1,2,0,1,0],[121,184,7,6,5,100,19,34,97,0]],[[0,0,0,0,0,0,0,0,0,1,2,8,0,0,0,0,3,2,2,1,1,0,1,2,1,0],[121,8,7,6,5,164,3,34,161,32]],[[0,0,0,0,0,0,0,0,0,1,8,8,1,0,2,1,2,3,2,2,0,1,0,0,0,1],[185,296,199,6,5,4,35,34,1,32]],[[0,0,0,0,0,0,0,0,0,1,5,6,3,1,3,0,0,2,1,0,1,1,0,0,0,1],[9,200,279,6,5,4,83,34,1,32]],[[0,0,0,0,0,0,0,1,0,0,9,9,3,1,0,1,2,3,1,1,1,0,0,1,0,0],[201,312,7,6,5,196,3,66,1,0]],[[0,0,0,0,0,0,0,0,1,0,6,5,0,1,0,0,0,2,0,3,0,0,0,0,0,1],[9,216,7,6,5,68,3,34,33,0]],[[0,0,0,0,0,0,0,0,0,1,6,8,1,0,0,0,3,1,1,2,1,1,2,2,0,1],[185,168,7,6,5,164,3,34,1,176]],[[1,0,0,0,0,0,0,0,0,0,0,3,0,1,2,0,2,3,0,1,0,1,3,2,0,1],[41,8,135,6,5,4,51,34,1,192]],[[0,0,0,0,0,0,0,1,0,0,10,6,2,0,3,0,0,0,0,2,0,0,0,1,1,1],[9,8,247,6,5,4,3,146,1,0]],[[0,0,0,0,0,0,0,0,1,0,2,7,2,1,1,1,3,2,2,1,1,0,2,2,0,1],[121,8,183,150,165,4,3,34,33,144]],[[0,1,0,0,0,0,0,0,0,0,5,2,2,1,0,0,0,0,0,3,0,0,2,2,0,1],[9,40,7,6,5,4,3,114,1,144]],[[0,0,1,0,0,0,0,0,0,0,10,7,0,0,0,1,0,3,2,2,0,0,0,1,0,0],[9,328,39,6,5,132,3,34,1,0]],[[0,1,0,0,0,0,0,0,0,0,0,3,0,0,3,1,0,1,1,0,1,0,2,0,0,0],[9,40,215,6,5,4,3,34,1,0]],[[0,0,0,0,0,0,0,0,1,0,10,2,0,1,0,0,0,1,1,3,0,1,2,2,0,0],[9,232,7,6,5,4,3,34,33,0]],[[1,0,0,0,0,0,0,0,0,0,5,8,0,0,0,1,2,2,0,0,0,0,2,1,1,1],[169,200,7,6,5,164,3,34,161,144]],[[0,0,0,0,0,0,0,0,0,1,9,2,0,0,0,0,0,0,2,2,1,1,3,0,0,0],[9,8,7,6,5,4,3,114,1,32]],[[0,0,0,0,1,0,0,0,0,0,3,2,0,0,0,1,0,2,0,3,1,0,0,1,1,0],[9,168,7,6,37,4,3,34,1,0]],[[0,1,0,0,0,0,0,0,0,0,10,5,0,1,2,0,3,3,2,1,0,0,0,2,0,0],[249,360,135,6,5,4,3,34,1,0]],[[0,0,0,1,0,0,0,0,0,0,7,6,3,0,0,1,0,0,0,2,0,1,0,2,0,1],[9,8,7,38,5,100,3,114,1,0]],[[0,0,0,0,0,0,0,0,1,0,4,0,0,0,0,0,2,0,3,0,0,1,0,2,1,1],[121,8,7,6,5,4,35,34,33,0]],[[0,0,0,1,0,0,0,0,0,0,7,5,0,1,0,0,3,0,0,3,0,1,0,2,1,0],[201,8,7,38,5,68,3,34,1,0]],[[0,0,0,1,0,0,0,0,0,0,1,8,0,1,3,0,2,0,0,2,0,0,3,2,1,0],[9,8,183,38,5,4,3,34,289,0]],[[0,0,0,0,0,1,0,0,0,0,4,7,0,0,0,1,1,2,1,2,0,0,0,1,1,1],[89,184,7,6,5,164,3,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,7,10,2,0,1,1,0,1,0,2,1,1,0,1,1,0],[9,184,183,150,5,4,19,34,1,32]],[[0,0,0,0,0,0,1,0,0,0,3,9,2,0,0,1,3,1,2,1,0,1,0,2,0,1],[137,120,7,6,5,196,51,34,1,0]],[[0,1,0,0,0,0,0,0,0,0,2,2,0,1,0,1,0,0,3,1,0,0,0,1,0,0],[9,40,7,6,197,4,3,66,1,0]],[[1,0,0,0,0,0,0,0,0,0,2,6,0,1,0,1,1,0,0,0,1,1,0,2,0,1],[89,8,7,6,5,100,35,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,8,3,0,1,0,1,1,0,2,3,0,0,0,2,0,0],[153,8,7,6,5,4,3,34,1,32]],[[0,0,0,0,0,1,0,0,0,0,0,1,2,0,0,0,0,0,2,2,1,0,0,2,1,0],[9,8,7,6,5,36,3,34,1,0]],[[0,0,1,0,0,0,0,0,0,0,6,8,0,0,0,0,3,0,1,1,1,0,0,1,1,1],[185,8,39,6,5,164,3,34,1,0]],[[0,0,0,0,0,0,0,1,0,0,0,6,0,0,2,0,2,3,3,1,1,1,0,2,0,0],[9,8,135,198,5,4,51,66,1,0]],[[0,0,0,0,1,0,0,0,0,0,6,0,0,0,0,0,1,0,3,3,1,1,0,0,0,1],[121,8,7,6,37,4,3,34,1,0]],[[0,0,0,0,1,0,0,0,0,0,0,8,0,0,2,1,0,2,0,1,1,1,3,1,0,0],[9,8,167,198,37,4,51,34,1,0]],[[0,0,0,0,0,0,0,0,1,0,5,8,0,1,2,0,0,1,1,2,0,0,1,0,0,1],[9,152,135,6,5,4,3,34,33,0]],[[0,0,1,0,0,0,0,0,0,0,2,7,0,1,2,0,3,0,1,0,0,0,0,1,1,1],[121,8,167,6,5,4,3,34,1,0]],[[0,0,0,0,0,0,0,0,1,0,7,10,0,0,2,1,0,2,1,3,1,1,0,1,1,1],[9,232,167,198,5,4,35,34,33,0]],[[1,0,0,0,0,0,0,0,0,0,2,3,0,1,3,0,3,0,0,0,0,1,0,0,1,1],[153,8,183,6,5,4,83,34,1,0]],[[0,0,1,0,0,0,0,0,0,0,0,5,0,0,0,0,2,3,0,2,0,1,0,0,1,1],[9,8,39,6,5,68,3,34,1,0]],[[0,0,1,0,0,0,0,0,0,0,0,2,3,0,1,0,3,0,0,2,1,0,1,1,0,1],[9,8,215,150,5,4,3,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,9,9,1,0,1,1,1,0,3,3,0,0,0,0,1,0],[169,8,151,6,5,4,3,34,1,32]],[[0,0,0,0,0,0,0,0,0,1,3,2,0,1,0,0,0,1,1,3,1,0,0,2,0,0],[9,120,7,6,133,4,3,34,1,32]],[[0,0,0,0,0,0,1,0,0,0,3,2,0,0,0,1,0,3,2,3,0,1,0,2,0,0],[9,216,7,6,5,4,35,34,1,0]],[[0,0,0,0,0,1,0,0,0,0,0,0,3,1,1,0,2,3,1,1,0,1,1,0,1,0],[9,8,183,6,133,36,35,34,1,0]],[[0,0,0,0,0,0,0,0,1,0,5,3,0,1,0,1,3,1,0,1,1,0,0,0,1,1],[169,152,7,6,5,4,3,34,33,0]],[[0,0,0,0,0,0,0,0,1,0,5,7,0,0,1,0,1,1,2,3,0,0,0,1,1,0],[105,152,87,6,5,4,3,34,33,0]],[[0,0,0,0,0,0,0,1,0,0,2,6,2,0,2,1,2,2,1,1,1,1,3,1,1,1],[89,8,231,198,5,4,51,66,161,192]],[[0,0,0,0,0,0,0,0,0,1,7,8,0,0,0,0,2,3,2,1,1,0,0,2,0,0],[169,280,7,6,5,164,3,34,1,32]],[[0,1,0,0,0,0,0,0,0,0,5,3,0,0,0,1,3,1,3,0,0,0,0,0,1,0],[169,184,7,6,5,4,3,34,1,0]],[[0,0,0,0,0,0,0,0,1,0,8,6,1,1,3,0,0,2,0,0,0,1,0,1,0,0],[9,248,215,6,5,4,83,34,33,0]],[[0,0,1,0,0,0,0,0,0,0,0,10,3,1,3,1,3,0,1,3,0,1,0,0,1,0],[9,8,343,6,5,4,51,34,1,0]],[[0,0,0,1,0,0,0,0,0,0,5,8,1,1,2,0,3,1,2,2,0,1,0,0,1,0],[169,152,167,38,5,4,35,34,1,0]],[[1,0,0,0,0,0,0,0,0,0,2,4,0,1,0,1,3,3,0,3,0,0,2,1,1,1],[153,8,7,6,5,36,3,34,161,144]],[[0,0,1,0,0,0,0,0,0,0,1,8,1,0,3,1,0,0,0,3,1,1,0,0,1,1],[9,8,279,6,5,4,51,50,1,0]],[[0,0,0,0,0,0,0,1,0,0,3,4,0,1,0,1,0,1,3,3,1,1,0,0,0,0],[9,120,7,6,197,36,3,66,1,0]],[[0,0,0,0,0,1,0,0,0,0,8,7,3,0,2,1,0,3,0,0,0,1,0,0,0,1],[9,296,263,6,5,36,67,34,1,0]],[[0,0,1,0,0,0,0,0,0,0,1,9,0,1,2,0,3,2,1,3,0,1,0,1,0,1],[9,8,167,6,5,4,35,34,1,0]],[[0,1,0,0,0,0,0,0,0,0,8,5,0,1,2,0,1,2,2,1,0,1,3,2,1,1],[153,280,135,6,5,4,51,34,289,192]],[[0,0,0,0,0,0,0,0,1,0,1,9,1,0,0,1,1,3,3,0,1,1,3,0,1,1],[9,8,7,6,5,196,35,34,161,192]],[[1,0,0,0,0,0,0,0,0,0,9,5,2,0,0,0,3,3,1,3,0,1,0,1,0,1],[265,312,7,6,5,68,3,34,1,0]],[[0,0,0,0,0,0,1,0,0,0,9,2,2,0,0,1,0,0,0,2,0,1,2,1,1,0],[9,8,7,6,5,4,35,114,97,0]],[[0,0,0,1,0,0,0,0,0,0,5,3,0,0,2,0,3,0,3,1,0,1,3,2,0,1],[169,8,135,38,5,4,51,34,1,192]],[[0,0,0,0,0,0,0,1,0,0,0,10,1,1,0,0,2,0,3,1,1,0,0,0,0,1],[9,8,7,6,197,228,3,66,1,0]],[[0,0,0,0,0,0,0,1,0,0,2,8,0,0,0,1,2,1,1,3,1,1,0,2,0,0],[89,8,7,6,5,164,3,66,1,0]],[[0,0,0,0,0,0,0,1,0,0,2,10,0,1,0,1,2,3,3,1,0,0,0,2,1,1],[89,8,7,6,197,228,3,66,1,0]],[[0,0,0,0,0,0,1,0,0,0,7,9,0,0,0,1,1,0,3,2,0,0,1,2,0,0],[137,8,7,6,5,196,35,34,1,0]],[[0,0,0,0,0,0,0,1,0,0,6,0,0,0,0,1,3,0,3,1,0,0,0,2,1,1],[185,8,7,6,5,4,3,66,1,0]],[[0,0,0,0,0,1,0,0,0,0,5,3,0,1,0,0,3,0,3,3,0,0,0,1,1,1],[169,8,7,6,197,36,3,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,10,4,0,1,3,1,1,3,2,1,1,0,0,2,1,0],[185,328,215,6,5,4,3,34,1,32]],[[0,0,0,0,0,0,0,0,1,0,3,5,2,0,0,0,2,3,0,0,1,0,2,1,0,1],[105,216,7,6,5,68,3,34,33,144]],[[0,0,0,0,0,0,0,0,0,1,0,2,2,0,0,0,1,2,1,2,1,0,0,0,1,0],[9,8,7,6,5,4,3,34,1,32]],[[0,0,0,1,0,0,0,0,0,0,0,10,2,0,0,0,0,2,3,1,1,0,0,0,0,0],[9,8,7,38,5,228,3,34,1,0]],[[0,0,0,0,1,0,0,0,0,0,0,2,0,0,3,1,0,0,1,1,0,0,0,2,1,1],[9,8,215,6,37,4,3,34,1,0]],[[0,0,0,0,1,0,0,0,0,0,2,7,0,1,0,1,3,3,1,3,0,0,0,0,0,0],[121,8,7,6,165,132,3,34,1,0]],[[0,0,0,0,0,0,0,0,1,0,10,7,0,0,0,1,1,0,3,1,0,1,1,1,0,0],[185,8,7,6,5,132,19,34,33,0]],[[0,0,0,1,0,0,0,0,0,0,4,9,0,1,3,0,0,1,3,1,1,0,0,0,1,1],[9,136,183,38,5,4,3,34,1,0]],[[0,0,0,0,0,0,0,1,0,0,7,10,0,0,0,0,1,0,3,0,1,0,0,2,0,1],[137,8,7,6,5,228,3,66,1,0]],[[0,0,0,0,0,0,0,0,0,1,8,0,1,0,0,1,0,2,0,3,0,0,2,2,0,1],[9,248,7,6,5,4,3,34,1,176]],[[0,0,0,0,1,0,0,0,0,0,2,7,0,1,1,1,1,3,3,0,1,0,2,0,1,1],[57,8,119,150,229,4,3,34,97,144]],[[0,0,0,0,0,0,1,0,0,0,7,8,0,1,2,1,3,0,0,0,0,1,3,2,1,0],[201,8,167,6,5,4,99,34,289,0]],[[0,0,0,0,0,0,0,0,1,0,2,0,0,0,0,0,3,2,1,0,0,1,1,2,0,1],[121,8,7,6,5,4,35,34,33,0]],[[0,0,1,0,0,0,0,0,0,0,3,0,2,1,1,0,0,3,2,3,1,1,0,1,0,1],[9,216,183,150,165,4,19,34,1,0]],[[0,1,0,0,0,0,0,0,0,0,1,1,0,0,0,0,3,3,0,2,1,0,0,2,0,0],[9,40,7,6,5,4,3,34,1,0]],[[0,1,0,0,0,0,0,0,0,0,6,1,0,1,0,0,0,0,3,3,1,1,0,2,1,1],[9,40,7,6,5,4,3,114,1,0]],[[0,0,0,1,0,0,0,0,0,0,2,1,1,1,2,0,0,1,1,2,1,1,1,1,0,0],[9,8,167,230,5,4,35,34,1,0]],[[0,0,0,0,0,1,0,0,0,0,6,0,0,1,3,0,0,3,2,3,1,1,0,1,1,1],[9,264,183,6,5,36,51,34,1,0]],[[0,0,1,0,0,0,0,0,0,0,6,8,0,1,0,1,0,3,1,1,1,0,1,1,0,1],[9,264,39,6,5,164,3,34,1,0]],[[1,0,0,0,0,0,0,0,0,0,7,1,0,0,0,1,3,1,3,3,1,0,3,0,1,1],[233,184,7,6,5,4,3,34,161,192]],[[0,0,0,0,0,1,0,0,0,0,10,4,0,1,2,1,3,1,2,3,1,1,3,2,1,0],[249,232,167,198,5,36,35,34,289,0]],[[0,0,0,0,0,1,0,0,0,0,0,9,0,1,3,0,0,0,1,3,0,0,0,2,1,0],[9,8,183,6,5,36,3,34,1,0]],[[0,0,0,0,0,0,0,0,1,0,6,6,1,1,0,1,3,2,1,2,1,1,0,0,0,1],[185,216,7,6,5,100,3,34,33,0]],[[0,0,0,0,0,0,0,1,0,0,8,1,3,1,0,1,1,2,2,1,0,0,0,2,0,1],[153,248,7,6,5,4,3,66,1,0]],[[0,0,0,0,1,0,0,0,0,0,9,3,0,0,0,1,1,0,0,2,1,1,3,2,0,0],[169,8,7,6,37,4,3,34,1,0]],[[0,1,0,0,0,0,0,0,0,0,8,1,0,0,2,1,3,0,3,1,1,1,0,0,1,1],[217,40,167,198,5,4,51,34,1,0]],[[0,0,0,0,0,1,0,0,0,0,2,10,0,0,0,0,3,0,0,0,0,1,1,2,1,1],[121,8,7,6,5,260,35,34,161,0]],[[0,0,0,0,1,0,0,0,0,0,10,7,0,1,0,1,1,3,0,3,0,1,0,2,1,0],[185,328,7,6,37,132,3,34,1,0]],[[0,0,0,0,0,0,0,1,0,0,8,1,1,0,0,1,3,1,2,2,0,1,0,0,1,0],[217,200,7,6,5,4,3,66,1,0]],[[0,0,0,0,0,0,0,0,1,0,1,1,0,1,0,1,0,2,2,2,1,0,0,1,1,0],[9,8,7,6,165,4,3,34,33,0]],[[0,0,0,1,0,0,0,0,0,0,9,8,0,1,2,0,2,3,0,0,0,1,0,1,1,0],[201,312,135,38,5,4,67,34,1,0]],[[0,0,0,0,0,0,1,0,0,0,7,2,0,1,1,1,0,3,1,2,1,0,3,0,0,0],[9,280,119,150,5,4,35,34,1,0]],[[0,0,1,0,0,0,0,0,0,0,7,8,2,0,0,0,3,3,3,1,1,1,0,1,0,0],[201,280,39,6,5,164,19,34,1,0]],[[0,0,0,0,0,1,0,0,0,0,3,5,0,0,1,0,1,0,1,2,1,0,0,1,1,0],[73,8,87,150,5,36,3,34,1,0]],[[0,0,0,0,0,0,0,1,0,0,3,7,3,1,1,1,1,2,2,2,1,1,0,2,0,1],[73,168,215,150,165,4,19,66,1,0]],[[0,0,0,0,0,0,0,0,0,1,9,0,0,0,0,0,0,0,2,3,0,1,3,1,0,0],[9,8,7,6,5,4,3,114,1,32]],[[0,0,0,0,0,0,0,1,0,0,2,5,0,0,0,0,0,0,0,3,1,1,3,1,0,0],[9,8,7,6,5,68,3,98,1,0]],[[0,0,0,0,0,1,0,0,0,0,9,2,1,0,0,1,2,3,2,0,0,1,0,1,1,0],[201,312,7,6,5,36,35,34,1,0]],[[0,0,0,0,0,0,0,1,0,0,10,2,0,0,0,0,1,2,3,2,0,0,0,2,1,1],[185,280,7,6,5,4,3,66,1,0]],[[1,0,0,0,0,0,0,0,0,0,0,1,0,1,0,1,2,3,0,2,0,1,1,2,1,1],[41,8,7,6,5,4,3,34,161,0]],[[0,0,0,0,0,0,0,1,0,0,3,5,3,0,0,1,0,0,0,0,0,0,0,1,1,0],[9,8,7,6,5,68,3,114,1,0]],[[0,0,1,0,0,0,0,0,0,0,2,6,0,1,2,0,3,1,0,3,1,1,0,2,0,0],[121,8,167,198,5,4,35,34,1,0]],[[0,0,1,0,0,0,0,0,0,0,9,0,0,0,0,0,1,3,1,2,1,0,1,2,1,1],[169,312,39,6,5,4,3,34,161,0]],[[0,0,0,0,0,0,1,0,0,0,5,7,0,1,0,1,3,0,3,0,0,1,0,0,1,0],[169,8,7,6,197,132,67,34,1,0]],[[1,0,0,0,0,0,0,0,0,0,7,8,3,0,0,0,2,0,3,2,0,1,0,0,1,1],[201,8,7,6,5,164,3,34,1,0]],[[0,0,1,0,0,0,0,0,0,0,3,1,0,0,0,1,0,0,2,0,1,0,1,2,1,0],[9,8,39,6,5,4,3,82,161,0]],[[0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,1,0,2,0,0,1,0,0,1,1,0],[9,8,7,6,5,4,3,34,1,32]],[[0,1,0,0,0,0,0,0,0,0,7,7,0,0,1,0,3,1,0,1,1,1,0,1,0,0],[201,216,87,150,5,4,35,34,1,0]],[[1,0,0,0,0,0,0,0,0,0,8,1,0,1,0,1,2,0,2,3,0,1,0,0,1,1],[217,8,7,6,5,4,3,34,1,0]],[[0,0,0,0,0,0,0,0,0,1,9,7,0,1,3,1,3,0,0,3,1,1,0,1,1,0],[233,8,215,6,5,4,51,34,1,32]]]}</script>
+<script>// Yumon Park simulation core. Every Yumon carries its own copy of the exported WIR brain
+// (dense Float32 weights). Founders start from the compiled weights, which give the
+// written keys exactly; afterwards each Yumon samples options from a softmax over its
+// keys, keeps a small buffer of what happened, and takes policy-gradient steps on its own
+// weights whenever it falls asleep. A child starts from its mother's weights; a Yumon's
+// weights are dropped when it dies. The host does the world: four bands (sky, trees,
+// ground, water), plants, species built from capability permutations, genes, limbs,
+// hunting, mating and death.
+(function (root) {
+  'use strict';
+  const WORLD_W = 2400, WORLD_H = 600;
+  // Bands top to bottom: sky, trees, ground, water.
+  const BANDS = ['sky', 'trees', 'ground', 'water'];
+  const BAND_Y = [[0, 190], [190, 330], [330, 400], [400, 600]];
+  const bandOf = (y) => (y < 190 ? 0 : y < 330 ? 1 : y < 400 ? 2 : 3);
+
+  // ---------------------------------------------------------------- capabilities
+  // Each capability is carried by a limb; a limb's size gene sets how well the
+  // capability works. Limbs shared by two capabilities (claws: climbing and clawing)
+  // tie them together.
+  const CAPS = [
+    { id: 'swim', kind: 'move', limb: 'fins', label: 'Swim' },
+    { id: 'walk', kind: 'move', limb: 'legs', label: 'Walk' },
+    { id: 'climb', kind: 'move', limb: 'claws', label: 'Climb' },
+    { id: 'fly', kind: 'move', limb: 'wings', label: 'Fly' },
+    { id: 'bite', kind: 'weapon', limb: 'jaws', label: 'Bite' },
+    { id: 'claw', kind: 'weapon', limb: 'claws', label: 'Claw' },
+    { id: 'sting', kind: 'weapon', limb: 'stinger', label: 'Sting' },
+    { id: 'horn', kind: 'weapon', limb: 'horns', label: 'Horn' },
+    { id: 'shell', kind: 'guard', limb: 'shell', label: 'Shell' },
+    { id: 'spines', kind: 'guard', limb: 'spines', label: 'Spines' },
+    { id: 'camo', kind: 'guard', limb: 'skin', label: 'Camouflage' },
+    { id: 'social', kind: 'mind', limb: null, label: 'Social' },
+    { id: 'graze', kind: 'diet', food: 'grass', label: 'Graze' },
+    { id: 'browse', kind: 'diet', food: 'fruit', label: 'Browse' },
+    { id: 'filter', kind: 'diet', food: 'plankton', label: 'Filter' },
+    { id: 'hawk', kind: 'diet', food: 'gnats', label: 'Hawk' },
+    { id: 'scavenge', kind: 'diet', food: 'meat', label: 'Scavenge' },
+  ];
+  const CAP = Object.fromEntries(CAPS.map((c) => [c.id, c]));
+  const LIMBS = ['fins', 'legs', 'claws', 'wings', 'jaws', 'stinger', 'horns', 'shell', 'spines', 'skin'];
+  const FOODS = ['gnats', 'fruit', 'grass', 'plankton', 'meat'];
+  const FOOD_BAND = { gnats: 0, fruit: 1, grass: 2, plankton: 3 };
+  // Movement sets: every 1- and 2-capability combination of the four.
+  const LOCO = [['swim'], ['walk'], ['climb'], ['fly'], ['swim', 'walk'], ['walk', 'climb'], ['walk', 'fly'], ['swim', 'fly'], ['climb', 'fly'], ['swim', 'climb']];
+  const WEAPONS = [[], [], ['bite'], ['claw'], ['sting'], ['horn'], ['bite', 'claw'], ['bite', 'sting'], ['bite', 'horn']];
+  const GUARDS = [[], ['shell'], ['spines'], ['camo']];
+
+  // ---------------------------------------------------------------- tuning
+  const DEFAULTS = {
+    temp: 8, // softmax temperature in key units (a drive unit is 16 key units)
+    // Rewards on top of the homeostatic one: a kill, a blow landed (hunting or fighting
+    // back), getting away from an attacker alive. A killer gorges on up to gorge of the body.
+    killR: 3, hitR: 0.3, escapeR: 1, gorge: 0.5,
+    // Evolution: every gene x exp(mutSmall N), one gene x exp(mutBig N), hue +- hueStep;
+    // a capability is gained or lost with probability capRate per birth. Every splitEvery
+    // ticks a group of at least splitMin (both sexes) with another capability set, or a
+    // gene cluster splitDist away (log units), becomes a new species.
+    mutSmall: 0.03, mutBig: 0.15, hueStep: 6, capRate: 0.06,
+    splitEvery: 250, splitMin: 5, splitDist: 0.3, maxSpecies: 160,
+    wallLife: 0, // ticks a wall stands; 0 until removed
+    breedCd: 400, twinSize: 0.85, // mating cooldown at size 1; unarmed Yumon smaller than twinSize have twins
+    gamma: 0.85, lr: 0.003, anchor: 0.002, clip: 2.0, minBuf: 16, maxBuf: 360, epochs: 1,
+    foodE: 25, popCap: 900, needScale: 20,
+    speed: 1.4, // all band speeds
+    // A sampled option is kept this many ticks (one decision) unless its probability
+    // falls below drop; rewards in between go to that decision.
+    commit: 12, drop: 0.05,
+    // Plant patches: a season lasts season[0..1] ticks; a patch eaten below wither of its
+    // full amount withers early; it sprouts at sprout of full, reformAway[0..1] along.
+    call: 2.5, // mating-call range, times the sense radius
+    plantRate: 1.25, // moving patches lose food (sprouts start small, eaters lose track)
+    season: [2000, 4000], wither: 0.1, sprout: 0.35, reformAway: [150, 450], grace: 400,
+    roamFar: [300, 900], roamTicks: 700, roamPace: 0.75,
+  };
+
+  function makeRng(s) {
+    let seed = (s >>> 0) || 1;
+    const rnd = () => {
+      seed = (seed + 0x6d2b79f5) >>> 0;
+      let t = seed;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    return rnd;
+  }
+
+  // ---------------------------------------------------------------- the brain
+  // Dense layout of the exported sparse layers: per layer W [rows x cols] then b.
+  function brainShape(spec) {
+    let cols = spec.inputs.length, size = 0;
+    const layers = spec.layers.map((l) => {
+      const rows = l.rows.length, L = { rows, cols, w: size, b: size + rows * cols };
+      size += rows * cols + rows;
+      cols = rows;
+      return L;
+    });
+    const init = new Float32Array(size);
+    spec.layers.forEach((l, k) => {
+      const L = layers[k];
+      l.rows.forEach((r, i) => {
+        for (let j = 0; j < r.length; j += 2) init[L.w + i * L.cols + r[j]] = r[j + 1];
+      });
+      l.b.forEach((v, i) => (init[L.b + i] = v));
+    });
+    const width = Math.max(spec.inputs.length, ...layers.map((L) => L.rows));
+    // Activation buffers: acts[k] is the input of layer k, acts[n] the output.
+    const acts = [new Float64Array(spec.inputs.length), ...layers.map((L) => new Float64Array(L.rows))];
+    const deltas = layers.map((L) => new Float64Array(L.rows));
+    function forward(w, x) {
+      acts[0].set(x);
+      for (let k = 0; k < layers.length; k++) {
+        const L = layers[k], a = acts[k], out = acts[k + 1], last = k === layers.length - 1;
+        for (let r = 0; r < L.rows; r++) {
+          let z = w[L.b + r];
+          const o = L.w + r * L.cols;
+          for (let c = 0; c < L.cols; c++) z += w[o + c] * a[c];
+          out[r] = last || z > 0 ? z : 0;
+        }
+      }
+      return acts[layers.length];
+    }
+    // Adds d(sum_k dOut_k * out_k)/dw into g, after forward(w, x).
+    function backward(w, dOut, g) {
+      const n = layers.length;
+      deltas[n - 1].set(dOut);
+      for (let k = n - 1; k >= 0; k--) {
+        const L = layers[k], a = acts[k], d = deltas[k];
+        for (let r = 0; r < L.rows; r++) {
+          const dr = d[r];
+          if (dr === 0) continue;
+          g[L.b + r] += dr;
+          const o = L.w + r * L.cols;
+          for (let c = 0; c < L.cols; c++) g[o + c] += dr * a[c];
+        }
+        if (k === 0) break;
+        const prev = deltas[k - 1];
+        for (let c = 0; c < L.cols; c++) {
+          if (a[c] <= 0) { prev[c] = 0; continue; }
+          let s = 0;
+          for (let r = 0; r < L.rows; r++) s += w[L.w + r * L.cols + c] * d[r];
+          prev[c] = s;
+        }
+      }
+    }
+    return { layers, size, init, forward, backward, nIn: spec.inputs.length };
+  }
+
+  function softmax(keys, temp, p) {
+    let mx = -Infinity;
+    for (let k = 0; k < keys.length; k++) mx = Math.max(mx, keys[k]);
+    let s = 0;
+    for (let k = 0; k < keys.length; k++) s += (p[k] = Math.exp((keys[k] - mx) / temp));
+    for (let k = 0; k < keys.length; k++) p[k] /= s;
+    return p;
+  }
+
+  // ---------------------------------------------------------------- the written rule
+  function ruleKeys(x, C) {
+    const N = C.options.length;
+    const opt = x.slice(0, N).indexOf(1);
+    const [hunger, fatigue, hurt, fertile, td, refuge, fd, pd, md, kc, camo, social, hit, odds, armed, guard] = x.slice(N);
+    const scared = td > 0;
+    const d = [
+      fd > 0 && hunger >= 2 ? hunger + 2 * fd - 1 : 0,
+      pd > 0 && hunger >= 3 ? hunger + 3 * pd + 1 : 0,
+      scared ? 3 * td + 2 * refuge + 2 * hurt + 2 : 0,
+      camo === 1 && scared && td < C.near ? 3 * td + 6 : 0,
+      fertile === 1 && md > 0 && hunger < 6 && td < 2 ? 6 + 2 * md : 0,
+      scared ? 0 : 2 * Math.min(7, Math.max(0, fatigue - 3)),
+      social === 1 ? 2 + td - Math.min(kc, 2) : 0,
+      2 + (fd === 0 && pd === 0 ? Math.min(hunger, 5) : 0),
+      armed === 1 && hit > 0 ? Math.max(0, 4 * hit + 4 * odds - 2 * hurt - 2) : 0,
+      guard === 1 && hit >= 2 ? 3 * hit + 3 : 0,
+    ];
+    return d.map((v, o) => C.key_scale * (v + C.inertia * (o === opt ? 1 : 0)) + (N - 1 - o));
+  }
+  const argmax = (a) => { let b = 0; for (let k = 1; k < a.length; k++) if (a[k] > a[b]) b = k; return b; };
+
+  // ---------------------------------------------------------------- species
+  const SYL = {
+    swim: ['Fin', 'Gill', 'Rip', 'Bub', 'Kelp'], walk: ['Paw', 'Trot', 'Mud', 'Burr', 'Stomp'], climb: ['Bough', 'Twig', 'Lim', 'Nook', 'Vine'],
+    fly: ['Wisp', 'Puff', 'Sky', 'Flit', 'Zeph'],
+  };
+  const TAIL = { bite: ['fang', 'chomp', 'maw'], claw: ['claw', 'rake'], sting: ['sting', 'barb'], horn: ['horn', 'butt'], shell: ['shell', 'plate'], spines: ['quill', 'thorn'], camo: ['shade', 'murk'], none: ['let', 'kin', 'mo', 'bit', 'ling', 'pip'] };
+
+  // Roles fix the shape of the food web: half the species eat only plants, a quarter
+  // hunt and also eat plants, a quarter only hunt (and scavenge).
+  // diets: 'mixed' (half plant eaters, a quarter omnivores, a quarter hunters), 'hunters'
+  // (every species armed and still eating plants), 'carnivores' (armed, meat only).
+  function makeSpecies(rnd, count, diets = 'mixed') {
+    const pick = (a) => a[Math.floor(rnd() * a.length)];
+    const roles = [];
+    for (let i = 0; i < count; i++) roles.push(diets === 'hunters' ? 'omni' : diets === 'carnivores' ? 'carn' : i % 4 < 2 ? 'herb' : i % 4 === 2 ? 'omni' : 'carn');
+    for (let i = roles.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [roles[i], roles[j]] = [roles[j], roles[i]]; }
+    const out = [], seen = new Set(), names = new Set();
+    let guard = 0;
+    while (out.length < count && guard++ < 5000) {
+      const role = roles[out.length];
+      const loco = LOCO[out.length % LOCO.length];
+      const weapons = role === 'herb' ? [] : pick(WEAPONS.filter((w) => w.length));
+      const guards = pick(GUARDS);
+      const bands = new Set();
+      for (const c of loco) for (const b of bandsFor(c)) bands.add(b);
+      const plants = Object.keys(FOOD_BAND).filter((f) => bands.has(FOOD_BAND[f]));
+      const diet = new Set();
+      const carn = weapons.length > 0;
+      if (role !== 'carn') {
+        diet.add(pick(plants));
+        if (rnd() < 0.35) diet.add(pick(plants));
+      }
+      if (carn || rnd() < 0.15) diet.add('meat');
+      const caps = [...loco, ...weapons, ...guards];
+      if (rnd() < 0.3) caps.push('social');
+      for (const f of diet) {
+        const c = CAPS.find((k) => k.food === f);
+        if (c && (f !== 'meat' || !carn)) caps.push(c.id);
+      }
+      const sig = [...caps].sort().join('+') + '|' + [...diet].sort().join('+');
+      if (seen.has(sig)) continue;
+      seen.add(sig);
+      // Fliers stay light enough to lift; hunters run a little bigger.
+      const lo = carn ? 0.85 : 0.6, span = loco.includes('fly') ? 1.15 - lo : carn ? 1.0 : 0.9;
+      const genes = { size: lo + rnd() * span, eyes: 0.7 + rnd() * 0.6, hue: (out.length * 137.5) % 360 };
+      for (const l of LIMBS) genes[l] = 0;
+      for (const c of caps) if (CAP[c].limb) genes[CAP[c].limb] = 0.75 + rnd() * 0.5;
+      const cs = new Set(caps);
+      out.push({ id: out.length, name: nameFor(cs, rnd, names), role, caps: cs, caps0: new Set(cs), diet: dietOf(cs), genes, carn, alive: 0, born: 0, extinctAt: null, maxGen: 0, parent: null, since: 0 });
+    }
+    return out;
+  }
+  // A name from the capabilities: a syllable for how it moves, a tail for its weapon or guard.
+  function nameFor(caps, rnd, names) {
+    const pick = (a) => a[Math.floor(rnd() * a.length)];
+    const loco = ['swim', 'walk', 'climb', 'fly'].filter((c) => caps.has(c));
+    const tailKey = ['bite', 'claw', 'sting', 'horn', 'shell', 'spines', 'camo'].find((c) => caps.has(c)) || 'none';
+    let name;
+    for (let t = 0; t < 30; t++) {
+      name = pick(SYL[loco[loco.length - 1] || 'walk']) + pick(TAIL[tailKey]);
+      if (!names.has(name)) break;
+    }
+    for (let k = 2; names.has(name); k++) if (!names.has(name + ' ' + roman(k))) name += ' ' + roman(k);
+    names.add(name);
+    return name;
+  }
+  const roman = (n) => ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X'][n] || String(n);
+  // What a capability set can eat: the plants of its diet capabilities, and meat with a
+  // weapon or scavenging.
+  function dietOf(caps) {
+    const d = new Set();
+    for (const c of caps) if (CAP[c].food && CAP[c].food !== 'meat') d.add(CAP[c].food);
+    if (caps.has('scavenge') || [...caps].some((c) => CAP[c].kind === 'weapon')) d.add('meat');
+    return d;
+  }
+  function roleOf(caps) {
+    const armed = [...caps].some((c) => CAP[c].kind === 'weapon');
+    const plants = [...caps].some((c) => CAP[c].food && CAP[c].food !== 'meat');
+    return !armed ? 'herb' : plants ? 'omni' : 'carn';
+  }
+  const sigOf = (caps) => [...caps].sort().join('+');
+  function bandsFor(cap) {
+    return cap === 'swim' ? [3] : cap === 'walk' ? [2] : cap === 'climb' ? [1, 2] : cap === 'fly' ? [0, 1, 2] : [];
+  }
+
+  // ---------------------------------------------------------------- traits
+  // Quantities from genes and growth. Every limb costs upkeep; size buys reach and
+  // strength at the cost of speed and food.
+  function traits(caps, g, age, life) {
+    const grow = 0.55 + 0.45 * Math.min(1, age / (0.18 * life));
+    const s = g.size * grow, m = s * s, has = (c) => caps.has(c);
+    const drag = 0.6 + 0.4 * m + 0.5 * g.shell, k = 1 / Math.sqrt(drag);
+    const lift = g.wings / (0.5 + 0.35 * m + 0.4 * g.shell);
+    const fly = has('fly') && lift >= 0.9 ? 2.2 * g.wings * k : 0;
+    const swim = has('swim') ? 1.5 * g.fins * k : 0;
+    const walk = has('walk') ? 1.3 * g.legs * k : 0;
+    const climb = has('climb') ? 1.0 * g.claws * k : 0;
+    const spd = [fly, Math.max(climb, 0.6 * fly), Math.max(walk, 0.45 * fly, 0.45 * climb, has('fly') ? 0.25 : 0), swim];
+    let limbs = 0;
+    for (const l of LIMBS) limbs += g[l];
+    return {
+      s, m, r: 3 + 4 * s, spd, lift,
+      bite: has('bite') ? 10 * g.jaws * s : 0, claw: has('claw') ? 7 * g.claws * s : 0, horn: has('horn') ? 8 * g.horns * s : 0,
+      venom: has('sting') ? 3 * g.stinger * s : 0,
+      armor: has('shell') ? Math.min(0.75, 0.45 * g.shell) : 0, thorn: has('spines') ? 1.8 * g.spines * s : 0,
+      camo: has('camo') ? 1 + 1.5 * g.skin : 1,
+      sense: 80 + 70 * g.eyes + 10 * s,
+      emax: 100 * m, hpmax: 30 * m * (1 + 0.6 * g.shell),
+      metab: 100 * m * 0.0007 * (1 + 0.1 * limbs + 0.15 * g.eyes),
+      eat: 0.04 * (0.6 + 0.4 * s) * (1 + 0.3 * g.jaws),
+    };
+  }
+  const weaponOf = (t) => t.bite + t.claw + t.horn + t.venom > 0;
+  // A can eat B: a weapon, another species, and B not too big for it.
+  function canEat(a, b) {
+    if (a.sp === b.sp || !weaponOf(a.t)) return false;
+    return b.t.m <= a.t.m * (a.t.venom > 0 ? 2.0 : 1.3) && b.t.m >= a.t.m * 0.04;
+  }
+
+  // ---------------------------------------------------------------- the park
+  function createPark(data, opts = {}) {
+    const C = data.consts;
+    const T = Object.assign({}, DEFAULTS, opts.tune || {}); // per park, so a restart starts clean
+    const NOPT = C.options.length;
+    const brain = brainShape(opts.brain || data.brain);
+    const rnd = makeRng(opts.seed || 1);
+    let learn = opts.learn !== false;
+    const gauss = () => Math.sqrt(-2 * Math.log(1 - rnd())) * Math.cos(2 * Math.PI * rnd());
+    const species = makeSpecies(rnd, opts.species || 30, opts.diets || 'mixed');
+    const names = new Set(species.map((sp) => sp.name));
+    const events = []; // [tick, text]: new species, capability changes that spread
+    // Walls the observer draws: { id, x, y0, y1, until }. Nothing crosses or sees through.
+    const walls = [];
+    let nextWall = 1, aliveN = 0;
+    const moving = opts.movingPatches !== false;
+    const yumon = [];
+    const byId = new Map();
+    // The model cache: id -> { w, anchor }. One entry per living Yumon.
+    const models = new Map();
+    const food = [];
+    let nextId = 1;
+    const stats = {
+      tick: 0, born: 0, died: 0, causes: { eaten: 0, fought: 0, starved: 0, old: 0, poison: 0, thorns: 0 }, sleeps: 0, trainSteps: 0, trainMs: 0,
+      hunts: 0, attacks: 0, kills: 0, fights: 0, braces: 0, escapes: 0, gained: 0, lost: 0, splits: 0, reformed: 0, decisions: 0, written: 0, untrained: 0, exactMiss: 0, drift: 0, driftN: 0,
+    };
+    const history = []; // [tick, pops per species]
+    const changes = new Map(); // "rule->net" option pairs from learned brains
+    const p = new Float64Array(NOPT);
+
+    const wrapX = (x) => ((x % WORLD_W) + WORLD_W) % WORLD_W;
+    const dxw = (a, b) => { let d = b - a; if (d > WORLD_W / 2) d -= WORLD_W; else if (d < -WORLD_W / 2) d += WORLD_W; return d; };
+
+    // ---------------------------------------------------------------- plants
+    function addFood(kind, x, y, cap, regrow, drift) {
+      food.push({ kind, x, y, amt: cap * (0.4 + 0.6 * rnd()), cap, regrow, vx: drift ? (rnd() - 0.5) * 0.3 : 0, band: bandOf(y) });
+    }
+    // Plants grow in patches with sparse stretches between them: meadows, fruit groves,
+    // drifting plankton blooms and gnat swarms. A patch eaten down sends its eaters on.
+    // Totals (items x regrowth) match an even carpet: grass 1.3, fruit 0.72, plankton
+    // 0.84, gnats 0.5 units per tick.
+    const groups = [];
+    // A patch withers when it is eaten down (below wither of its full amount) or its
+    // season ends, and sprouts small somewhere new in its band, so eaters must follow it.
+    const patchList = [];
+    function patches(kind, n, per, cap, total, spanLo, spanHi, y0, y1, drift) {
+      const regrow = (T.plantRate * total) / (n * per);
+      for (let k = 0; k < n; k++) {
+        const P = { kind, items: [], cx: (k + 0.15 + 0.7 * rnd()) * (WORLD_W / n), span: 0, y0, y1, spanLo, spanHi, grp: null, until: 0, moves: 0 };
+        if (drift) { P.grp = { vx: (rnd() - 0.5) * 0.3, cy: 0 }; groups.push(P.grp); }
+        for (let i = 0; i < per; i++) {
+          addFood(kind, 0, y0, cap, regrow, false);
+          const f = food[food.length - 1];
+          f.grp = P.grp; f.patch = P;
+          P.items.push(f);
+        }
+        placePatch(P, P.cx, 0.4 + 0.6 * rnd());
+        P.until = stats.tick + T.season[0] * rnd() + T.season[0]; // stagger the first seasons
+      }
+    }
+    function placePatch(P, cx, fill) {
+      P.cx = wrapX(cx);
+      P.span = P.spanLo + rnd() * (P.spanHi - P.spanLo);
+      if (P.grp) P.grp.cy = P.y0 + rnd() * (P.y1 - P.y0);
+      for (const f of P.items) {
+        f.x = wrapX(P.cx + (rnd() - 0.5) * P.span);
+        f.y = P.grp ? Math.min(P.y1, Math.max(P.y0, P.grp.cy + (rnd() - 0.5) * 50)) : P.y0 + rnd() * (P.y1 - P.y0);
+        f.band = bandOf(f.y);
+        f.amt = f.cap * fill;
+      }
+      P.born = stats.tick;
+      P.until = stats.tick + T.season[0] + rnd() * (T.season[1] - T.season[0]);
+    }
+    function reformPatches() {
+      for (const P of patchList) {
+        let amt = 0, cap = 0;
+        for (const f of P.items) { amt += f.amt; cap += f.cap; }
+        if (P.grp) P.cx = wrapX(P.cx + P.grp.vx * 25);
+        if (stats.tick < P.until && (amt > T.wither * cap || stats.tick - P.born < T.grace)) continue;
+        const [lo, hi] = T.reformAway;
+        const cx = P.cx + (rnd() < 0.5 ? -1 : 1) * (lo + rnd() * (hi - lo));
+        placePatch(P, cx, T.sprout);
+        P.moves++; stats.reformed++;
+      }
+    }
+    patches('grass', 8, 13, 6, 1.3, 120, 240, 340, 395, false);
+    patches('fruit', 7, 9, 5, 0.72, 90, 180, 205, 315, false);
+    patches('plankton', 7, 10, 5, 0.84, 60, 120, 410, 590, true);
+    patches('gnats', 6, 8, 4, 0.5, 50, 100, 15, 180, true);
+    for (const f of food) if (f.patch && !patchList.includes(f.patch)) patchList.push(f.patch);
+
+    // ---------------------------------------------------------------- yumon
+    function spawn(sp, genes, x, y, mother, father, caps) {
+      const life = 3500 * (0.7 + 0.3 * genes.size) * (0.85 + 0.3 * rnd());
+      const y0 = { id: nextId++, sp: sp.id, s: sp, sex: rnd() < 0.5 ? 0 : 1, genes, x: wrapX(x), y, vx: 0, vy: 0, age: 0, life, alive: true,
+        option: 7, sleeping: false, fatigue: rnd() * 4, poison: 0, mateCd: 300, preg: null, atkCd: 0, wander: rnd() * Math.PI * 2,
+        gen: mother ? Math.max(mother.gen, father ? father.gen : 0) + 1 : 0, learned: mother ? mother.learned : 0, sleeps: 0,
+        learns: mother ? mother.learns : opts.mixed ? rnd() < 0.5 : true, buf: [], r: 0, keys: null, rule: null, exact: true, lastEat: 0, kills: 0, children: 0, mom: mother ? mother.id : 0 };
+      y0.caps = caps || new Set(sp.caps);
+      y0.diet = dietOf(y0.caps);
+      y0.hitBy = 0; y0.hitAt = -1e9; y0.attacker = null; y0.wasHit = 0; y0.bracing = false; y0.blockedAt = -1;
+      y0.t = traits(y0.caps, genes, 0, life);
+      y0.energy = y0.t.emax * (mother ? 0.7 : 0.8);
+      y0.hp = y0.t.hpmax;
+      // The child's brain is a copy of its mother's at birth; founders get the compiled weights.
+      const w = mother ? models.get(mother.id).w.slice() : brain.init.slice();
+      models.set(y0.id, { w, anchor: w.slice() });
+      y0.exact = !mother || mother.exact;
+      placeIn(y0);
+      yumon.push(y0);
+      byId.set(y0.id, y0);
+      sp.alive++; sp.born++; sp.maxGen = Math.max(sp.maxGen, y0.gen);
+      return y0;
+    }
+    function maskOf(t) { return t.spd.map((v) => v > 0); }
+    function placeIn(a) {
+      const m = maskOf(a.t);
+      if (m[bandOf(a.y)]) return;
+      const ok = [0, 1, 2, 3].filter((b) => m[b]);
+      const b = ok[Math.floor(rnd() * ok.length)];
+      a.y = BAND_Y[b][0] + 6 + rnd() * (BAND_Y[b][1] - BAND_Y[b][0] - 12);
+    }
+    function homeBand(t) { let b = 0; for (let k = 1; k < 4; k++) if (t.spd[k] > t.spd[b]) b = k; return b; }
+    // Founders arrive in small mixed-sex groups of 2-3, each group somewhere else in the
+    // park, so species start spread out and still find mates.
+    function founders(sp, n) {
+      const t = traits(sp.caps, sp.genes, 3000, 3500);
+      const hb = homeBand(t);
+      let cx = 0, left = 0;
+      for (let i = 0; i < n; i++) {
+        // Hunters start as packs of 4 so they still find mates while they chase prey.
+        if (left === 0) { cx = rnd() * WORLD_W; left = sp.carn ? Math.min(n - i, 4) : n - i === 4 ? 2 : Math.min(n - i, 2 + (rnd() < 0.4 ? 1 : 0)); }
+        left--;
+        const g = { ...sp.genes };
+        for (const k of Object.keys(g)) if (k !== 'hue' && g[k] > 0) g[k] *= Math.exp(0.05 * gauss());
+        const y = BAND_Y[hb][0] + 6 + rnd() * (BAND_Y[hb][1] - BAND_Y[hb][0] - 12);
+        const a = spawn(sp, g, cx + (rnd() - 0.5) * 60, y, null, null);
+        a.sex = i % 2;
+        a.age = a.life * (0.2 + 0.3 * rnd());
+        a.t = traits(a.caps, a.genes, a.age, a.life);
+        a.energy = a.t.emax * 0.8; a.hp = a.t.hpmax;
+      }
+    }
+    for (const sp of species) {
+      const t = traits(sp.caps, sp.genes, 3000, 3500);
+      sp.adult = t;
+      const n = sp.role === 'herb' ? Math.max(9, Math.min(24, 21 / t.m)) : sp.role === 'omni' ? 8 : 8;
+      founders(sp, Math.round(n));
+    }
+
+    // ---------------------------------------------------------------- spatial hash
+    const CELL = 100, GX = WORLD_W / CELL, GY = Math.ceil(WORLD_H / CELL);
+    let grid = [], fgrid = [];
+    function rebuild() {
+      grid = Array.from({ length: GX * GY }, () => []);
+      fgrid = Array.from({ length: GX * GY }, () => []);
+      for (const a of yumon) if (a.alive) grid[Math.floor(a.x / CELL) % GX + GX * Math.min(GY - 1, Math.floor(a.y / CELL))].push(a);
+      for (const f of food) if (f.amt >= 0.3) fgrid[Math.floor(wrapX(f.x) / CELL) % GX + GX * Math.min(GY - 1, Math.floor(f.y / CELL))].push(f);
+    }
+    function near(g, x, y, R, fn) {
+      const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL), n = Math.ceil(R / CELL);
+      for (let j = Math.max(0, cy - n); j <= Math.min(GY - 1, cy + n); j++)
+        for (let i = cx - n; i <= cx + n; i++) for (const o of g[((i % GX) + GX) % GX + GX * j]) fn(o);
+    }
+    const bucket = (d, R, contact) => (d > R ? 0 : d <= contact ? 3 : d <= 0.4 * R ? 2 : 1);
+
+    // ---------------------------------------------------------------- perception
+    function perceive(a) {
+      const t = a.t, mask = maskOf(t), R = t.sense * (a.sleeping ? 0.35 : 1), myBand = bandOf(a.y);
+      const fertile = isFertile(a);
+      let threat = null, td = Infinity, prey = null, pdist = Infinity, mate = null, mdist = Infinity, kin = 0, kx = 0, ky = 0;
+      // Mating calls carry farther than sight: a fertile Yumon hears fertile mates of its
+      // species out to call x its sense radius.
+      const RC = fertile && !a.sleeping ? R * T.call : R;
+      near(grid, a.x, a.y, RC, (o) => {
+        if (o === a || !o.alive) return;
+        const dx = dxw(a.x, o.x), dy = o.y - a.y, d = Math.hypot(dx, dy);
+        if (walls.length && walled(a.x, a.y, dx, dy)) return;
+        if (d > R) {
+          if (d <= RC && o.sp === a.sp && o.sex !== a.sex && d < mdist && isFertile(o)) { mate = o; mdist = d; }
+          return;
+        }
+        if (o.sp === a.sp) {
+          if (d < 0.6 * R) { kin++; kx += dx; ky += dy; }
+          if (fertile && o.sex !== a.sex && isFertile(o) && d < mdist) { mate = o; mdist = d; }
+          return;
+        }
+        // Still camouflaged Yumon are seen only from closer.
+        const seen = (o.option === 3 || o.sleeping) ? d * o.t.camo : d;
+        if (seen > R) return;
+        if (canEat(o, a) && maskOf(o.t)[myBand] && seen < td) { threat = o; td = seen; }
+        if (canEat(a, o) && mask[bandOf(o.y)] && seen < pdist) { prey = o; pdist = seen; }
+      });
+      let fdist = Infinity, fd = null;
+      near(fgrid, a.x, a.y, R, (f) => {
+        if (f.amt < 0.3 || !a.diet.has(f.kind) || !mask[f.band]) return;
+        const dx = dxw(a.x, f.x), d = Math.hypot(dx, f.y - a.y);
+        if (d >= fdist || (walls.length && walled(a.x, a.y, dx, f.y - a.y))) return;
+        if (d < fdist) { fdist = d; fd = f; }
+      });
+      let refuge = 0;
+      if (threat) { const tm = maskOf(threat.t); for (let b = 0; b < 4; b++) if (mask[b] && !tm[b]) refuge = 1; }
+      a.threat = threat; a.prey = prey; a.mate = mate; a.food = fd; a.kin = kin ? [kx / kin, ky / kin] : null;
+      // The attacker: who struck last, if it is alive and still in sight.
+      let hit = 0, odds = 0;
+      const at = a.hitBy ? byId.get(a.hitBy) : null;
+      a.attacker = null;
+      if (at && at.alive) {
+        const dx = dxw(a.x, at.x), dy = at.y - a.y, ago = stats.tick - a.hitAt;
+        if (Math.hypot(dx, dy) <= R && !(walls.length && walled(a.x, a.y, dx, dy))) {
+          hit = ago <= 12 ? 3 : ago <= 40 ? 2 : ago <= 100 ? 1 : 0;
+          if (hit) {
+            a.attacker = at;
+            // Odds: how long it takes me to finish it against how long it takes it to finish me.
+            const mine = at.hp / Math.max(1e-6, blow(a, at)), theirs = a.hp / Math.max(1e-6, blow(at, a));
+            odds = !weaponOf(t) ? 0 : theirs >= 1.5 * mine ? 2 : theirs >= 0.67 * mine ? 1 : 0;
+          }
+        }
+      }
+      if (a.wasHit && !hit && a.hitBy) { a.r += T.escapeR; stats.escapes++; a.hitBy = 0; } // got away alive
+      a.wasHit = hit;
+      const contact = (o) => t.r + (o ? o.t.r : 4) + 4;
+      const hunger = Math.max(0, Math.min(C.level, Math.round(C.level * (1 - a.energy / t.emax))));
+      const O = NOPT, x = new Array(O + 16).fill(0);
+      x[a.option] = 1;
+      x[O] = hunger;
+      x[O + 1] = Math.min(C.level, Math.floor(a.fatigue));
+      x[O + 2] = Math.min(C.hurt, Math.floor(4 * (1 - a.hp / t.hpmax)));
+      x[O + 3] = fertile ? 1 : 0;
+      x[O + 4] = threat ? bucket(td, R, contact(threat) + 20) : 0;
+      x[O + 5] = refuge;
+      x[O + 6] = fd ? bucket(fdist, R, t.r + 6) : 0;
+      x[O + 7] = prey ? bucket(pdist, R, contact(prey)) : 0;
+      x[O + 8] = mate ? bucket(mdist, RC, contact(mate)) : 0;
+      x[O + 9] = Math.min(3, kin);
+      x[O + 10] = a.caps.has('camo') ? 1 : 0;
+      x[O + 11] = a.caps.has('social') ? 1 : 0;
+      x[O + 12] = hit;
+      x[O + 13] = odds;
+      x[O + 14] = weaponOf(t) ? 1 : 0;
+      x[O + 15] = t.armor > 0 || t.thorn > 0 ? 1 : 0;
+      return x;
+    }
+    // The reward is homeostatic: what a tick does to a convex need over hunger, fatigue
+    // and hurt (Keramati and Gutkin's drive reduction), plus a bonus for mating and birth.
+    function need(a) {
+      const hu = 1 - Math.max(0, a.energy) / a.t.emax, fa = a.fatigue / C.level, hr = 1 - Math.max(0, a.hp) / a.t.hpmax;
+      return 4 * hu * hu + 2 * fa * fa + 6 * hr * hr;
+    }
+    function isFertile(a) {
+      return a.age > 0.18 * a.life && !a.preg && a.mateCd <= 0 && a.energy > 0.55 * a.t.emax && aliveN < T.popCap;
+    }
+
+    // ---------------------------------------------------------------- learning
+    // REINFORCE with a per-buffer baseline, an anchor pulling back toward the weights the
+    // Yumon was born with, and a clipped step.
+    function train(a) {
+      const buf = a.buf;
+      if (buf.length < T.minBuf) return;
+      const t0 = (typeof performance !== 'undefined' ? performance : Date).now();
+      const n = buf.length, G = new Float64Array(n);
+      let run = 0;
+      for (let i = n - 1; i >= 0; i--) { run = buf[i].r + T.gamma * run; G[i] = run; }
+      let mean = 0; for (let i = 0; i < n; i++) mean += G[i]; mean /= n;
+      let v = 0; for (let i = 0; i < n; i++) v += (G[i] - mean) ** 2;
+      const sd = Math.sqrt(v / n);
+      if (sd < 1e-4) { buf.length = 0; return; }
+      const M = models.get(a.id), w = M.w, g = new Float64Array(brain.size), dOut = new Float64Array(NOPT);
+      for (let e = 0; e < T.epochs; e++) {
+        g.fill(0);
+        for (let i = 0; i < n; i++) {
+          const A = (G[i] - mean) / sd;
+          const keys = brain.forward(w, buf[i].x);
+          softmax(keys, T.temp, p);
+          for (let k = 0; k < NOPT; k++) dOut[k] = (A * ((k === buf[i].a ? 1 : 0) - p[k])) / T.temp / n;
+          brain.backward(w, dOut, g);
+        }
+        let norm = 0;
+        for (let i = 0; i < g.length; i++) norm += g[i] * g[i];
+        norm = Math.sqrt(norm);
+        const sc = norm > T.clip ? T.clip / norm : 1;
+        for (let i = 0; i < g.length; i++) w[i] += T.lr * (sc * g[i] - T.anchor * (w[i] - M.anchor[i]));
+      }
+      a.exact = false;
+      a.learned++; a.sleeps++;
+      stats.sleeps++; stats.trainSteps += T.epochs;
+      stats.trainMs += (typeof performance !== 'undefined' ? performance : Date).now() - t0;
+      buf.length = 0;
+    }
+
+    // ---------------------------------------------------------------- one tick
+    function die(a, cause) {
+      if (!a.alive) return;
+      a.alive = false;
+      a.cause = cause;
+      stats.died++; stats.causes[cause]++;
+      a.s.alive--;
+      if (a.s.alive === 0) a.s.extinctAt = stats.tick;
+      models.delete(a.id); // the model cache keeps only the living
+      a.buf = [];
+      const fy = bandOf(a.y) === 3 ? a.y : Math.min(395, Math.max(a.y, 340 + rnd() * 50));
+      const body = { kind: 'meat', x: a.x, y: fy, amt: 4 * a.t.m + 1, cap: 0, regrow: -0.004, vx: 0, band: bandOf(fy) };
+      food.push(body);
+      return body;
+    }
+
+    function steer(a, tx, ty, frac) {
+      const dx = dxw(a.x, tx), dy = ty - a.y, d = Math.hypot(dx, dy) || 1;
+      const sp = T.speed * a.t.spd[bandOf(a.y)] * frac * (1 - 0.06 * Math.max(0, a.fatigue - 5)); // tired is slow
+      a.dvx = (dx / d) * sp; a.dvy = (dy / d) * sp;
+    }
+
+    function tick() {
+      stats.tick++;
+      for (let i = walls.length - 1; i >= 0; i--) if (walls[i].until && walls[i].until <= stats.tick) walls.splice(i, 1);
+      if (stats.tick % T.splitEvery === 0) speciate();
+      rebuild();
+      const alive = yumon.filter((a) => a.alive);
+      aliveN = alive.length;
+      for (const a of alive) {
+        if (!a.alive) continue; // killed earlier this tick
+        a.need0 = need(a);
+        const x = perceive(a);
+        const M = models.get(a.id);
+        const keys = Array.from(brain.forward(M.w, x));
+        if (opts.onDecide) opts.onDecide(a, x, keys);
+        const rule = ruleKeys(x, C);
+        a.keys = keys; a.rule = rule; a.x_in = x;
+        const rb = argmax(rule), nb = argmax(keys);
+        if (a.exact) {
+          stats.untrained++;
+          let bad = false;
+          for (let k = 0; k < NOPT; k++) if (Math.abs(keys[k] - rule[k]) > 1e-6) bad = true;
+          if (bad) stats.exactMiss++;
+        } else {
+          stats.driftN++; a.s.dN = (a.s.dN || 0) + 1;
+          if (rb !== nb) {
+            stats.drift++; a.s.dD = (a.s.dD || 0) + 1;
+            const key = C.options[rb] + '>' + C.options[nb];
+            changes.set(key, (changes.get(key) || 0) + 1);
+          }
+        }
+        a.ruleBest = rb; a.netBest = nb;
+        let opt;
+        softmax(keys, T.temp, p);
+        if (a.fatigue >= C.level && !a.attacker) { opt = 5; a.commit = 0; } // exhausted: falls asleep, not a decision
+        else if (a.commit > 0 && p[a.option] >= T.drop) { opt = a.option; a.commit--; } // still committed
+        else {
+          a.commit = T.commit;
+          let u = rnd(); opt = NOPT - 1;
+          for (let k = 0; k < NOPT; k++) { u -= p[k]; if (u <= 0) { opt = k; break; } }
+          stats.decisions++;
+          if (opt === rb) stats.written++;
+          if (learn && a.learns) {
+            a.buf.push({ x: Int8Array.from(x), a: opt, r: 0 });
+            if (a.buf.length > T.maxBuf) a.buf.shift();
+          }
+        }
+        const wasAsleep = a.sleeping;
+        a.option = opt;
+        a.sleeping = opt === 5;
+        if (a.sleeping && !wasAsleep && learn && a.learns) train(a);
+        act(a);
+      }
+      for (const a of alive) if (a.alive) move(a);
+      for (const a of alive) if (a.alive) body(a);
+      for (const a of alive) if (a.alive && a.buf.length) { a.buf[a.buf.length - 1].r += a.r + T.needScale * (a.need0 - need(a)); }
+      for (const a of alive) a.r = 0;
+      plants();
+      if (stats.tick % 25 === 0) {
+        for (let i = yumon.length - 1; i >= 0; i--) if (!yumon[i].alive) { byId.delete(yumon[i].id); yumon.splice(i, 1); }
+        history.push([stats.tick, species.map((s) => s.alive)]);
+        if (history.length > 2000) history.splice(0, history.length - 2000);
+      }
+    }
+
+    function act(a) {
+      a.dvx = 0; a.dvy = 0; a.bracing = false;
+      const t = a.t;
+      switch (a.option) {
+        case 0: { // eat
+          const f = a.food;
+          if (!f) break;
+          const d = Math.hypot(dxw(a.x, f.x), f.y - a.y);
+          if (d > t.r + 6) steer(a, f.x, f.y, 0.8);
+          else if (a.energy < t.emax) {
+            const u = Math.min(f.amt, t.eat), e = Math.min(u * T.foodE, t.emax - a.energy);
+            f.amt -= u; a.energy += e;
+          }
+          break;
+        }
+        case 1: { // hunt
+          const o = a.prey;
+          if (!o || !o.alive) break;
+          stats.hunts++;
+          const d = Math.hypot(dxw(a.x, o.x), o.y - a.y);
+          // A pounce: faster than a run, and it tires.
+          if (d > t.r + o.t.r + 4) { steer(a, o.x, o.y, 1.4); a.fatigue += 0.02; }
+          else if (a.atkCd <= 0) attack(a, o);
+          break;
+        }
+        case 2: { // flee
+          const o = a.threat;
+          if (!o) break;
+          let tx = a.x - dxw(a.x, o.x) * 3, ty = a.y - (o.y - a.y) * 3;
+          const tm = maskOf(o.t), m = maskOf(t);
+          let best = -1, bd = Infinity;
+          for (let b = 0; b < 4; b++) if (m[b] && !tm[b]) { const cy = (BAND_Y[b][0] + BAND_Y[b][1]) / 2, dd = Math.abs(cy - a.y); if (dd < bd) { bd = dd; best = b; } }
+          if (best >= 0) ty = (BAND_Y[best][0] + BAND_Y[best][1]) / 2;
+          steer(a, tx, ty, 1);
+          break;
+        }
+        case 3: break; // hide: hold still (camouflage works only while still)
+        case 4: { // mate
+          const o = a.mate;
+          if (!o || !o.alive) break;
+          const d = Math.hypot(dxw(a.x, o.x), o.y - a.y);
+          if (d > t.r + o.t.r + 4) steer(a, o.x, o.y, 0.8);
+          else if (isFertile(a) && isFertile(o)) conceive(a.sex === 0 ? a : o, a.sex === 0 ? o : a);
+          break;
+        }
+        case 5: break; // sleep
+        case 6: { // flock
+          if (!a.kin) { roam(a); break; }
+          steer(a, a.x + a.kin[0], a.y + a.kin[1], 0.6);
+          break;
+        }
+        case 8: { // fight: turn on the attacker
+          const o = a.attacker;
+          if (!o || !o.alive) break;
+          const d = Math.hypot(dxw(a.x, o.x), o.y - a.y);
+          if (d > t.r + o.t.r + 4) { steer(a, o.x, o.y, 1.2); a.fatigue += 0.015; }
+          else if (a.atkCd <= 0) { stats.fights++; attack(a, o, true); }
+          break;
+        }
+        case 9: a.bracing = true; stats.braces++; break; // brace: hold still behind shell or spines
+        default: roam(a);
+      }
+    }
+
+    // Roaming heads for a far goal and keeps it until it gets there or gives up, so a
+    // Yumon with nothing to do travels instead of milling about.
+    function roam(a) {
+      const t = a.t, g = a.goal, m = maskOf(t);
+      if (g && a.blockedAt >= stats.tick - 1) g.dir = -g.dir, g.until = 0; // walked into a wall: turn back
+      if (!g || stats.tick > g.until || !m[bandOf(g.y)] || Math.hypot(dxw(a.x, g.x), g.y - a.y) < 25) {
+        const [lo, hi] = T.roamFar, dist = lo + rnd() * (hi - lo);
+        const dir = g && rnd() < 0.7 ? g.dir : rnd() < 0.5 ? -1 : 1; // mostly keep going the same way
+        const ok = [0, 1, 2, 3].filter((b) => m[b]), hb = homeBand(t);
+        const b = rnd() < 0.6 ? hb : ok[Math.floor(rnd() * ok.length)];
+        a.goal = { x: wrapX(a.x + dir * dist), y: BAND_Y[b][0] + 8 + rnd() * (BAND_Y[b][1] - BAND_Y[b][0] - 16), dir, until: stats.tick + T.roamTicks };
+      }
+      a.wander += (rnd() - 0.5) * 0.2;
+      steer(a, a.goal.x, a.goal.y + Math.sin(a.wander) * 12, T.roamPace);
+    }
+
+    // One blow from a to o. A braced shell takes less and braced spines hurt more.
+    function blow(a, o) {
+      const t = a.t, armor = o.bracing && o.t.armor > 0 ? Math.min(0.9, o.t.armor + 0.3) : o.t.armor;
+      return (t.bite + t.claw + t.horn) * (1 - armor) + 0.3 * t.venom;
+    }
+    function attack(a, o, back) {
+      const t = a.t;
+      a.atkCd = 12;
+      stats.attacks++;
+      o.hp -= blow(a, o);
+      o.poison += t.venom;
+      o.hitBy = a.id; o.hitAt = stats.tick;
+      a.r += T.hitR;
+      if (o.t.thorn > 0) {
+        a.hp -= o.t.thorn * (o.bracing ? 2 : 1);
+        if (a.hp <= 0) { die(a, 'thorns'); o.r += T.killR; return; }
+      }
+      if (o.hp > 0) return;
+      const body = die(o, back ? 'fought' : 'eaten');
+      a.kills++; stats.kills++;
+      a.r += T.killR;
+      // The killer eats first: up to gorge of the body, as far as it has room.
+      if (a.diet.has('meat') && body) {
+        const e = Math.min(a.t.emax - a.energy, T.gorge * body.amt * T.foodE);
+        if (e > 0) { a.energy += e; body.amt -= e / T.foodE; }
+      }
+    }
+
+    function conceive(mom, dad) {
+      mom.preg = { dad: dad.id, dadGenes: { ...dad.genes }, dadCaps: new Set(dad.caps), dadGen: dad.gen, at: stats.tick + 80 };
+      mom.energy -= 0.25 * mom.t.emax;
+      // Small Yumon breed sooner (r-strategists); big ones wait longer.
+      mom.mateCd = T.breedCd * (0.45 + 0.55 * mom.genes.size); dad.mateCd = T.breedCd * (0.45 + 0.55 * dad.genes.size);
+      mom.r += 1; dad.r += 1;
+    }
+
+    // A child's genome: each gene a random blend of the parents', a little noise on every
+    // gene and one bigger step on one of them. Capabilities both parents carry pass on;
+    // one parent's pass half the time. Now and then a capability is gained (likelier on a
+    // limb it already has, so claws for climbing make clawing easy) or lost.
+    function childGenome(mom, pr) {
+      const a = mom.genes, b = pr.dadGenes, g = {};
+      for (const k of Object.keys(a)) {
+        const u = rnd();
+        g[k] = k === 'hue' ? a.hue + (((b.hue - a.hue + 540) % 360) - 180) * u : a[k] * (1 - u) + b[k] * u;
+      }
+      const caps = new Set();
+      for (const c of new Set([...mom.caps, ...pr.dadCaps])) if ((mom.caps.has(c) && pr.dadCaps.has(c)) || rnd() < 0.5) caps.add(c);
+      if (![...caps].some((c) => CAP[c].kind === 'move')) caps.add([...mom.caps].find((c) => CAP[c].kind === 'move'));
+      let event = null;
+      if (rnd() < T.capRate) event = rnd() < 0.55 ? gainCap(caps, g) : loseCap(caps, g);
+      fitLimbs(caps, g);
+      const keys = Object.keys(g).filter((k) => k !== 'hue' && g[k] > 0);
+      for (const k of keys) g[k] *= Math.exp(T.mutSmall * gauss());
+      const k = keys[Math.floor(rnd() * keys.length)];
+      g[k] *= Math.exp(T.mutBig * gauss());
+      for (const k of keys) g[k] = Math.min(k === 'size' ? 2.6 : 2.5, Math.max(k === 'size' ? 0.4 : 0.15, g[k]));
+      g.hue = (g.hue + T.hueStep * gauss() + 360) % 360;
+      // A limb that has withered away takes its capabilities with it (never the last way to move).
+      for (const c of [...caps]) {
+        const L = CAP[c].limb;
+        if (L && g[L] < 0.22 && !(CAP[c].kind === 'move' && moveCount(caps) === 1)) { caps.delete(c); event = event || '-' + c; }
+      }
+      fitLimbs(caps, g);
+      return { g, caps, event, mutated: k };
+    }
+    const moveCount = (caps) => [...caps].filter((c) => CAP[c].kind === 'move').length;
+    // Limbs follow capabilities: a limb no capability uses is gone, a new one starts small.
+    function fitLimbs(caps, g) {
+      const used = new Set([...caps].map((c) => CAP[c].limb).filter(Boolean));
+      for (const L of LIMBS) {
+        if (!used.has(L)) g[L] = 0;
+        else if (g[L] < 0.3) g[L] = 0.3 + 0.15 * rnd();
+      }
+    }
+    function gainCap(caps, g) {
+      const pool = CAPS.filter((c) => !caps.has(c.id) && !(caps.size >= 9));
+      if (!pool.length) return null;
+      const wt = pool.map((c) => (c.limb && g[c.limb] > 0 ? 4 : 1));
+      let u = rnd() * wt.reduce((x, y) => x + y, 0), c = pool[pool.length - 1];
+      for (let i = 0; i < pool.length; i++) { u -= wt[i]; if (u <= 0) { c = pool[i]; break; } }
+      caps.add(c.id);
+      if (c.limb && !(g[c.limb] > 0)) g[c.limb] = 0.35 + 0.2 * rnd();
+      return '+' + c.id;
+    }
+    function loseCap(caps, g) {
+      const pool = [...caps].filter((c) => !(CAP[c].kind === 'move' && moveCount(caps) === 1));
+      if (!pool.length) return null;
+      const c = pool[Math.floor(rnd() * pool.length)];
+      caps.delete(c);
+      void g;
+      return '-' + c;
+    }
+
+    function birth(mom) {
+      const pr = mom.preg;
+      mom.preg = null;
+      // Small unarmed Yumon have twins.
+      const n = Math.min(!weaponOf(mom.t) && mom.genes.size < T.twinSize ? 2 : 1, Math.max(0, T.popCap - aliveN));
+      for (let i = 0; i < n; i++) {
+        const G = childGenome(mom, pr);
+        const c = spawn(mom.s, G.g, mom.x + (rnd() - 0.5) * 10, mom.y, mom, { gen: pr.dadGen }, G.caps);
+        c.mutated = G.mutated;
+        c.capEvent = G.event;
+        if (G.event) stats[G.event[0] === '+' ? 'gained' : 'lost']++;
+        stats.born++;
+        mom.children++;
+      }
+      mom.r += 1;
+    }
+
+    // ---------------------------------------------------------------- new species
+    // A group inside a species that carries another capability set, or a gene cluster far
+    // from the rest, splits off once it has splitMin members of both sexes. After the split
+    // the two can no longer mate. The species itself takes its majority's capabilities.
+    function speciate() {
+      for (const sp of species.slice()) {
+        if (!sp.alive) continue;
+        const live = yumon.filter((a) => a.alive && a.sp === sp.id);
+        const groups = new Map();
+        for (const a of live) { const k = sigOf(a.caps); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(a); }
+        const sorted = [...groups.values()].sort((x, y) => y.length - x.length);
+        for (const grp of sorted.slice(1)) if (grp.length >= T.splitMin && bothSexes(grp)) split(sp, grp, 'caps');
+        const rest = live.filter((a) => a.sp === sp.id);
+        if (rest.length >= 2 * T.splitMin) {
+          const [A, B, dist] = twoMeans(rest);
+          const small = A.length < B.length ? A : B;
+          if (dist > T.splitDist && A.length >= T.splitMin && B.length >= T.splitMin && bothSexes(A) && bothSexes(B)) split(sp, small, 'genes');
+        }
+        refresh(sp);
+      }
+    }
+    const bothSexes = (grp) => grp.some((a) => a.sex === 0) && grp.some((a) => a.sex === 1);
+    const geneVec = (g) => ['size', 'eyes', ...LIMBS].map((k) => Math.log(Math.max(0.1, g[k] || 0)));
+    // Two clusters of log genes (farthest-point start, a few Lloyd steps); the distance
+    // between their centres.
+    function twoMeans(live) {
+      const V = live.map((a) => geneVec(a.genes)), D = V[0].length;
+      const dist = (u, v) => { let s = 0; for (let k = 0; k < D; k++) s += (u[k] - v[k]) ** 2; return Math.sqrt(s); };
+      let c0 = V[0], c1 = V[0];
+      for (const v of V) if (dist(v, c0) > dist(c1, c0)) c1 = v;
+      for (const v of V) if (dist(v, c1) > dist(c0, c1)) c0 = v;
+      let lab = [];
+      for (let it = 0; it < 6; it++) {
+        lab = V.map((v) => (dist(v, c0) <= dist(v, c1) ? 0 : 1));
+        const m = [new Array(D).fill(0), new Array(D).fill(0)], n = [0, 0];
+        V.forEach((v, i) => { n[lab[i]]++; for (let k = 0; k < D; k++) m[lab[i]][k] += v[k]; });
+        if (!n[0] || !n[1]) return [live, [], 0];
+        c0 = m[0].map((x) => x / n[0]); c1 = m[1].map((x) => x / n[1]);
+      }
+      return [live.filter((_, i) => lab[i] === 0), live.filter((_, i) => lab[i] === 1), dist(c0, c1)];
+    }
+    function meanGenes(grp) {
+      const g = {};
+      for (const k of Object.keys(grp[0].genes)) g[k] = grp.reduce((s, a) => s + a.genes[k], 0) / grp.length;
+      g.hue = grp[0].genes.hue;
+      return g;
+    }
+    function split(sp, grp, why) {
+      if (species.length >= T.maxSpecies) return;
+      const caps = new Set(grp[0].caps);
+      const shift = (rnd() < 0.5 ? -1 : 1) * (35 + 50 * rnd()); // a new species looks new
+      for (const a of grp) a.genes.hue = (a.genes.hue + shift + 360) % 360;
+      const genes = meanGenes(grp);
+      const ns = { id: species.length, name: nameFor(caps, rnd, names), role: roleOf(caps), caps, caps0: new Set(caps), diet: dietOf(caps), genes,
+        carn: [...caps].some((c) => CAP[c].kind === 'weapon'), alive: 0, born: grp.length, extinctAt: null, maxGen: 0, parent: sp.id, since: stats.tick, why };
+      ns.adult = traits(caps, genes, 3000, 3500);
+      species.push(ns);
+      for (const a of grp) { a.sp = ns.id; a.s = ns; sp.alive--; ns.alive++; ns.maxGen = Math.max(ns.maxGen, a.gen); }
+      const diff = [...caps].filter((c) => !sp.caps.has(c)).map((c) => '+' + CAP[c].label).concat([...sp.caps].filter((c) => !caps.has(c)).map((c) => '-' + CAP[c].label));
+      events.push([stats.tick, `${ns.name} split from ${sp.name} (${why === 'caps' ? diff.join(' ') : 'genes drifted apart'})`]);
+      stats.splits++;
+    }
+    // A species shows its majority's capabilities and adult body.
+    function refresh(sp) {
+      const live = yumon.filter((a) => a.alive && a.sp === sp.id);
+      if (!live.length) return;
+      const n = new Map();
+      for (const a of live) { const k = sigOf(a.caps); n.set(k, (n.get(k) || 0) + 1); }
+      const top = [...n.entries()].sort((x, y) => y[1] - x[1])[0][0];
+      const caps = new Set(live.find((a) => sigOf(a.caps) === top).caps);
+      if (sigOf(caps) !== sigOf(sp.caps)) {
+        const diff = [...caps].filter((c) => !sp.caps.has(c)).map((c) => '+' + CAP[c].label).concat([...sp.caps].filter((c) => !caps.has(c)).map((c) => '-' + CAP[c].label));
+        events.push([stats.tick, `${sp.name} changed: ${diff.join(' ')}`]);
+      }
+      sp.caps = caps; sp.diet = dietOf(caps); sp.role = roleOf(caps); sp.carn = [...caps].some((c) => CAP[c].kind === 'weapon');
+      sp.adult = traits(caps, meanGenes(live), 3000, 3500);
+    }
+
+    function move(a) {
+      a.vx += (a.dvx - a.vx) * 0.3; a.vy += (a.dvy - a.vy) * 0.3;
+      const x0 = a.x;
+      a.x = wrapX(a.x + a.vx);
+      let y = a.y + a.vy;
+      const m = maskOf(a.t);
+      let lo = 0, hi = 3;
+      while (!m[lo]) lo++;
+      while (!m[hi]) hi--;
+      const ymin = BAND_Y[lo][0] + 4, ymax = BAND_Y[hi][1] - 4;
+      if (y < ymin) y = Math.min(a.y + 3, ymin); // fell out of a band it can no longer hold (lost flight)
+      if (y > ymax) y = ymax;
+      if (a.y < ymin) y = Math.min(a.y + 3, ymax);
+      a.y = y;
+      if (walls.length) wallBlock(a, x0);
+    }
+    // A wall stops anything that would cross it or end up inside it, on the side it came from.
+    function wallBlock(a, x0) {
+      for (const w of walls) {
+        if (a.y < w.y0 - a.t.r || a.y > w.y1 + a.t.r) continue;
+        const pad = a.t.r + 2, o0 = dxw(x0, w.x), o1 = dxw(a.x, w.x);
+        const side = o0 > 0 ? 1 : o0 < 0 ? -1 : a.vx > 0 ? 1 : -1; // 1: the wall is to its right
+        if (Math.sign(o1) !== side || Math.abs(o1) < pad) { a.x = wrapX(w.x - side * pad); a.vx = 0; a.blockedAt = stats.tick; }
+      }
+    }
+    // Does a wall stand between (x, y) and (x + dx, y + dy)?
+    function walled(x, y, dx, dy) {
+      if (dx === 0) return false;
+      for (const w of walls) {
+        const off = dxw(x, w.x);
+        if (off * dx <= 0 || Math.abs(off) >= Math.abs(dx)) continue;
+        const yy = y + (dy * off) / dx;
+        if (yy >= w.y0 && yy <= w.y1) return true;
+      }
+      return false;
+    }
+
+    function body(a) {
+      const t = a.t, speed = Math.hypot(a.vx, a.vy), top = Math.max(...t.spd) || 1;
+      const frac = Math.min(1, speed / top), band = bandOf(a.y);
+      a.energy -= t.metab + 0.0011 * t.emax * frac * (band === 0 ? 1.6 : 1);
+      a.fatigue = a.sleeping ? Math.max(0, a.fatigue - 0.06) : Math.min(C.level, a.fatigue + 0.012 * (1 + frac));
+      if (a.poison > 0.01) { a.hp -= 0.03 * a.poison; a.poison *= 0.985; if (a.hp <= 0) return die(a, 'poison'); }
+      if (a.energy <= 0) { a.energy = 0; a.hp -= 0.02 * t.hpmax; if (a.hp <= 0) return die(a, 'starved'); }
+      else if (a.hp < t.hpmax) a.hp = Math.min(t.hpmax, a.hp + 0.002 * t.hpmax);
+      a.atkCd--; a.mateCd--;
+      a.age++;
+      if (a.age > a.life) return die(a, 'old');
+      if (a.age < 0.2 * a.life && a.age % 50 === 0) {
+        const f = a.energy / t.emax, h = a.hp / t.hpmax;
+        a.t = traits(a.caps, a.genes, a.age, a.life);
+        a.energy = f * a.t.emax; a.hp = h * a.t.hpmax;
+      }
+      if (a.preg && stats.tick >= a.preg.at) birth(a);
+    }
+
+    function plants() {
+      if (moving && stats.tick % 25 === 0) reformPatches();
+      for (const g of groups) if (rnd() < 0.002) g.vx = (rnd() - 0.5) * 0.3;
+      for (let i = food.length - 1; i >= 0; i--) {
+        const f = food[i];
+        if (f.kind === 'meat') { f.amt += f.regrow * (1 + f.amt * 0.2); if (f.amt <= 0.05) food.splice(i, 1); continue; }
+        f.amt = Math.min(f.cap, f.amt + f.regrow);
+        if (f.vx) { f.x = wrapX(f.x + f.vx); if (rnd() < 0.002) f.vx = (rnd() - 0.5) * 0.3; }
+        if (f.grp) f.x = wrapX(f.x + f.grp.vx);
+      }
+    }
+
+    // ---------------------------------------------------------------- checks and views
+    function verifyPort() {
+      let bad = 0, netBad = 0;
+      for (const [x, want] of data.vectors) {
+        const got = ruleKeys(x, C);
+        if (got.some((v, k) => v !== want[k])) bad++;
+        const keys = brain.forward(brain.init, x);
+        for (let k = 0; k < NOPT; k++) if (Math.abs(keys[k] - want[k]) > 1e-6) { netBad++; break; }
+      }
+      return { vectors: data.vectors.length, ruleMismatches: bad, netMismatches: netBad };
+    }
+    function foodWeb() {
+      // Adult means: who can eat whom where their bands overlap.
+      const live = species.map((s) => ({ sp: s.id, t: s.adult }));
+      const web = [];
+      for (const a of live) for (const b of live) {
+        if (a.sp === b.sp) continue;
+        const ma = maskOf(a.t), mb = maskOf(b.t);
+        if (canEat(a, b) && ma.some((v, k) => v && mb[k])) web.push([a.sp, b.sp]);
+      }
+      return web;
+    }
+    function speciesStats(sp) {
+      const live = yumon.filter((a) => a.alive && a.sp === sp.id);
+      const mean = (f) => (live.length ? live.reduce((s, a) => s + f(a), 0) / live.length : 0);
+      const genes = {};
+      for (const k of Object.keys(sp.genes)) if (k !== 'hue' && sp.genes[k] > 0) genes[k] = mean((a) => a.genes[k]);
+      return { n: live.length, genes, gen: mean((a) => a.gen), learned: mean((a) => a.learned) };
+    }
+    function brainDelta(a) {
+      const M = models.get(a.id);
+      if (!M) return 0;
+      let s = 0; for (let i = 0; i < M.w.length; i++) s += Math.abs(M.w[i] - brain.init[i]);
+      return s;
+    }
+
+    return {
+      WORLD_W, WORLD_H, BANDS, BAND_Y, CAPS, LIMBS, T, species, yumon, food, stats, history, changes, models, brain,
+      tick, verifyPort, foodWeb, speciesStats, brainDelta, bandOf, traits, canEat, maskOf,
+      feed(x, y) {
+        const b = bandOf(y), kind = ['gnats', 'fruit', 'grass', 'plankton'][b];
+        for (let i = 0; i < 4; i++) addFood(kind, wrapX(x + (rnd() - 0.5) * 30), Math.min(BAND_Y[b][1] - 3, Math.max(BAND_Y[b][0] + 3, y + (rnd() - 0.5) * 20)), [4, 5, 6, 5][b], [0.01, 0.012, 0.013, 0.012][b], b === 0 || b === 3);
+        return kind;
+      },
+      reintroduce(sp) { if (sp.alive === 0) { sp.extinctAt = null; founders(sp, 6); } },
+      walls, events,
+      addWall(x, y0, y1) {
+        const w = { id: nextWall++, x: wrapX(x), y0: Math.max(0, Math.min(y0, y1)), y1: Math.min(WORLD_H, Math.max(y0, y1)), until: T.wallLife ? stats.tick + T.wallLife : 0 };
+        walls.push(w);
+        return w;
+      },
+      removeWall(x, y, R) {
+        let best = -1, bd = R;
+        walls.forEach((w, i) => { const d = Math.abs(dxw(x, w.x)) + (y < w.y0 ? w.y0 - y : y > w.y1 ? y - w.y1 : 0); if (d < bd) { bd = d; best = i; } });
+        return best >= 0 ? walls.splice(best, 1)[0] : null;
+      },
+      clearWalls() { walls.length = 0; },
+      setLearn(v) { learn = !!v; },
+      get learn() { return learn; },
+      byId,
+    };
+  }
+
+  const api = { createPark, makeSpecies, traits, dietOf, CAPS, LIMBS, BANDS };
+  if (typeof module !== 'undefined' && module.exports) module.exports = { ParkCore: api };
+  else root.ParkCore = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+<script>(function () {
+  'use strict';
+  const DATA = JSON.parse(document.getElementById('park-data').textContent);
+  // Ecosystem setup: saved per viewer, applied by Save & restart.
+  const DEFAULT_SETUP = { seed: 11, species: 30, diets: 'mixed', plantRate: 1.25, moving: true, call: 2.5, learn: true, lr: 0.003, evolution: 'default', killR: 3, brain: 0 };
+  // Brains: the exact compiled rule, or variants from `wir park --variant` (e.g. superposed
+  // brains from `wir superpose-choice-layer`).
+  const BRAINS = [{ label: 'Exact (the rule, compiled)', spec: DATA.brain }, ...(DATA.brains || []).map((b) => ({ label: b.label, spec: b }))];
+  const brainOf = (st) => BRAINS[Math.max(0, Math.min(BRAINS.length - 1, st.brain | 0))];
+  const EVOLUTION = { gentle: { mutSmall: 0.02, mutBig: 0.08, capRate: 0.02 }, default: { mutSmall: 0.03, mutBig: 0.15, capRate: 0.06 }, wild: { mutSmall: 0.05, mutBig: 0.25, capRate: 0.15 } };
+  let setup = { ...DEFAULT_SETUP };
+  try { setup = { ...DEFAULT_SETUP, ...JSON.parse(localStorage.getItem('yumon-park-setup') || '{}') }; } catch (e) { /* storage blocked: defaults */ }
+  const makeSim = (st) => ParkCore.createPark(DATA, { seed: st.seed, species: st.species, diets: st.diets, movingPatches: st.moving, learn: st.learn, brain: brainOf(st).spec,
+    tune: { plantRate: st.plantRate, call: st.call, lr: st.lr, killR: st.killR, ...(EVOLUTION[st.evolution] || EVOLUTION.default) } });
+  let sim = makeSim(setup);
+  const C = DATA.consts;
+  const $ = (id) => document.getElementById(id);
+  const canvas = $('world'), ctx = canvas.getContext('2d');
+  const OPT_LABEL = { eat: 'Eat', hunt: 'Hunt', flee: 'Flee', hide: 'Hide', mate: 'Mate', sleep: 'Sleep', flock: 'Flock', roam: 'Roam', fight: 'Fight', brace: 'Brace' };
+  const W0 = sim.WORLD_W, H0 = sim.WORLD_H;
+  const hue = (sp, a) => `hsl(${(a ? a.genes.hue : sp.genes.hue).toFixed(0)} 62% ${dark() ? 62 : 48}%)`;
+  const dark = () => getComputedStyle(document.documentElement).colorScheme === 'dark';
+
+  let pal = {};
+  function readPalette() {
+    const cs = getComputedStyle(document.documentElement), v = (n) => cs.getPropertyValue(n).trim();
+    pal = { skyTop: v('--sky-top'), skyBot: v('--sky-bot'), canopy: v('--canopy'), canopy2: v('--canopy-2'), trunk: v('--trunk'), ground: v('--ground'),
+      grass: v('--grass'), waterTop: v('--water-top'), waterBot: v('--water-bot'), ink: v('--ink'), accent: v('--accent'), bad: v('--bad'), line: v('--line'), muted: v('--muted'), panel: v('--panel'),
+      wall: v('--wall'), wallEdge: v('--wall-edge'), warn: v('--warn') };
+  }
+  readPalette();
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', readPalette);
+  new MutationObserver(readPalette).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+  // ---------------------------------------------------------------- camera
+  const cam = { x: W0 / 2, y: H0 / 2, z: 1 };
+  let W = 0, Hpx = 0, dpr = 1;
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    W = r.width; Hpx = r.height;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(Hpx * dpr);
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+  const scale = () => (Hpx / H0) * cam.z;
+  function clampCam() {
+    const s = scale(), half = Hpx / 2 / s;
+    cam.y = Math.max(half, Math.min(H0 - half, cam.y));
+    cam.x = ((cam.x % W0) + W0) % W0;
+  }
+  const sx = (x) => { let d = x - cam.x; if (d > W0 / 2) d -= W0; else if (d < -W0 / 2) d += W0; return d * scale() + W / 2; };
+  const sy = (y) => (y - cam.y) * scale() + Hpx / 2;
+  const toWorld = (px, py) => [cam.x + (px - W / 2) / scale(), cam.y + (py - Hpx / 2) / scale()];
+
+  // ---------------------------------------------------------------- state
+  const state = { tool: 'watch', running: true, speed: 2, selected: null, follow: false };
+  let acc = 0, last = performance.now(), tickMs = 0;
+  const TPS = 12;
+  function step() {
+    const t0 = performance.now();
+    sim.tick();
+    tickMs = tickMs * 0.9 + (performance.now() - t0) * 0.1;
+  }
+
+  // ---------------------------------------------------------------- scenery (fixed per world x)
+  const h2 = (x, s) => { let h = Math.imul(x | 0, 374761393) + Math.imul(s, 668265263); h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
+  const TREES = [];
+  for (let x = 20; x < W0; x += 70 + Math.floor(h2(x, 3) * 50)) TREES.push({ x, w: 6 + h2(x, 4) * 6, top: 212 + h2(x, 5) * 40, r: 46 + h2(x, 6) * 30 });
+
+  function drawScene() {
+    const s = scale();
+    const [b0, b1, b2, b3] = sim.BAND_Y;
+    let g = ctx.createLinearGradient(0, sy(0), 0, sy(330));
+    g.addColorStop(0, pal.skyTop); g.addColorStop(1, pal.skyBot);
+    ctx.fillStyle = g; ctx.fillRect(0, sy(0), W, sy(330) - sy(0));
+    // trees: trunks to the ground, canopies across the tree band
+    for (const t of TREES) for (const X of copies(t.x, t.r)) {
+      ctx.fillStyle = pal.trunk;
+      ctx.fillRect(X - (t.w * s) / 2, sy(t.top), t.w * s, sy(336) - sy(t.top));
+    }
+    for (const t of TREES) for (const X of copies(t.x, t.r)) {
+      ctx.fillStyle = h2(t.x, 9) < 0.5 ? pal.canopy : pal.canopy2;
+      ctx.beginPath(); ctx.ellipse(X, sy(t.top + 8), t.r * s, (t.r * 0.62) * s, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(X + t.r * 0.55 * s, sy(t.top + 34), t.r * 0.6 * s, t.r * 0.42 * s, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(X - t.r * 0.6 * s, sy(t.top + 30), t.r * 0.55 * s, t.r * 0.4 * s, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = pal.ground; ctx.fillRect(0, sy(b2[0]), W, sy(b2[1]) - sy(b2[0]));
+    ctx.fillStyle = pal.grass; ctx.fillRect(0, sy(b2[0]), W, Math.max(2, 5 * s));
+    g = ctx.createLinearGradient(0, sy(b3[0]), 0, sy(b3[1]));
+    g.addColorStop(0, pal.waterTop); g.addColorStop(1, pal.waterBot);
+    ctx.fillStyle = g; ctx.fillRect(0, sy(b3[0]), W, sy(b3[1]) - sy(b3[0]));
+    void b0; void b1;
+  }
+  function copies(x, r) {
+    const out = [], X = sx(x), span = W0 * scale(), pad = (r || 10) * scale();
+    for (const k of [-1, 0, 1]) { const v = X + k * span; if (v > -pad && v < W + pad) out.push(v); }
+    return out;
+  }
+
+  const FOOD_COL = { gnats: '#3a3a3a', fruit: '#d6453d', grass: '#8bcf5a', plankton: '#7fe0c4', meat: '#9b3b2e' };
+  function drawFood() {
+    const s = scale();
+    for (const f of sim.food) {
+      if (f.amt < 0.3) continue;
+      for (const X of copies(f.x, 10)) {
+        const Y = sy(f.y), k = Math.min(1, f.amt / Math.max(1, f.cap || 6));
+        ctx.fillStyle = f.kind === 'gnats' && dark() ? '#c9d2d0' : FOOD_COL[f.kind];
+        if (f.kind === 'grass') {
+          ctx.strokeStyle = FOOD_COL.grass; ctx.lineWidth = Math.max(1, 1.3 * s);
+          ctx.beginPath();
+          for (let i = -1; i <= 1; i++) { ctx.moveTo(X + i * 2 * s, Y + 3 * s); ctx.lineTo(X + i * 3 * s, Y + 3 * s - (3 + 7 * k) * s); }
+          ctx.stroke();
+        } else if (f.kind === 'gnats') {
+          for (let i = 0; i < 2 + Math.round(5 * k); i++) ctx.fillRect(X + (h2(i, f.x | 0) - 0.5) * 14 * s, Y + (h2(i, 7 + (f.y | 0)) - 0.5) * 10 * s, Math.max(1, s), Math.max(1, s));
+        } else if (f.kind === 'plankton') {
+          ctx.globalAlpha = 0.85;
+          for (let i = 0; i < 2 + Math.round(5 * k); i++) { ctx.beginPath(); ctx.arc(X + (h2(i, f.x | 0) - 0.5) * 14 * s, Y + (h2(i, 3) - 0.5) * 10 * s, Math.max(1, 1.2 * s), 0, 7); ctx.fill(); }
+          ctx.globalAlpha = 1;
+        } else {
+          ctx.beginPath(); ctx.arc(X, Y, Math.max(1.5, (f.kind === 'meat' ? 2 + Math.min(5, f.amt * 0.5) : 2 + 2 * k) * s), 0, 7); ctx.fill();
+        }
+      }
+    }
+  }
+
+  // Walls: a stone strip, full or part height; a fading top edge when it has a lifetime.
+  function drawWalls() {
+    const s = scale(), list = sim.walls.slice();
+    if (wallDraft) list.push({ ...wallDraft, draft: true });
+    for (const w of list) for (const X of copies(w.x, 8)) {
+      const y0 = sy(w.y0), y1 = sy(w.y1), wd = Math.max(4, 7 * s);
+      ctx.globalAlpha = w.draft ? 0.55 : w.until ? 0.6 + 0.4 * Math.min(1, (w.until - sim.stats.tick) / 1500) : 1;
+      ctx.fillStyle = pal.wall; ctx.fillRect(X - wd / 2, y0, wd, y1 - y0);
+      ctx.strokeStyle = pal.wallEdge; ctx.lineWidth = 1;
+      ctx.strokeRect(X - wd / 2 + 0.5, y0 + 0.5, wd - 1, y1 - y0 - 1);
+      ctx.beginPath();
+      for (let y = w.y0 + 14; y < w.y1; y += 14) { ctx.moveTo(X - wd / 2, sy(y)); ctx.lineTo(X + wd / 2, sy(y)); }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // A Yumon: body by size and hue, with the limbs its species has, sized by its genes.
+  function drawYumon(a, X, Y, now) {
+    const s = scale(), R = a.t.r * s, g = a.genes, face = a.vx >= 0 ? 1 : -1, sp = a.s;
+    const hidden = a.option === 3 || (a.sleeping && a.caps.has('camo'));
+    ctx.globalAlpha = hidden ? 0.45 : 1;
+    const col = hue(sp, a);
+    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = Math.max(1, 0.18 * R);
+    const flap = Math.sin(now / 90 + a.id) * 0.5;
+    if (g.wings && a.t.spd[0] > 0) { ctx.beginPath(); ctx.ellipse(X - face * 0.2 * R, Y - 0.6 * R, R * 0.9 * g.wings, R * (0.35 + 0.25 * flap), -face * 0.5, 0, Math.PI * 2); ctx.globalAlpha *= 0.7; ctx.fill(); ctx.globalAlpha = hidden ? 0.45 : 1; }
+    if (g.fins) { ctx.beginPath(); ctx.moveTo(X - face * R * 0.8, Y); ctx.lineTo(X - face * R * (1.3 + 0.4 * g.fins), Y - R * 0.6); ctx.lineTo(X - face * R * (1.3 + 0.4 * g.fins), Y + R * 0.6); ctx.closePath(); ctx.fill(); }
+    if (g.legs) { ctx.beginPath(); for (const o of [-0.45, 0.45]) { ctx.moveTo(X + o * R, Y + 0.6 * R); ctx.lineTo(X + o * R + Math.sin(now / 80 + a.id + o * 3) * 0.2 * R * (Math.abs(a.vx) > 0.1), Y + R * (0.9 + 0.5 * g.legs)); } ctx.stroke(); }
+    if (g.stinger) { ctx.beginPath(); ctx.moveTo(X - face * R * 0.85, Y - 0.1 * R); ctx.lineTo(X - face * R * (1.2 + 0.5 * g.stinger), Y - 0.5 * R); ctx.stroke(); }
+    // body
+    ctx.beginPath(); ctx.ellipse(X, Y, R, R * 0.82, 0, 0, Math.PI * 2); ctx.fill();
+    if (g.shell) { ctx.fillStyle = 'rgba(0,0,0,0.28)'; ctx.beginPath(); ctx.ellipse(X, Y - 0.1 * R, R * 1.02, R * 0.78, 0, Math.PI, 0); ctx.fill(); }
+    if (g.spines) { ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.beginPath(); for (let k = 0; k < 5; k++) { const t = Math.PI * (1.1 + k * 0.2); ctx.moveTo(X + Math.cos(t) * R, Y + Math.sin(t) * R * 0.82); ctx.lineTo(X + Math.cos(t) * R * (1.3 + 0.2 * g.spines), Y + Math.sin(t) * R * (1.1 + 0.2 * g.spines)); } ctx.stroke(); }
+    if (g.skin) { ctx.fillStyle = 'rgba(0,0,0,0.22)'; for (let k = 0; k < 3; k++) { ctx.beginPath(); ctx.arc(X + (k - 1) * 0.45 * R, Y + 0.1 * R, 0.16 * R, 0, 7); ctx.fill(); } }
+    ctx.strokeStyle = col;
+    if (g.horns) { ctx.beginPath(); ctx.moveTo(X + face * 0.5 * R, Y - 0.6 * R); ctx.lineTo(X + face * R * (0.8 + 0.3 * g.horns), Y - R * (1.1 + 0.3 * g.horns)); ctx.stroke(); }
+    if (g.claws) { ctx.beginPath(); ctx.arc(X + face * 1.05 * R, Y + 0.35 * R, 0.25 * R * g.claws, face > 0 ? -1 : 2, face > 0 ? 1.5 : 4.6); ctx.stroke(); }
+    // eye and mouth
+    ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(X + face * 0.45 * R, Y - 0.2 * R, Math.max(1, 0.24 * R), 0, 7); ctx.fill();
+    ctx.fillStyle = '#10181a'; ctx.beginPath(); ctx.arc(X + face * 0.5 * R, Y - 0.2 * R, Math.max(0.6, 0.12 * R), 0, 7); ctx.fill();
+    if (a.sleeping) { ctx.strokeStyle = '#10181a'; ctx.beginPath(); ctx.moveTo(X + face * 0.3 * R, Y - 0.2 * R); ctx.lineTo(X + face * 0.65 * R, Y - 0.2 * R); ctx.stroke(); }
+    if (g.jaws) { ctx.strokeStyle = '#10181a'; ctx.lineWidth = Math.max(1, 0.12 * R); ctx.beginPath(); ctx.moveTo(X + face * 0.95 * R, Y + 0.15 * R); ctx.lineTo(X + face * 0.5 * R, Y + 0.25 * R); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+    if (a.option === 8 || a.bracing) { // fighting back: red ring; bracing: a thick amber ring
+      ctx.strokeStyle = a.bracing ? pal.warn : pal.bad; ctx.lineWidth = Math.max(1.5, (a.bracing ? 0.3 : 0.16) * R);
+      ctx.beginPath(); ctx.arc(X, Y, R * 1.35, 0, 7); ctx.stroke();
+    }
+    if (a.sleeping && s > 1.4) { ctx.fillStyle = pal.ink; ctx.font = `700 ${Math.round(9 + 2 * s)}px ${getComputedStyle(document.body).fontFamily}`; ctx.fillText('z', X + R, Y - R); }
+  }
+
+  function draw(now) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (state.follow && state.selected && state.selected.alive) { cam.x = state.selected.x; cam.y = state.selected.y; }
+    clampCam();
+    drawScene();
+    drawFood();
+    drawWalls();
+    for (const a of sim.yumon) {
+      if (!a.alive) continue;
+      for (const X of copies(a.x, 20)) {
+        drawYumon(a, X, sy(a.y), now);
+        if (a === state.selected) {
+          ctx.strokeStyle = pal.panel; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(X, sy(a.y), a.t.r * scale() * 1.8 + 4, 0, 7); ctx.stroke();
+          ctx.strokeStyle = pal.accent; ctx.setLineDash([4, 3]);
+          ctx.beginPath(); ctx.arc(X, sy(a.y), a.t.sense * scale(), 0, 7); ctx.stroke(); ctx.setLineDash([]);
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- input
+  let drag = null, wallDraft = null;
+  const clampY = (y) => Math.max(0, Math.min(H0, y));
+  canvas.addEventListener('pointerdown', (e) => {
+    drag = { x: e.clientX, y: e.clientY, cx: cam.x, cy: cam.y, moved: false };
+    canvas.setPointerCapture(e.pointerId);
+    if (state.tool === 'wall') {
+      const r = canvas.getBoundingClientRect(), [wx, wy] = toWorld(e.clientX - r.left, e.clientY - r.top);
+      drag.wall = { x: ((wx % W0) + W0) % W0, y: clampY(wy) };
+    }
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    const r = canvas.getBoundingClientRect(), [wx, wy] = toWorld(e.clientX - r.left, e.clientY - r.top);
+    $('hover').textContent = `x ${Math.round(((wx % W0) + W0) % W0)} · ${sim.BANDS[sim.bandOf(Math.max(0, Math.min(H0 - 1, wy)))]}`;
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (drag.wall) { // drawing a wall: drag up or down sets its span
+      if (Math.abs(dy) > 6) { drag.moved = true; wallDraft = { x: drag.wall.x, y0: Math.min(drag.wall.y, clampY(wy)), y1: Math.max(drag.wall.y, clampY(wy)) }; }
+      if (!state.running) draw(performance.now());
+      return;
+    }
+    if (Math.abs(dx) + Math.abs(dy) > 4) { drag.moved = true; state.follow = false; $('follow').checked = false; }
+    cam.x = drag.cx - dx / scale(); cam.y = drag.cy - dy / scale();
+    if (!state.running) draw(performance.now());
+  });
+  canvas.addEventListener('pointerup', (e) => {
+    const d = drag; drag = null;
+    if (d && d.wall) {
+      const draft = wallDraft; wallDraft = null;
+      if (draft && draft.y1 - draft.y0 > 12) { sim.addWall(draft.x, draft.y0, draft.y1); toast(`Wall from ${bandName(draft.y0)} to ${bandName(draft.y1 - 1)}`); }
+      else if (!d.moved) {
+        if (sim.removeWall(d.wall.x, d.wall.y, 14 / scale() + 6)) toast('Wall removed');
+        else { sim.addWall(d.wall.x, 0, H0); toast('Wall across every band'); }
+      }
+      renderWalls();
+      return;
+    }
+    if (!d || d.moved) return;
+    const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top, [wx, wy] = toWorld(px, py);
+    if (state.tool === 'feed') { toast(`Planted ${sim.feed(((wx % W0) + W0) % W0, Math.max(2, Math.min(H0 - 2, wy)))}`); return; }
+    let best = null, bd = 18;
+    for (const a of sim.yumon) if (a.alive) for (const X of copies(a.x, 20)) { const dd = Math.hypot(X - px, sy(a.y) - py) - a.t.r * scale(); if (dd < bd) { bd = dd; best = a; } }
+    state.selected = best;
+    renderInspector(); renderSpecies();
+  });
+  canvas.addEventListener('wheel', (e) => { e.preventDefault(); zoom(e.deltaY < 0 ? 1.2 : 1 / 1.2); }, { passive: false });
+  function zoom(f) { cam.z = Math.max(1, Math.min(6, cam.z * f)); if (!state.running) draw(performance.now()); }
+  $('zin').onclick = () => zoom(1.4);
+  $('zout').onclick = () => zoom(1 / 1.4);
+  document.querySelectorAll('input[name=tool]').forEach((r) => r.addEventListener('change', () => { state.tool = r.value; canvas.style.cursor = r.value === 'watch' ? 'grab' : 'crosshair'; $('wall-opts').hidden = r.value !== 'wall'; $('wall-help').hidden = r.value !== 'wall'; }));
+  const bandName = (y) => sim.BANDS[sim.bandOf(Math.max(0, Math.min(H0 - 1, y)))];
+  $('wall-life').onchange = (e) => { sim.T.wallLife = +e.target.value; toast(+e.target.value ? `New walls stand ${fmt(+e.target.value)} ticks` : 'New walls stand until removed'); };
+  $('wall-clear').onclick = () => { sim.clearWalls(); renderWalls(); toast('Walls cleared'); if (!state.running) draw(performance.now()); };
+  function renderWalls() { $('wall-count').textContent = sim.walls.length ? `${sim.walls.length} wall${sim.walls.length > 1 ? 's' : ''}` : 'no walls'; }
+  $('play').onclick = () => { state.running = !state.running; $('play').textContent = state.running ? 'Pause' : 'Play'; $('play').setAttribute('aria-pressed', String(!state.running)); };
+  $('stepbtn').onclick = () => { step(); draw(performance.now()); renderAll(); };
+  $('speed').onchange = (e) => (state.speed = +e.target.value);
+  $('follow').onchange = (e) => (state.follow = e.target.checked);
+  $('learn').onchange = (e) => { sim.setLearn(e.target.checked); toast(e.target.checked ? 'Sleep learning on' : 'Sleep learning off: brains keep what they have'); };
+  $('lr').onchange = (e) => { sim.T.lr = +e.target.value; toast(`Learning rate ${e.target.value}`); };
+  let toastT = 0;
+  function toast(msg) { const t = $('toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => (t.hidden = true), 1800); }
+
+  // ---------------------------------------------------------------- panels
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  const fmt = (n) => n.toLocaleString('en-US');
+  const bar = (v, warn) => `<span class="bar${warn ? ' warn' : ''}"><i style="width:${(100 * Math.max(0, Math.min(1, v))).toFixed(0)}%"></i></span>`;
+  const CAPL = Object.fromEntries(sim.CAPS.map((c) => [c.id, c]));
+  const capChips = (sp) => `<span class="chips">${[...sp.caps].map((c) => `<span class="chip k-${CAPL[c].kind}${sp.caps0 && !sp.caps0.has(c) ? ' new' : ''}"${sp.caps0 && !sp.caps0.has(c) ? ' title="evolved since the species began"' : ''}>${esc(CAPL[c].label)}</span>`).join('')}</span>`;
+  // An individual's capabilities against its species': gained ones marked +, lost ones struck.
+  const ownChips = (a) => {
+    const sp = a.s, out = [];
+    for (const c of a.caps) out.push(`<span class="chip k-${CAPL[c].kind}${sp.caps.has(c) ? '' : ' new'}"${sp.caps.has(c) ? '' : ' title="its species mostly lacks this"'}>${sp.caps.has(c) ? '' : '+'}${esc(CAPL[c].label)}</span>`);
+    for (const c of sp.caps) if (!a.caps.has(c)) out.push(`<span class="chip lost" title="its species mostly has this">${esc(CAPL[c].label)}</span>`);
+    return `<span class="chips">${out.join('')}</span>`;
+  };
+  let eats = new Map(), eatenBy = new Map();
+  function computeWeb() {
+    eats = new Map(); eatenBy = new Map();
+    for (const [a, b] of sim.foodWeb()) { eats.set(a, (eats.get(a) || 0) + 1); eatenBy.set(b, (eatenBy.get(b) || 0) + 1); }
+  }
+  computeWeb();
+
+  function renderInspector() {
+    const a = state.selected, el = $('inspector');
+    if (!a) { el.innerHTML = '<p class="muted" style="margin:0">Click a Yumon in the park to see what it feels, what its brain says next to the written rule, and how its genes have moved from its species\' founders.</p>'; return; }
+    const sp = a.s, t = a.t;
+    if (!a.alive) { el.innerHTML = `<p style="margin:0"><span class="dot" style="background:${hue(sp, a)}"></span> <b>${esc(sp.name)}</b> #${a.id} died (${esc({ eaten: 'eaten', fought: 'killed by the Yumon it attacked', starved: 'starved', old: 'old age', poison: 'poison', thorns: 'spines of its prey' }[a.cause] || a.cause)}) at generation ${a.gen}. Its brain has left the cache.</p>`; return; }
+    const p = softmax(a.keys, sim.T.temp);
+    const keyRows = C.options.map((o, k) => `<span${k === a.option ? ' style="font-weight:700"' : ''}>${OPT_LABEL[o]}</span>${bar(p[k])}<span class="num w">${k === a.ruleBest ? 'rule' : ''}</span>`).join('');
+    const f = sp.genes;
+    const genes = Object.keys(f).filter((k) => k !== 'hue' && f[k] > 0 && a.genes[k] > 0).map((k) => {
+      const d = (a.genes[k] / f[k] - 1) * 100;
+      return `<span class="chip"${k === a.mutated ? ' title="mutated at birth" style="border-color:var(--accent)"' : ''}>${k} ${a.genes[k].toFixed(2)} <span class="muted">${d >= 0 ? '+' : ''}${d.toFixed(0)}%</span></span>`;
+    }).join('');
+    const delta = sim.brainDelta(a);
+    const at = a.attacker;
+    const fightNote = at ? `<dt>Struck</dt><dd><span class="pill bad">by ${esc(at.s.name)}</span> odds ${['worse', 'even', 'better'][a.x_in[C.options.length + 13]]}</dd>` : '';
+    const capNote = a.capEvent ? `<dt>At birth</dt><dd><span class="pill mid">${a.capEvent[0] === '+' ? 'gained' : 'lost'} ${esc(CAPL[a.capEvent.slice(1)].label)}</span></dd>` : '';
+    const flyNote = a.caps.has('fly') && t.spd[0] === 0 ? '<dt>Flight</dt><dd><span class="pill bad">grounded</span> wings no longer lift it</dd>' : '';
+    el.innerHTML = `
+      <p style="margin:0"><span class="dot" style="background:${hue(sp, a)}"></span> <b>${esc(sp.name)}</b> #${a.id} · ${a.sex ? 'male' : 'female'} · gen ${a.gen}${a.mom ? ` · mother #${a.mom}` : ' · founder'}</p>
+      <div style="margin-top:6px">${ownChips(a)}</div>
+      <dl class="kv">
+        <dt>Doing</dt><dd><b>${OPT_LABEL[C.options[a.option]]}</b>${a.ruleBest !== a.netBest ? ` <span class="pill mid">rule: ${OPT_LABEL[C.options[a.ruleBest]]}</span>` : ''}</dd>
+        <dt>Energy</dt><dd>${bar(a.energy / t.emax, a.energy < 0.25 * t.emax)}<span class="num">${Math.round(100 * a.energy / t.emax)}%</span></dd>
+        <dt>Health</dt><dd>${bar(a.hp / t.hpmax, a.hp < 0.5 * t.hpmax)}<span class="num">${Math.round(100 * a.hp / t.hpmax)}%</span></dd>
+        <dt>Fatigue</dt><dd>${bar(a.fatigue / C.level)}<span class="num">${a.fatigue.toFixed(1)}</span></dd>
+        <dt>Age</dt><dd>${bar(a.age / a.life)}<span class="num">${Math.round(100 * a.age / a.life)}% of life</span></dd>
+        <dt>Kills</dt><dd class="num">${a.kills}</dd>
+        ${fightNote}${capNote}${flyNote}
+      </dl>
+      <h4>Its brain's options</h4>
+      <div class="keys">${keyRows}</div>
+      <h4>Genes vs its species' founders</h4>
+      <div class="chips">${genes}</div>
+      <h4>Brain</h4>
+      <p class="num" style="margin:0">${a.exact ? '<span class="pill good">exact</span> still the compiled weights' : `<span class="pill mid">learned</span> ${a.learned} sleep updates along its line, ${a.sleeps} its own · |change| ${delta.toFixed(2)}`}</p>
+      <p class="note" style="margin-top:4px">${a.learns ? '' : 'This lineage does not learn. '}${fmt(sim.brain.size)} weights, ${(sim.brain.size * 4 / 1024).toFixed(1)} KB. The rule tag marks the written rule's choice for what it senses now.</p>`;
+  }
+  function softmax(keys, T) { const m = Math.max(...keys), e = keys.map((k) => Math.exp((k - m) / T)), s = e.reduce((x, y) => x + y, 0); return e.map((v) => v / s); }
+
+  function renderLearned() {
+    const st = sim.stats, el = $('learned');
+    const total = [...sim.changes.values()].reduce((s, v) => s + v, 0);
+    const rows = [...sim.changes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 7).map(([k, v]) => {
+      const [r, n] = k.split('>');
+      return `<li><span>${OPT_LABEL[n]} <span class="muted">where the rule says</span> ${OPT_LABEL[r]}</span><span class="num">${(100 * v / Math.max(1, st.driftN)).toFixed(1)}%</span></li>`;
+    }).join('');
+    el.innerHTML = `
+      <dl class="kv" style="grid-template-columns: 1fr auto">
+        <dt>Trained brains disagree with the rule</dt><dd class="num">${st.driftN ? (100 * st.drift / st.driftN).toFixed(1) : '0.0'}%</dd>
+        <dt>Decisions on the rule's choice</dt><dd class="num">${st.decisions ? (100 * st.written / st.decisions).toFixed(1) : '0.0'}%</dd>
+        <dt>Sleep updates</dt><dd class="num">${fmt(st.sleeps)}</dd>
+        <dt>Untrained brains off the rule</dt><dd class="num">${fmt(st.exactMiss)} of ${fmt(st.untrained)}</dd>
+      </dl>
+      ${total ? `<h4>Most common learned changes</h4><ul class="learned">${rows}</ul>` : '<p class="note">No brain has slept yet. The first sleeps come a few hundred ticks in.</p>'}
+      <p class="note">Shares are of all decisions by trained brains. Sampling from the softmax already strays from the rule's top choice now and then, before any learning.</p>`;
+  }
+
+  function renderSpecies() {
+    const order = sim.species.slice().sort((x, y) => (y.alive > 0) - (x.alive > 0) || y.alive - x.alive || (x.extinctAt || 0) - (y.extinctAt || 0));
+    const rows = order.map((sp) => {
+      const st = sim.speciesStats(sp), f = sp.genes;
+      let drift = '';
+      if (st.n) {
+        let bk = null, bv = 0;
+        for (const k of Object.keys(st.genes)) { const d = st.genes[k] / f[k] - 1; if (Math.abs(d) > Math.abs(bv)) { bv = d; bk = k; } }
+        if (bk) drift = `${bk} ${bv >= 0 ? '+' : ''}${(100 * bv).toFixed(0)}%`;
+      }
+      const learned = sp.dN ? `${(100 * (sp.dD || 0) / sp.dN).toFixed(0)}%` : '-';
+      const status = sp.alive ? '<span class="pill good">alive</span>' : `<span class="pill bad">extinct</span> <button type="button" data-re="${sp.id}">Reintroduce</button>`;
+      const from = sp.parent !== null && sp.parent !== undefined ? ` · from ${esc(sim.species[sp.parent].name)} at ${fmt(sp.since)}` : '';
+      const sel = state.selected && state.selected.sp === sp.id ? ' class="sel"' : sp.alive ? '' : ' class="gone"';
+      return `<tr${sel}><td><span class="dot" style="background:${hue(sp)}"></span> <b>${esc(sp.name)}</b><br><span class="muted" style="font-size:12px">${sp.role === 'herb' ? 'plant eater' : sp.role === 'omni' ? 'omnivore' : 'hunter'} · ${[...sp.diet].join(', ') || 'nothing it can eat'}${from}</span></td><td>${capChips(sp)}</td><td class="num">${sp.alive}</td><td class="num">${sp.maxGen}</td><td class="num">${drift}</td><td class="num">${eats.get(sp.id) || 0} / ${eatenBy.get(sp.id) || 0}</td><td class="num">${learned}</td><td>${status}</td></tr>`;
+    });
+    $('species').innerHTML = rows.join('');
+  }
+  $('species').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-re]');
+    if (!b) return;
+    const sp = sim.species[+b.dataset.re];
+    sim.reintroduce(sp); toast(`${sp.name} reintroduced`); renderSpecies();
+  });
+
+  const pc = $('pop'), pctx = pc.getContext('2d');
+  function renderPop() {
+    const r = pc.getBoundingClientRect(), d = Math.min(2, window.devicePixelRatio || 1);
+    pc.width = Math.round(r.width * d); pc.height = Math.round(r.height * d);
+    pctx.setTransform(d, 0, 0, d, 0, 0);
+    const w = r.width, h = r.height, L = 34, B = 18, Tp = 6;
+    pctx.clearRect(0, 0, w, h);
+    const hist = sim.history;
+    if (hist.length < 2) return;
+    let mx = 10;
+    for (const [, pops] of hist) for (const v of pops) mx = Math.max(mx, v);
+    mx = Math.ceil(mx / 10) * 10;
+    const t0 = hist[0][0], t1 = hist[hist.length - 1][0];
+    const X = (t) => L + ((t - t0) / Math.max(1, t1 - t0)) * (w - L - 6), Y = (v) => h - B - (v / mx) * (h - B - Tp);
+    pctx.strokeStyle = pal.line; pctx.fillStyle = pal.muted; pctx.lineWidth = 1; pctx.font = '11px ' + getComputedStyle(document.body).fontFamily;
+    for (let k = 0; k <= 4; k++) { const v = (mx * k) / 4, y = Y(v); pctx.beginPath(); pctx.moveTo(L, y); pctx.lineTo(w - 6, y); pctx.stroke(); pctx.fillText(String(Math.round(v)), 2, y + 4); }
+    pctx.fillText(`tick ${t0}`, L, h - 4); const lbl = `tick ${t1}`; pctx.fillText(lbl, w - 6 - pctx.measureText(lbl).width, h - 4);
+    sim.species.forEach((sp, i) => {
+      pctx.strokeStyle = hue(sp); pctx.lineWidth = state.selected && state.selected.sp === sp.id ? 2.6 : 1.3;
+      pctx.beginPath();
+      let on = false;
+      hist.forEach(([t, pops]) => { const v = pops[i]; if (v === undefined) return; if (on) pctx.lineTo(X(t), Y(v)); else { pctx.moveTo(X(t), Y(v)); on = true; } });
+      pctx.stroke();
+    });
+    const alive = sim.species.filter((s) => s.alive).length;
+    const born = sim.species.filter((s) => s.parent !== null && s.parent !== undefined).length;
+    $('pop-note').textContent = `${alive} of ${sim.species.length} species alive, ${born} of them evolved here. One line per species in its colour; the selected Yumon's species is drawn thicker.`;
+  }
+
+  function renderStats() {
+    const alive = sim.yumon.filter((a) => a.alive);
+    $('s-pop').textContent = fmt(alive.length);
+    $('s-sp').textContent = `${sim.species.filter((s) => s.alive).length}/${sim.species.length}`;
+    $('s-born').textContent = fmt(sim.stats.born);
+    $('s-died').textContent = fmt(sim.stats.died);
+    $('s-gen').textContent = String(Math.max(...sim.species.map((s) => s.maxGen)));
+    $('s-models').textContent = `${fmt(sim.models.size)} · ${((sim.models.size * sim.brain.size * 8) / 1048576).toFixed(1)} MB`;
+    $('s-tick').textContent = fmt(sim.stats.tick);
+  }
+  function renderEvolution() {
+    const st = sim.stats, ev = sim.events.slice(-10).reverse();
+    $('evolution').innerHTML = `
+      <dl class="kv" style="grid-template-columns: 1fr auto">
+        <dt>Kills · fights back · escapes</dt><dd class="num">${fmt(st.kills)} · ${fmt(st.fights)} · ${fmt(st.escapes)}</dd>
+        <dt>Capabilities gained · lost at birth</dt><dd class="num">${fmt(st.gained)} · ${fmt(st.lost)}</dd>
+        <dt>New species</dt><dd class="num">${fmt(st.splits)}</dd>
+      </dl>
+      ${ev.length ? `<ul class="events">${ev.map(([t, e]) => `<li><span class="num muted">${fmt(t)}</span><span>${esc(e)}</span></li>`).join('')}</ul>` : '<p class="note">No new species yet. A group with another capability set, or genes drifted far from the rest, splits off once it has 5 members of both sexes.</p>'}`;
+  }
+  function renderAll() { renderStats(); renderInspector(); renderLearned(); renderEvolution(); renderSpecies(); renderPop(); renderWalls(); }
+
+  // static cards
+  function renderStatic() {
+  $('caps').innerHTML = sim.CAPS.map((c) => `<div><span class="chip k-${c.kind}">${esc(c.label)}</span><span class="muted" style="font-size:12px">${c.limb || (c.food ? c.food : 'mind')}</span><span class="num">${sim.species.filter((s) => s.caps.has(c.id) && (s.alive || !s.parent)).length}</span></div>`).join('');
+  const B = brainOf(setup);
+  $('src').textContent = B.spec.source;
+  $('net').textContent = `${B.label}: ${B.spec.inputs.length} inputs, hidden ${JSON.stringify(B.spec.hidden)}, ${fmt(B.spec.params)} weights (${(B.spec.params * 4 / 1024).toFixed(1)} KB as float32)`;
+  const port = sim.verifyPort();
+  $('port').textContent = setup.brain > 0
+    ? `Checked on load: this page's copy of the rule gives the Rust rule's keys on all ${port.vectors} test vectors (${port.ruleMismatches} differences). This brain shares neurons between features, so its keys are close to the rule's but not equal (${port.netMismatches} of ${port.vectors} vectors differ by more than 1e-6). The cache holds one brain per living Yumon: a copy (current weights) plus the weights it was born with.`
+    : `Checked on load: the compiled weights and this page's copy of the rule give the Rust rule's keys on all ${port.vectors} test vectors (${port.netMismatches + port.ruleMismatches} differences). The cache holds one brain per living Yumon: a copy (current weights) plus the weights it was born with.`;
+
+  }
+
+  // ---------------------------------------------------------------- setup tab
+  function fillSetup(st) {
+    $('set-seed').value = st.seed; $('set-species').value = st.species; $('set-diets').value = st.diets;
+    $('set-plants').value = String(st.plantRate); $('set-moving').value = st.moving ? 'moving' : 'fixed';
+    $('set-call').value = String(st.call); $('set-learn').checked = st.learn; $('set-lr').value = String(st.lr);
+    $('set-evo').value = st.evolution; $('set-kill').value = String(st.killR);
+    $('set-brain').innerHTML = BRAINS.map((b, i) => `<option value="${i}">${esc(b.label)}</option>`).join('');
+    $('set-brain').value = String(BRAINS.indexOf(brainOf(st)));
+    dietNote();
+  }
+  function readSetup() {
+    const n = (id, lo, hi, d) => { const v = Math.round(+$(id).value); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : d; };
+    return { seed: n('set-seed', 1, 999999, 11), species: n('set-species', 8, 40, 30), diets: $('set-diets').value, plantRate: +$('set-plants').value,
+      moving: $('set-moving').value === 'moving', call: +$('set-call').value, learn: $('set-learn').checked, lr: +$('set-lr').value,
+      evolution: $('set-evo').value, killR: +$('set-kill').value, brain: +$('set-brain').value || 0 };
+  }
+  const DIET_NOTES = {
+    mixed: 'Half the species eat only plants, a quarter are omnivores, a quarter hunt. In headless runs with learning, 6-27 species were alive at tick 10,000 (most of them evolved in the park), and on one seed the omnivores ate every plant eater.',
+    hunters: 'Every species is armed and hunts, and still eats the plants of its bands. In headless runs 3 and 7 species were alive at tick 10,000 (21 and 335 Yumon), with many fights.',
+    carnivores: 'Meat only. No species can eat plants, so the only food is other Yumon and nothing brings new energy in. In headless runs every species was extinct by tick 4,100-5,000.',
+  };
+  function dietNote() { $('diet-note').textContent = DIET_NOTES[$('set-diets').value]; }
+  $('set-diets').addEventListener('change', dietNote);
+  function describe(st) {
+    return `Seed ${st.seed} · ${st.species} species · ${{ mixed: 'mixed diets', hunters: 'all hunters', carnivores: 'all carnivores' }[st.diets]} · plants ${st.plantRate}x · ${st.moving ? 'moving' : 'fixed'} patches · mating calls ${st.call}x · learning ${st.learn ? 'on (' + st.lr + ')' : 'off'} · kill reward ${st.killR} · ${st.evolution} evolution${st.brain > 0 ? ' · ' + brainOf(st).label : ''}`;
+  }
+  function restart(st) {
+    setup = st;
+    try { localStorage.setItem('yumon-park-setup', JSON.stringify(st)); } catch (e) { /* not saved: still applies now */ }
+    sim = makeSim(st);
+    sim.T.wallLife = +$('wall-life').value;
+    computeWeb();
+    $('learn').checked = st.learn; $('lr').value = String(st.lr);
+    if (![...$('lr').options].some((o) => o.value === String(st.lr))) $('lr').value = '0.003';
+    renderStatic();
+    warm();
+    $('current-setup').textContent = describe(st);
+  }
+  $('setup-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    restart(readSetup());
+    showTab('park');
+    toast('Park restarted with the new setup');
+  });
+  $('set-defaults').addEventListener('click', () => fillSetup(DEFAULT_SETUP));
+  function showTab(name) {
+    for (const b of document.querySelectorAll('[role=tab][data-view]')) b.setAttribute('aria-selected', String(b.dataset.view === name));
+    $('view-park').hidden = name !== 'park';
+    $('view-setup').hidden = name !== 'setup';
+    if (name === 'setup') fillSetup(setup);
+    else { resize(); renderPop(); }
+    try { localStorage.setItem('yumon-park-tab', name); } catch (e) { /* ignore */ }
+  }
+  for (const b of document.querySelectorAll('[role=tab][data-view]')) b.addEventListener('click', () => showTab(b.dataset.view));
+
+  // ---------------------------------------------------------------- loop
+  // Start a little way in so the first view shows a living park.
+  function warm() {
+    for (let i = 0; i < 300; i++) sim.tick();
+    state.selected = sim.yumon.find((a) => a.alive && a.s.carn) || sim.yumon.find((a) => a.alive) || null;
+    if (state.selected) cam.x = state.selected.x;
+    renderAll();
+  }
+  renderStatic();
+  $('current-setup').textContent = describe(setup);
+  warm();
+  let firstTab = 'park';
+  try { firstTab = location.hash === '#setup' ? 'setup' : localStorage.getItem('yumon-park-tab') || 'park'; } catch (e) { /* ignore */ }
+  showTab(firstTab === 'setup' ? 'setup' : 'park');
+  let panelT = 0;
+  function frame(now) {
+    const dt = Math.min(100, now - last); last = now;
+    if (state.running) {
+      acc += (dt / 1000) * TPS * state.speed;
+      const t0 = performance.now();
+      while (acc >= 1 && performance.now() - t0 < 30) { step(); acc -= 1; }
+      if (acc > 4) acc = 0;
+    }
+    if (Hpx > 0 && !$('view-park').hidden) draw(now);
+    if (now - panelT > 500 && !$('view-park').hidden) { panelT = now; renderAll(); }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
