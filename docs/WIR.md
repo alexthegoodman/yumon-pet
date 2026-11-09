@@ -785,3 +785,45 @@ Skirmish page source now lives in `wir/demos/tactics/`. `wir/demos/tests/brain_p
 (Playwright from the allegiance install, Chrome) checks both pickers. Not done: the
 fish/bird and tactics brains (the tool accepts them; nothing measured), packed carries as
 a general `wir pack-carries`, LP speed (2-5 minutes on 1-8k distinct states).
+
+## WIR 0.3: written attention (Nov 9, 2026)
+
+`wir 0.3` sequence programs (wir/src/seq.rs, README "WIR 0.3", plan in
+docs/ideas/WIR_ATTENTION.md) add attention to the 0.2 language. Per-position lets use
+the 0.2 combinators; `mean(v, pred)` and `count(pred)` read other positions, with `pred`
+comparing a key side `k(e)` and a query side `q(e)` (`==`, `eq/ne/lt/le/gt/ge`, or `true`).
+It follows RASP (aggregate, selector width) and Tracr (compiled weights, one-hot sides,
+BOS as the default target, selector width from attention to BOS plus an MLP); the
+reference semantics (exact hard attention) and the exhaustive checks are ours.
+
+Compilation: a norm-free transformer, blocks of attention then a one-hidden-layer ReLU MLP,
+no biases. Residual: `isbos`, `one` (constants ride on it; 0 at BOS), token and position
+one-hot plus value, one dimension per relu node, head and count decoder (relus read only by
+a decoder stay hidden units). The residual connection carries everything, so there are no
+carry units. Sides are one-hot: free for the token and position, otherwise K + 2 relus
+(hats r(c-1) - 2 r(c) + r(c+1) over r(t) = relu(v - t)); the predicate table goes into
+W_Q (d_head = key values + 1). Matching keys score beta (sharpness, default 40), BOS beta/2
+for a mean and beta for a count, others 0. BOS's residual stays 0 because its own query
+reads BOS in a mean head (value 0) and the real keys in a count head. `count` reads
+1/(w + 1) and a piecewise-linear MLP through the points (1/(w+1), w) turns it back into w.
+
+Results (`wir seq ... --check`, i5-12500, f64):
+
+| program | blocks | heads | d_model | params (non-zero) | all up to len 6 (299,592) | 200k random, len 7-8 | worst diff |
+|---|---|---|---|---|---|---|---|
+| reverse | 3 | 2 | 37 | 3,293 (161) | 0 wrong | 0 wrong | 1.4e-8 |
+| hist | 1 | 1 | 22 | 1,210 (86) | 0 wrong | 0 wrong | 0 |
+| sort (stable) | 4 | 2 | 92 | 30,084 (693) | 0 wrong | 0 wrong | 1.4e-8 |
+| prefix_hist (causal) | 1 | 1 | 22 | 1,210 (86) | 0 wrong | 0 wrong (100k) | 0 |
+
+Sharpness sweep (sort, all sequences up to length 5): beta 5 rounds wrong on 27,988 of
+37,448; beta 10 worst 4.8e-2, 20 3.2e-4, 30 2.1e-6, 40 1.4e-8: about e^5 per +10, the
+e^(-beta/2) of the BOS term.
+
+First bug: count heads wrote 1 at BOS (BOS's own query read BOS's value), so BOS took a
+nonzero `target` and matched as a key; sort read 0 at slot 0 on short sequences until the
+count head's BOS query was pointed away from BOS.
+
+Not done: f32 / PyTorch export, interval bounds through the leak (checks are empirical),
+previous-token / induction / Dyck / mode programs, conjunctions in predicates, norms and
+RoPE (sunrise's architecture), superposing the residual stream.

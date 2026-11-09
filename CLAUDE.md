@@ -317,3 +317,14 @@ page (template + build.py); `wir/demos/tests/brain_picker.mjs` checks the picker
 Scripts: `wir/scripts/superpose/` (colony.js, park_record.js, park_run.js, ant_hostdiff.py).
 118 wir tests.
 
+
+WIR 0.3 attention (2026-11-09): see docs/WIR.md "WIR 0.3: written attention" and
+docs/ideas/WIR_ATTENTION.md (RASP/Tracr-inspired). `wir/src/seq.rs`: `wir 0.3` sequence
+programs (`sequence len N [causal] [sharpness B]`, `input tok: token in [lo, hi]`, `pos`,
+`mean(v, pred)`, `count(pred)`, pred `true` | `k(a) == q(b)` | `eq/ne/lt/le/gt/ge(k(..), q(..))`)
+compile to a norm-free transformer (`SeqWeights`: BOS row 0, residual dim per node, no
+biases, scores without 1/sqrt(d)). `SeqProgram::eval` is exact hard attention,
+`SeqWeights::eval` softmax. deep.rs `Scope`/`Cursor` are pub(crate) with a `seq` hook so
+0.3 reuses the 0.2 expression parser. `wir seq FILE [--run ..] [--check task --max-len N
+--sample N] [--sharpness B] [-o w.json]`; examples reverse/hist/sort/prefix_hist.wir: all
+sequences up to length 6 and 200k at 7-8 correct, worst diff 1.4e-8 at beta 40. 123 wir tests.

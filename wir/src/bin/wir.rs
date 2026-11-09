@@ -85,6 +85,16 @@ usage:
                                         checked on every state; probe `inputs` [N][D],
                                         optional `weights` [N]
 
+  wir seq <file.wir> [--run 3,1,2 ..] [--check reverse|hist|sort|length|prefix_hist]
+          [--output NAME] [--max-len N] [--sample N] [--seed 1] [--sharpness B]
+          [-o weights.json]
+                                        compile a 0.3 sequence program (attention heads
+                                        mean/count) to a norm-free transformer; --run
+                                        prints program and network outputs per position,
+                                        --check compares both with the task on every
+                                        sequence up to --max-len (default: the program's)
+                                        and on --sample random longer ones
+
 Weights use PyTorch nn.Linear layout: W1 [H, D], b1 [H], W2 [O, H], b2 [O]; SwiGLU
 networks add W3 [H, D], b3 [H]. --domain drops creases never active on the probe's
 `inputs`; --kernel-terms keeps the first N of 9 patch components (lossy); --digits
@@ -167,6 +177,7 @@ fn main() -> ExitCode {
         "ant" => cmd_ant(rest),
         "park" => cmd_park(rest),
         "superpose-choice-layer" => cmd_superpose_choice_layer(rest),
+        "seq" => cmd_seq(rest),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
@@ -1109,6 +1120,68 @@ fn cmd_superpose_choice_layer(raw: &[String]) -> Result<(), String> {
             eprintln!("wrote {out}");
         }
         None => print!("{}", r.source),
+    }
+    Ok(())
+}
+
+fn cmd_seq(raw: &[String]) -> Result<(), String> {
+    let valued = ["--run", "--check", "--output", "--max-len", "--sample", "--seed", "--sharpness", "-o"];
+    let args = Args::parse(raw, &valued)?;
+    args.check(&valued)?;
+    let file = args.file("a .wir file")?;
+    let src = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut p = wir::seq::lower(&src).map_err(|e| e.to_string())?;
+    if let Some(b) = args.get("--sharpness") {
+        p.ctx.sharpness = b.parse().map_err(|_| "bad --sharpness")?;
+    }
+    let (w, c) = wir::seq::compile(&p).map_err(|e| e.to_string())?;
+    eprintln!(
+        "{}: d_model {}, {} blocks, {} heads (d_head <= {}), MLP hidden {:?}, {} parameters ({} non-zero)",
+        file.display(), c.d_model, c.blocks, c.heads, c.d_head_max, c.mlp_hidden, c.params, c.nonzero
+    );
+    for (_, run) in args.flags.iter().filter(|(k, _)| k == "--run") {
+        let toks: Vec<i64> = run.as_deref().unwrap_or("").split(',').map(|t| t.trim().parse().map_err(|_| format!("bad token `{t}`"))).collect::<Result<_, _>>()?;
+        if toks.is_empty() || toks.len() > p.ctx.len || toks.iter().any(|t| *t < p.ctx.vocab.0 || *t > p.ctx.vocab.1) {
+            return Err(format!("--run needs 1..={} tokens in [{}, {}]", p.ctx.len, p.ctx.vocab.0, p.ctx.vocab.1));
+        }
+        let (pe, ne) = (p.eval(&toks), w.eval(&toks));
+        for (o, (name, _)) in p.outputs.iter().enumerate() {
+            let f = |v: &Vec<Vec<f64>>| v.iter().map(|r| format!("{:.6}", r[o])).collect::<Vec<_>>().join(" ");
+            println!("{name}: program [{}]", f(&pe));
+            println!("{}  network [{}]", " ".repeat(name.len()), f(&ne));
+        }
+    }
+    if let Some(t) = args.get("--check") {
+        let out = match args.get("--output") {
+            Some(n) => p.outputs.iter().position(|(o, _)| o == n).ok_or(format!("no output `{n}`"))?,
+            None => 0,
+        };
+        let max_len = match args.get("--max-len") {
+            Some(v) => v.parse::<usize>().map_err(|_| "bad --max-len")?.min(p.ctx.len),
+            None => p.ctx.len,
+        };
+        let start = std::time::Instant::now();
+        let r = wir::seq::check(&p, &w, t, out, wir::seq::all_sequences(p.ctx.vocab, max_len))
+            .ok_or(format!("unknown task `{t}` (have {})", wir::seq::TASKS.join(", ")))?;
+        eprintln!(
+            "{t} (sharpness {}): {} sequences (all up to length {max_len}); program wrong on {}, network wrong on {}; worst |network - program| {:.1e} ({:.1?})",
+            p.ctx.sharpness, r.sequences, r.program_wrong, r.network_wrong, r.worst, start.elapsed()
+        );
+        let sample: u64 = args.get("--sample").map_or(Ok(0), |v| v.parse()).map_err(|_| "bad --sample")?;
+        if sample > 0 && max_len < p.ctx.len {
+            let seed: u64 = args.get("--seed").map_or(Ok(1), |v| v.parse()).map_err(|_| "bad --seed")?;
+            let start = std::time::Instant::now();
+            let seqs = wir::seq::random_sequences(p.ctx.vocab, max_len + 1, p.ctx.len, sample, seed);
+            let r = wir::seq::check(&p, &w, t, out, seqs).unwrap();
+            eprintln!(
+                "{t}: {} random sequences of length {}..={}; program wrong on {}, network wrong on {}; worst |network - program| {:.1e} ({:.1?})",
+                r.sequences, max_len + 1, p.ctx.len, r.program_wrong, r.network_wrong, r.worst, start.elapsed()
+            );
+        }
+    }
+    if let Some(out) = args.get("-o") {
+        let text = serde_json::to_string(&w.to_json()).map_err(|e| e.to_string())?;
+        std::fs::write(out, text).map_err(|e| format!("{out}: {e}"))?;
     }
     Ok(())
 }

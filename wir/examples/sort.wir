@@ -1,0 +1,8 @@
+wir 0.3
+# Stable sort: a token's target slot is the number of tokens before it in sorted
+# order (ties broken by position), and slot i reads the token whose target is i.
+sequence len 8
+input tok: token in [0, 7]
+let key = tok * 8 + pos
+let target = count(lt(k(key), q(key)))
+output sorted = mean(tok, k(target) == q(pos))

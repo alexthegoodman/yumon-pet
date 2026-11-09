@@ -759,6 +759,7 @@ pub fn lower_with(src: &str, symbols: &[String]) -> Result<DeepProgram> {
                     lets: &lets,
                     shifted: &mut shifted,
                     shift: (0, 0),
+                    seq: None,
                 };
                 let mut v = p.expr(&mut sc)?;
                 p.end()?;
@@ -806,6 +807,7 @@ pub fn lower_with(src: &str, symbols: &[String]) -> Result<DeepProgram> {
                     lets: &lets,
                     shifted: &mut shifted,
                     shift: (0, 0),
+                    seq: None,
                 };
                 let own = sc.tap(channel, 0, 0, s.line);
                 let delta = prog.outputs[output].1.sub(&own);
@@ -860,17 +862,19 @@ pub fn lower_with(src: &str, symbols: &[String]) -> Result<DeepProgram> {
 }
 
 /// What expressions can see while parsing.
-struct Scope<'a> {
-    g: &'a mut Graph,
-    env: &'a HashMap<String, Affine>,
-    grid: Option<&'a mut GridSpec>,
-    inputs: &'a mut Vec<(String, (f64, f64))>,
-    taps: &'a mut HashMap<(usize, i64, i64), Affine>,
-    stmts: &'a [Statement],
-    lets: &'a HashMap<String, (usize, usize)>,
-    shifted: &'a mut HashMap<(String, i64, i64), Affine>,
+pub(crate) struct Scope<'a> {
+    pub(crate) g: &'a mut Graph,
+    pub(crate) env: &'a HashMap<String, Affine>,
+    pub(crate) grid: Option<&'a mut GridSpec>,
+    pub(crate) inputs: &'a mut Vec<(String, (f64, f64))>,
+    pub(crate) taps: &'a mut HashMap<(usize, i64, i64), Affine>,
+    pub(crate) stmts: &'a [Statement],
+    pub(crate) lets: &'a HashMap<String, (usize, usize)>,
+    pub(crate) shifted: &'a mut HashMap<(String, i64, i64), Affine>,
     /// Added to every grid read: nonzero while a let is lowered again at an offset.
-    shift: (i64, i64),
+    pub(crate) shift: (i64, i64),
+    /// Present in 0.3 sequence programs: attention heads (`mean`, `count`).
+    pub(crate) seq: Option<&'a mut crate::seq::SeqCtx>,
 }
 
 impl Scope<'_> {
@@ -912,6 +916,7 @@ impl Scope<'_> {
             lets: self.lets,
             shifted: &mut *self.shifted,
             shift: (dy, dx),
+            seq: self.seq.as_deref_mut(),
         };
         let v = cur.expr(&mut sub)?;
         cur.end()?;
@@ -920,38 +925,38 @@ impl Scope<'_> {
     }
 }
 
-struct Cursor<'a> {
-    t: &'a [Token],
-    i: usize,
-    s: &'a Statement,
+pub(crate) struct Cursor<'a> {
+    pub(crate) t: &'a [Token],
+    pub(crate) i: usize,
+    pub(crate) s: &'a Statement,
 }
 
 impl Cursor<'_> {
-    fn err(&self, msg: &str) -> WirError {
+    pub(crate) fn err(&self, msg: &str) -> WirError {
         WirError::at(self.s.line, &self.s.text, msg)
     }
 
-    fn peek(&self) -> Option<&Tok> {
+    pub(crate) fn peek(&self) -> Option<&Tok> {
         self.t.get(self.i).map(|t| &t.tok)
     }
 
-    fn next(&mut self) -> Result<Tok> {
+    pub(crate) fn next(&mut self) -> Result<Tok> {
         let t = self.peek().cloned().ok_or_else(|| self.err("statement ends too early"))?;
         self.i += 1;
         Ok(t)
     }
 
-    fn eat(&mut self, t: &Tok) -> bool {
+    pub(crate) fn eat(&mut self, t: &Tok) -> bool {
         let hit = self.peek() == Some(t);
         self.i += hit as usize;
         hit
     }
 
-    fn eat_ident(&mut self, word: &str) -> bool {
+    pub(crate) fn eat_ident(&mut self, word: &str) -> bool {
         self.eat(&Tok::Ident(word.into()))
     }
 
-    fn expect(&mut self, t: &Tok) -> Result<()> {
+    pub(crate) fn expect(&mut self, t: &Tok) -> Result<()> {
         match self.peek() {
             Some(x) if x == t => {
                 self.i += 1;
@@ -962,14 +967,14 @@ impl Cursor<'_> {
         }
     }
 
-    fn ident(&mut self) -> Result<String> {
+    pub(crate) fn ident(&mut self) -> Result<String> {
         match self.next()? {
             Tok::Ident(s) => Ok(s),
             t => Err(self.err(&format!("expected a name, found {}", t.describe()))),
         }
     }
 
-    fn signed(&mut self) -> Result<f64> {
+    pub(crate) fn signed(&mut self) -> Result<f64> {
         let sign = if self.eat(&Tok::Minus) { -1.0 } else { self.eat(&Tok::Plus); 1.0 };
         match self.next()? {
             Tok::Num(v) => Ok(sign * v),
@@ -977,14 +982,14 @@ impl Cursor<'_> {
         }
     }
 
-    fn end(&self) -> Result<()> {
+    pub(crate) fn end(&self) -> Result<()> {
         match self.peek() {
             None => Ok(()),
             Some(t) => Err(self.err(&format!("unexpected {}", t.describe()))),
         }
     }
 
-    fn fresh(&self, name: &str, env: &HashMap<String, Affine>) -> Result<()> {
+    pub(crate) fn fresh(&self, name: &str, env: &HashMap<String, Affine>) -> Result<()> {
         if FUNCTIONS.contains(&name) || RESERVED.contains(&name) {
             return Err(self.err(&format!("`{name}` is reserved")));
         }
@@ -994,7 +999,7 @@ impl Cursor<'_> {
         Ok(())
     }
 
-    fn expr(&mut self, sc: &mut Scope) -> Result<Affine> {
+    pub(crate) fn expr(&mut self, sc: &mut Scope) -> Result<Affine> {
         let mut acc = if self.eat(&Tok::Minus) {
             self.term(sc)?.scale(-1.0)
         } else {
@@ -1082,6 +1087,9 @@ impl Cursor<'_> {
     }
 
     fn call(&mut self, f: &str, sc: &mut Scope) -> Result<Affine> {
+        if sc.seq.is_some() && crate::seq::FUNCTIONS.contains(&f) {
+            return crate::seq::call(self, f, sc);
+        }
         self.expect(&Tok::LParen)?;
         let mut args = vec![self.expr(sc)?];
         while self.eat(&Tok::Comma) {

@@ -1,0 +1,7 @@
+wir 0.3
+# Reverse a sequence: position i reads the token at n - 1 - i.
+sequence len 8
+input tok: token in [0, 7]
+let n = count(true)
+let opp = n - pos - 1
+output rev = mean(tok, k(pos) == q(opp))

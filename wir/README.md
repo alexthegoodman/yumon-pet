@@ -269,6 +269,35 @@ keys near their values so the decoded features keep their meaning, `--digits` se
 written precision. `wir ant` and `wir park` take `--variant label=brain.wir` (repeatable)
 to add brains to the page's brain selector.
 
+## WIR 0.3: sequence programs with attention (`src/seq.rs`)
+
+A `wir 0.3` program reads a token sequence and compiles to a small norm-free transformer
+(RASP / Tracr-style; see `../docs/WIR.md` "WIR 0.3: written attention"). Lets and outputs
+are per-position 0.2 expressions; `pos` is the position; two attention reads:
+
+- `mean(v, pred)`: v averaged over the key positions where pred holds (0 if none)
+- `count(pred)`: how many key positions pred holds at
+
+`pred` is `true`, `k(a) == q(b)` or `eq/ne/lt/le/gt/ge(side, side)`, sides `k(expr)` (at
+the key) and `q(expr)` (at the query), both with integer intervals.
+
+```
+wir 0.3
+sequence len 8                     # add `causal` for keys at or before the query; `sharpness B`
+input tok: token in [0, 7]
+let n = count(true)
+output rev = mean(tok, k(pos) == q(n - pos - 1))
+```
+
+```
+cargo run --release -- seq examples/sort.wir --run 3,1,2,1 --check sort --max-len 6 --sample 200000 [-o sort.json]
+```
+
+The JSON has `tok_embed` / `pos_embed` (row 0 is BOS), per block `heads` (`wq`, `wk`
+[d_head, d_model], `wv` [1, d], `wo` [d, 1]; scores without 1/sqrt(d_head)) then `w_in` /
+`w_out` (ReLU MLP, no biases), and `unembed`. `--sharpness` overrides beta (leak about
+e^(-beta/2)). Examples: `reverse.wir`, `hist.wir`, `sort.wir`, `prefix_hist.wir` (causal).
+
 ## Library
 
 ```rust
@@ -334,3 +363,6 @@ heading, and roles choosing the task (a digger follows the dig field, a forager 
 `tests/superpose.rs` covers `superpose-choice-layer`: a full-width layer keeping every key
 value, renamed copies for lets between features and keys, the certificate, and the refusals
 (a key reading a feature through a relu, a key before its feature).
+`tests/seq.rs` covers 0.3 sequence programs: reverse, histogram, sort and the causal
+histogram on every sequence up to length 4 plus samples at full length, the layout of the
+primitives, an empty mean reading 0, sharpness setting the leak, and the refusals.

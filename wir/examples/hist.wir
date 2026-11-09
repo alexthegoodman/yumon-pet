@@ -1,0 +1,5 @@
+wir 0.3
+# Histogram: how many tokens in the sequence equal this one.
+sequence len 8
+input tok: token in [0, 7]
+output hist = count(k(tok) == q(tok))

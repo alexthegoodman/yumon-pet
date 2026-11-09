@@ -33,6 +33,7 @@ pub mod model;
 pub mod num;
 pub mod parser;
 pub mod printer;
+pub mod seq;
 pub mod superpose;
 
 pub use canon::{canonicalize, decompile, DecompileOptions, Tolerances};

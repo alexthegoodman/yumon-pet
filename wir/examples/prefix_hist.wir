@@ -1,0 +1,5 @@
+wir 0.3
+# Causal histogram: how many times this token has appeared so far (this one included).
+sequence len 8 causal
+input tok: token in [0, 7]
+output seen = count(k(tok) == q(tok))
