@@ -327,4 +327,8 @@ biases, scores without 1/sqrt(d)). `SeqProgram::eval` is exact hard attention,
 `SeqWeights::eval` softmax. deep.rs `Scope`/`Cursor` are pub(crate) with a `seq` hook so
 0.3 reuses the 0.2 expression parser. `wir seq FILE [--run ..] [--check task --max-len N
 --sample N] [--sharpness B] [-o w.json]`; examples reverse/hist/sort/prefix_hist.wir: all
-sequences up to length 6 and 200k at 7-8 correct, worst diff 1.4e-8 at beta 40. 123 wir tests.
+sequences up to length 6 and 200k at 7-8 correct, worst diff 1.4e-8 at beta 40.
+Verification: `seq::error_bound` (proven |network - program| per output; relus get -M isbos
+gates from it so BOS stays 0, needed for causal counts), fuzz of random programs in
+tests/seq.rs (`WIR_SEQ_FUZZ=5000`: 2.64M values, none above bound), `--probe N:file` +
+`wir/scripts/seq_torch.py` (PyTorch f64/f32, 0 wrong). 125 wir tests.

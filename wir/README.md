@@ -295,8 +295,15 @@ cargo run --release -- seq examples/sort.wir --run 3,1,2,1 --check sort --max-le
 
 The JSON has `tok_embed` / `pos_embed` (row 0 is BOS), per block `heads` (`wq`, `wk`
 [d_head, d_model], `wv` [1, d], `wo` [d, 1]; scores without 1/sqrt(d_head)) then `w_in` /
-`w_out` (ReLU MLP, no biases), and `unembed`. `--sharpness` overrides beta (leak about
-e^(-beta/2)). Examples: `reverse.wir`, `hist.wir`, `sort.wir`, `prefix_hist.wir` (causal).
+`w_out` (ReLU MLP, no biases; relus that could be nonzero at BOS carry a -M `isbos`
+gate), and `unembed`. `--sharpness` overrides beta (leak about e^(-beta/2)). Every run prints
+a proven bound on |network - program| per output over all sequences up to `len`
+(`seq::error_bound`). `--probe N:file.json` writes random sequences with program and network
+outputs. Examples: `reverse.wir`, `hist.wir`, `sort.wir`, `prefix_hist.wir` (causal).
+
+```
+uv run --project ../python-train python scripts/seq_torch.py   # PyTorch float64/float32 check
+```
 
 ## Library
 
@@ -365,4 +372,6 @@ value, renamed copies for lets between features and keys, the certificate, and t
 (a key reading a feature through a relu, a key before its feature).
 `tests/seq.rs` covers 0.3 sequence programs: reverse, histogram, sort and the causal
 histogram on every sequence up to length 4 plus samples at full length, the layout of the
-primitives, an empty mean reading 0, sharpness setting the leak, and the refusals.
+primitives, an empty mean reading 0, sharpness setting the leak, the refusals, the bound
+on the examples, and a fuzz of random programs (`WIR_SEQ_FUZZ=N`, default 300) checking
+the network never leaves the bound.

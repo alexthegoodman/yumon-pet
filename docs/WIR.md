@@ -824,6 +824,39 @@ First bug: count heads wrote 1 at BOS (BOS's own query read BOS's value), so BOS
 nonzero `target` and matched as a key; sort read 0 at slot 0 on short sequences until the
 count head's BOS query was pointed away from BOS.
 
-Not done: f32 / PyTorch export, interval bounds through the leak (checks are empirical),
-previous-token / induction / Dyck / mode programs, conjunctions in predicates, norms and
-RoPE (sunrise's architecture), superposing the residual stream.
+### Verification (Nov 9)
+
+**Error bound.** `seq::error_bound` proves |network - program| for every sequence up to
+`len` (exact arithmetic; float rounding not included) and `wir seq` prints it per output.
+Embedding, `one` and `isbos` are exact and every residual dimension is written once, so
+errors start at heads: one-hot L1 errors give a score perturbation d, a mean head's error is
+the mass off its matches ((N e^d + e^(b + d_b)) / e^(beta - d) with matches, N e^d / e^(b - d_b)
+without) times the value span plus within-match unevenness (e^(2d) - 1) and the value error,
+a count head's is p_BOS against 1/(w + 1) for every w and non-matching count, and affine forms
+and relus pass sum |coef| e. Bounds at beta 40: reverse and sort 1.2e-7 (observed 1.4e-8),
+hist 7.9e-15 (observed 0), all < 0.5, so rounding the network gives the program's integer
+outputs on all ~19M sequences up to length 8. Sort at beta 30: 1.7e-5 (observed 2.1e-6); 20:
+2.0e-2 (3.2e-4); 10: 1.9e14 (useless; the count decoder's slopes up to 72 amplify the hats).
+
+**Fuzz** (`tests/seq.rs`, `WIR_SEQ_FUZZ=N`): random programs (len 2-6, vocab 2-5 values,
+half causal, beta 20/30/40; counts, clips and means chained, predicates over random integer
+affine sides, all six comparisons and `true`). 5,000 programs, 2.64M output values: none
+above its bound; 4,942 had every bound < 0.5. The largest observed/bound above f64 noise is
+1.000: a mean with no match spreads exactly N e^-20 onto the keys, which the bound charges.
+
+The first fuzz run found a bug the four examples missed: in a causal program BOS's query
+sees only BOS, so a count head writes 1 there, and a count used in a key side then gave
+BOS a value (|network - program| 2.4, while the bound claimed 1e-7 because it assumed a real
+key visible at BOS). Fix: every relu that the bound says could be nonzero at BOS gets a
+-M isbos weight (M from the BOS bound), so each MLP resets BOS to exactly 0, and causal
+count heads are bounded as reading 1 at BOS.
+
+**PyTorch** (`wir/scripts/seq_torch.py`, torch 2.14.1 CPU): the JSON rebuilt as an
+nn.Module (batched, padded, key mask) on 20,000 random sequences per example. float64 matches
+the Rust network to 2.2e-16. float32: reverse and sort land 1.9e-16 from the exact program
+(the leak, about e^-20, falls below f32 resolution, so softmax rounds to hard attention);
+hist and prefix_hist 1.9e-6 (f32 rounding times the count decoder's slopes). 0 sequences
+round wrong in either precision.
+
+Not done: previous-token / induction / Dyck / mode programs, conjunctions in predicates, a
+bound that includes float rounding, superposing the residual stream.

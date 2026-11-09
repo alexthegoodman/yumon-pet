@@ -87,7 +87,7 @@ usage:
 
   wir seq <file.wir> [--run 3,1,2 ..] [--check reverse|hist|sort|length|prefix_hist]
           [--output NAME] [--max-len N] [--sample N] [--seed 1] [--sharpness B]
-          [-o weights.json]
+          [--probe N:probe.json] [-o weights.json]
                                         compile a 0.3 sequence program (attention heads
                                         mean/count) to a norm-free transformer; --run
                                         prints program and network outputs per position,
@@ -1125,7 +1125,7 @@ fn cmd_superpose_choice_layer(raw: &[String]) -> Result<(), String> {
 }
 
 fn cmd_seq(raw: &[String]) -> Result<(), String> {
-    let valued = ["--run", "--check", "--output", "--max-len", "--sample", "--seed", "--sharpness", "-o"];
+    let valued = ["--run", "--check", "--output", "--max-len", "--sample", "--seed", "--sharpness", "--probe", "-o"];
     let args = Args::parse(raw, &valued)?;
     args.check(&valued)?;
     let file = args.file("a .wir file")?;
@@ -1139,6 +1139,15 @@ fn cmd_seq(raw: &[String]) -> Result<(), String> {
         "{}: d_model {}, {} blocks, {} heads (d_head <= {}), MLP hidden {:?}, {} parameters ({} non-zero)",
         file.display(), c.d_model, c.blocks, c.heads, c.d_head_max, c.mlp_hidden, c.params, c.nonzero
     );
+    let bound = wir::seq::error_bound(&p);
+    for (o, (name, _)) in p.outputs.iter().enumerate() {
+        let b = bound.outputs[o];
+        eprintln!(
+            "{name}: |network - program| <= {b:.1e} on every sequence up to length {}{}",
+            p.ctx.len,
+            if b < 0.5 { " (rounding the network gives the program's integer outputs)" } else { "" }
+        );
+    }
     for (_, run) in args.flags.iter().filter(|(k, _)| k == "--run") {
         let toks: Vec<i64> = run.as_deref().unwrap_or("").split(',').map(|t| t.trim().parse().map_err(|_| format!("bad token `{t}`"))).collect::<Result<_, _>>()?;
         if toks.is_empty() || toks.len() > p.ctx.len || toks.iter().any(|t| *t < p.ctx.vocab.0 || *t > p.ctx.vocab.1) {
@@ -1178,6 +1187,17 @@ fn cmd_seq(raw: &[String]) -> Result<(), String> {
                 r.sequences, max_len + 1, p.ctx.len, r.program_wrong, r.network_wrong, r.worst, start.elapsed()
             );
         }
+    }
+    if let Some(spec) = args.get("--probe") {
+        // N:file.json -> N random sequences (lengths 1..=len) with program and network outputs
+        let (count, out) = spec.split_once(':').ok_or("--probe takes N:file.json")?;
+        let count: u64 = count.parse().map_err(|_| "bad --probe count")?;
+        let seed: u64 = args.get("--seed").map_or(Ok(1), |v| v.parse()).map_err(|_| "bad --seed")?;
+        let seqs: Vec<Vec<i64>> = wir::seq::random_sequences(p.ctx.vocab, 1, p.ctx.len, count, seed).collect();
+        let prog: Vec<_> = seqs.iter().map(|s| p.eval(s)).collect();
+        let net: Vec<_> = seqs.iter().map(|s| w.eval(s)).collect();
+        let j = serde_json::json!({ "sequences": seqs, "program": prog, "network": net, "bound": bound.outputs });
+        std::fs::write(out, j.to_string()).map_err(|e| format!("{out}: {e}"))?;
     }
     if let Some(out) = args.get("-o") {
         let text = serde_json::to_string(&w.to_json()).map_err(|e| e.to_string())?;

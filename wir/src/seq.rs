@@ -25,9 +25,10 @@
 //! ReLU MLP, each adding into a residual stream. Position 0 is a BOS token. Residual
 //! dimensions: `isbos`, `one` (1 at every real position, 0 at BOS, and the only way
 //! constants enter), the token and position one-hot plus value, then one per relu node,
-//! head and count decoder. Every dimension but `isbos` is 0 at BOS (up to the leak: BOS's
-//! own query reads BOS in a mean head, the real keys' 0 in a count head), so a head with
-//! no matching key reads 0 there. A head scores matching keys `sharpness` (beta), BOS
+//! head and count decoder. Every dimension but `isbos` should be 0 at BOS, so a head
+//! with no matching key reads 0 there: BOS's own query reads BOS in a mean head and the
+//! real keys' 0 in a count head (a causal count head can only read BOS's 1), and every
+//! relu that could be nonzero at BOS gets a -M isbos gate sized by `error_bound`. A head scores matching keys `sharpness` (beta), BOS
 //! beta / 2 (mean) or beta (count) and other keys 0, so it is hard attention up to a
 //! leak of about e^(-beta / 2). `count` reads 1/(w + 1) from a head that always
 //! includes BOS and turns it back into w with a piecewise-linear MLP, exact at the
@@ -676,6 +677,7 @@ pub fn compile(p: &SeqProgram) -> Result<(SeqWeights, SeqCost)> {
     let g = &p.graph;
     let c = &p.ctx;
     let st = stages(p);
+    let bound = error_bound(p);
     // Live nodes, from the outputs back.
     let mut live = vec![false; g.nodes.len()];
     let mut stack: Vec<usize> = p.outputs.iter().flat_map(|(_, a)| a.terms.keys().copied()).collect();
@@ -821,6 +823,9 @@ pub fn compile(p: &SeqProgram) -> Result<(SeqWeights, SeqCost)> {
         for (u, &id) in units.iter().enumerate() {
             let Node::Relu(a) = &g.nodes[id] else { unreachable!() };
             w_in.row_mut(u).copy_from_slice(&row(a));
+            if let Some(m) = bound.gates.get(&id) {
+                w_in.set(u, isbos, -m);
+            }
             if let Some(&dm) = dim_of.get(&id) {
                 w_out.set(dm, u, 1.0);
             }
@@ -962,4 +967,102 @@ pub fn layout(p: &SeqProgram) -> BTreeMap<usize, (usize, usize)> {
         }
     }
     m
+}
+
+// ---------------------------------------------------------------- error bound
+
+/// A sound bound on |network - program| for every sequence up to the program's length,
+/// in exact arithmetic (f64/f32 rounding is not included).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ErrorBound {
+    /// Per output, the largest |network - program| at any real position.
+    pub outputs: Vec<f64>,
+    /// Per head (in `ctx.heads` order): the bound on its output at real positions.
+    pub heads: Vec<f64>,
+    /// Per relu node that can be nonzero at BOS: the `isbos` weight -M that zeroes it there.
+    pub gates: HashMap<usize, f64>,
+}
+
+/// Every residual dimension is written once, by the sublayer that computes it, and
+/// the embedding, `one` and `isbos` are exact, so errors start only at heads. Relus are
+/// gated at BOS (`gates`: -M isbos, M from the BOS bound), so they are exactly 0 there. Track per
+/// node a bound e at real positions and eb at BOS (where the exact value is 0), push
+/// them through affine forms (sum of |coef| e) and relus (1-Lipschitz), and bound each
+/// head from the score perturbation its one-hot inputs allow:
+///
+/// - one-hot L1 errors Eq, Ek (real), Ebq, Ekb (BOS); a predicate table of 0/1 gives
+///   real-key score error d <= beta (Eq (1 + Ek) + Ek) and BOS-key d_b <= beta (1 + Eq) Ekb.
+/// - mean: with w >= 1 matches the mass off them is at most (N e^d + e^(b + d_b)) / e^(beta - d)
+///   and their weights differ by at most e^(2d); with none, at most N e^d / e^(b - d_b);
+///   the error is that mass times the value span plus the value error.
+/// - count: p_BOS against 1/(w + 1), bounded for every w and every number of
+///   non-matching keys up to N - w.
+/// - at BOS: other keys score at most beta Ebq (1 + Ek); a mean head reads BOS (score beta),
+///   a count head avoids it (score -beta).
+pub fn error_bound(p: &SeqProgram) -> ErrorBound {
+    let g = &p.graph;
+    let c = &p.ctx;
+    let (beta, n) = (c.sharpness, c.len as f64);
+    let mut e = vec![0.0f64; g.nodes.len()];
+    let mut eb = vec![0.0f64; g.nodes.len()];
+    let lin = |a: &Affine, e: &[f64]| a.terms.iter().map(|(&m, k)| k.abs() * e[m]).sum::<f64>();
+    let l1 = |s: &Side, e: &[f64]| s.onehot.iter().map(|a| lin(a, e)).sum::<f64>();
+    let mut heads = vec![0.0; c.heads.len()];
+    let mut gates = HashMap::new();
+    for (id, node) in g.nodes.iter().enumerate() {
+        match node {
+            Node::Relu(a) => {
+                // At BOS the argument is at most lin(a, eb) (its exact value is 0 there);
+                // a gate of that size keeps the unit at exactly 0.
+                e[id] = lin(a, &e);
+                let at_bos = lin(a, &eb);
+                if at_bos > 0.0 {
+                    gates.insert(id, (at_bos + 1.0).ceil());
+                }
+            }
+            Node::Input(_) if let Some(body) = c.defs.get(&id) => {
+                e[id] = lin(body, &e);
+                eb[id] = lin(body, &eb);
+            }
+            Node::Input(_) if let Some(&hi) = c.head_of.get(&id) => {
+                let h = &c.heads[hi];
+                let (eq, ek, ebq, ekb) = (l1(&h.q, &e), l1(&h.k, &e), l1(&h.q, &eb), l1(&h.k, &eb));
+                let d = beta * (eq * (1.0 + ek) + ek);
+                let db = beta * (1.0 + eq) * ekb;
+                let d_at_bos = beta * ebq * (1.0 + ek); // other keys' scores at BOS's query
+                let d_self = beta * ebq * ekb;
+                let (real, bos) = match &h.kind {
+                    HeadKind::Mean(v) => {
+                        let b = beta / 2.0;
+                        let (lo, hi_) = g.range_of(v);
+                        let ev = lin(v, &e).max(lin(v, &eb));
+                        let span = hi_.max(0.0) - lo.min(0.0);
+                        let maxabs = lo.abs().max(hi_.abs()) + ev;
+                        let m1 = (n * d.exp() + (b + db).exp()) / (beta - d).exp();
+                        let m0 = n * d.exp() / (b - db).exp();
+                        let real = ev + ((2.0 * d).exp_m1() * span + m1 * span).max(m0 * maxabs);
+                        let mb = n * d_at_bos.exp() / (beta - d_self).exp();
+                        (real, ev + mb * maxabs)
+                    }
+                    HeadKind::Count => {
+                        let mut dev = 0.0f64;
+                        for w in 0..=c.len {
+                            let (w, r) = (w as f64, n - w as f64);
+                            let exact = 1.0 / (w + 1.0);
+                            let lo = (beta - db).exp() / ((beta - db).exp() + w * (beta + d).exp() + r * d.exp());
+                            let hi_ = (beta + db).exp() / ((beta + db).exp() + w * (beta - d).exp());
+                            dev = dev.max((lo - exact).abs()).max((hi_ - exact).abs());
+                        }
+                        // Causal: BOS's query sees only BOS and reads its value, 1.
+                        (dev, if c.causal { 1.0 } else { (-beta + d_self + d_at_bos).exp().min(1.0) })
+                    }
+                };
+                e[id] = real;
+                eb[id] = bos;
+                heads[hi] = real;
+            }
+            Node::Input(_) => {}
+        }
+    }
+    ErrorBound { outputs: p.outputs.iter().map(|(_, a)| lin(a, &e)).collect(), heads, gates }
 }
