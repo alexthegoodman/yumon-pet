@@ -204,3 +204,49 @@ output em6 = relu(6 - ew0_6 - ew1_6 - ew2_6 - ew3_6 - ew4_6 - ew5_6 - 5)
 Personally, I suspect that with polysemantic weights, we will have less accuracy to the rules. That's okay. We can accept less perfection / memorization, if it means more inter-connected weights. 
 We technically want some of that organic quasi-noise that arises from those connections, as it will create surprising behaviors that are usually reasonable, given an unexpected set of inputs.
 Although I know in some cases that is controlled just by clipping.
+## Results (2026-11-08)
+
+The hand rewrite above is the same circuit the 0.2 compiler already emits (select, and and gt are
+lowered to these relu forms anyway). Compiled, it is 1,513 vs 1,559 non-zero weights and 8 vs 10
+hidden layers, and 1.07% of 200k random inputs differ from the rule. The cause is a bug, not
+interference: `idle_lost` is not `or(idle, not(kn))` and can reach -2. Scripts are in
+`wir/scripts/superpose/`. The colony runs are `colony_results.txt`, 10k ticks each.
+
+New 0.2 combinator `unit(x)`: always one hidden unit, relu(x - lo) + lo, so a packed value is
+carried as one neuron (otherwise affine lets fold back into their inputs).
+
+**Exact superposition (packed carries).** 69% of the ant brain's hidden units (485 of 706) were
+carries, mostly the 24 grade inputs. `gen_pairs.py` packs two ternary grades per neuron
+(`unit(3*g0 + g1 + 4)`), the task selects one packed neuron per pair (it means the food gradient
+while foraging, the nest gradient going home) and one layer decodes it: 706 -> 631 hidden units,
+60.0k -> 44.9k dense params, 11 layers, 0 differences on 200k inputs. Four grades per neuron
+(base 81) is also exact (41.4k params) but its sequential decode costs 3 layers.
+
+**Lossy superposition (`fit.py`).** Ten features read by the task and emote choices (home, forage,
+dig, dump, help, lost, hungry, workem, cf, grip) go through m shared neurons
+`z = unit(relu(C f + c))` and are read back linearly (`D z + d`). Fear, action bits, inertia and
+gradient routing stay exact. C and D are fitted in PyTorch on the 998 distinct feature vectors of a
+baseline colony run (seed 7, 846k decisions, weighted by frequency), with loss on the task and emote
+choices, then rounded to 2 decimals. Neurons came out polysemantic (m = 6: one neuron correlates
+with 8 of the 10 features). Colony (seed 7 = fit, 11 and 23 held out; differ = share of decisions
+not matching the rule):
+
+| m | differ | starved (7/11/23) | mean pop (7/11/23) |
+|---|---|---|---|
+| exact | 0 | 17 / 20 / 32 | 86 / 98 / 88 |
+| 6 | 0.06-0.10% | 25 / 20 / 37 | 90 / 99 / 91 |
+| 5 | 0.20-0.30% | 54 / 12 / 21 | 81 / 81 / 102 |
+| 4 | 2.6-4.8% | 63 / 126 / 22 | 76 / 91 / 96 (seed 11 ends at 10 ants) |
+| 3 | 5.7-6.2% | 81 / 52 / 67 | 81 / 99 / 101 |
+| 2 | 29-30% | 37 / 91 / 41 | 81 / 105 / 113 |
+
+Action bits never changed. Interference falls almost entirely on hungry, free ants at the nest,
+where eating competes with foraging and digging, so its cost is starvation, not chaos. m = 4's main
+quirk is working <-> hungry (some ants keep working while hungry). m = 3 mostly shows the wrong
+emote (hungry shown as straining or carrying). At m = 2, 30% of decisions differ, yet two of three
+colonies grew larger than baseline while starving more: a different colony character, not a
+collapse. Size is not monotone: m = 4 lost a colony and m = 3 did not, because the fit decides which
+features to sacrifice, so loss weights matter as much as m.
+
+Not done: several fits per m (one fit, 6 restarts each), more seeds (single runs diverge
+chaotically), an ant.rs generator option, a page to watch the quirks.

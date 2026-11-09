@@ -295,3 +295,11 @@ capability set or a gene cluster into new species (`sp.parent`, `sim.events`). W
 4, twins for small unarmed, size-scaled mating cooldown. Mixed at 10k with learning: 6-27 species
 alive, mostly evolved here, 814-1,322 kills. Setup adds kill reward and evolution strength.
 
+Superposition (2026-11-08): see docs/POLYSEMANTIC.md "Results". 0.2 `unit(x)` (`Graph::unit` in
+deep.rs) always makes one unit relu(x - lo) + lo, so a packed value is carried as one neuron.
+`ant_core.js` createSim takes `onDecide(ant, dec)`. `wir/scripts/superpose/`: gen_pairs.py (two
+grades per neuron, exact, 706 -> 631 units), fit.py (lossy bottleneck of m neurons over 10
+task/emote features, fitted on colony states, emits WIR), colony.js (colony run with any compiled
+brain, diff vs rule), quirks.py. m = 6: 0.1% of decisions differ, colony unchanged; m = 2: 30%,
+colonies survive but starve more. Not in ant.rs yet.
+

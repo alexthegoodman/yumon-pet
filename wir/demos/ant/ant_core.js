@@ -451,6 +451,7 @@
         const p = brainParts(brainInput(a, rs));
         if (p.option !== option || p.emote !== emote || p.actions.some((b, i) => b !== dec.actions[i])) check.brain++;
       }
+      if (opts.onDecide) opts.onDecide(a, dec);
       return dec;
     }
 
