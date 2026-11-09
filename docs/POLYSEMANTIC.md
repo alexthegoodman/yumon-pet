@@ -250,3 +250,11 @@ features to sacrifice, so loss weights matter as much as m.
 
 Not done: several fits per m (one fit, 6 restarts each), more seeds (single runs diverge
 chaotically), an ant.rs generator option, a page to watch the quirks.
+
+## Without training (2026-11-08)
+
+The trained bottleneck above is now built without training by `wir superpose-choice-layer`
+(PCA encoder, LP decoder): see docs/WIR.md "Superposition without training". With hungry states
+weighted x10, the 6-neuron ant brain keeps every heading in the colony runs, and the 4-neuron one
+is quirky (1.4-1.7% of headings differ) without the starvation the trained 4-neuron brain caused.
+Yumon Park has a 6-neuron brain too. Both pages can switch brains.

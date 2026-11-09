@@ -26,19 +26,19 @@ async function open(file) {
 // Scenario: Ant offers its brains and runs a superposed one
 {
   const { page, errors } = await open(antHtml);
-  await page.waitForSelector("#brain-pick option");
+  await page.waitForSelector("#brain-pick option", { state: "attached" });
   const labels = await page.$$eval("#brain-pick option", (o) => o.map((x) => x.textContent));
   check(labels.length === 3 && labels[0].startsWith("Exact") && labels[1].includes("6 shared") && labels[2].includes("4 shared"), `ant menu: ${labels.join(" | ")}`);
   check((await page.$eval("#brain-pick", (s) => s.value)) === "0", "ant starts on the exact brain");
   await Promise.all([page.waitForEvent("load"), page.selectOption("#brain-pick", "1")]);
-  await page.waitForSelector("#nets tr");
+  await page.waitForSelector("#nets tr", { state: "attached" });
   check(page.url().endsWith("#brain=1"), `reloaded with ${new URL(page.url()).hash}`);
   const nets = await page.$eval("#nets", (t) => t.textContent);
   check(nets.includes("66-71-71-67-58-130"), "networks table shows the superposed brain's layers");
   await page.waitForTimeout(4000);
   const note = await page.$eval("#check-out", (p) => p.textContent);
   check(note.includes("shares neurons"), `check note: ${note.slice(0, 120)}...`);
-  check(/<code>|sp_z0/.test(await page.$eval("#src", (p) => p.textContent)) || (await page.$eval("#src", (p) => p.textContent)).includes("sp_z0"), "source tab shows the bottleneck");
+  check((await page.$eval("#src", (p) => p.textContent)).includes("let sp_z0 = unit("), "source tab shows the bottleneck");
   await page.screenshot({ path: path.join(shots, "ant_superposed6.png") });
   check(errors.length === 0, `ant script errors: ${errors.length ? errors.join("; ") : "none"}`);
 }

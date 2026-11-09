@@ -746,3 +746,42 @@ python demos/park/build.py ../tmp/wir-park/park_demo.json ../tmp/wir-park/yumon-
 node demos/park/harness.js 10000 mixed 1 ../tmp/wir-park/park_demo.json
 cargo test --test park
 ```
+
+## Superposition without training (Nov 8, 2026)
+
+`wir superpose-choice-layer` (wir/src/superpose.rs, README "Superposition") squeezes the
+features a choice program's keys read through one layer of N shared `unit()` neurons. The
+encoder is weighted PCA of the features (each scaled by its largest key coefficient). The
+decoder (features read back linearly) comes from one LP (`microlp` 0.7.0): every winner leads
+by 1, or every key value is kept (`--preserve values`), plus a light value-fidelity term
+(1e-4) so keys cannot be scaled up for free. Keys' coefficients come from lowering the
+program again with the features as symbolic inputs (`deep::lower_with`), so the tool works
+on any scalar choice program and refuses keys that read a feature through a nonlinearity.
+Background and the trained comparison: docs/POLYSEMANTIC.md.
+
+States are colony recordings (`wir/scripts/superpose/colony.js`, `park_record.js`), weighted
+by frequency. Frequency alone sacrifices rare but vital choices: unweighted ant brains
+starved more (m = 5 lost a colony on one seed), and the unweighted park brain never fought
+(0 fight deaths vs 42; 93 alive vs 406). `--weight` fixes both: hungry states x10 for the
+ant, fight/brace x30 and hide/mate x10 for the park.
+
+Ant (10 features, 3 seeds, 10k ticks; exact: mean pop 86/98/88, starved 17/20/32):
+
+| Brain | Headings differ | Emotes differ | Starved | Mean pop |
+|---|---|---|---|---|
+| `ant_brain_choice6.wir` (hungry x10) | 0-0.002% | 0.03-0.18% | 17/18/47 | 86/93/91 |
+| `ant_brain_choice4.wir` (hungry x10) | 1.4-1.7% | 3.5-4.4% | 22/18/25 | 84/89/79 |
+
+m = 6 keeps every heading on seed 7, so that colony matches the exact run tick for tick. m = 4
+is the quirky one: some ants pick another task or feeling now and then, and colonies stay
+healthy. Both: 60,033 -> 46,273 / 45,877 params, 10 -> 11 hidden layers.
+
+Park (`park_brain_choice6.wir`, values mode, seed 11, learning off): top option off the rule
+in 14.7% of decisions (sampling from softmax(keys/4) already varies), 335 alive vs 406, 11
+species vs 7, 42 fight deaths as in the exact park; 3,475 -> 3,795 params (one more layer).
+
+Both pages have a brain picker (`wir ant|park --export .. --variant label=brain.wir`); the
+Skirmish page source now lives in `wir/demos/tactics/`. `wir/demos/tests/brain_picker.mjs`
+(Playwright from the allegiance install, Chrome) checks both pickers. Not done: the
+fish/bird and tactics brains (the tool accepts them; nothing measured), packed carries as
+a general `wir pack-carries`, LP speed (2-5 minutes on 1-8k distinct states).

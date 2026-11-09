@@ -303,3 +303,17 @@ task/emote features, fitted on colony states, emits WIR), colony.js (colony run 
 brain, diff vs rule), quirks.py. m = 6: 0.1% of decisions differ, colony unchanged; m = 2: 30%,
 colonies survive but starve more. Not in ant.rs yet.
 
+superpose-choice-layer (2026-11-08): see docs/WIR.md "Superposition without training".
+`wir superpose-choice-layer` (src/superpose.rs, dep microlp 0.7.0) for scalar choice programs:
+weighted-PCA encoder of `unit()` neurons, LP decoder (winner margin 1, or `--preserve values`;
+`--fidelity` 1e-4), keys' coefficients via `deep::lower_with(src, features)` (features as
+symbolic inputs; `DeepProgram.names` holds every let). States from probes (`--states`, `inputs` +
+`weights`) or `--sample`; `--weight name=f`; output gets a certificate header. Examples:
+`ant_brain_choice6/4.wir` (hungry=10), `park_brain_choice6.wir` (values, fight/brace=30,
+hide/mate=10). ant.rs names `lost`, `workem`, `carrying` (same network). `wir ant|park --variant
+label=file.wir` adds brains to the page JSON (`brains`); both pages have a brain picker
+(`createSim`/`createPark` opts.brain, park `onDecide`). `wir/demos/tactics/` holds the Skirmish
+page (template + build.py); `wir/demos/tests/brain_picker.mjs` checks the pickers in Chrome.
+Scripts: `wir/scripts/superpose/` (colony.js, park_record.js, park_run.js, ant_hostdiff.py).
+118 wir tests.
+
