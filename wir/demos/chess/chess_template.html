@@ -1,0 +1,195 @@
+<meta charset="utf-8">
+<title>WIR Chess</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans+Condensed:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: board with its eval rail on the left, a scoresheet-style control column on the right; stacks on phones. */
+:root {
+  --bg: #eef0ea;          /* cool paper with a green bias */
+  --surface: #f8f9f5;
+  --ink: #1d2420;
+  --muted: #5d6a62;
+  --line: #cfd6cd;
+  --sq-light: #ece4c8;    /* vinyl tournament board: buff */
+  --sq-dark: #5f8a69;     /* and green */
+  --accent: #c7781a;      /* amber: what the network attends to */
+  --white-ctl: rgba(255, 252, 235, .62);
+  --black-ctl: rgba(18, 34, 26, .42);
+  --danger: #b8322a;
+  --good: #2f7a4c;
+  --piece-w: #fbfaf5;
+  --piece-b: #17201b;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141916; --surface: #1b221e; --ink: #e5ebe5; --muted: #98a69d; --line: #2e3833;
+    --sq-light: #c9c09f; --sq-dark: #4b7155; --accent: #e8a24a;
+    --white-ctl: rgba(255, 250, 225, .55); --black-ctl: rgba(5, 14, 9, .5);
+    --danger: #e0645a; --good: #6cc08d; --piece-w: #fbfaf5; --piece-b: #111814;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141916; --surface: #1b221e; --ink: #e5ebe5; --muted: #98a69d; --line: #2e3833;
+  --sq-light: #c9c09f; --sq-dark: #4b7155; --accent: #e8a24a;
+  --white-ctl: rgba(255, 250, 225, .55); --black-ctl: rgba(5, 14, 9, .5);
+  --danger: #e0645a; --good: #6cc08d; --piece-w: #fbfaf5; --piece-b: #111814;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.5 var(--font-body); padding-inline: 16px; padding-block: 20px 40px; }
+.wrap { max-width: 1120px; margin: 0 auto; display: grid; gap: 20px; }
+header { display: grid; gap: 6px; }
+h1 { font: 700 clamp(28px, 4vw, 40px)/1.05 var(--font-display); letter-spacing: -.01em; margin: 0; text-wrap: balance; }
+h1 span { color: var(--accent); }
+.lede { margin: 0; color: var(--muted); max-width: 68ch; }
+.main { display: grid; grid-template-columns: minmax(0, 600px) minmax(0, 1fr); gap: 24px; align-items: start; }
+@media (max-width: 900px) { .main { grid-template-columns: minmax(0, 1fr); } }
+.boardcol { display: grid; gap: 10px; min-width: 0; }
+.boardrow { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 8px; }
+.rail { position: relative; border-radius: 3px; overflow: hidden; background: var(--piece-b); border: 1px solid var(--line); }
+.rail i { position: absolute; left: 0; right: 0; bottom: 0; background: var(--piece-w); transition: height .35s ease; }
+.board { position: relative; aspect-ratio: 1; width: 100%; max-width: 100%; display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); grid-template-rows: repeat(8, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; touch-action: manipulation; }
+.sq { position: relative; border: 0; padding: 0; margin: 0; min-width: 0; min-height: 0; overflow: hidden; display: grid; place-items: center; cursor: pointer; font: inherit; color: inherit; }
+.sq.l { background: var(--sq-light); } .sq.d { background: var(--sq-dark); }
+.sq:focus-visible { outline: 3px solid var(--accent); outline-offset: -3px; z-index: 2; }
+.sq .ctl { position: absolute; inset: 0; pointer-events: none; }
+.sq .coord { position: absolute; font: 600 10px/1 var(--font-mono); opacity: .7; pointer-events: none; }
+.sq .coord.f { right: 3px; bottom: 2px; } .sq .coord.r { left: 3px; top: 3px; }
+.sq.l .coord { color: var(--sq-dark); } .sq.d .coord { color: var(--sq-light); }
+.pc { position: relative; font-size: min(8.5vw, 50px); line-height: 1; user-select: none; pointer-events: none; font-family: "Segoe UI Symbol", "Noto Sans Symbols 2", "DejaVu Sans", serif; }
+.pc.w { color: var(--piece-w); text-shadow: 0 0 1px #000, 0 0 1px #000, 0 1px 1px rgba(0,0,0,.6); }
+.pc.b { color: var(--piece-b); text-shadow: 0 0 1px rgba(255,255,255,.35); }
+.sq.sel { box-shadow: inset 0 0 0 4px var(--accent); }
+.sq.last::after { content: ""; position: absolute; inset: 0; background: rgba(199, 120, 26, .22); pointer-events: none; }
+.sq.check { background-image: radial-gradient(circle, rgba(184, 50, 42, .75) 0, rgba(184, 50, 42, .0) 70%); }
+.sq .dot { position: absolute; width: 26%; height: 26%; border-radius: 50%; background: rgba(23, 32, 27, .35); pointer-events: none; }
+.sq .dot.cap { width: 86%; height: 86%; background: none; border: 4px solid rgba(23, 32, 27, .35); }
+.sq .hang { position: absolute; inset: 9%; border: 3px dashed var(--danger); border-radius: 50%; pointer-events: none; }
+.sq .num { position: absolute; left: 3px; bottom: 2px; font: 600 10px/1 var(--font-mono); padding: 1px 3px; border-radius: 3px; background: rgba(0,0,0,.45); color: #fff; pointer-events: none; }
+svg.rays { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.promo { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0,0,0,.35); z-index: 5; }
+.promo div { display: flex; gap: 8px; background: var(--surface); padding: 10px; border-radius: 6px; border: 1px solid var(--line); }
+.promo button { width: 56px; height: 56px; font-size: 40px; border: 1px solid var(--line); background: var(--sq-light); border-radius: 4px; cursor: pointer; }
+.status { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; font: 500 14px/1.4 var(--font-body); }
+.status b { font: 700 18px/1.2 var(--font-display); }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); font: 500 12px/1.6 var(--font-mono); color: var(--muted); }
+.chip.on { border-color: var(--accent); color: var(--ink); }
+.chip.on::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1s infinite alternate; }
+@keyframes pulse { from { opacity: .3; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .chip.on::before, .rail i { animation: none; transition: none; } }
+.side { display: grid; gap: 14px; min-width: 0; }
+section.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; display: grid; gap: 10px; min-width: 0; }
+.panel h2 { margin: 0; font: 700 13px/1.2 var(--font-display); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button.btn { font: 500 14px/1 var(--font-body); padding: 8px 12px; border-radius: 5px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+button.btn:hover { border-color: var(--muted); }
+button.btn:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.btn.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+button.btn:disabled { opacity: .5; cursor: default; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.seg button { font: 500 13px/1 var(--font-body); padding: 8px 10px; border: 0; background: var(--bg); color: var(--ink); cursor: pointer; border-right: 1px solid var(--line); }
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+label.lab { font-size: 13px; color: var(--muted); }
+.hint { margin: 0; font-size: 13px; color: var(--muted); }
+.moves { font: 400 14px/1.7 var(--font-mono); max-height: 180px; overflow-y: auto; display: grid; grid-template-columns: 3ch 1fr 1fr; column-gap: 10px; }
+.moves .n { color: var(--muted); }
+.terms { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
+.terms th { text-align: left; font-weight: 500; color: var(--muted); padding: 3px 0; }
+.terms td { padding: 3px 0; font-family: var(--font-mono); text-align: right; }
+.terms td:first-child { font-family: var(--font-body); text-align: left; }
+.terms tr.total td { border-top: 1px solid var(--line); font-weight: 600; }
+.cands { display: grid; grid-template-columns: auto 1fr auto; gap: 4px 10px; align-items: center; font: 400 13px/1.4 var(--font-mono); }
+.cands .bar { height: 6px; border-radius: 3px; background: var(--accent); opacity: .75; }
+.slider { display: grid; grid-template-columns: 9ch minmax(0, 1fr) 6ch; gap: 8px; align-items: center; font-size: 13px; }
+.slider output { font: 400 12px var(--font-mono); text-align: right; }
+.slider input { width: 100%; accent-color: var(--accent); }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
+.stats div { display: grid; }
+.stats b { font: 700 20px/1.1 var(--font-display); font-variant-numeric: tabular-nums; }
+.stats span { font-size: 12px; color: var(--muted); }
+details summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+pre.src { max-height: 360px; overflow: auto; font: 12px/1.5 var(--font-mono); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 10px; white-space: pre; }
+.check label { display: inline-flex; gap: 6px; align-items: center; font-size: 14px; margin-right: 12px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: -2px; margin-right: 4px; border: 1px solid var(--line); }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>WIR <span>Chess</span></h1>
+    <p class="lede">Every judgment this player makes comes from a written neural network: attention heads and ReLU layers compiled from WIR source, with no training. The host knows only the rules and how far to look ahead. Turn on the lens to see what the network attends to.</p>
+  </header>
+  <div class="main">
+    <div class="boardcol">
+      <div class="status" id="status"></div>
+      <div class="boardrow">
+        <div class="rail" id="rail" title="Network evaluation (white share)"><i id="railfill" style="height:50%"></i></div>
+        <div class="board" id="board" role="grid" aria-label="Chess board"></div>
+      </div>
+      <div class="row">
+        <button class="btn primary" id="newgame">New game</button>
+        <div class="seg" role="group" aria-label="Play as">
+          <button id="as-white" aria-pressed="true">Play white</button>
+          <button id="as-black" aria-pressed="false">Play black</button>
+        </div>
+        <button class="btn" id="undo">Undo</button>
+        <button class="btn" id="flip">Flip</button>
+      </div>
+    </div>
+    <div class="side">
+      <section class="panel">
+        <h2>Opponent</h2>
+        <div class="seg" role="group" aria-label="Lookahead" id="levels"></div>
+        <p class="hint" id="levelhint"></p>
+        <div class="slider"><label class="lab" for="time">Think time</label><input type="range" id="time" min="1" max="15" step="1" value="4"><output id="timeout">4 s</output></div>
+        <div class="row" id="lastsearch"></div>
+      </section>
+      <section class="panel">
+        <h2>Network's judgment</h2>
+        <table class="terms" id="terms"></table>
+        <p class="hint">Centipawns for the side to move, as the network sees this position. Its last layer weighs each term with the style below.</p>
+      </section>
+      <section class="panel">
+        <h2>Instinct</h2>
+        <p class="hint">The network's own ranking of the legal moves, one look each, no search.</p>
+        <div class="cands" id="cands"></div>
+      </section>
+      <section class="panel">
+        <h2>Lens</h2>
+        <div class="check">
+          <label><input type="checkbox" id="lens-attack"> Attack map</label>
+          <label><input type="checkbox" id="lens-hang" checked> Hanging pieces</label>
+          <label><input type="checkbox" id="lens-rays"> Ray heads</label>
+        </div>
+        <div class="legend" id="legend"></div>
+      </section>
+      <section class="panel">
+        <h2>Style</h2>
+        <p class="hint">These are the weights of the network's last layer. Changing them changes how it plays, exactly.</p>
+        <div id="sliders" style="display:grid;gap:6px"></div>
+        <div class="row"><button class="btn" id="style-reset">Reset style</button></div>
+      </section>
+      <section class="panel">
+        <h2>Moves</h2>
+        <div class="moves" id="moves"></div>
+      </section>
+      <section class="panel">
+        <h2>The network</h2>
+        <div class="stats" id="netstats"></div>
+        <p class="hint" id="netcheck"></p>
+        <details><summary>WIR source</summary><pre class="src" id="src"></pre></details>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script id="chess-data" type="application/json">__DATA__</script>
+<script id="chess-core-src" type="text/plain">__CORE__</script>
+<script>__CORE__</script>
+<script>__UI__</script>

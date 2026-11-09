@@ -27,8 +27,11 @@ class SeqTransformer(torch.nn.Module):
     def __init__(self, w, dtype):
         super().__init__()
         t = lambda m: torch.nn.Parameter(torch.tensor(m, dtype=dtype), requires_grad=False)
-        self.vocab_lo, self.causal = w["vocab"][0], w["causal"]
-        self.tok_embed, self.pos_embed, self.unembed = t(w["tok_embed"]), t(w["pos_embed"]), t(w["unembed"])
+        self.causal = w["causal"]
+        self.embeds = [(e["lo"], t(e["table"])) for e in w["embeds"]]
+        for i, (_, tab) in enumerate(self.embeds):
+            self.register_parameter(f"embed{i}", tab)
+        self.pos_embed, self.unembed = t(w["pos_embed"]), t(w["unembed"])
         self.blocks = []
         for i, b in enumerate(w["blocks"]):
             heads = [tuple(t(h[k]) for k in ("wq", "wk", "wv", "wo")) for h in b["heads"]]
@@ -43,10 +46,12 @@ class SeqTransformer(torch.nn.Module):
             self.blocks.append((heads, w_in, w_out))
 
     def forward(self, tokens, lengths):
-        # tokens [B, L] (padded), lengths [B]; position 0 is BOS.
-        bsz, length = tokens.shape
-        ids = torch.cat([torch.zeros(bsz, 1, dtype=torch.long), tokens - self.vocab_lo + 1], dim=1)
-        x = self.tok_embed[ids] + self.pos_embed[: length + 1].unsqueeze(0)
+        # tokens [B, L, inputs] (padded), lengths [B]; position 0 is BOS.
+        bsz, length, _ = tokens.shape
+        x = self.pos_embed[: length + 1].unsqueeze(0).expand(bsz, -1, -1)
+        for k, (lo, tab) in enumerate(self.embeds):
+            ids = torch.cat([torch.zeros(bsz, 1, dtype=torch.long), tokens[:, :, k] - lo + 1], dim=1)
+            x = x + tab[ids]
         keys = torch.arange(length + 1)
         mask = keys.unsqueeze(0) <= lengths.unsqueeze(1)  # [B, L+1] real keys and BOS
         mask = mask.unsqueeze(1).expand(bsz, length + 1, length + 1)
@@ -74,7 +79,8 @@ def run(name, count=20000):
         w, probe = json.load(open(wpath)), json.load(open(ppath))
     seqs = probe["sequences"]
     length = max(len(s) for s in seqs)
-    tokens = torch.tensor([s + [w["vocab"][0]] * (length - len(s)) for s in seqs])
+    lo = w["embeds"][0]["lo"]
+    tokens = torch.tensor([s + [lo] * (length - len(s)) for s in seqs]).unsqueeze(-1)
     lengths = torch.tensor([len(s) for s in seqs])
     print(f"{name}: {len(seqs)} sequences, bound {probe['bound']}")
     for dtype in (torch.float64, torch.float32):
@@ -96,5 +102,5 @@ def run(name, count=20000):
 
 if __name__ == "__main__":
     print(f"torch {torch.__version__}")
-    for name in sys.argv[1:] or ["reverse", "hist", "sort", "prefix_hist"]:
+    for name in sys.argv[1:] or ["reverse", "hist", "sort", "prefix_hist", "max"]:
         run(name)

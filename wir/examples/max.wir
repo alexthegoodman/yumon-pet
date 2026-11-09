@@ -1,0 +1,6 @@
+wir 0.3
+# Largest token: the best key by grade (its own value); ties read equal tokens.
+sequence len 8
+input tok: token in [0, 7]
+table value(x) = x
+output top = best(tok, true, value(k(tok)))

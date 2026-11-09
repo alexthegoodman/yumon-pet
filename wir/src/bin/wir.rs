@@ -95,6 +95,13 @@ usage:
                                         sequence up to --max-len (default: the program's)
                                         and on --sample random longer ones
 
+  wir chess [-o chess.wir] [--boards 100000] [--seed 1] [--export demo.json] [--vectors 256]
+                                        generate the WIR Chess network (0.3: attack maps,
+                                        evaluation terms, eval), compile it, print the
+                                        proven bounds and check it against the plain
+                                        reference on random boards; --export writes the
+                                        page data (sparse weights + reference vectors)
+
 Weights use PyTorch nn.Linear layout: W1 [H, D], b1 [H], W2 [O, H], b2 [O]; SwiGLU
 networks add W3 [H, D], b3 [H]. --domain drops creases never active on the probe's
 `inputs`; --kernel-terms keeps the first N of 9 patch components (lossy); --digits
@@ -178,6 +185,7 @@ fn main() -> ExitCode {
         "park" => cmd_park(rest),
         "superpose-choice-layer" => cmd_superpose_choice_layer(rest),
         "seq" => cmd_seq(rest),
+        "chess" => cmd_chess(rest),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
@@ -1150,8 +1158,8 @@ fn cmd_seq(raw: &[String]) -> Result<(), String> {
     }
     for (_, run) in args.flags.iter().filter(|(k, _)| k == "--run") {
         let toks: Vec<i64> = run.as_deref().unwrap_or("").split(',').map(|t| t.trim().parse().map_err(|_| format!("bad token `{t}`"))).collect::<Result<_, _>>()?;
-        if toks.is_empty() || toks.len() > p.ctx.len || toks.iter().any(|t| *t < p.ctx.vocab.0 || *t > p.ctx.vocab.1) {
-            return Err(format!("--run needs 1..={} tokens in [{}, {}]", p.ctx.len, p.ctx.vocab.0, p.ctx.vocab.1));
+        if toks.is_empty() || toks.len() > p.ctx.len || toks.iter().any(|t| *t < p.vocab().0 || *t > p.vocab().1) {
+            return Err(format!("--run needs 1..={} tokens in [{}, {}]", p.ctx.len, p.vocab().0, p.vocab().1));
         }
         let (pe, ne) = (p.eval(&toks), w.eval(&toks));
         for (o, (name, _)) in p.outputs.iter().enumerate() {
@@ -1170,7 +1178,7 @@ fn cmd_seq(raw: &[String]) -> Result<(), String> {
             None => p.ctx.len,
         };
         let start = std::time::Instant::now();
-        let r = wir::seq::check(&p, &w, t, out, wir::seq::all_sequences(p.ctx.vocab, max_len))
+        let r = wir::seq::check(&p, &w, t, out, wir::seq::all_sequences(p.vocab(), max_len))
             .ok_or(format!("unknown task `{t}` (have {})", wir::seq::TASKS.join(", ")))?;
         eprintln!(
             "{t} (sharpness {}): {} sequences (all up to length {max_len}); program wrong on {}, network wrong on {}; worst |network - program| {:.1e} ({:.1?})",
@@ -1180,7 +1188,7 @@ fn cmd_seq(raw: &[String]) -> Result<(), String> {
         if sample > 0 && max_len < p.ctx.len {
             let seed: u64 = args.get("--seed").map_or(Ok(1), |v| v.parse()).map_err(|_| "bad --seed")?;
             let start = std::time::Instant::now();
-            let seqs = wir::seq::random_sequences(p.ctx.vocab, max_len + 1, p.ctx.len, sample, seed);
+            let seqs = wir::seq::random_sequences(p.vocab(), max_len + 1, p.ctx.len, sample, seed);
             let r = wir::seq::check(&p, &w, t, out, seqs).unwrap();
             eprintln!(
                 "{t}: {} random sequences of length {}..={}; program wrong on {}, network wrong on {}; worst |network - program| {:.1e} ({:.1?})",
@@ -1193,7 +1201,7 @@ fn cmd_seq(raw: &[String]) -> Result<(), String> {
         let (count, out) = spec.split_once(':').ok_or("--probe takes N:file.json")?;
         let count: u64 = count.parse().map_err(|_| "bad --probe count")?;
         let seed: u64 = args.get("--seed").map_or(Ok(1), |v| v.parse()).map_err(|_| "bad --seed")?;
-        let seqs: Vec<Vec<i64>> = wir::seq::random_sequences(p.ctx.vocab, 1, p.ctx.len, count, seed).collect();
+        let seqs: Vec<Vec<i64>> = wir::seq::random_sequences(p.vocab(), 1, p.ctx.len, count, seed).collect();
         let prog: Vec<_> = seqs.iter().map(|s| p.eval(s)).collect();
         let net: Vec<_> = seqs.iter().map(|s| w.eval(s)).collect();
         let j = serde_json::json!({ "sequences": seqs, "program": prog, "network": net, "bound": bound.outputs });
@@ -1202,6 +1210,72 @@ fn cmd_seq(raw: &[String]) -> Result<(), String> {
     if let Some(out) = args.get("-o") {
         let text = serde_json::to_string(&w.to_json()).map_err(|e| e.to_string())?;
         std::fs::write(out, text).map_err(|e| format!("{out}: {e}"))?;
+    }
+    Ok(())
+}
+
+fn cmd_chess(raw: &[String]) -> Result<(), String> {
+    let valued = ["-o", "--boards", "--seed", "--export", "--vectors"];
+    let args = Args::parse(raw, &valued)?;
+    args.check(&valued)?;
+    let num = |f: &str, d: u64| -> Result<u64, String> { args.get(f).map_or(Ok(d), |v| v.parse().map_err(|_| format!("bad {f}"))) };
+    let src = wir::chess::program();
+    if let Some(out) = args.get("-o") {
+        std::fs::write(out, &src).map_err(|e| format!("{out}: {e}"))?;
+    }
+    let start = std::time::Instant::now();
+    let (p, w, bound) = wir::chess::build().map_err(|e| e.to_string())?;
+    let c = w.cost();
+    eprintln!(
+        "chess: compiled in {:.1?}; d_model {}, {} blocks, {} attention heads (d_head <= {}), MLP hidden {:?}, {} parameters ({} non-zero)",
+        start.elapsed(), c.d_model, c.blocks, c.heads, c.d_head_max, c.mlp_hidden, c.params, c.nonzero
+    );
+    for (o, (name, _)) in p.outputs.iter().enumerate() {
+        eprintln!("  {name}: |network - program| <= {:.1e}", bound[o]);
+    }
+    let boards = num("--boards", 100_000)?;
+    let mut rng = num("--seed", 1)?.max(1);
+    if boards > 0 {
+        let start = std::time::Instant::now();
+        let list: Vec<[u8; 64]> = (0..boards).map(|_| wir::chess::random_board(&mut rng)).collect();
+        let r = wir::chess::check(&w, list.into_iter());
+        eprintln!(
+            "chess: {} random boards ({:.1?}, {:.2} ms/board): per-square outputs wrong on {}, worst per-square |network - reference| {:.1e}, worst total/eval {:.1e}",
+            r.boards, start.elapsed(), start.elapsed().as_secs_f64() * 1000.0 / r.boards as f64, r.square_wrong, r.worst_square, r.worst_total
+        );
+        if r.square_wrong > 0 {
+            return Err("network and reference disagree".into());
+        }
+    }
+    if let Some(out) = args.get("--export") {
+        let n = num("--vectors", 256)?;
+        let runner = wir::seq::SeqRunner::new(&w);
+        let vectors: Vec<serde_json::Value> = (0..n)
+            .map(|_| {
+                let b = wir::chess::random_board(&mut rng);
+                let r = wir::chess::reference(&b);
+                let net = runner.eval_multi(&wir::chess::tokens(&b));
+                serde_json::json!({
+                    "board": b.to_vec(), "att_w": r.att_w.to_vec(), "att_b": r.att_b.to_vec(),
+                    "low_w": r.low_w.to_vec(), "low_b": r.low_b.to_vec(), "hanging_w": r.hanging_w.to_vec(),
+                    "hanging_b": r.hanging_b.to_vec(), "totals": r.totals.to_vec(), "eval": r.eval,
+                    "network_eval": net[0][13],
+                })
+            })
+            .collect();
+        let data = serde_json::json!({
+            "weights": w.to_sparse_json(),
+            "outputs": p.outputs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+            "bounds": bound,
+            "style": wir::chess::STYLE.iter().map(|(n, v)| serde_json::json!([n, v])).collect::<Vec<_>>(),
+            "program": src,
+            "pst_mg": (0..13u8).map(|p| (0..64).map(|q| wir::chess::pst_signed(p, q, false)).collect::<Vec<_>>()).collect::<Vec<_>>(),
+            "pst_eg": (0..13u8).map(|p| (0..64).map(|q| wir::chess::pst_signed(p, q, true)).collect::<Vec<_>>()).collect::<Vec<_>>(),
+            "cost": { "d_model": c.d_model, "blocks": c.blocks, "heads": c.heads, "params": c.params, "nonzero": c.nonzero },
+            "vectors": vectors,
+        });
+        std::fs::write(out, data.to_string()).map_err(|e| format!("{out}: {e}"))?;
+        eprintln!("wrote {out}");
     }
     Ok(())
 }

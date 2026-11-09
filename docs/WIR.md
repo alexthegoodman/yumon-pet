@@ -860,3 +860,92 @@ round wrong in either precision.
 
 Not done: previous-token / induction / Dyck / mode programs, conjunctions in predicates, a
 bound that includes float rounding, superposing the residual stream.
+
+## WIR 0.3 extensions and WIR Chess (Nov 9, 2026)
+
+Plan: docs/ideas/WIR_CHESS.md (phases 1-3 done). Code: wir/src/seq.rs, wir/src/chess.rs,
+wir/demos/chess/.
+
+### Language (seq.rs)
+
+- **Several inputs per token** (`input piece: token in [0, 12]`, repeatable); each has its own
+  embedding table (BOS row 0). `SeqProgram::eval_multi` / `SeqWeights::eval_multi` take
+  `[position][input]`.
+- **Tables:** `table name(a, b) = expr` (numbers, parameters, + - * /, abs min max div mod,
+  comparisons, and or not select, earlier tables) or `= [..]` nested lists (0 outside).
+- **Conditions:** `and(clause, ..)`; a clause is `k(a) == q(b)`, `eq..ge(side, side)` or a table
+  call with `k(..)`, `q(..)` and constants (nonzero holds; one side may be missing).
+- **`best(v, cond, grade)`**: mean over the matching keys with the highest grade (a table call,
+  integers >= 0). Scores: each condition adds M = 1 + max grade, the grade adds its value, BOS
+  sits at M m - 1/2 (mean) or m (count). Winners lead others by beta and BOS by beta/2, so the
+  old bound formulas hold with the score perturbation summed per clause (scale x largest entry).
+- **Lookups:** a table called outside a condition. With an input or `pos` as argument it is an
+  embedding-written dimension (free, tight range); otherwise through a one-hot (hats); with two
+  non-constant arguments it expands over the one with fewer values (`select` per value).
+- **Shared heads:** heads with identical scores share one attention head (several value rows);
+  identical heads are deduplicated. Count decoders cover 0..wmax, where wmax comes from a
+  position condition's table (a knight count decodes 0..8, not 0..64).
+- **`SeqRunner`**: sparse evaluation (skips keys more than 36 below a query's best score,
+  weight < e^-36). Used by the checks.
+
+Fuzz (tests/seq.rs, now with two inputs, `and`, `best`, tables and one- and two-argument
+lookups): 5,000 programs, 3.38M output values, none above its bound, 4,935 with every bound
+< 0.5. PyTorch (scripts/seq_torch.py, multi-input embeddings) still 0 wrong in f64/f32.
+
+### The chess network (chess.rs, `wir chess`)
+
+64 square tokens, `piece` 0..12, judged from the side to move (the host mirrors for black).
+`chess::program()` writes the WIR source (examples/chess.wir):
+
+- 8 ray heads: per direction `best(.., and(onray(d, q(pos), k(pos)), occ(k(piece))),
+  near(d, q(pos), k(pos)))` reading four lookups of the first piece (white/black slides this
+  way, 30 - attacker value); 6 count heads for knight, pawn and king attackers.
+- Per square: attackers per side, lowest attacker (balanced max tree; a left fold made 15
+  blocks, the tree 11), hanging bits (attacked, and undefended or attacked by something
+  cheaper), mobility, king zone attacks, passed pawns (count over the front span), rooks on
+  open files.
+- Totals through one shared `mean(.., true)` head; the opening/endgame blend
+  EG + phase (MG - EG) / 24 sums phase x (MG - EG) through another head (phase as a product
+  of piece lookups and MG - EG, 3 selects).
+- `eval` = pst + 4 mobility + 8 king - 0.15 hang_us + 0.5 hang_them + passed + 20 rooks; the
+  totals are outputs too, so the page recombines them with its style weights (the last layer).
+  Material and piece-square values are our own (not PeSTO's tables).
+
+Compiled: d_model 275, 11 blocks, 22 attention heads (d_head <= 142), 1,161,325 dense
+parameters of which 11,247 non-zero. Proven bounds: attackers 1.1e-6, lowest attacker 1.1e-4,
+hanging 4.4e-4 (all < 0.5, so rounding is exact on every board); totals are loose (hanging
+totals 32 cp, eval 23 cp: bit errors times big-M constants), observed 1.6e-7.
+
+Checks: 100,000 random boards (one king per side, random armies, pawns off the back ranks)
+against `chess::reference`: 0 per-square differences, worst total/eval 1.6e-7 (Rust, 1.3
+ms/board, i5-12500). tests/chess.rs adds known positions.
+
+### Host and page (demos/chess)
+
+`chess_core.js`: rules (castling, en passant, promotion, check, 50 moves, repetition,
+insufficient material), perft, the sparse network runner, a plain-JS twin of the reference,
+and search (negamax alpha-beta, quiescence, MVV-LVA, transposition table, iterative deepening
+with a time limit; depth 0 = the network alone ranks the legal moves). Scores are quantized to
+1/1000 cp so exact ties stay ties (a tie at -228 broke differently under the network's 8e-9
+error before). `harness.js` (Node 24):
+
+- perft: start, Kiwipete, positions 3-5, 17 counts, all exact;
+- 256 Rust vectors: twin exact, network within 9.2e-8; ray heads attend to the first piece on
+  their ray for all 32,768 (square, direction) pairs;
+- lockstep, 20 self-play games, 3,548 boards: network vs twin within 1.6e-7;
+- engine with network vs with twin: 47/47 identical moves and scores at depth 2;
+- speed: 1.65 ms per network eval (from 3.1 after reading only the dims each head uses and
+  writing head outputs straight into the residual); depth 2 from the start 0.22 s;
+- matches, 10 games each: instinct vs random 10-0-0, depth 1 vs random 7 wins 3 draws (the
+  draws are probably repetitions; not investigated), depth 2 vs instinct 10-0-0. No Elo.
+
+Page: `build.py chess_demo.json out.html`; the engine runs in a blob Web Worker. Board,
+eval rail, the network's term table, Instinct (depth-0 ranking), levels Instinct/1/2/3 ply
+with think time, style sliders (last-layer weights), lens (attack map counts, hanging rings,
+the 8 ray heads' chosen keys from the attention pattern), move list, network stats and the
+WIR source. `demos/tests/chess_page.feature` + `chess_page.mjs` (Chrome via Playwright): 12
+checks pass. Demo artifact "WIR Chess": https://claude.ai/artifact/9u2N2Y2UBcU6f4yuS3gGtW
+(private).
+
+Not done: RL (phase 5), strength measurements against outside engines, a tighter bound
+through bits (snapping), pins/checks in the evaluation, opening variety.

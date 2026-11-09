@@ -1,6 +1,6 @@
 //! WIR 0.3 sequence programs: attention heads compiled to a norm-free transformer.
 
-use wir::seq::{self, all_sequences, check, compile_str, random_sequences};
+use wir::seq::{self, all_sequences, check, compile_str, random_sequences, SeqRunner};
 
 fn example(name: &str) -> String {
     std::fs::read_to_string(format!("{}/examples/{name}.wir", env!("CARGO_MANIFEST_DIR"))).unwrap()
@@ -10,10 +10,10 @@ fn example(name: &str) -> String {
 /// sample at full length.
 fn exact(file: &str, task: &str, max_len: usize) {
     let (p, w, _) = compile_str(&example(file)).unwrap();
-    let r = check(&p, &w, task, 0, all_sequences(p.ctx.vocab, max_len)).unwrap();
+    let r = check(&p, &w, task, 0, all_sequences(p.vocab(), max_len)).unwrap();
     assert_eq!((r.program_wrong, r.network_wrong), (0, 0), "{file}: {r:?}");
     assert!(r.worst < 1e-6, "{file}: worst {}", r.worst);
-    let r = check(&p, &w, task, 0, random_sequences(p.ctx.vocab, max_len + 1, p.ctx.len, 2000, 7)).unwrap();
+    let r = check(&p, &w, task, 0, random_sequences(p.vocab(), max_len + 1, p.ctx.len, 2000, 7)).unwrap();
     assert_eq!((r.program_wrong, r.network_wrong), (0, 0), "{file} sampled: {r:?}");
 }
 
@@ -23,6 +23,66 @@ fn reverse_histogram_sort_and_causal_histogram_are_exact() {
     exact("hist", "hist", 4);
     exact("sort", "sort", 4);
     exact("prefix_hist", "prefix_hist", 4);
+    exact("max", "max", 4);
+}
+
+#[test]
+fn tables_conjunctions_lookups_and_two_inputs() {
+    // Two inputs per token: a colour and a value. Per position: the value of the nearest
+    // earlier token of the same colour (by position grade), how many tokens share both
+    // colour and parity, and two lookups (free from the embedding, and a two-argument one).
+    let src = "wir 0.3
+sequence len 6
+input c: token in [0, 2]
+input v: token in [-3, 4]
+table before(a, b) = lt(b, a)
+table near(a, b) = select(lt(b, a), b + 1, 0)
+table parity(x) = mod(x, 2)
+table mix(x, y) = [[0, 1, 2], [3, 4, 5], [6, 7, 8]]
+output prev = best(v, and(k(c) == q(c), before(q(pos), k(pos))), near(q(pos), k(pos)))
+output both = count(and(k(c) == q(c), k(parity(v)) == q(parity(v))))
+output par = parity(v) + 10 * parity(pos)
+output mixed = mix(c, parity(v + 3))
+";
+    let (p, w, c) = compile_str(src).unwrap();
+    let runner = SeqRunner::new(&w);
+    let bound = seq::error_bound(&p);
+    assert!(bound.outputs.iter().all(|b| *b < 1e-6), "{:?}", bound.outputs);
+    let mut r = Rng(99);
+    for _ in 0..3000 {
+        let n = r.int(1, 6) as usize;
+        let toks: Vec<Vec<i64>> = (0..n).map(|_| vec![r.int(0, 2), r.int(-3, 4)]).collect();
+        let prog = p.eval_multi(&toks);
+        let net = runner.eval_multi(&toks);
+        for i in 0..n {
+            let (ci, vi) = (toks[i][0], toks[i][1]);
+            let prev = (0..i).rev().find(|&j| toks[j][0] == ci).map_or(0, |j| toks[j][1]);
+            let both = (0..n).filter(|&j| toks[j][0] == ci && toks[j][1].rem_euclid(2) == vi.rem_euclid(2)).count();
+            let par = vi.rem_euclid(2) + 10 * (i as i64 % 2);
+            let mixed = ci * 3 + (vi + 3).rem_euclid(2);
+            let want = [prev as f64, both as f64, par as f64, mixed as f64];
+            for o in 0..4 {
+                assert!((prog[i][o] - want[o]).abs() < 1e-9, "program o{o} at {i} on {toks:?}: {} vs {}", prog[i][o], want[o]);
+                assert!((net[i][o] - want[o]).abs() <= bound.outputs[o] + 1e-9, "network o{o} at {i} on {toks:?}");
+            }
+        }
+    }
+    // `prev` and the conjunction's count share no head; `par` is embedding-only.
+    assert!(c.heads >= 2);
+}
+
+#[test]
+fn equal_scores_share_one_attention_head() {
+    let src = "wir 0.3
+sequence len 5
+input t: token in [0, 3]
+output a = mean(t, k(t) == q(t))
+output b = mean(pos, k(t) == q(t))
+output c = mean(2 * t + 1, k(t) == q(t))
+";
+    let (_, w, c) = compile_str(src).unwrap();
+    assert_eq!(c.heads, 1);
+    assert_eq!(w.blocks[0].heads[0].wv.rows, 3);
 }
 
 #[test]
@@ -42,9 +102,9 @@ fn layout_of_the_primitives() {
 fn length_and_empty_mean() {
     let src = "wir 0.3\nsequence len 5\ninput t: token in [0, 2]\noutput n = count(true)\noutput none = mean(t + 1, k(t) == q(t + 3))\n";
     let (p, w, _) = compile_str(src).unwrap();
-    let r = check(&p, &w, "length", 0, all_sequences(p.ctx.vocab, 5)).unwrap();
+    let r = check(&p, &w, "length", 0, all_sequences(p.vocab(), 5)).unwrap();
     assert_eq!((r.program_wrong, r.network_wrong), (0, 0));
-    for s in all_sequences(p.ctx.vocab, 5) {
+    for s in all_sequences(p.vocab(), 5) {
         let net = w.eval(&s);
         assert!(net.iter().all(|row| row[1].abs() < 1e-6), "empty mean must read 0: {s:?} {net:?}");
     }
@@ -57,7 +117,7 @@ fn sharpness_sets_the_leak() {
         let mut p = seq::lower(&example("reverse")).unwrap();
         p.ctx.sharpness = b;
         let (w, _) = seq::compile(&p).unwrap();
-        worst.push(check(&p, &w, "reverse", 0, all_sequences(p.ctx.vocab, 3)).unwrap().worst);
+        worst.push(check(&p, &w, "reverse", 0, all_sequences(p.vocab(), 3)).unwrap().worst);
     }
     assert!(worst[0] > worst[1] && worst[1] > worst[2] && worst[2] > 0.0, "{worst:?}");
 }
@@ -69,7 +129,7 @@ fn errors() {
         assert!(e.contains(msg), "{e}");
     };
     let head = "wir 0.3\nsequence len 4\ninput t: token in [0, 3]\n";
-    bad(&format!("{head}output y = count(k(t) == k(t))\n"), "one `k(..)` side with one `q(..)`");
+    bad(&format!("{head}output y = count(k(t) == k(t))\n"), "at most one `k(..)` and one `q(..)`");
     bad(&format!("{head}output y = count(k(t / 2) == q(t))\n"), "integer intervals");
     bad(&format!("{head}output y = mean(t, k(t) < q(t))\n"), "expected");
     bad("wir 0.3\ninput t: token in [0, 3]\noutput y = t\n", "sequence len N");
@@ -83,7 +143,7 @@ fn the_bound_holds_on_the_examples() {
         let (p, w, _) = compile_str(&example(file)).unwrap();
         let b = seq::error_bound(&p).outputs[0];
         assert!(b < 1e-6, "{file}: bound {b}");
-        let r = check(&p, &w, task, 0, random_sequences(p.ctx.vocab, 1, p.ctx.len, 3000, 3)).unwrap();
+        let r = check(&p, &w, task, 0, random_sequences(p.vocab(), 1, p.ctx.len, 3000, 3)).unwrap();
         assert!(r.worst <= b, "{file}: observed {} above bound {b}", r.worst);
     }
 }
@@ -111,8 +171,9 @@ fn random_program(r: &mut Rng) -> String {
     let vhi = vlo + r.int(1, 4);
     let causal = if r.int(0, 1) == 1 { " causal" } else { "" };
     let beta = [20, 30, 40][r.int(0, 2) as usize];
-    let mut src = format!("wir 0.3\nsequence len {len}{causal} sharpness {beta}\ninput t: token in [{vlo}, {vhi}]\n");
-    let mut ints = vec!["t".to_string(), "pos".to_string()];
+    let mut src = format!("wir 0.3\nsequence len {len}{causal} sharpness {beta}\ninput t: token in [{vlo}, {vhi}]\ninput u: token in [0, 2]\n");
+    src.push_str("table gabs(x) = abs(x)\ntable lk(x) = mod(3 * x + 1, 5) - 2\ntable lk2(x, y) = mod(x + 2 * y, 4)\ntable near(a, b) = le(abs(a - b), 1)\n");
+    let mut ints = vec!["t".to_string(), "pos".to_string(), "u".to_string()];
     let mut vals: Vec<String> = vec![];
     let affine = |r: &mut Rng, pool: &[String]| -> String {
         let mut e = format!("{}", r.int(-2, 2));
@@ -124,12 +185,18 @@ fn random_program(r: &mut Rng) -> String {
     };
     let cmps = ["eq", "ne", "lt", "le", "gt", "ge"];
     for i in 0..r.int(2, 5) {
-        let pred = if r.int(0, 4) == 0 {
-            "true".to_string()
-        } else {
+        let clause = |r: &mut Rng| -> String {
             let (a, b) = (affine(r, &ints), affine(r, &ints));
             let (ka, kb) = if r.int(0, 1) == 0 { ("k", "q") } else { ("q", "k") };
-            format!("{}({ka}({a}), {kb}({b}))", cmps[r.int(0, 5) as usize])
+            match r.int(0, 3) {
+                0 => format!("near({ka}({a}), {kb}({b}))"),
+                _ => format!("{}({ka}({a}), {kb}({b}))", cmps[r.int(0, 5) as usize]),
+            }
+        };
+        let pred = match r.int(0, 5) {
+            0 => "true".to_string(),
+            1 | 2 => format!("and({}, {})", clause(r), clause(r)),
+            _ => clause(r),
         };
         let name = format!("v{i}");
         match r.int(0, 2) {
@@ -175,8 +242,10 @@ fn fuzz_random_programs_stay_within_the_bound() {
         causal += p.ctx.causal as usize;
         let bound = seq::error_bound(&p);
         tight += bound.outputs.iter().all(|b| *b < 0.5) as usize;
-        for s in random_sequences(p.ctx.vocab, 1, p.ctx.len, 60, programs as u64) {
-            let (prog, net) = (p.eval(&s), w.eval(&s));
+        let runner = SeqRunner::new(&w);
+        for s in random_sequences(p.vocab(), 1, p.ctx.len, 60, programs as u64) {
+            let s: Vec<Vec<i64>> = s.iter().enumerate().map(|(i, &t)| vec![t, (t * 7 + i as i64 * 3).rem_euclid(3)]).collect();
+            let (prog, net) = (p.eval_multi(&s), if programs % 10 == 0 { w.eval_multi(&s) } else { runner.eval_multi(&s) });
             for i in 0..s.len() {
                 for (o, b) in bound.outputs.iter().enumerate() {
                     let d = (net[i][o] - prog[i][o]).abs();

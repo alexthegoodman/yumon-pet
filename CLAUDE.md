@@ -332,3 +332,17 @@ Verification: `seq::error_bound` (proven |network - program| per output; relus g
 gates from it so BOS stays 0, needed for causal counts), fuzz of random programs in
 tests/seq.rs (`WIR_SEQ_FUZZ=5000`: 2.64M values, none above bound), `--probe N:file` +
 `wir/scripts/seq_torch.py` (PyTorch f64/f32, 0 wrong). 125 wir tests.
+
+WIR Chess (2026-11-09): see docs/WIR.md "WIR 0.3 extensions and WIR Chess", plan in
+docs/ideas/WIR_CHESS.md (phases 1-3 done, RL not). seq.rs now has several token inputs,
+`table` (expr or nested list), `and(..)` conditions with table clauses, `best(v, cond, grade)`,
+lookups (embedding-written for inputs/`pos`), shared heads, count decoders sized by wmax,
+`SeqRunner` (sparse, skips keys < best - 36). Scores: conditions add M = 1 + max grade, BOS at
+M m - 1/2 (mean) / m (count). chess.rs: `program()` (8 ray `best` heads, 6 count heads,
+attackers, lowest attacker via balanced max tree, hanging, mobility, king zone, passed, open
+files, totals via `mean(.., true)`, phase blend via a head), `reference`, `check`; `wir chess
+[-o --boards --export --vectors]`. d_model 275, 11 blocks, 22 heads, 11,247 non-zero weights;
+100k random boards 0 wrong. wir/demos/chess: chess_core.js (rules, perft, sparse JS runner,
+JS twin, search; quantized scores), chess_ui.js, chess_template.html, build.py, harness.js
+(perft|vectors|lockstep|speed|twin|match). demos/tests/chess_page.{feature,mjs}: 12 checks.
+Artifact "WIR Chess" https://claude.ai/artifact/9u2N2Y2UBcU6f4yuS3gGtW (private). 129 wir tests.

@@ -1087,7 +1087,7 @@ impl Cursor<'_> {
     }
 
     fn call(&mut self, f: &str, sc: &mut Scope) -> Result<Affine> {
-        if sc.seq.is_some() && crate::seq::FUNCTIONS.contains(&f) {
+        if sc.seq.as_deref().is_some_and(|c| crate::seq::handles(c, f)) {
             return crate::seq::call(self, f, sc);
         }
         self.expect(&Tok::LParen)?;

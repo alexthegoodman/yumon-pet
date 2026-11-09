@@ -305,6 +305,23 @@ outputs. Examples: `reverse.wir`, `hist.wir`, `sort.wir`, `prefix_hist.wir` (cau
 uv run --project ../python-train python scripts/seq_torch.py   # PyTorch float64/float32 check
 ```
 
+### 0.3 extensions and WIR Chess
+
+Several inputs per token (repeat `input`), `table name(a, b) = expr | [..]`, `and(..)`
+conditions, table clauses (`onray(3, q(pos), k(pos))`, one-sided `occ(k(piece))`),
+`best(v, cond, grade)`, lookups (`pst(piece, pos)`; free from the embedding when the argument
+is an input or `pos`), shared heads, sparse `SeqRunner`. See `../docs/WIR.md` "WIR 0.3
+extensions and WIR Chess".
+
+```
+cargo run --release -- chess -o examples/chess.wir --boards 100000 --export chess_demo.json
+node demos/chess/harness.js chess_demo.json 20            # perft, vectors, lockstep, speed
+node demos/chess/harness.js chess_demo.json 40 twin       # network vs plain-code twin moves
+node demos/chess/harness.js chess_demo.json 10 match      # short matches
+python demos/chess/build.py chess_demo.json wir-chess.html
+node demos/tests/chess_page.mjs wir-chess.html shots      # Chrome BDD (chess_page.feature)
+```
+
 ## Library
 
 ```rust
@@ -375,3 +392,5 @@ histogram on every sequence up to length 4 plus samples at full length, the layo
 primitives, an empty mean reading 0, sharpness setting the leak, the refusals, the bound
 on the examples, and a fuzz of random programs (`WIR_SEQ_FUZZ=N`, default 300) checking
 the network never leaves the bound.
+`tests/chess.rs` checks the chess network against `chess::reference` on random boards
+(per-square outputs exact after rounding, proven bounds < 0.5) and known positions.
