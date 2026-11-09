@@ -202,7 +202,8 @@ networks and rule in lockstep, and reports behaviour (retreat to cover when hurt
 empty, step-and-reverse moves, spread around the player).
 
 The WIR Skirmish page lives in `demos/tactics/` (`skirmish_template.html`, the page with a
-`__DATA__` slot): `python demos/tactics/build.py demo.json skirmish.html`.
+`__DATA__` slot): `python demos/tactics/build.py demo.json skirmish.html`. A built copy,
+`demos/tactics/wir-skirmish.html`, opens directly in a browser.
 
 ### Yumon Ant
 
