@@ -48,6 +48,20 @@ cargo run --release --bin train_code -- --config configs/yumon-dec-base-pretrain
 cargo run --release --bin train_code -- --config configs/yumon-dec-base-pretrain-jl.json --jl residual:64@3+learned
 ```
 
+Each arm also has its own config, so no flag is needed (all share the out_dir
+and seed; `--jl` still overrides):
+
+| config (`configs/yumon-dec-base-pretrain-jl-*.json`) | arm |
+| --- | --- |
+| `head64` | residual:64@6, projection only before the head |
+| `residual64-mid` | residual:64@3 |
+| `residual64-embed` | residual:64@0 |
+| `residual64-mid-learned` | residual:64@3+learned (control) |
+| `attn16` | attention:16, all blocks |
+| `attn8-late` | attention:8 from block 3 |
+| `ffn64` | ffn:64, all blocks |
+| `width64-baseline` | no projection, embed_dim 64, ff_dim 256 (fair baseline for residual64-embed) |
+
 The training log already writes `tokens_per_sec` and `step_ms` per window, so
 the speed side of each arm comes out of the same run as its loss.
 
