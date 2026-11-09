@@ -136,7 +136,13 @@ pre.src .c { color: #6f8094; }
 <script>
 (() => {
 "use strict";
-const D = JSON.parse(document.getElementById("nets").textContent);
+const raw = document.getElementById("nets").textContent;
+if (raw.startsWith("__")) {
+  // Opened the template itself: the weights are only filled in by build.py.
+  document.body.textContent = "This is the page template. Build it first: python wir/demos/tactics/build.py tactics_demo.json wir-skirmish.html (tactics_demo.json from `wir tactics --export`).";
+  return;
+}
+const D = JSON.parse(raw);
 const C = D.consts;
 const H = 24, W = 40, N = H * W;
 const CEIL = C.ceiling;
