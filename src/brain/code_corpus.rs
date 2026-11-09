@@ -134,7 +134,7 @@ pub struct CodeConfig {
     pub shuffle: Option<bool>,
     /// Johnson-Lindenstrauss projection experiment (docs/JL.md); architecture
     /// "decoder-only" only. `{"site": "none"}` is the baseline arm.
-    pub jl: Option<super::jl::JlConfig>,
+    pub jl: Option<super::jl::JlSet>,
     /// Drop this many of the hardest difficulty deciles (0-9) from a
     /// difficulty-sorted cache before the validation split, e.g. 2 keeps the
     /// easiest 80% (the deciles `cache_yumon_talk` prints). 0 keeps everything.

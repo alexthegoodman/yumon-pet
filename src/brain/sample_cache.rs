@@ -364,9 +364,11 @@ pub fn load_cache_with_objective(
         metadata.max_seq_len,
         max_seq_len
     );
+    let fingerprint = tokenizer_fingerprint(tokenizer)?;
     ensure!(
-        metadata.tokenizer_sha256 == tokenizer_fingerprint(tokenizer)?,
-        "cache tokenizer does not match the training tokenizer; rebuild locally"
+        metadata.tokenizer_sha256 == fingerprint,
+        "cache tokenizer does not match the training tokenizer (cache {}, tokenizer {}); rebuild locally",
+        &metadata.tokenizer_sha256[..12.min(metadata.tokenizer_sha256.len())], &fingerprint[..12]
     );
     let decoder = zstd::stream::read::Decoder::new(file)?;
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, decoder);

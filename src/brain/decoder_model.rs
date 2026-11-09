@@ -20,7 +20,7 @@ use super::{
     bpe::{BpeTokenizer, TokenizerKind},
     fixer::fix_json_syntax,
     flash_attn::backend::{FlashAttention, causal_flash_attention},
-    jl::{JlConfig, JlProjection, JlSite},
+    jl::{JlProjection, JlSet, JlSite},
     model::{GenerationResult, MLP, MLPConfig, RMSNorm, RMSNormConfig, TEMPERATURE, TOP_K},
     samples::{Action, CardinalDir, TrainingStage},
     tokenizer::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN},
@@ -47,14 +47,13 @@ struct DecBlock<B: Backend> {
     heads: usize,
 }
 
-/// The JL map a block applies, if any (see jl.rs). Residual maps sit between
-/// blocks and are applied by the brain.
-enum BlockJl<'a, B: Backend> {
-    None,
+/// The JL maps a block applies (see jl.rs). Residual maps sit between blocks
+/// and are applied by the brain.
+struct BlockJl<'a, B: Backend> {
     /// head_dim -> dim for q, k (after RoPE) and v.
-    Attention(&'a JlProjection<B>),
+    attention: Option<&'a JlProjection<B>>,
     /// Normed MLP input, width -> dim.
-    Ffn(&'a JlProjection<B>),
+    ffn: Option<&'a JlProjection<B>>,
 }
 // Manual impls: a derive would require B: Copy.
 impl<B: Backend> Clone for BlockJl<'_, B> {
@@ -270,14 +269,14 @@ impl<B: FlashAttention> DecBlock<B> {
         let q = apply_rope(split(self.q.forward(norm.clone())), rope);
         let k = apply_rope(split(self.k.forward(norm.clone())), rope);
         let v = split(self.v.forward(norm));
-        match jl {
-            BlockJl::Attention(p) => {
+        match jl.attention {
+            Some(p) => {
                 // Attention scales scores by 1/sqrt(dim); this restores 1/sqrt(head_dim),
                 // so (qR).(kR) is scored like the unprojected q.k it estimates.
                 let rescale = (p.out_dim() as f64 / hd as f64).sqrt();
                 (p.forward(q) * rescale, p.forward(k), p.forward(v))
             }
-            _ => (q, k, v),
+            None => (q, k, v),
         }
     }
     /// Residual add of the attention output [batch, heads, seq, dim], then the MLP
@@ -287,7 +286,7 @@ impl<B: FlashAttention> DecBlock<B> {
         let [batch, heads, seq, dim] = attn.dims();
         let x = x + self.o.forward(attn.swap_dims(1, 2).reshape([batch, seq, heads * dim]));
         let mut mlp_in = self.ffn_norm.forward(x.clone());
-        if let BlockJl::Ffn(p) = jl {
+        if let Some(p) = jl.ffn {
             mlp_in = p.forward(mlp_in);
         }
         let mlp_out = match mlp {
@@ -351,9 +350,9 @@ pub struct YumonDecBrain<B: Backend> {
     norm: RMSNorm<B>,
     dropout: Dropout,
     pub token_head: Linear<B>,
-    /// JL maps (config.jl): one for `residual`, one per affected block for
-    /// `attention`/`ffn`, none otherwise. Last field so older records load as
-    /// `LegacyDecBrain`.
+    /// JL maps (config.jl), in this order: one for `residual`, then one per
+    /// affected block for `attention`, then for `ffn`. Last field so older
+    /// records load as `LegacyDecBrain`.
     jl: Vec<JlProjection<B>>,
 }
 
@@ -403,7 +402,7 @@ pub struct YumonDecBrainConfig {
     pub max_seq_len: usize,
     /// Johnson-Lindenstrauss projection experiment (jl.rs, docs/JL.md).
     #[config(default = "None")]
-    pub jl: Option<JlConfig>,
+    pub jl: Option<JlSet>,
 }
 
 /// Widths of one block: residual, MLP hidden, per-head attention, MLP input.
@@ -411,25 +410,36 @@ struct BlockWidths { width: usize, ff: usize, head: usize, mlp_in: usize }
 
 impl YumonDecBrainConfig {
     /// The JL config when it adds a projection.
-    fn active_jl(&self) -> Option<&JlConfig> { self.jl.as_ref().filter(|j| j.active()) }
+    fn active_jl(&self) -> Option<&JlSet> { self.jl.as_ref().filter(|j| j.active()) }
+    /// The active map at `site`.
+    pub fn jl_site(&self, site: JlSite) -> Option<&crate::brain::jl::JlConfig> {
+        self.active_jl().and_then(|j| j.site(site))
+    }
     fn jl_from(&self, site: JlSite) -> Option<usize> {
-        self.active_jl().filter(|j| j.site == site).map(|j| j.from_layer)
+        self.jl_site(site).map(|j| j.from_layer)
+    }
+    /// `site`'s target width when its map covers block `layer`.
+    fn jl_covers(&self, site: JlSite, layer: usize) -> Option<usize> {
+        self.jl_site(site).filter(|j| layer >= j.from_layer && layer < self.n_layers).map(|j| j.dim)
     }
     /// Residual width before block `layer` (`n_layers` = at the head).
     pub fn width_at(&self, layer: usize) -> usize {
-        match self.jl_from(JlSite::Residual) {
-            Some(from) if layer >= from => self.jl.as_ref().unwrap().dim,
-            _ => self.embed_dim,
-        }
+        self.active_jl().map_or(self.embed_dim, |j| j.width_at(self.embed_dim, layer))
     }
     fn block_widths(&self, layer: usize) -> BlockWidths {
         let width = self.width_at(layer);
-        let jl = self.active_jl();
-        let ff = if width != self.embed_dim { jl.unwrap().narrow_ff_dim(self.embed_dim, self.ff_dim) } else { self.ff_dim };
-        let in_site = |site| self.jl_from(site).is_some_and(|from| layer >= from);
-        let head = if in_site(JlSite::Attention) { jl.unwrap().dim } else { width / self.attn_heads };
-        let mlp_in = if in_site(JlSite::Ffn) { jl.unwrap().dim } else { width };
+        let ff = match self.jl_site(JlSite::Residual) {
+            Some(r) if width != self.embed_dim => r.narrow_ff_dim(self.embed_dim, self.ff_dim),
+            _ => self.ff_dim,
+        };
+        let head = self.jl_covers(JlSite::Attention, layer).unwrap_or(width / self.attn_heads);
+        let mlp_in = self.jl_covers(JlSite::Ffn, layer).unwrap_or(width);
         BlockWidths { width, ff, head, mlp_in }
+    }
+    /// Maps per site in `YumonDecBrain.jl`: residual, attention, ffn.
+    fn jl_counts(&self) -> [usize; 3] {
+        let per_block = |site| self.jl_from(site).map_or(0, |from| self.n_layers - from);
+        [self.jl_from(JlSite::Residual).is_some() as usize, per_block(JlSite::Attention), per_block(JlSite::Ffn)]
     }
     pub fn init<B: Backend>(&self, device: &B::Device) -> YumonDecBrain<B> {
         assert!(self.n_layers > 0 && self.max_seq_len > 0 && self.vocab_size > 0);
@@ -442,16 +452,19 @@ impl YumonDecBrainConfig {
             jl.validate(self.embed_dim, self.attn_heads, self.n_layers).expect("invalid jl config");
         }
         let linear = |from: usize, to: usize| LinearConfig::new(from, to).with_bias(false).init(device);
-        let hd = self.embed_dim / self.attn_heads;
-        let jl = match self.active_jl() {
-            None => Vec::new(),
-            Some(j) => match j.site {
-                JlSite::Residual => vec![j.projection(self.embed_dim, j.from_layer, device)],
-                JlSite::Attention => (j.from_layer..self.n_layers).map(|l| j.projection(hd, l, device)).collect(),
-                JlSite::Ffn => (j.from_layer..self.n_layers).map(|l| j.projection(self.embed_dim, l, device)).collect(),
-                JlSite::None => unreachable!(),
-            },
-        };
+        let mut jl = Vec::new();
+        if let Some(set) = self.active_jl() {
+            if let Some(from) = self.jl_from(JlSite::Residual) {
+                jl.push(set.projection(JlSite::Residual, self.embed_dim, from, device));
+            }
+            if let Some(from) = self.jl_from(JlSite::Attention) {
+                jl.extend((from..self.n_layers)
+                    .map(|l| set.projection(JlSite::Attention, self.width_at(l) / self.attn_heads, l, device)));
+            }
+            if let Some(from) = self.jl_from(JlSite::Ffn) {
+                jl.extend((from..self.n_layers).map(|l| set.projection(JlSite::Ffn, self.width_at(l), l, device)));
+            }
+        }
         let out_width = self.width_at(self.n_layers);
         YumonDecBrain {
             config: Ignored(self.clone()),
@@ -489,18 +502,17 @@ impl YumonDecBrainConfig {
     }
     /// Weights in the JL maps (frozen unless jl.trainable).
     pub fn jl_param_count(&self) -> usize {
-        let Some(j) = self.active_jl() else { return 0 };
-        let affected = self.n_layers - j.from_layer;
-        match j.site {
-            JlSite::Residual => self.embed_dim * j.dim,
-            JlSite::Attention => affected * (self.embed_dim / self.attn_heads) * j.dim,
-            JlSite::Ffn => affected * self.embed_dim * j.dim,
-            JlSite::None => 0,
-        }
+        let residual = self.jl_site(JlSite::Residual).map_or(0, |r| self.embed_dim * r.dim);
+        let blocks: usize = (0..self.n_layers).map(|l| {
+            let width = self.width_at(l);
+            self.jl_covers(JlSite::Attention, l).map_or(0, |k| width / self.attn_heads * k)
+                + self.jl_covers(JlSite::Ffn, l).map_or(0, |k| width * k)
+        }).sum();
+        residual + blocks
     }
     /// Per-head width of blocks after a residual JL map, if any.
     fn narrow_head_dim(&self) -> Option<usize> {
-        self.jl_from(JlSite::Residual).filter(|&from| from < self.n_layers).map(|_| self.jl.as_ref().unwrap().dim / self.attn_heads)
+        self.jl_site(JlSite::Residual).filter(|r| r.from_layer < self.n_layers).map(|r| r.dim / self.attn_heads)
     }
 }
 impl<B: FlashAttention> YumonDecBrain<B> {
@@ -525,13 +537,10 @@ impl<B: FlashAttention> YumonDecBrain<B> {
 
     /// The JL map block `layer` applies itself.
     fn block_jl(&self, layer: usize) -> BlockJl<'_, B> {
-        let Some(j) = self.config.active_jl() else { return BlockJl::None };
-        if layer < j.from_layer { return BlockJl::None; }
-        match j.site {
-            JlSite::Attention => BlockJl::Attention(&self.jl[layer - j.from_layer]),
-            JlSite::Ffn => BlockJl::Ffn(&self.jl[layer - j.from_layer]),
-            _ => BlockJl::None,
-        }
+        let [residual, attention, _] = self.config.jl_counts();
+        let map = |site, offset| self.config.jl_from(site).filter(|&from| layer >= from)
+            .map(|from| &self.jl[offset + layer - from]);
+        BlockJl { attention: map(JlSite::Attention, residual), ffn: map(JlSite::Ffn, residual + attention) }
     }
     /// Applies the residual JL map when it sits before block `layer`
     /// (`n_layers` = before the final norm).
@@ -690,7 +699,7 @@ pub struct DecMetadata {
     pub ff_dim: usize,
     pub max_seq_len: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jl: Option<JlConfig>,
+    pub jl: Option<JlSet>,
 }
 impl DecMetadata {
     pub fn config(&self) -> YumonDecBrainConfig {
@@ -1246,9 +1255,11 @@ mod tests {
     }
     fn jl_configs() -> Vec<YumonDecBrainConfig> {
         // tiny_config: width 16, 2 heads (head_dim 8), 2 layers.
-        ["residual:8@0", "residual:8@1", "residual:8@2", "attention:4", "attention:4@1", "ffn:8", "ffn:8@1+learned", "none"]
+        // Stacked: after residual:8 the heads are 4 wide and the MLP input 8.
+        ["residual:8@0", "residual:8@1", "residual:8@2", "attention:4", "attention:4@1", "ffn:8", "ffn:8@1+learned", "none",
+            "residual:8@0,ffn:4", "residual:8@1,attention:2,ffn:4@1", "attention:4+learned,ffn:8+learned"]
             .iter()
-            .map(|spec| tiny_config().with_max_seq_len(16).with_jl(Some(JlConfig::parse(spec).unwrap())))
+            .map(|spec| tiny_config().with_max_seq_len(16).with_jl(Some(JlSet::parse(spec).unwrap())))
             .collect()
     }
 
@@ -1280,10 +1291,11 @@ mod tests {
         let device = Default::default();
         for config in jl_configs() {
             let jl = config.jl.clone().unwrap();
+            let trainable = jl.0.iter().any(|j| j.trainable);
             let model: YumonDecBrain<Balanced> = config.init(&device);
             let grads = model.forward(Tensor::from_ints([[1, 4, 5, 6]], &device)).powf_scalar(2.0).mean().backward();
             for map in &model.jl {
-                assert_eq!(map.weight.val().grad(&grads).is_some(), jl.trainable, "{}", jl.tag());
+                assert_eq!(map.weight.val().grad(&grads).is_some(), trainable, "{}", jl.tag());
             }
             assert!(model.token_head.weight.val().grad(&grads).is_some());
             // An optimizer step leaves frozen maps alone.
@@ -1292,7 +1304,7 @@ mod tests {
             let updated = AdamWConfig::new().init().step(1e-2, model, params);
             for (map, old) in updated.jl.iter().zip(before) {
                 let changed = values(map.weight.val().inner()) != old;
-                assert_eq!(changed, jl.trainable, "{}", jl.tag());
+                assert_eq!(changed, trainable, "{}", jl.tag());
             }
         }
     }
@@ -1314,7 +1326,7 @@ mod tests {
             TokenizerKind::Bpe(t) => t.inner.to_string(false).unwrap().into_bytes(),
             _ => unreachable!(),
         };
-        let meta = |jl: Option<JlConfig>| serde_json::json!({
+        let meta = |jl: Option<JlSet>| serde_json::json!({
             "dropout_rate": 0.0, "vocab_size": config.vocab_size, "epochs_trained": 1, "final_loss": 1.0,
             "batch_size": 1, "training_stage": config.training_stage, "embed_dim": config.embed_dim,
             "hidden_units": config.hidden_units, "n_layers": config.n_layers, "attn_heads": config.attn_heads,
@@ -1326,7 +1338,7 @@ mod tests {
         assert!(restored.jl.is_empty());
         assert_close(values(model.forward(input())), values(restored.forward(input())), 1e-6, "legacy load");
         // A JL model round-trips with its frozen map.
-        let jl = JlConfig::parse("residual:8@1").unwrap();
+        let jl = JlSet::parse("residual:8@1,ffn:4@1").unwrap();
         let model: YumonDecBrain<Inner> = config.clone().with_jl(Some(jl.clone())).init(&device);
         let bytes = recorder.record(model.clone().into_record(), ()).unwrap();
         let (restored, _, restored_config) = YumonDecBrain::<Inner>::load_from_bytes(&bytes, &tokenizer_bytes, &meta(Some(jl.clone())), &device).unwrap();

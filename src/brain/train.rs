@@ -267,7 +267,7 @@ pub struct RunConfig {
     /// Mamba-2 settings; None = defaults. Mamba2 runs only.
     pub mamba: Option<Mamba2Settings>,
     /// Decoder-only JL projection experiment (brain::jl).
-    pub jl: Option<crate::brain::jl::JlConfig>,
+    pub jl: Option<crate::brain::jl::JlSet>,
 }
 
 /// Number of held-out prompts run through the model every time we do a
@@ -487,7 +487,16 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
         config.eval_stage.as_deref().unwrap_or("auto"));
     use crate::brain::{code_corpus, code_curriculum};
     config.validate()?;
-    let tokenizer = code_corpus::load_tokenizer(&config.tokenizer)?;
+    // A full-cache run on a Pet text cache (wiki, talk; `cache_samples --dataset`) loads
+    // the tokenizer the way that cache was written: plain, normalizer allowed.
+    let text_cache = config.curriculum.is_none() && config.docs.is_none() && config.pretrain_cache.is_none()
+        && crate::brain::sample_cache::read_metadata(&config.cache)
+            .is_ok_and(|m| m.objective != crate::brain::sample_cache::CacheObjective::RawCode);
+    let tokenizer = if text_cache {
+        crate::brain::bpe::TokenizerKind::Bpe(crate::brain::bpe::BpeTokenizer::load(&config.tokenizer)?)
+    } else {
+        code_corpus::load_tokenizer(&config.tokenizer)?
+    };
 
     // If training with a talk vocabulary (e.g. kilo_talk_vocab.json beside the tokenizer),
     // load it into the global vocab so evaluation previews use the exact matching vocabulary!
@@ -1492,10 +1501,14 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
             .with_jl(run_cfg.jl.clone());
         println!("Decoder-only: {:.2}M parameters, flash attention, BalancedCheckpointing.",
             config.param_count() as f64 / 1e6);
-        if let Some(jl) = run_cfg.jl.as_ref().filter(|j| j.active()) {
-            println!("JL projection {:?} to {} from layer {} ({} weights, {}); residual width per layer {:?} then head {}.",
-                jl.site, jl.dim, jl.from_layer, config.jl_param_count(), if jl.trainable { "trained" } else { "frozen" },
-                (0..config.n_layers).map(|l| config.width_at(l)).collect::<Vec<_>>(), config.width_at(config.n_layers));
+        if let Some(set) = run_cfg.jl.as_ref().filter(|j| j.active()) {
+            for jl in &set.0 {
+                println!("JL projection {:?} to {} from layer {} ({}).",
+                    jl.site, jl.dim, jl.from_layer, if jl.trainable { "trained" } else { "frozen" });
+            }
+            println!("JL maps hold {} weights; residual width per layer {:?} then head {}.",
+                config.jl_param_count(), (0..config.n_layers).map(|l| config.width_at(l)).collect::<Vec<_>>(),
+                config.width_at(config.n_layers));
         }
         if !run_dir.join("model.bin").exists() {
             if let Some(init_path) = &run_cfg.init_checkpoint {
@@ -2589,41 +2602,41 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
         // .add("data/dpo/reasoning_train.txt",   FileKind::SyntheticDpo, None)
         // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
         // // .add("data/ideas.txt",   FileKind::TxtLines, None)
-        .add("archive/arena_extract.txt",   FileKind::Chats, None)
-        // // .add("data/distillchatv1.csv",   FileKind::DistillChat, None)
-        // // Plain text, loss on every token (cleaned extract of the simplewiki XML).
-        // // .add("data/wiki_extract.txt",   FileKind::Paragraphs, None)
-        // // .add("data/quotes.csv",   FileKind::QuotesCsv, None) // only 5 prompts used. maybe better used without prompts
-        .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
-        .add("data/bible_asv.csv", FileKind::BibleCsv, None)
-        // // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs - real
-        // // message/reply splits (ideas, Bible and stories train as plain text).
-        .add("archive/synthetic/bible.txt", FileKind::Chats, None)
-        .add("archive/synthetic/business.txt", FileKind::Chats, None)
-        .add("archive/synthetic/universe.txt", FileKind::Chats, None)
-        .add("archive/synthetic/world_basics.txt", FileKind::Chats, None)
-        .add("archive/synthetic/daily_life.txt", FileKind::Chats, None)
-        .add("archive/synthetic/social_life.txt", FileKind::Chats, None)
-        // .add("archive/synthetic/puzzles.txt", FileKind::Chats, None) // too short answers in data
-        // .add("archive/synthetic/commands.txt", FileKind::Chats, None) // too short answers in data
-        .add("archive/synthetic/memory.txt", FileKind::Chats, None)
-        .add("data/creative_stories.txt", FileKind::Stories, None)
+        // .add("archive/arena_extract.txt",   FileKind::Chats, None)
+        // // // .add("data/distillchatv1.csv",   FileKind::DistillChat, None)
+        // // // Plain text, loss on every token (cleaned extract of the simplewiki XML).
+        .add("data/wiki_extract.txt",   FileKind::Paragraphs, None);
+        // // // .add("data/quotes.csv",   FileKind::QuotesCsv, None) // only 5 prompts used. maybe better used without prompts
+        // .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
+        // .add("data/bible_asv.csv", FileKind::BibleCsv, None)
+        // // // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs - real
+        // // // message/reply splits (ideas, Bible and stories train as plain text).
+        // .add("archive/synthetic/bible.txt", FileKind::Chats, None)
+        // .add("archive/synthetic/business.txt", FileKind::Chats, None)
+        // .add("archive/synthetic/universe.txt", FileKind::Chats, None)
+        // .add("archive/synthetic/world_basics.txt", FileKind::Chats, None)
+        // .add("archive/synthetic/daily_life.txt", FileKind::Chats, None)
+        // .add("archive/synthetic/social_life.txt", FileKind::Chats, None)
+        // // .add("archive/synthetic/puzzles.txt", FileKind::Chats, None) // too short answers in data
+        // // .add("archive/synthetic/commands.txt", FileKind::Chats, None) // too short answers in data
+        // .add("archive/synthetic/memory.txt", FileKind::Chats, None)
+        // .add("data/creative_stories.txt", FileKind::Stories, None)
         // // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
         // // // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
         // // // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, None)
-        .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, None)
+        // .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, None)
+        // .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, None);
         // // // .add("archive/ov_chats.txt", FileKind::Chats, None)
         // // // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // // // .add("archive/you_chats.txt", FileKind::Chats, None)
-        // // // .add("archive/you_chats.txt", FileKind::Chats, None)
-        // // // .add("archive/you_chats.txt", FileKind::Chats, None)
-        .add("archive/you_chats.txt", FileKind::Chats, None)
-        // // // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        // // // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        // // // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        .add("archive/clean_chats.txt", FileKind::Chats, None);
+        // .add("archive/ov_chats.txt", FileKind::Chats, None)
+        // // // // .add("archive/you_chats.txt", FileKind::Chats, None)
+        // // // // .add("archive/you_chats.txt", FileKind::Chats, None)
+        // // // // .add("archive/you_chats.txt", FileKind::Chats, None)
+        // .add("archive/you_chats.txt", FileKind::Chats, None)
+        // // // // .add("archive/clean_chats.txt", FileKind::Chats, None)
+        // // // // .add("archive/clean_chats.txt", FileKind::Chats, None)
+        // // // // .add("archive/clean_chats.txt", FileKind::Chats, None)
+        // .add("archive/clean_chats.txt", FileKind::Chats, None);
         // UltraChat conversations: multi-turn dialogue dataset in data/ultrachat/
         // Point to a specific split or the whole folder (with optional per-file limit).
         // .add("data/ultrachat/train_sft.csv", FileKind::UltrachatCsv, None)
@@ -3896,8 +3909,8 @@ mod memory_probe_tests {
 
     fn dec<AD: AutodiffBackend<Device = WgpuDevice> + FlashAttention>(label: &str, s: &Shape) {
         let device = WgpuDevice::default();
-        // PROBE_JL=residual:64@3 etc. (brain::jl::JlConfig::parse); PROBE_FF overrides 4 * width.
-        let jl = std::env::var("PROBE_JL").ok().map(|s| crate::brain::jl::JlConfig::parse(&s).unwrap());
+        // PROBE_JL=residual:64@3 etc. (brain::jl::JlSet::parse); PROBE_FF overrides 4 * width.
+        let jl = std::env::var("PROBE_JL").ok().map(|s| crate::brain::jl::JlSet::parse(&s).unwrap());
         let config = YumonDecBrainConfig::new(s.vocab, TrainingStage::Language)
             .with_embed_dim(s.width).with_hidden_units(s.width).with_n_layers(s.layers)
             .with_attn_heads(s.heads).with_ff_dim(env("PROBE_FF", 4 * s.width)).with_max_seq_len(s.seq)

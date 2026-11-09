@@ -33,8 +33,8 @@ fn main() -> anyhow::Result<()> {
         #[arg(long, alias = "eval-stage", alias = "eval_stage")]
         stage: Option<String>,
         /// JL projection arm (docs/JL.md): `none`, `SITE:DIM` or `SITE:DIM@LAYER`,
-        /// SITE = residual | attention | ffn, optional `+learned` suffix.
-        /// Replaces site/dim/from_layer/trainable of the config's `jl` section.
+        /// SITE = residual | attention | ffn, optional `+learned` suffix; comma-separated
+        /// to stack sites. Replaces the config's `jl` maps, keeping their seed and ff_dim.
         #[arg(long)]
         jl: Option<String>,
     }
@@ -62,12 +62,18 @@ fn main() -> anyhow::Result<()> {
         adaptive.enabled = true;
     }
     if let Some(spec) = &args.jl {
-        let arm = yumon_pet::brain::jl::JlConfig::parse(spec)?;
-        config.jl = Some(match config.jl.take() {
-            // Keep the config's seed and narrow ff_dim.
-            Some(base) => yumon_pet::brain::jl::JlConfig { seed: base.seed, ff_dim: base.ff_dim, ..arm },
-            None => arm,
-        });
+        let mut arm = yumon_pet::brain::jl::JlSet::parse(spec)?;
+        if let Some(base) = config.jl.take() {
+            // Keep the config's seed, and the narrow ff_dim of a residual map.
+            for j in &mut arm.0 {
+                j.seed = base.0[0].seed;
+                if let Some(same) = base.0.iter().find(|b| b.site == j.site) {
+                    j.seed = same.seed;
+                    j.ff_dim = same.ff_dim;
+                }
+            }
+        }
+        config.jl = Some(arm);
         config.validate()?;
     }
     anyhow::ensure!(

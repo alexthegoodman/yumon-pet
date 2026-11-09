@@ -362,3 +362,8 @@ panics on short records). Config `yumon-dec-base-pretrain-jl.json` (sunrise shap
 yumon-base-dec-jl). Step time on UHD 770 at the sunrise shape: none 679 ms, residual:64@3
 482, residual:64@0 344, attention:16 615, ffn:64 635 (`PROBE_JL` in training_memory_probe).
 Loss comparison runs are not done.
+2026-11-09: `jl` is a `JlSet` (one object or an array, at most one map per site; `--jl`
+takes comma-separated specs). Maps are stored residual, then attention, then ffn; later
+maps see the residual's narrow width. `train_code` on a full Pet text cache (not RawCode,
+no curriculum/docs) loads the tokenizer plainly like `cache_samples`, so the lowercasing
+`yumon_bpe` works; the cache mismatch error prints both fingerprints.

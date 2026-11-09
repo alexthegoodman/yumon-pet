@@ -14,6 +14,7 @@
 //! `none` adds nothing; it names the baseline arm of an experiment config so
 //! all arms share seeding and run-name layout.
 //! R is frozen unless `trainable` (the learned-projection control).
+//! `JlSet` stacks maps at several sites (at most one per site).
 use burn::{module::Param, prelude::*};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
@@ -115,8 +116,101 @@ impl JlConfig {
         self.ff_dim.unwrap_or_else(|| (ff_dim * self.dim / embed_dim).max(1))
     }
 
-    pub fn projection<B: Backend>(&self, from: usize, layer: usize, device: &B::Device) -> JlProjection<B> {
-        JlProjection::new(from, self.dim, self.seed.wrapping_add(layer as u64), self.trainable, device)
+}
+
+/// One or more JL maps at different sites (e.g. a residual map at 0 plus FFN
+/// maps on the narrow blocks). In JSON a single map is an object and several
+/// are an array; at most one map per site. Stacked maps see the widths the
+/// earlier sites leave: after `residual:128@0`, an `ffn` map projects the
+/// 128-wide MLP input and an `attention` map the 128 / heads head width.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JlSet(pub Vec<JlConfig>);
+
+impl From<JlConfig> for JlSet {
+    fn from(config: JlConfig) -> Self { Self(vec![config]) }
+}
+
+impl Serialize for JlSet {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self.0.as_slice() {
+            [one] => one.serialize(s),
+            many => many.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for JlSet {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Form { One(JlConfig), Many(Vec<JlConfig>) }
+        Ok(match Form::deserialize(d)? {
+            Form::One(one) => Self(vec![one]),
+            Form::Many(many) => Self(many),
+        })
+    }
+}
+
+impl JlSet {
+    /// Comma-separated `JlConfig::parse` specs, e.g. `residual:128@0,ffn:64`.
+    pub fn parse(spec: &str) -> anyhow::Result<Self> {
+        Ok(Self(spec.split(',').map(|s| JlConfig::parse(s.trim())).collect::<anyhow::Result<_>>()?))
+    }
+
+    pub fn active(&self) -> bool { self.0.iter().any(JlConfig::active) }
+
+    /// The map at `site`, if the set has an active one.
+    pub fn site(&self, site: JlSite) -> Option<&JlConfig> {
+        self.0.iter().find(|j| j.active() && j.site == site)
+    }
+
+    /// Several active maps. Their seeds get a per-site offset so maps of
+    /// different sites never share a random stream; a single map keeps seed + block.
+    pub fn stacked(&self) -> bool { self.0.iter().filter(|j| j.active()).count() > 1 }
+
+    /// Residual width before block `layer` (`n_layers` = at the head).
+    pub fn width_at(&self, embed_dim: usize, layer: usize) -> usize {
+        match self.site(JlSite::Residual) {
+            Some(r) if layer >= r.from_layer => r.dim,
+            _ => embed_dim,
+        }
+    }
+
+    pub fn validate(&self, embed_dim: usize, attn_heads: usize, n_layers: usize) -> anyhow::Result<()> {
+        use anyhow::ensure;
+        ensure!(!self.0.is_empty(), "jl list is empty");
+        if let [one] = self.0.as_slice() {
+            return one.validate(embed_dim, attn_heads, n_layers);
+        }
+        for site in [JlSite::Residual, JlSite::Attention, JlSite::Ffn] {
+            ensure!(self.0.iter().filter(|j| j.site == site).count() <= 1, "jl has more than one {site:?} map");
+        }
+        ensure!(self.0.iter().all(JlConfig::active), "\"none\" cannot be combined with other jl maps");
+        if let Some(r) = self.site(JlSite::Residual) {
+            r.validate(embed_dim, attn_heads, n_layers)?;
+        }
+        for j in self.0.iter().filter(|j| j.site != JlSite::Residual) {
+            ensure!(j.dim > 0, "jl.dim must be positive");
+            ensure!(j.ff_dim.is_none(), "jl.ff_dim is for site \"residual\"");
+            ensure!(j.from_layer < n_layers, "jl.from_layer {} must be below n_layers {n_layers}", j.from_layer);
+            for layer in j.from_layer..n_layers {
+                let width = self.width_at(embed_dim, layer);
+                let full = if j.site == JlSite::Attention { width / attn_heads } else { width };
+                ensure!(j.dim < full, "{:?} jl.dim {} must be below the width it projects, {full} at block {layer}{}",
+                    j.site, j.dim, if width < embed_dim { " (after the residual map)" } else { "" });
+            }
+        }
+        Ok(())
+    }
+
+    /// Run-name suffix: the maps' tags in order, e.g. `_jl_residual128_at0_jl_ffn64_at0`.
+    pub fn tag(&self) -> String { self.0.iter().map(JlConfig::tag).collect() }
+
+    /// R for `site`'s map in block `layer` (residual: before block `layer`), from width `from`.
+    pub fn projection<B: Backend>(&self, site: JlSite, from: usize, layer: usize, device: &B::Device) -> JlProjection<B> {
+        let j = self.site(site).expect("no JL map at this site");
+        let salt = if self.stacked() { (site as u64) << 32 } else { 0 };
+        JlProjection::new(from, j.dim, j.seed.wrapping_add(layer as u64).wrapping_add(salt), j.trainable, device)
     }
 }
 
@@ -186,6 +280,26 @@ mod tests {
         assert!(ok("attention:32").is_err(), "head_dim is 32");
         assert!(ok("ffn:64@5").is_ok());
         assert!(ok("ffn:64@6").is_err());
+    }
+
+    #[test]
+    fn stacked_sets() {
+        let set = JlSet::parse("residual:64@0, ffn:32").unwrap();
+        assert_eq!(set.tag(), "_jl_residual64_at0_jl_ffn32_at0");
+        assert!(set.stacked() && set.validate(128, 4, 6).is_ok());
+        // The ffn map sees the 64-wide residual, so 64 or more is not a projection.
+        assert!(JlSet::parse("residual:64@0,ffn:64").unwrap().validate(128, 4, 6).is_err());
+        assert!(JlSet::parse("residual:64@3,ffn:100").unwrap().validate(128, 4, 6).is_err(), "blocks 3.. are 64 wide");
+        assert!(JlSet::parse("residual:64@0,attention:8").unwrap().validate(128, 4, 6).is_ok());
+        assert!(JlSet::parse("residual:64@0,attention:16").unwrap().validate(128, 4, 6).is_err(), "head width 16");
+        assert!(JlSet::parse("ffn:32,ffn:16").unwrap().validate(128, 4, 6).is_err());
+        assert!(JlSet::parse("none,ffn:16").unwrap().validate(128, 4, 6).is_err());
+        // JSON: one map is an object (as in older configs and checkpoints), several an array.
+        let one: JlSet = serde_json::from_str(r#"{"site": "ffn", "dim": 64}"#).unwrap();
+        assert_eq!(serde_json::to_value(&one).unwrap()["site"], "ffn");
+        let two: JlSet = serde_json::from_str(r#"[{"site": "residual", "dim": 64}, {"site": "ffn", "dim": 32}]"#).unwrap();
+        assert_eq!(two, set);
+        assert_eq!(serde_json::from_value::<JlSet>(serde_json::to_value(&two).unwrap()).unwrap(), two);
     }
 
     /// Inner products are kept on average: JL is unbiased, error ~ |x||y| sqrt(2/to).

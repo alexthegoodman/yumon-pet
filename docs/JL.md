@@ -18,6 +18,14 @@ Code: `src/brain/jl.rs` (config, spec parser, `JlProjection`), wired through
 | `ffn:K@L` | MLP input in blocks L.. | the normed MLP input goes d -> K; w1/w3 read K, w2 still writes d. |
 | `none` | nowhere | baseline arm. Same seeding and run-name layout as the other arms. |
 
+Sites stack: `jl` can be an array (or `--jl residual:128@0,ffn:64`), at most one
+map per site. Later maps see the widths earlier ones leave, so after
+`residual:128@0` an `ffn` map projects the 128-wide MLP input (its dim must be
+below 128) and `attention` the 128 / heads head width. Stacked maps get a per-site
+seed offset; the run name joins the maps' tags. The JL `ffn` site only shrinks
+the MLP input; the MLP's own 4x expansion is `ff_dim` (`jl.ff_dim` on the residual
+map for the narrow blocks).
+
 R is frozen (no gradient, the optimizer never touches it) unless the spec ends
 in `+learned`, which trains R with everything else. That is the control for
 "random projection vs learned projection of the same shape". Block i uses

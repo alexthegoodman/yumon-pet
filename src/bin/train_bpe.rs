@@ -46,6 +46,7 @@ fn main() -> anyhow::Result<()> {
 
         BpeTokenizer::train(
             sentences.iter().collect(), 
+            // 65536, // near GPT-2
             16384 // expressive (runpod)
             // 2048 // more budget (local)
             // 1024
