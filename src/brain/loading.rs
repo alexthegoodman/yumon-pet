@@ -8,9 +8,10 @@ pub(super) fn map_ordered<T: Send, U: Send>(
     items: Vec<T>,
     transform: impl Fn(T) -> U + Send + Sync,
 ) -> Vec<U> {
-    #[cfg(not(target_arch = "wasm32"))]
-    return items.into_par_iter().map(transform).collect();
-    #[cfg(target_arch = "wasm32")]
+    // nested map_ordered during dataloading is causing overheating
+    // #[cfg(not(target_arch = "wasm32"))]
+    // return items.into_par_iter().map(transform).collect();
+    // #[cfg(target_arch = "wasm32")]
     items.into_iter().map(transform).collect()
 }
 

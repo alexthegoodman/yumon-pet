@@ -335,3 +335,63 @@ Output Checkpoint: checkpoints/yumon-v2-sft/model.bin
 3. Direct Preference Optimization (DPO):
    `cargo run --release --bin train_code -- --config configs/yumon-moe-dpo.json`
 (To align directly from the newly trained SFT checkpoint, set "init_checkpoint": "checkpoints/yumon-v2-sft/..." in yumon-moe-dpo.json.)
+
+---
+
+## Example Config and resulting architecture
+
+```
+{
+  "architecture": "decoder-only",
+  "source": "../rust-code",
+  "cache": "training-cache/pretrain/kilo_pretrain.bin",
+  "tokenizer": "training-cache/kilo_talk_tokenizer",
+  "max_seq_len": 256,
+  "exclude_dirs": [
+    ".git",
+    "target",
+    "node_modules"
+  ],
+  "seed": 4815162342,
+  "vocab_size": 8192,
+  "embed_dim": 128,
+  "n_layers": 12,
+  "attn_heads": 4,
+  "ff_dim": 512,
+  "batch_size": 16,
+  "epochs": 10,
+  "first_lr": 0.001,
+  "last_lr": 0.0001,
+  "validation_fraction": 0.01,
+  "out_dir": "checkpoints/yumon-base-dec-jl",
+  "tie_embeddings": true,
+  "eval_stage": "base",
+  "jl": {
+    "site": "residual",
+    "dim": 64,
+    "from_layer": 6,
+    "trainable": true,
+    "seed": 1
+  }
+}
+```
+
+What it builds
+
+```
+tokens ─► Embedding 8,192 × 128
+          │
+          ▼
+   Blocks 0-5   width 128   4 heads × 32   MLP 128 → 512 → 128
+          │
+          ▼
+   R  128 × 64   starts as a random JL map, then TRAINED ("trainable": true)
+          │
+          ▼
+   Blocks 6-11  width 64    4 heads × 16   MLP 64 → 256 → 64
+          │
+          ▼
+   RMSNorm(64) ─► head 64 → 8,192
+```
+
+It's a funnel: six full-width blocks, a learned squeeze, then six half-width blocks.

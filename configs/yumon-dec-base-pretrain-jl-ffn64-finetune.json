@@ -1,0 +1,33 @@
+{
+  "architecture": "decoder-only",
+  "source": "../rust-code",
+  "cache": "training-cache/massive/pretrain/sft_samples.bin",
+  "tokenizer": "yumon_bpe",
+  "init_checkpoint": "checkpoints/yumon-base-dec-jl-ffn-sugar/code_64h_6l_4a_256ff_256len_b8_DecoderOnly_f32_jl_ffn32_at0_tied",
+  "max_seq_len": 256,
+  "exclude_dirs": [
+    ".git",
+    "target",
+    "node_modules"
+  ],
+  "seed": 4815162342,
+  "vocab_size": 16384,
+  "embed_dim": 64,
+  "n_layers": 6,
+  "attn_heads": 4,
+  "ff_dim": 256,
+  "batch_size": 8,
+  "epochs": 10,
+  "first_lr": 0.001,
+  "last_lr": 0.0001,
+  "validation_fraction": 0.0002,
+  "out_dir": "checkpoints/yumon-base-dec-jl-ffn-sugar-finetune",
+  "tie_embeddings": true,
+  "eval_stage": "base",
+  "jl": {
+    "site": "ffn",
+    "dim": 32,
+    "from_layer": 0,
+    "seed": 1
+  }
+}

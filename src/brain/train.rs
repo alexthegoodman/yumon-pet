@@ -2600,47 +2600,46 @@ pub fn stage_data_loader(stage: TrainingStage) -> DataLoader {
         // .add("data/dpo/memory_session_train.txt",   FileKind::SyntheticDpo, None)
         // .add("data/dpo/memory_trait_train.txt",   FileKind::SyntheticDpo, None)
         // .add("data/dpo/reasoning_train.txt",   FileKind::SyntheticDpo, None)
-        // // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
-        // // .add("data/ideas.txt",   FileKind::TxtLines, None)
+        // .add("data/chatbot_arena_conversations.json",   FileKind::JsonChats, None)
+        // .add("data/ideas.txt",   FileKind::TxtLines, None)
         // .add("archive/arena_extract.txt",   FileKind::Chats, None)
-        // // // .add("data/distillchatv1.csv",   FileKind::DistillChat, None)
-        // // // Plain text, loss on every token (cleaned extract of the simplewiki XML).
-        .add("data/wiki_extract.txt",   FileKind::Paragraphs, None);
-        // // // .add("data/quotes.csv",   FileKind::QuotesCsv, None) // only 5 prompts used. maybe better used without prompts
+        // .add("data/distillchatv1.csv",   FileKind::DistillChat, None)
+        // // Plain text, loss on every token (cleaned extract of the simplewiki XML).
+        // .add("data/wiki_extract.txt",   FileKind::Paragraphs, None)
+        // .add("data/quotes.csv",   FileKind::QuotesCsv, None) // only 5 prompts used. maybe better used without prompts
         // .add("data/bible_bbe.csv", FileKind::BibleCsv, None)
-        // .add("data/bible_asv.csv", FileKind::BibleCsv, None)
-        // // // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs - real
-        // // // message/reply splits (ideas, Bible and stories train as plain text).
+        // // LLM-generated Q&A pairs from src/bin/gen_synthetic_data.rs - real
+        // // message/reply splits (ideas, Bible and stories train as plain text).
         // .add("archive/synthetic/bible.txt", FileKind::Chats, None)
-        // .add("archive/synthetic/business.txt", FileKind::Chats, None)
-        // .add("archive/synthetic/universe.txt", FileKind::Chats, None)
-        // .add("archive/synthetic/world_basics.txt", FileKind::Chats, None)
-        // .add("archive/synthetic/daily_life.txt", FileKind::Chats, None)
+        .add("archive/synthetic/business.txt", FileKind::Chats, None)
+        .add("archive/synthetic/universe.txt", FileKind::Chats, None)
+        .add("archive/synthetic/world_basics.txt", FileKind::Chats, None)
+        .add("archive/synthetic/daily_life.txt", FileKind::Chats, None)
         // .add("archive/synthetic/social_life.txt", FileKind::Chats, None)
-        // // .add("archive/synthetic/puzzles.txt", FileKind::Chats, None) // too short answers in data
-        // // .add("archive/synthetic/commands.txt", FileKind::Chats, None) // too short answers in data
-        // .add("archive/synthetic/memory.txt", FileKind::Chats, None)
+        // .add("archive/synthetic/puzzles.txt", FileKind::Chats, None) // too short answers in data
+        // .add("archive/synthetic/commands.txt", FileKind::Chats, None) // too short answers in data
+        .add("archive/synthetic/memory.txt", FileKind::Chats, None)
         // .add("data/creative_stories.txt", FileKind::Stories, None)
-        // // // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, Some(50_000))
-        // // // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None);
-        // // // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, None)
-        // .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, None);
-        // // // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // // // .add("archive/ov_chats.txt", FileKind::Chats, None)
+        // .add("data/Dictionary/Oxford/Oxford_English_Dictionary.txt",   FileKind::SpecificDict, None)
+        // .add("archive/handcrafted_pairs.txt", FileKind::Chats, None)
         // .add("archive/ov_chats.txt", FileKind::Chats, None)
-        // // // // .add("archive/you_chats.txt", FileKind::Chats, None)
-        // // // // .add("archive/you_chats.txt", FileKind::Chats, None)
-        // // // // .add("archive/you_chats.txt", FileKind::Chats, None)
+        // .add("data/The-Office-Lines-V4.csv",   FileKind::DialogueCsv, None)
+        // .add("data/friends_all_episodes_clean.csv",   FileKind::FriendsCsv, None)
+        // .add("archive/ov_chats.txt", FileKind::Chats, None)
+        // .add("archive/ov_chats.txt", FileKind::Chats, None)
+        // .add("archive/ov_chats.txt", FileKind::Chats, None)
         // .add("archive/you_chats.txt", FileKind::Chats, None)
-        // // // // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        // // // // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        // // // // .add("archive/clean_chats.txt", FileKind::Chats, None)
-        // .add("archive/clean_chats.txt", FileKind::Chats, None);
-        // UltraChat conversations: multi-turn dialogue dataset in data/ultrachat/
-        // Point to a specific split or the whole folder (with optional per-file limit).
-        // .add("data/ultrachat/train_sft.csv", FileKind::UltrachatCsv, None)
-        // .add("data/ultrachat/train_gen.csv", FileKind::UltrachatCsv, None); // downloaded from kaggle :)
+        // .add("archive/you_chats.txt", FileKind::Chats, None)
+        // .add("archive/you_chats.txt", FileKind::Chats, None)
+        .add("archive/you_chats.txt", FileKind::Chats, None)
+        // .add("archive/clean_chats.txt", FileKind::Chats, None)
+        // .add("archive/clean_chats.txt", FileKind::Chats, None)
+        // .add("archive/clean_chats.txt", FileKind::Chats, None)
+        .add("archive/clean_chats.txt", FileKind::Chats, None);
+        // // UltraChat conversations: multi-turn dialogue dataset in data/ultrachat/
+        // // Point to a specific split or the whole folder (with optional per-file limit).
+        // // .add("data/ultrachat/train_sft.csv", FileKind::UltrachatCsv, None)
+        // // .add("data/ultrachat/train_gen.csv", FileKind::UltrachatCsv, None); // downloaded from kaggle :)
         // .add("data/ultrachat", FileKind::UltrachatCsv, None);
         // .add(vec![
         //         "data/ebooks/faa-h-8083-25c.pdf".to_string(),

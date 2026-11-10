@@ -1,8 +1,8 @@
 {
   "architecture": "decoder-only",
   "source": "../rust-code",
-  "cache": "training-cache/pretrain/kilo_pretrain.bin",
-  "tokenizer": "training-cache/kilo_talk_tokenizer",
+  "cache": "training-cache/massive/pretrain/samples.bin",
+  "tokenizer": "yumon_bpe",
   "max_seq_len": 256,
   "exclude_dirs": [
     ".git",
@@ -10,23 +10,22 @@
     "node_modules"
   ],
   "seed": 4815162342,
-  "vocab_size": 8192,
-  "embed_dim": 128,
+  "vocab_size": 16384,
+  "embed_dim": 64,
   "n_layers": 6,
   "attn_heads": 4,
-  "ff_dim": 512,
-  "batch_size": 16,
+  "ff_dim": 256,
+  "batch_size": 8,
   "epochs": 10,
   "first_lr": 0.001,
   "last_lr": 0.0001,
-  "validation_fraction": 0.01,
-  "out_dir": "checkpoints/yumon-base-dec-jl-ffn-nectar",
+  "validation_fraction": 0.0002,
+  "out_dir": "checkpoints/yumon-base-dec-jl-ffn-sugar",
   "tie_embeddings": true,
-  "drop_hardest_deciles": 2,
   "eval_stage": "base",
   "jl": {
     "site": "ffn",
-    "dim": 64,
+    "dim": 32,
     "from_layer": 0,
     "seed": 1
   }
