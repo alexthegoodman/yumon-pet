@@ -351,8 +351,36 @@ pub struct YumonDecBrain<B: Backend> {
     dropout: Dropout,
     pub token_head: Linear<B>,
     /// JL maps (config.jl), in this order: one for `residual`, then one per
-    /// affected block for `attention`, then for `ffn`. Last field so older
-    /// records load as `LegacyDecBrain`.
+    /// affected block for `attention`, then for `ffn`. Older records load as
+    /// `LegacyDecBrain`.
+    jl: Vec<JlProjection<B>>,
+    /// Factorized embedding (config.token_embed_dim): table width -> model width.
+    embed_in: Option<Linear<B>>,
+    /// Tied head when the head width differs from the table width: head -> table.
+    /// The projections are the last fields so older records load as `JlDecBrain`.
+    head_down: Option<Linear<B>>,
+}
+
+/// Tied-head logits `x E^T`: x [batch, seq, d], table E [vocab, d].
+/// Burn 0.20 / CubeCL 0.9 matmul against the strided `E.transpose()` is wrong on
+/// WGPU when d is not a multiple of 16 (d = 8 or 24 with vocab >= 4096: off by
+/// ~0.6; 16 and 32 exact), so the flat reshape round trip copies it contiguous first.
+pub(crate) fn tied_logits<B: Backend>(x: Tensor<B, 3>, table: Tensor<B, 2>) -> Tensor<B, 3> {
+    let [batch, seq, d] = x.dims();
+    let [vocab, _] = table.dims();
+    let table_t = table.transpose().reshape([d * vocab]).reshape([d, vocab]);
+    x.reshape([batch * seq, d]).matmul(table_t).reshape([batch, seq, vocab])
+}
+
+/// Record layout before the embedding projections.
+#[derive(Module, Debug)]
+struct JlDecBrain<B: Backend> {
+    config: Ignored<YumonDecBrainConfig>,
+    embedding: Embedding<B>,
+    blocks: Vec<DecBlock<B>>,
+    norm: RMSNorm<B>,
+    dropout: Dropout,
+    token_head: Linear<B>,
     jl: Vec<JlProjection<B>>,
 }
 
@@ -367,19 +395,28 @@ struct LegacyDecBrain<B: Backend> {
     token_head: Linear<B>,
 }
 
-/// Loads a record; `config.jl` picks the layout. Without JL maps the legacy layout
-/// reads both pre-JL records and current ones: `jl` is the record's last field and
-/// bincode ignores the trailing empty Vec. (Try-then-fall-back is not an option:
+/// Loads a record; the config picks the layout. A shorter layout also reads newer
+/// records whose trailing fields are empty (bincode ignores the trailing bytes), so
+/// the full layout is only needed with embedding projections, `JlDecBrain` with JL
+/// maps, and `LegacyDecBrain` otherwise. (Try-then-fall-back is not an option:
 /// BinBytesRecorder panics on a short record instead of returning an error.)
 fn load_dec_record<B: Backend, R: Recorder<B>>(recorder: &R, args: R::LoadArgs,
     config: &YumonDecBrainConfig, device: &B::Device) -> Result<YumonDecBrainRecord<B>> {
-    if config.active_jl().is_some() {
-        return recorder.load(args, device).map_err(|e| anyhow::anyhow!("load: {e:?}"));
+    let err = |e| anyhow::anyhow!("load: {e:?}");
+    if config.embed_in_dims().is_some() || config.head_down_dims().is_some() {
+        return recorder.load(args, device).map_err(err);
     }
-    let old = recorder.load::<LegacyDecBrainRecord<B>>(args, device).map_err(|e| anyhow::anyhow!("load: {e:?}"))?;
+    if config.active_jl().is_some() {
+        let old = recorder.load::<JlDecBrainRecord<B>>(args, device).map_err(err)?;
+        return Ok(YumonDecBrainRecord {
+            config: old.config, embedding: old.embedding, blocks: old.blocks, norm: old.norm,
+            dropout: old.dropout, token_head: old.token_head, jl: old.jl, embed_in: None, head_down: None,
+        });
+    }
+    let old = recorder.load::<LegacyDecBrainRecord<B>>(args, device).map_err(err)?;
     Ok(YumonDecBrainRecord {
-        config: old.config, embedding: old.embedding, blocks: old.blocks,
-        norm: old.norm, dropout: old.dropout, token_head: old.token_head, jl: Vec::new(),
+        config: old.config, embedding: old.embedding, blocks: old.blocks, norm: old.norm,
+        dropout: old.dropout, token_head: old.token_head, jl: Vec::new(), embed_in: None, head_down: None,
     })
 }
 #[derive(Config, Debug)]
@@ -403,6 +440,13 @@ pub struct YumonDecBrainConfig {
     /// Johnson-Lindenstrauss projection experiment (jl.rs, docs/JL.md).
     #[config(default = "None")]
     pub jl: Option<JlSet>,
+    /// Logits from the token embedding table (h E^T) instead of a separate head.
+    #[config(default = false)]
+    pub tie_embeddings: bool,
+    /// Token embedding table width when it differs from `embed_dim` (the model
+    /// width); a learned projection maps it to the model width.
+    #[config(default = "None")]
+    pub token_embed_dim: Option<usize>,
 }
 
 /// Widths of one block: residual, MLP hidden, per-head attention, MLP input.
@@ -436,6 +480,21 @@ impl YumonDecBrainConfig {
         let mlp_in = self.jl_covers(JlSite::Ffn, layer).unwrap_or(width);
         BlockWidths { width, ff, head, mlp_in }
     }
+    /// Width of the token embedding table.
+    pub fn effective_token_embed_dim(&self) -> usize {
+        self.token_embed_dim.unwrap_or(self.embed_dim)
+    }
+    /// (from, to) of the table -> model width projection, when factorized.
+    fn embed_in_dims(&self) -> Option<(usize, usize)> {
+        let table = self.effective_token_embed_dim();
+        (table != self.embed_dim).then_some((table, self.embed_dim))
+    }
+    /// (from, to) of the head -> table projection: tied, and the head width
+    /// (embed_dim, or a residual JL map's width) differs from the table's.
+    fn head_down_dims(&self) -> Option<(usize, usize)> {
+        let (head, table) = (self.width_at(self.n_layers), self.effective_token_embed_dim());
+        (self.tie_embeddings && head != table).then_some((head, table))
+    }
     /// Maps per site in `YumonDecBrain.jl`: residual, attention, ffn.
     fn jl_counts(&self) -> [usize; 3] {
         let per_block = |site| self.jl_from(site).map_or(0, |from| self.n_layers - from);
@@ -466,9 +525,21 @@ impl YumonDecBrainConfig {
             }
         }
         let out_width = self.width_at(self.n_layers);
+        // N(0, 1/fan_in) keeps the activation scale through each projection.
+        let projection = |(from, to): (usize, usize)| LinearConfig::new(from, to)
+            .with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 1.0 / (from as f64).sqrt() })
+            .with_bias(false)
+            .init(device);
+        let embedding = EmbeddingConfig::new(self.vocab_size, self.effective_token_embed_dim());
+        // A tied table is also the head: N(0, 0.02) keeps the first logits small.
+        let embedding = if self.tie_embeddings {
+            embedding.with_initializer(burn::nn::Initializer::Normal { mean: 0.0, std: 0.02 })
+        } else {
+            embedding
+        };
         YumonDecBrain {
             config: Ignored(self.clone()),
-            embedding: EmbeddingConfig::new(self.vocab_size, self.embed_dim).init(device),
+            embedding: embedding.init(device),
             blocks: (0..self.n_layers)
                 .map(|layer| {
                     let w = self.block_widths(layer);
@@ -486,19 +557,30 @@ impl YumonDecBrainConfig {
                 .collect(),
             norm: RMSNormConfig::new(out_width).init(device),
             dropout: DropoutConfig::new(self.dropout_rate).init(),
-            token_head: LinearConfig::new(out_width, self.vocab_size).init(device),
+            // Unused 1 x 1 placeholder when tied.
+            token_head: if self.tie_embeddings {
+                LinearConfig::new(1, 1).init(device)
+            } else {
+                LinearConfig::new(out_width, self.vocab_size).init(device)
+            },
             jl,
+            embed_in: self.embed_in_dims().map(projection),
+            head_down: self.head_down_dims().map(projection),
         }
     }
     /// Weights in the model, embeddings, head and JL maps included.
     pub fn param_count(&self) -> usize {
-        let (d, v, h) = (self.embed_dim, self.vocab_size, self.attn_heads);
+        let (v, h) = (self.vocab_size, self.attn_heads);
         let blocks: usize = (0..self.n_layers).map(|layer| {
             let w = self.block_widths(layer);
             3 * w.width * w.width + h * w.head * w.width + 2 * w.width + 2 * w.mlp_in * w.ff + w.ff * w.width
         }).sum();
         let out = self.width_at(self.n_layers);
-        v * d + blocks + out + out * v + v + self.jl_param_count()
+        // Tied: only the 1 x 1 placeholder (weight and bias).
+        let head = if self.tie_embeddings { 2 } else { out * v + v };
+        let projections: usize = [self.embed_in_dims(), self.head_down_dims()].into_iter().flatten()
+            .map(|(from, to)| from * to).sum();
+        v * self.effective_token_embed_dim() + projections + blocks + out + head + self.jl_param_count()
     }
     /// Weights in the JL maps (frozen unless jl.trainable).
     pub fn jl_param_count(&self) -> usize {
@@ -522,7 +604,7 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         -> (Tensor<B, 3>, Vec<(Tensor<B, 3>, Tensor<B, 3>)>) {
         let [_, seq] = tokens.dims();
         let ropes = self.ropes(seq, &tokens.device());
-        let mut x = self.embedding.forward(tokens);
+        let mut x = self.embed(tokens);
         let mut trace = Vec::with_capacity(self.blocks.len());
         for (layer, block) in self.blocks.iter().enumerate() {
             x = self.residual_jl(layer, x);
@@ -532,7 +614,28 @@ impl<B: FlashAttention> YumonDecBrain<B> {
             x = next;
         }
         x = self.residual_jl(self.blocks.len(), x);
-        (self.token_head.forward(self.norm.forward(x)), trace)
+        (self.head(x), trace)
+    }
+
+    /// Token embeddings at model width (through `embed_in` when factorized).
+    fn embed(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+        let x = self.embedding.forward(tokens);
+        match &self.embed_in {
+            Some(up) => up.forward(x),
+            None => x,
+        }
+    }
+    /// Final norm, then the head (or the embedding table when tied).
+    fn head(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        let x = self.norm.forward(x);
+        if !self.config.tie_embeddings {
+            return self.token_head.forward(x);
+        }
+        let x = match &self.head_down {
+            Some(down) => down.forward(x),
+            None => x,
+        };
+        tied_logits(x, self.embedding.weight.val())
     }
 
     /// The JL map block `layer` applies itself.
@@ -568,13 +671,13 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         let [_, seq] = tokens.dims();
         assert!(seq > 0 && seq <= self.config.max_seq_len);
         let ropes = self.ropes(seq, &tokens.device());
-        let mut x = self.dropout.forward(self.embedding.forward(tokens));
+        let mut x = self.dropout.forward(self.embed(tokens));
         for (layer, block) in self.blocks.iter().enumerate() {
             x = self.residual_jl(layer, x);
             x = block.forward(x, ropes.at(layer), self.block_jl(layer));
         }
         x = self.residual_jl(self.blocks.len(), x);
-        self.token_head.forward(self.norm.forward(x))
+        self.head(x)
     }
 
     /// Logits [1, t, vocab] for `t` new tokens after those already in `cache`.
@@ -586,14 +689,14 @@ impl<B: FlashAttention> YumonDecBrain<B> {
             narrow: cache.next_narrow_rope(t),
             from: self.config.jl_from(JlSite::Residual).unwrap_or(usize::MAX),
         };
-        let mut x = self.embedding.forward(tokens);
+        let mut x = self.embed(tokens);
         for (layer, block) in self.blocks.iter().enumerate() {
             x = self.residual_jl(layer, x);
             x = block.forward_cached(x, ropes.at(layer), self.block_jl(layer), cache.layer(layer));
         }
         x = self.residual_jl(self.blocks.len(), x);
         cache.advance(t);
-        self.token_head.forward(self.norm.forward(x))
+        self.head(x)
     }
 
     pub fn new_kv_cache(&self, device: &B::Device) -> KvCache<B> {
@@ -700,6 +803,11 @@ pub struct DecMetadata {
     pub max_seq_len: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jl: Option<JlSet>,
+    /// Absent in checkpoints from before decoder tying (all untied).
+    #[serde(default)]
+    pub tie_embeddings: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_embed_dim: Option<usize>,
 }
 impl DecMetadata {
     pub fn config(&self) -> YumonDecBrainConfig {
@@ -714,6 +822,8 @@ impl DecMetadata {
             ff_dim: self.ff_dim,
             max_seq_len: self.max_seq_len,
             jl: self.jl.clone(),
+            tie_embeddings: self.tie_embeddings,
+            token_embed_dim: self.token_embed_dim,
         }
     }
 }
@@ -1215,6 +1325,8 @@ mod tests {
             ff_dim: config.ff_dim,
             max_seq_len: config.max_seq_len,
             jl: None,
+            tie_embeddings: false,
+            token_embed_dim: None,
         };
         model.save(path.to_str().unwrap(), &tokenizer, &meta).unwrap();
         let (restored, tok, restored_config) =
@@ -1344,6 +1456,80 @@ mod tests {
         let (restored, _, restored_config) = YumonDecBrain::<Inner>::load_from_bytes(&bytes, &tokenizer_bytes, &meta(Some(jl.clone())), &device).unwrap();
         assert_eq!(restored_config.jl, Some(jl));
         assert_close(values(model.forward(input())), values(restored.forward(input())), 1e-6, "jl roundtrip");
+    }
+
+    /// `tied_logits` is exact at widths that are not a multiple of 16 (where a
+    /// matmul against the strided transpose is wrong on WGPU).
+    #[test]
+    fn tied_logits_match_reference() {
+        let device = Default::default();
+        let (m, v) = (12usize, 4096usize);
+        for k in [8usize, 16, 24] {
+            let xv: Vec<f32> = (0..m * k).map(|i| ((i * 7919 % 101) as f32 / 101.0) - 0.5).collect();
+            let wv: Vec<f32> = (0..v * k).map(|i| ((i * 104729 % 211) as f32 / 211.0) - 0.5).collect();
+            let x = Tensor::<Inner, 3>::from_data(TensorData::new(xv.clone(), [1, m, k]), &device);
+            let w = Tensor::<Inner, 2>::from_data(TensorData::new(wv.clone(), [v, k]), &device);
+            let reference: Vec<f32> = (0..m)
+                .flat_map(|i| { let (xv, wv) = (&xv, &wv); (0..v).map(move |j| (0..k).map(|c| xv[i * k + c] * wv[j * k + c]).sum::<f32>()) })
+                .collect();
+            assert_close(values(tied_logits(x, w)), reference, 1e-5, &format!("tied logits width {k}"));
+        }
+    }
+
+    /// Tied and factorized embeddings (with and without a residual JL map): param
+    /// count, cached decoding, gradients into the table and a checkpoint round trip.
+    #[test]
+    fn decoder_tied_and_factorized_embeddings() {
+        let device = Default::default();
+        let tokenizer = TokenizerKind::Bpe(BpeTokenizer::load("yumon_bpe").unwrap());
+        let tokenizer_bytes = match &tokenizer {
+            TokenizerKind::Bpe(t) => t.inner.to_string(false).unwrap().into_bytes(),
+            _ => unreachable!(),
+        };
+        let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+        let ids: Vec<i32> = (0..12).map(|i| 4 + (i * 5) % 28).collect();
+        let tensor = |ids: &[i32]| Tensor::<Inner, 2, Int>::from_ints(TensorData::new(ids.to_vec(), [1, ids.len()]), &device);
+        // tiny_config: width 16.
+        let cases = [(true, None, None), (true, Some(24), None), (false, Some(24), None), (true, Some(8), None),
+            (true, None, Some("residual:8@1")), (true, Some(24), Some("residual:8@0"))];
+        for (tie, table, jl) in cases {
+            let what = format!("tie {tie}, table {table:?}, jl {jl:?}");
+            let mut config = tiny_config().with_max_seq_len(16).with_tie_embeddings(tie).with_token_embed_dim(table)
+                .with_jl(jl.map(|s| JlSet::parse(s).unwrap()));
+            config.vocab_size = tokenizer.vocab_size();
+            let model: YumonDecBrain<Inner> = config.init(&device);
+            assert_eq!(model.num_params(), config.param_count(), "{what}");
+            assert_eq!(model.embedding.weight.dims(), [config.vocab_size, table.unwrap_or(16)], "{what}");
+            let full = values(model.forward(tensor(&ids)));
+            assert_eq!(full.len(), 12 * config.vocab_size, "{what}");
+            let mut cache = model.new_kv_cache(&device);
+            let mut cached = Vec::new();
+            let mut start = 0;
+            for n in [4, 1, 1, 3, 1, 2] {
+                cached.extend(values(model.forward_cached(tensor(&ids[start..start + n]), &mut cache)));
+                start += n;
+            }
+            assert_close(cached, full.clone(), 1e-4, &format!("cached logits {what}"));
+            // The tied table gets gradient from the head; the placeholder gets none.
+            let trained: YumonDecBrain<Balanced> = config.init(&device);
+            let grads = trained.forward(Tensor::from_ints([[1, 4, 5, 6]], &device)).powf_scalar(2.0).mean().backward();
+            assert!(trained.embedding.weight.val().grad(&grads).is_some(), "{what}");
+            assert_eq!(trained.token_head.weight.val().grad(&grads).is_some(), !tie, "{what}");
+            for proj in trained.embed_in.iter().chain(&trained.head_down) {
+                assert!(proj.weight.val().grad(&grads).is_some(), "{what}");
+            }
+            let meta = serde_json::json!({
+                "dropout_rate": 0.0, "vocab_size": config.vocab_size, "epochs_trained": 1, "final_loss": 1.0,
+                "batch_size": 1, "training_stage": config.training_stage, "embed_dim": config.embed_dim,
+                "hidden_units": config.hidden_units, "n_layers": config.n_layers, "attn_heads": config.attn_heads,
+                "ff_dim": config.ff_dim, "max_seq_len": config.max_seq_len, "jl": config.jl,
+                "tie_embeddings": tie, "token_embed_dim": table,
+            }).to_string();
+            let bytes = recorder.record(model.clone().into_record(), ()).unwrap();
+            let (restored, _, restored_config) = YumonDecBrain::<Inner>::load_from_bytes(&bytes, &tokenizer_bytes, &meta, &device).unwrap();
+            assert_eq!((restored_config.tie_embeddings, restored_config.token_embed_dim), (tie, table), "{what}");
+            assert_close(values(restored.forward(tensor(&ids))), full, 1e-6, &format!("roundtrip {what}"));
+        }
     }
 
     #[test]

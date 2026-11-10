@@ -3,7 +3,7 @@
 //! Activations/weights stay on device. Benchmark the synchronization overhead.
 use super::{
     bpe::{BpeTokenizer, TokenizerKind},
-    decoder_model::{KvCache, KvSlot, RopeTables, append_kv, apply_rope, cached_attention, generate_causal_cached, repeat_kv},
+    decoder_model::{KvCache, KvSlot, RopeTables, append_kv, apply_rope, cached_attention, generate_causal_cached, repeat_kv, tied_logits},
     flash_attn::backend::{FlashAttention, causal_flash_attention},
     model::{GenerationResult, MLP, MLPConfig, RMSNorm, RMSNormConfig},
     samples::TrainingStage,
@@ -692,10 +692,7 @@ impl<B: FlashAttention> YumonMoeBrain<B> {
                 Some(down) => down.forward(normed_x),
                 None => normed_x,
             };
-            let [batch, seq, token_dim] = normed_x.dims();
-            let flat = normed_x.reshape([batch * seq, token_dim]);
-            let logits_flat = flat.matmul(self.embedding.weight.val().transpose());
-            logits_flat.reshape([batch, seq, self.config.vocab_size])
+            tied_logits(normed_x, self.embedding.weight.val())
         } else {
             self.token_head.forward(normed_x)
         }

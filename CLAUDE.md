@@ -367,3 +367,15 @@ takes comma-separated specs). Maps are stored residual, then attention, then ffn
 maps see the residual's narrow width. `train_code` on a full Pet text cache (not RawCode,
 no curriculum/docs) loads the tokenizer plainly like `cache_samples`, so the lowercasing
 `yumon_bpe` works; the cache mismatch error prints both fingerprints.
+
+Decoder tying (2026-11-10): `tie_embeddings` was ignored by decoder-only until now (the
+`_tied` decoder runs, sunrise included, are untied). `YumonDecBrain` now ties (logits =
+h E^T, table N(0, 0.02), `token_head` a 1 x 1 placeholder) and takes `token_embed_dim`:
+table vocab x T, `embed_in` T -> embed_dim, and when tied `head_down` head width -> T
+(head width is the residual JL width when there is one). Record layouts: full only with a
+projection, else `JlDecBrain` (JL maps) or `LegacyDecBrain`; metadata gains
+`tie_embeddings` / `token_embed_dim` (absent = untied). Resuming an old untied `_tied`
+directory with tying on errors; use a new out_dir. Burn 0.20 / CubeCL 0.9 matmul against
+a strided `E.transpose()` is wrong on WGPU when the width is not a multiple of 16 (8, 24:
+off by ~0.6), so `tied_logits` (decoder_model.rs, also used by MoE) copies the transpose
+contiguous via a flat reshape. Tests pass; no training runs yet.

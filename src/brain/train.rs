@@ -257,7 +257,7 @@ pub struct RunConfig {
     /// None = AdamW; see brain::optimizers.
     #[cfg(not(target_arch = "wasm32"))]
     pub optimizer: Option<crate::brain::optimizers::OptimizerConfig>,
-    /// MoE token embedding width; None = embed_dim (no projections).
+    /// MoE / decoder-only token embedding width; None = embed_dim (no projections).
     pub token_embed_dim: Option<usize>,
     /// MoE router / expert hyperparameter overrides, each with its own optimizer.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1498,9 +1498,29 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
             .with_n_layers(run_cfg.n_layers).with_attn_heads(run_cfg.attn_heads)
             .with_ff_dim(run_cfg.ff_dim).with_max_seq_len(run_cfg.max_seq_len)
             .with_dropout_rate(run_cfg.dropout_rate)
-            .with_jl(run_cfg.jl.clone());
-        println!("Decoder-only: {:.2}M parameters, flash attention, BalancedCheckpointing.",
-            config.param_count() as f64 / 1e6);
+            .with_jl(run_cfg.jl.clone())
+            .with_tie_embeddings(run_cfg.tie_embeddings)
+            .with_token_embed_dim(run_cfg.token_embed_dim);
+        println!("Decoder-only: {:.2}M parameters, flash attention, BalancedCheckpointing{}.",
+            config.param_count() as f64 / 1e6, if config.tie_embeddings { ", tied embeddings" } else { "" });
+        let table = config.effective_token_embed_dim();
+        let head = config.width_at(config.n_layers);
+        if table != config.embed_dim || (config.tie_embeddings && table != head) {
+            println!("Embedding table {} x {table}, projected to width {}{}.", config.vocab_size, config.embed_dim,
+                if config.tie_embeddings && table != head { format!("; tied head projects {head} back to {table}") } else { String::new() });
+        }
+        let same = |saved: &YumonDecBrainConfig| saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
+            && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
+            && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
+            && saved.jl == config.jl && saved.token_embed_dim == config.token_embed_dim;
+        // Decoder runs named `_tied` before tying existed hold untied weights.
+        let same_tie = |saved: &YumonDecBrainConfig| -> Result<()> {
+            anyhow::ensure!(saved.tie_embeddings == config.tie_embeddings,
+                "decoder checkpoint has tie_embeddings = {}, run asks for {} (decoder checkpoints from before \
+                 decoder tying are untied even if the run name says _tied; use a new out_dir to train tied)",
+                saved.tie_embeddings, config.tie_embeddings);
+            Ok(())
+        };
         if let Some(set) = run_cfg.jl.as_ref().filter(|j| j.active()) {
             for jl in &set.0 {
                 println!("JL projection {:?} to {} from layer {} ({}).",
@@ -1514,22 +1534,16 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
             if let Some(init_path) = &run_cfg.init_checkpoint {
                 println!("Initializing decoder weights from base checkpoint: {}", init_path.display());
                 let (m, checkpoint_tokenizer, saved) = Self::load(init_path.to_str().unwrap(), device)?;
-                anyhow::ensure!(saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
-                    && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
-                    && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
-                    && saved.jl == config.jl,
-                    "Base decoder checkpoint configuration differs from requested fine-tuning run");
+                anyhow::ensure!(same(&saved), "Base decoder checkpoint configuration differs from requested fine-tuning run");
+                same_tie(&saved)?;
                 ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
                 return Ok((m, 0));
             }
             return Ok((config.init(device), 0));
         }
         let (m, checkpoint_tokenizer, saved) = Self::load(run_dir.to_str().unwrap(), device)?;
-        anyhow::ensure!(saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
-            && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
-            && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
-            && saved.jl == config.jl,
-            "decoder checkpoint configuration differs from requested run");
+        anyhow::ensure!(same(&saved), "decoder checkpoint configuration differs from requested run");
+        same_tie(&saved)?;
         ensure_same_tokenizer(tokenizer, &checkpoint_tokenizer)?;
         let meta: DecMetadata = serde_json::from_str(&std::fs::read_to_string(run_dir.join("metadata.json"))?)?;
         Ok((m, meta.epochs_trained))
@@ -1555,6 +1569,8 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
             ff_dim:         p.run_cfg.ff_dim,
             max_seq_len:    p.run_cfg.max_seq_len,
             jl:             self.config.jl.clone(),
+            tie_embeddings: self.config.tie_embeddings,
+            token_embed_dim: self.config.token_embed_dim,
         };
         self.save(dir, tokenizer, &meta)
     }
