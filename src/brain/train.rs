@@ -1800,6 +1800,7 @@ where
     let is_yumon_talk = is_yumon_talk_run(&run_cfg.name, tokenizer, raw_code);
     let run_dir_str = run_dir.to_str().unwrap();
     let (mut model, mut epochs_already_done) = M::init_or_resume(run_cfg, tokenizer, run_dir, device)?;
+    crate::brain::model_summary::print_model_summary::<TrainBackend, M>(&model);
     let ref_model: Option<M> = if is_dpo {
         println!("Cloning frozen reference model for DPO preference optimization...");
         Some(model.clone())

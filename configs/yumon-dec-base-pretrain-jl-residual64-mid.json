@@ -1,8 +1,8 @@
 {
   "architecture": "decoder-only",
   "source": "../rust-code",
-  "cache": "training-cache/pretrain/kilo_pretrain.bin",
-  "tokenizer": "training-cache/kilo_talk_tokenizer",
+  "cache": "training-cache/massive/pretrain/samples.bin",
+  "tokenizer": "yumon_bpe",
   "max_seq_len": 256,
   "exclude_dirs": [
     ".git",
@@ -10,24 +10,23 @@
     "node_modules"
   ],
   "seed": 4815162342,
-  "vocab_size": 8192,
-  "embed_dim": 128,
+  "vocab_size": 16384,
+  "embed_dim": 1024,
   "n_layers": 6,
-  "attn_heads": 4,
-  "ff_dim": 512,
-  "batch_size": 16,
-  "epochs": 10,
+  "attn_heads": 16,
+  "ff_dim": 4096,
+  "batch_size": 2,
+  "epochs": 2,
   "first_lr": 0.001,
   "last_lr": 0.0001,
-  "validation_fraction": 0.01,
-  "out_dir": "checkpoints/yumon-base-dec-jl-honey",
+  "validation_fraction": 0.0002,
+  "out_dir": "checkpoints/yumon-base-dec-jl-residual-spacetime",
   "tie_embeddings": true,
-  "drop_hardest_deciles": 2,
   "eval_stage": "base",
   "jl": {
     "site": "residual",
-    "dim": 64,
-    "from_layer": 3,
+    "dim": 32,
+    "from_layer": 1,
     "seed": 1
   }
 }

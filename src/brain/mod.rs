@@ -50,6 +50,7 @@ pub mod loss_stats;
 pub mod adaptive_loss;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod optimizers;
+pub mod model_summary;
 pub mod keywords;
 pub mod fixer;
 pub mod loader;
