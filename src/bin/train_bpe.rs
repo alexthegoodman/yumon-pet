@@ -31,7 +31,7 @@ fn main() -> anyhow::Result<()> {
         let output = args.output.unwrap_or_else(|| "yumon_bpe".into());
         
         let sentences = stage_data_loader(TrainingStage::Language)
-            .total_limit(1_500_000)
+            .total_limit(2_500_000)
             .seed(4815162342)
             .load_sentences()?;
 
@@ -47,8 +47,8 @@ fn main() -> anyhow::Result<()> {
         BpeTokenizer::train(
             sentences.iter().collect(), 
             // 65536, // near GPT-2
-            16384 // expressive (runpod)
-            // 2048 // more budget (local)
+            // 16384 // expressive (runpod)
+            2048 // more budget (local)
             // 1024
             // 4096 // medium
         )?.save(

@@ -10,7 +10,7 @@
     "node_modules"
   ],
   "seed": 4815162342,
-  "vocab_size": 16384,
+  "vocab_size": 2048,
   "token_embed_dim": 512,
   "embed_dim": 128,
   "n_layers": 6,
