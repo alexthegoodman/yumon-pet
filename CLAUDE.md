@@ -379,3 +379,12 @@ directory with tying on errors; use a new out_dir. Burn 0.20 / CubeCL 0.9 matmul
 a strided `E.transpose()` is wrong on WGPU when the width is not a multiple of 16 (8, 24:
 off by ~0.6), so `tied_logits` (decoder_model.rs, also used by MoE) copies the transpose
 contiguous via a flat reshape. Tests pass; no training runs yet.
+
+Yumon Swarm (2026-11-11): plan only, see docs/SWARM.md. Tiny specialist decoders
+(planners write Rust skeletons with typed `hole!(kind)` holes, workers fill one hole
+kind each, written glue routes/splices/checks with syn and cargo check), all
+fine-tuned from `checkpoints/yumon-code-dec-sugar-maniac` (~187k params, 2,048-token
+code BPE, tied). Roles read the full vocab and write from 256 rows of the tied table.
+Input is `///` doc comments; no Kilo Code. Code goes in `swarm/` (own crate, path
+dependency on yumon-pet). Phases 0-6 end with RL on cargo check error codes. Nothing
+built yet.
