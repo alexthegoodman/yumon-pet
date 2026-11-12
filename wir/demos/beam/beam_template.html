@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WIR Beam</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap">
+<style>
+:root {
+  --bg: #f3f0e8;
+  --surface: #fbf9f4;
+  --ink: #221e1a;
+  --muted: #6a6358;
+  --line: #d9d3c5;
+  --accent: #1d7a8a;       /* teal: the chosen beams */
+  --accent-ink: #ffffff;
+  --warm: #c2571a;         /* rust: the optimum, and misses */
+  --good: #2e7d4f;
+  --danger: #b3382c;
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #171512; --surface: #1f1c18; --ink: #ebe6dc; --muted: #a49c8e; --line: #36312a;
+    --accent: #4fb3c4; --accent-ink: #0d1a1d; --warm: #e8884a; --good: #6cc08d; --danger: #e0786c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #171512; --surface: #1f1c18; --ink: #ebe6dc; --muted: #a49c8e; --line: #36312a;
+  --accent: #4fb3c4; --accent-ink: #0d1a1d; --warm: #e8884a; --good: #6cc08d; --danger: #e0786c;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--font-body); padding-inline: 16px; padding-block: 22px 44px; }
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 18px; }
+h1 { font: 700 clamp(30px, 4.4vw, 44px)/1.05 var(--font-display); letter-spacing: -.01em; margin: 0 0 6px; text-wrap: balance; }
+h1 span { color: var(--accent); }
+.lede { margin: 0; color: var(--muted); max-width: 74ch; }
+section.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; display: grid; gap: 10px; min-width: 0; align-content: start; }
+.panel h2 { margin: 0; font: 600 12px/1.2 var(--font-body); text-transform: uppercase; letter-spacing: .09em; color: var(--muted); }
+.hint { margin: 0; font-size: 13px; color: var(--muted); }
+.row { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+label.lab { font-size: 13px; color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+select { font: 500 14px var(--font-body); padding: 7px 9px; border-radius: 5px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+button.btn { font: 500 14px/1 var(--font-body); padding: 9px 14px; border-radius: 5px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+button.btn:hover:not(:disabled) { border-color: var(--muted); }
+button.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.btn:disabled { opacity: .5; cursor: default; }
+button:focus-visible, select:focus-visible, td.cell:focus-visible { outline: 2px solid var(--warm); outline-offset: 2px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.seg button { font: 500 13px/1 var(--font-mono); min-width: 34px; padding: 9px 0; border: 0; background: var(--bg); color: var(--ink); cursor: pointer; border-right: 1px solid var(--line); }
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.status { font: 500 14px/1.45 var(--font-body); min-height: 2.9em; }
+.status b { font-weight: 600; }
+.gridwrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); }
+table.grid { border-collapse: collapse; width: 100%; min-width: 980px; font: 400 12px/1.2 var(--font-mono); }
+table.grid th { font-weight: 600; color: var(--muted); padding: 6px 4px; white-space: nowrap; text-align: center; border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0; }
+table.grid th.beam { text-align: left; min-width: 190px; max-width: 190px; position: sticky; left: 0; z-index: 1; padding-left: 10px; font-family: var(--font-body); white-space: normal; background: var(--surface); border-right: 1px solid var(--line); }
+table.grid th.beam small { display: block; font: 400 11px var(--font-mono); color: var(--muted); }
+table.grid th.beam.idle { opacity: .45; }
+table.grid th.beam.ended { color: var(--good); }
+table.grid td { text-align: center; height: 38px; min-width: 52px; border: 1px solid color-mix(in srgb, var(--line) 70%, transparent); position: relative; cursor: default; background: color-mix(in srgb, var(--accent) calc(var(--t, 0) * 38%), transparent); font-variant-numeric: tabular-nums; }
+table.grid td .rk { position: absolute; top: 2px; right: 3px; font-size: 9px; color: var(--muted); }
+table.grid td.pick { background: var(--accent); color: var(--accent-ink); font-weight: 600; box-shadow: inset 0 0 0 2px var(--surface); }
+table.grid td.pick .rk { color: var(--accent-ink); opacity: .85; }
+table.grid td.dead { background: repeating-linear-gradient(135deg, transparent 0 5px, color-mix(in srgb, var(--line) 80%, transparent) 5px 6px); color: var(--muted); }
+table.grid td.idle { opacity: .35; }
+table.grid td.sel { outline: 2px solid var(--warm); outline-offset: -2px; }
+.picks { display: grid; gap: 4px; font: 400 13px/1.45 var(--font-mono); margin: 0; padding: 0; list-style: none; }
+.picks li { display: grid; grid-template-columns: 3ch minmax(0, 1fr) auto; gap: 10px; align-items: baseline; }
+.picks .n { color: var(--muted); }
+.picks .done { color: var(--good); }
+.cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: start; }
+@media (max-width: 860px) { .cols { grid-template-columns: minmax(0, 1fr); } }
+table.refs { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.refs th { text-align: left; font-weight: 500; color: var(--muted); padding: 3px 6px 3px 0; }
+table.refs td { padding: 4px 6px 4px 0; border-top: 1px solid var(--line); vertical-align: baseline; }
+table.refs td.num { font: 400 12px var(--font-mono); text-align: right; white-space: nowrap; }
+table.refs td.mark { width: 3.5em; font: 600 11px var(--font-mono); white-space: nowrap; }
+table.refs tr.opt td { color: var(--ink); }
+table.refs tr.cur td:first-child { box-shadow: inset 3px 0 0 var(--accent); padding-left: 6px; }
+.ok { color: var(--good); } .miss { color: var(--warm); }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); gap: 10px; }
+.stats div { display: grid; }
+.stats b { font: 700 20px/1.1 var(--font-display); font-variant-numeric: tabular-nums; }
+.stats span { font-size: 12px; color: var(--muted); }
+details summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+pre.src { max-height: 340px; overflow: auto; font: 12px/1.5 var(--font-mono); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 10px; white-space: pre; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--muted); }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: -2px; margin-right: 5px; border: 1px solid var(--line); }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>WIR <span>Beam</span></h1>
+    <p class="lede">Beam search needs one decision at every step: of all the beams times all the tokens, which few survive? Here that decision is a written neural network, attention heads and ReLU layers compiled from WIR source with no training. A toy bigram model supplies the costs; the host only runs the loop.</p>
+  </header>
+
+  <section class="panel">
+    <h2>Search</h2>
+    <div class="row">
+      <label class="lab">Starts after <select id="prompt" aria-label="Starting word"></select></label>
+      <label class="lab">Cost grain <select id="unit" aria-label="Cost units per nat"></select></label>
+      <span class="row" role="group" aria-label="Beam width" style="gap:8px"><span class="lab" id="widthlab">Width</span>
+        <span class="seg" id="width" aria-labelledby="widthlab"></span></span>
+    </div>
+    <div class="row">
+      <button class="btn primary" id="step">Step</button>
+      <button class="btn" id="run">Run</button>
+      <button class="btn" id="reset">Reset</button>
+    </div>
+    <div class="status" id="status" role="status" aria-live="polite"></div>
+    <div class="gridwrap"><table class="grid" id="grid" aria-label="Candidates: every live beam crossed with every word"></table></div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <div class="cols">
+    <section class="panel">
+      <h2>Beams</h2>
+      <ol class="picks" id="beams" aria-label="Current beams, best first"></ol>
+      <p class="hint">Cost is the sum of log-probabilities (nats), including the end token; a beam that ended stays in the list and keeps its cost.</p>
+    </section>
+    <section class="panel">
+      <h2>Against the references</h2>
+      <table class="refs" id="refs"></table>
+      <p class="hint" id="refnote"></p>
+    </section>
+  </div>
+
+  <div class="cols">
+    <section class="panel">
+      <h2>All prompts</h2>
+      <p class="hint">Every starting word, searched to the end, at each width: how often the sentence is the exact best (dynamic programming over this bigram model).</p>
+      <div class="row"><button class="btn" id="score">Score all prompts</button><span class="hint" id="scoreprog"></span></div>
+      <table class="refs" id="scoreboard"></table>
+    </section>
+    <section class="panel">
+      <h2>The network</h2>
+      <div class="stats" id="netstats"></div>
+      <p class="hint" id="netcheck"></p>
+      <details><summary>WIR source</summary><pre class="src" id="src"></pre></details>
+    </section>
+  </div>
+</div>
+
+<script id="beam-data" type="application/json">__DATA__</script>
+<script>__CORE__</script>
+<script>__UI__</script>
+</body>
+</html>

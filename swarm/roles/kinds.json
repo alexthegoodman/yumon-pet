@@ -78,7 +78,7 @@
       ],
       "out_vocab": 256,
       "train": {
-        "epochs": 20
+        "epochs": 5
       }
     },
     {
@@ -88,7 +88,7 @@
       ],
       "out_vocab": 2073,
       "train": {
-        "epochs": 15
+        "epochs": 10
       }
     },
     {
@@ -98,7 +98,7 @@
       ],
       "out_vocab": 2073,
       "train": {
-        "epochs": 30
+        "epochs": 10
       }
     },
     {

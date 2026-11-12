@@ -322,6 +322,23 @@ python demos/chess/build.py chess_demo.json wir-chess.html
 node demos/tests/chess_page.mjs wir-chess.html shots      # Chrome BDD (chess_page.feature)
 ```
 
+### WIR Beam
+
+`wir beam` writes and compiles one beam search step as a 0.3 network (`src/beam.rs`,
+`examples/beam.wir`): inputs `s` (beam cost), `l` (token cost), `fin` per candidate token,
+two count heads rank all beams x tokens by (cost, position), and three `mean` heads read the
+survivor of each rank (cost, parent beam, token); `rank` is an output too. Costs are small
+integers (the host quantizes -log p and subtracts the best beam). See `../docs/WIR.md`
+"WIR Beam".
+
+```
+cargo run --release -- beam --beams 8 --vocab 16 --cap 48 --qmax 31 -o examples/beam.wir --export ../tmp/wir-beam/beam_demo.json
+cargo test --release --test beam                              # incl. every step of a 2 x 3 configuration
+node demos/beam/harness.js ../tmp/wir-beam/beam_demo.json     # vectors, lockstep, quality, speed
+python demos/beam/build.py ../tmp/wir-beam/beam_demo.json demos/beam/wir-beam.html
+node demos/tests/beam_page.mjs demos/beam/wir-beam.html shots # Chrome BDD (beam_page.feature)
+```
+
 ## Library
 
 ```rust
@@ -353,7 +370,7 @@ let text = wir::print(&p, wir::NumFormat::CANONICAL);      // or NumFormat::EXAC
 ## Tests
 
 ```
-cargo test                      # 118 tests, ~60 s debug (fuzz and fluid are the slow ones)
+cargo test                      # 118+ tests, ~60 s debug (fuzz and fluid are the slow ones)
 uv run --project ../python-train python scripts/interop.py   # NumPy 2.5 / PyTorch 2.14 cross-check
 ```
 

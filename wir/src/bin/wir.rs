@@ -95,6 +95,14 @@ usage:
                                         sequence up to --max-len (default: the program's)
                                         and on --sample random longer ones
 
+  wir beam [--beams 4] [--vocab 8] [--cap 24] [--qmax 15] [-o beam.wir] [--steps 20000]
+           [--seed 1] [--export demo.json] [--vectors 256]
+                                        generate the WIR Beam network (0.3: one beam search
+                                        step ranks beams x tokens by cost, keeps the best
+                                        --beams), compile it, print the proven bounds, and
+                                        check --steps random steps (many ties) against the
+                                        reference
+
   wir chess [-o chess.wir] [--boards 100000] [--seed 1] [--export demo.json] [--vectors 256]
                                         generate the WIR Chess network (0.3: attack maps,
                                         evaluation terms, eval), compile it, print the
@@ -186,6 +194,7 @@ fn main() -> ExitCode {
         "superpose-choice-layer" => cmd_superpose_choice_layer(rest),
         "seq" => cmd_seq(rest),
         "chess" => cmd_chess(rest),
+        "beam" => cmd_beam(rest),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
@@ -1271,6 +1280,79 @@ fn cmd_chess(raw: &[String]) -> Result<(), String> {
             "program": src,
             "pst_mg": (0..13u8).map(|p| (0..64).map(|q| wir::chess::pst_signed(p, q, false)).collect::<Vec<_>>()).collect::<Vec<_>>(),
             "pst_eg": (0..13u8).map(|p| (0..64).map(|q| wir::chess::pst_signed(p, q, true)).collect::<Vec<_>>()).collect::<Vec<_>>(),
+            "cost": { "d_model": c.d_model, "blocks": c.blocks, "heads": c.heads, "params": c.params, "nonzero": c.nonzero },
+            "vectors": vectors,
+        });
+        std::fs::write(out, data.to_string()).map_err(|e| format!("{out}: {e}"))?;
+        eprintln!("wrote {out}");
+    }
+    Ok(())
+}
+
+fn cmd_beam(raw: &[String]) -> Result<(), String> {
+    let valued = ["--beams", "--vocab", "--cap", "--qmax", "-o", "--steps", "--seed", "--export", "--vectors"];
+    let args = Args::parse(raw, &valued)?;
+    args.check(&valued)?;
+    let num = |f: &str, d: u64| -> Result<u64, String> { args.get(f).map_or(Ok(d), |v| v.parse().map_err(|_| format!("bad {f}"))) };
+    let d = wir::beam::Config::default();
+    let cfg = wir::beam::Config {
+        k: num("--beams", d.k as u64)? as usize,
+        v: num("--vocab", d.v as u64)? as usize,
+        cap: num("--cap", d.cap as u64)? as i64,
+        qmax: num("--qmax", d.qmax as u64)? as i64,
+    };
+    if cfg.v < cfg.k || cfg.k == 0 {
+        return Err("--vocab must be at least --beams".into());
+    }
+    let src = wir::beam::program(&cfg);
+    if let Some(out) = args.get("-o") {
+        std::fs::write(out, &src).map_err(|e| format!("{out}: {e}"))?;
+    }
+    let start = std::time::Instant::now();
+    let (p, w, bound) = wir::beam::build(&cfg).map_err(|e| e.to_string())?;
+    let c = w.cost();
+    eprintln!(
+        "beam {} beams x {} tokens (cost 0..={} + 0..={}): compiled in {:.1?}; d_model {}, {} blocks, {} attention heads (d_head <= {}), MLP hidden {:?}, {} parameters ({} non-zero)",
+        cfg.k, cfg.v, cfg.cap, cfg.qmax, start.elapsed(), c.d_model, c.blocks, c.heads, c.d_head_max, c.mlp_hidden, c.params, c.nonzero
+    );
+    for (o, (name, _)) in p.outputs.iter().enumerate() {
+        eprintln!("  {name}: |network - program| <= {:.1e} on every input", bound[o]);
+    }
+    let steps = num("--steps", 20_000)?;
+    let mut rng = num("--seed", 1)?.max(1);
+    if steps > 0 {
+        let start = std::time::Instant::now();
+        let list: Vec<_> = (0..steps).map(|i| wir::beam::random_step(&cfg, &mut rng, i % 2 == 0)).collect();
+        let r = wir::beam::check(&cfg, &w, list.into_iter());
+        eprintln!(
+            "beam: {} random steps, half with costs in 0..=2 for ties ({:.1?}, {:.2} ms/step): full ranking wrong on {}, worst |network - reference| {:.1e}",
+            r.steps, start.elapsed(), start.elapsed().as_secs_f64() * 1000.0 / r.steps as f64, r.wrong, r.worst
+        );
+        if r.wrong > 0 {
+            return Err("network and reference disagree".into());
+        }
+    }
+    if let Some(out) = args.get("--export") {
+        let n = num("--vectors", 256)?;
+        let runner = wir::seq::SeqRunner::new(&w);
+        let vectors: Vec<serde_json::Value> = (0..n)
+            .map(|i| {
+                let st = wir::beam::random_step(&cfg, &mut rng, i % 2 == 0);
+                let r = wir::beam::reference(&cfg, &st);
+                let net = runner.eval_multi(&wir::beam::tokens(&cfg, &st));
+                serde_json::json!({
+                    "s": st.s, "l": st.l, "fin": st.fin,
+                    "ranking": r.iter().map(|p| [p.cost, p.from as i64, p.tok as i64]).collect::<Vec<_>>(),
+                    "network": net,
+                })
+            })
+            .collect();
+        let data = serde_json::json!({
+            "weights": w.to_sparse_json(),
+            "outputs": p.outputs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+            "bounds": bound,
+            "config": { "k": cfg.k, "v": cfg.v, "cap": cfg.cap, "qmax": cfg.qmax, "dead": cfg.dead() },
+            "program": src,
             "cost": { "d_model": c.d_model, "blocks": c.blocks, "heads": c.heads, "params": c.params, "nonzero": c.nonzero },
             "vectors": vectors,
         });

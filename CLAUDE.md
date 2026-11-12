@@ -410,3 +410,15 @@ holds role data (prompt-masked loss), rows, batching and `Worker`; bins `train_r
 `swarm/train_roles.ps1` runs roles in sequence. Roles in `swarm/roles/kinds.json` carry `out_vocab`,
 optional `model` (own shape/checkpoint) and `train`. Checkpoints go to `checkpoints/swarm/<role>/`.
 Smoke-tested only; real training is left to Alex. docs/SWARM.md 'Phase 2 setup'.
+
+WIR Beam (2026-11-12): see docs/WIR.md "WIR Beam". `wir beam` (wir/src/beam.rs) writes one beam
+search step as a 0.3 network (`examples/beam.wir`): per candidate (beam x word) inputs s, l, fin;
+two count heads rank by (cost, position), mean heads read each rank's cost/parent/word, `rank`
+is an output; finished beams offer only word 0. Integer costs (host quantizes -ln p, subtracts
+the best beam, clips at cap). Demo default 8 x 16, cap 48, qmax 31: 15,996 non-zero weights,
+bounds < 7.1e-4; 26,244 inputs of a 2 x 3 config exhaustive and 20k random steps exact. Host
+and page in `wir/demos/beam/` (beam_core.js bigram LM, host loop, twin, greedy/float/DP
+references; harness.js; build.py; `demos/tests/beam_page.{feature,mjs}`). Network beam finds the
+exact best sentence on 16/16 prompts at width 8 (greedy 8/16); width 2 can be worse than greedy.
+Export goes to `tmp/wir-beam/beam_demo.json`. `tests/beam.rs`: 4 tests.
+

@@ -1,0 +1,16 @@
+wir 0.3
+# One beam search step: rank the 8 x 16 candidates by cost, keep the best 8.
+sequence len 128
+input s: token in [0, 48]
+input l: token in [0, 31]
+input fin: token in [0, 1]
+table col(x) = mod(x, 16)
+table parent(x) = div(x, 16)
+let c = select(fin, select(eq(col(pos), 0), s, 80), s + l)
+let below = count(lt(k(c), q(c)))
+let ties = count(and(k(c) == q(c), lt(k(pos), q(pos))))
+let place = below + ties
+output cost = mean(c, k(place) == q(pos))
+output from = mean(parent(pos), k(place) == q(pos))
+output tok = mean(col(pos), k(place) == q(pos))
+output rank = place

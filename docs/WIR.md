@@ -949,3 +949,65 @@ checks pass. Demo artifact "WIR Chess": https://claude.ai/artifact/9u2N2Y2UBcU6f
 
 Not done: RL (phase 5), strength measurements against outside engines, a tighter bound
 through bits (snapping), pins/checks in the evaluation, opening variety.
+
+## WIR Beam: one beam search step as a network (Nov 12, 2026)
+
+Code: wir/src/beam.rs, `wir beam`, wir/examples/beam.wir, wir/tests/beam.rs, wir/demos/beam/.
+
+A step has k live beams and v words, so k x v candidates at position `beam * v + word`.
+Per candidate the inputs are `s` (the beam's cost), `l` (the word's cost) and `fin`; costs are
+small integers (lower is better). The program:
+
+```
+let c = select(fin, select(eq(col(pos), 0), s, DEAD), s + l)
+let below = count(lt(k(c), q(c)))
+let ties = count(and(k(c) == q(c), lt(k(pos), q(pos))))
+let place = below + ties
+output cost = mean(c, k(place) == q(pos))     # also: from = parent beam, tok = word
+output rank = place
+```
+
+Two count heads rank every candidate (ties go to the earlier position, so ranks are a
+permutation); each output slot r reads the candidate whose rank is r. The first k positions
+are the new beams, best first, and all k x v slots are the full ranking. A finished beam
+offers only word 0 (the end/pad id) at no cost; its other words cost DEAD = cap + qmax + 1.
+Two heads on `c` rather than one on a combined key (cost x position): a side costs range + 2 relus,
+and the combined key's range would be about k x v times larger (not built or measured).
+
+Host contract (demos/beam/beam_core.js): quantize -ln p to `min(qmax, round(unit * -ln p))`,
+keep each beam's integer cost, send `s` = cost - best live beam's cost clipped at `cap` (so
+beams more than cap behind tie), idle beams get s = cap and l = qmax (with v >= k they never
+reach the survivors), and stop when slot 0 has ended (costs only grow, nothing can overtake
+it). Width w < k just idles the other beams.
+
+Results (i5-12500, Node 24.11, Windows 11; Rust f64):
+
+| config | d_model | blocks | heads | params (non-zero) | proven bound (cost / from / tok / rank) |
+|---|---|---|---|---|---|
+| 4 x 8, cost 0..24 + 0..15 | 273 | 7 | 3 | 343,434 (3,541) | 5.2e-6 / 2.0e-7 / 4.6e-7 / - |
+| 4 x 16, same | 369 | 7 | 3 | 641,691 (5,952) | 1.8e-5 for cost |
+| 8 x 16, cost 0..48 + 0..31 (the demo) | 721 | 7 | 3 | 2,493,939 (15,996) | 7.1e-4 / 2.1e-5 / 4.4e-5 / 3.6e-11 |
+
+All bounds are < 0.5, so rounding gives the integers on every input (`seq::error_bound`).
+`tests/beam.rs`: every step of a 2 x 3 configuration with costs 0..2 (26,244 inputs, ties and
+finished beams included) and 3,000 random steps at 4 x 8, half with costs in 0..2 so ties are
+common: 0 wrong. `wir beam --steps 20000` at 8 x 16: 0 wrong, worst |network - reference|
+1.6e-7, 1.5 ms per step in Rust. The JS runner takes 2.2 ms per step (450 steps/s).
+
+Demo (demos/beam, `wir-beam.html`): a toy bigram model over 16 words (hand-written counts)
+supplies the costs; the page draws the 8 x 16 candidate grid with the network's own ranks,
+the survivors, the beam list, and the result against greedy, a float beam search and the exact
+best sentence (dynamic programming over the bigram). Harness over the 16 prompts, 8 steps max,
+6 cost units per nat: lockstep 384 searches / 804 steps with the network equal to the plain-sort
+twin at every step (also at 2 and 4 units); 128 Rust vectors agree. The network beam finds
+the exact best sentence for: width 1 9/16, 2 12, 3 12, 4 13, 5 13, 6 14, 7 16, 8 16; greedy 8/16,
+float beam at width 8 16/16. Beam search is not monotone in width: on "the", width 2 ends on a worse sentence (-4.58) than
+greedy and width 3 (-3.53), and from the start of a sentence at 3 units per nat width 2 gets
+-5.39 against greedy's -4.33. Quantization matters too: at 3 units per nat "yumon sleeps" ties
+"the small" after rounding and loses on position at width 2 (the float beam keeps it); at 6
+units it is kept. Chrome BDD (beam_page.feature, 7 scenarios) passes.
+
+Not done: length normalization, top-p/nucleus (needs a cumulative sum), a real language model
+behind the costs, a bound that includes float rounding, batching several searches per
+sequence.
+
