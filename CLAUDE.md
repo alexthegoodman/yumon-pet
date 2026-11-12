@@ -401,3 +401,5 @@ whole fills only for block/arms/literal (see docs/SWARM.md table); `code.bin` ha
 enums, so `variants` has no data. `cargo test --release` in `swarm/` runs 3 tests.
 
 Swarm follow-up (2026-11-11): chunker and `document` accept enums; `code.bin` rebuilt (134,655 chunks, backup `code.bin.pre-enums`). `swarm/tokenizer.json` (`make_tokenizer`) adds 25 one-token markers (ids 2048-2072); prompts max out below 512. Phase 2 must extend the checkpoint's embedding to 2,073 rows.
+
+Swarm phase 1 (2026-11-12): `swarm.rs` (Slot, Filler, Oracle, SwapOne, `run`, `charge`), `check.rs` (`check_all`, batched scratch-crate cargo check, `external` for unresolved derives), bin `oracle` (`--check N`, ~1 min at 1500; 10k modules in one crate is too slow). Results in docs/SWARM.md 'Phase 1 results'. 8 tests.

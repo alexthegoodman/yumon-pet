@@ -266,6 +266,60 @@ by linking the yumon-pet rlib). A bin inside yumon-pet (`view_code_bucket`,
 separate crate does not beat a bin in yumon-pet on edit cycles (about 5-9 s vs 3 s); it
 does keep swarm edits from touching yumon-pet. Decision: keep `swarm/`.
 
+## Phase 1 results (2026-11-12)
+
+`swarm/src/swarm.rs`: `Slot` tree (open or filled), `Filler` trait (`Oracle` = ground
+truth, `SwapOne` = oracle except one hole), breadth-first `run` dispatcher (parse the fill
+into segments and child slots at `<hole_KIND>` markers, `syn` check per fill with the
+kind's wrapper, retries, give-up, per-fill byte spans, `charge()` = deepest fill whose
+bytes hold an error span). `check.rs`: `check_all` writes candidates as modules of one
+scratch crate and runs `cargo check --message-format=json` once; errors map back to
+candidate and byte span. `cargo run --release --bin oracle -- --check 1500`
+(about 1 min 15 s; `out/phase1/report.json`).
+
+- Oracle swarm over all 13,003 held-out chunks: 13,003 rebuilt byte for byte, 13,003 parse,
+  121,692 fills, 0 rejected, 0 retries, 0 open slots. 8 swarm tests pass.
+- `cargo check` ceiling: chunks are cut from files, so only 320 of 1,500 held-out
+  ground-truth chunks (21.3%) compile alone (rest: E0425/E0433/E0405 unresolved names, and
+  `external` = unresolved derives/attributes like serde). This is the ceiling for any
+  swarm on chunks, and the swap runs below use only those 320 clean chunks, so every error
+  is the swap's.
+- One swapped hole per chunk (a wrong but parseable fill of the same kind from another
+  file, up to 200 chars; sensitivity of the check to each role, with everything else
+  perfect):
+
+| kind | chunks | parse% | clean% | errors charged to the swapped hole |
+| --- | --- | --- | --- | --- |
+| block | 256 | 100 | 90.2 | 92% |
+| expr | 256 | 100 | 89.8 | 60% |
+| literal | 15 | 100 | 86.7 | 50% |
+| call_args | 158 | 100 | 93.0 | 77% |
+| pat | 191 | 100 | 94.8 | 9% |
+| iter | 25 | 100 | 88.0 | 100% |
+| cond | 23 | 100 | 43.5 | 100% |
+| arms | 12 | 100 | 83.3 | 100% |
+| fields | 24 | 100 | 37.5 | 93% |
+| variants | 20 | 100 | 45.0 | 71% |
+| sig | 47 | 100 | 44.7 | 29% |
+| name | 320 | 100 | 100 | n/a (no errors) |
+
+Readings: a wrong fill almost always parses (the `syn` per-fill check passes it), so parse
+rate cannot tell a good worker from a random one; `cargo check` can. Structural holes
+(`cond`, `fields`, `variants`, `sig`) break compilation 55-63% of the time when wrong,
+`block`/`expr`/`call_args`/`iter` about 7-12%, `pat` 5%. Charging by deepest enclosing fill
+is exact when the swap itself is wrong (`block`, `cond`, `iter`, `arms`, `fields` 90-100%),
+poor where the error shows at a use site elsewhere (`pat` 9%: a changed binding breaks
+later uses; `sig` 29%: callers and body). So phase 6 needs "defining hole" attribution
+(who bound the name or fixed the type), not just span containment. Small kinds (`literal`,
+`arms`, `variants`, `iter`, `cond` under 30 chunks) are too few for percentages; run with a
+larger `--check` before relying on them (cost grows with batch size: 10k modules in one
+crate did not finish in 30 min, 1,500 take 30-60 s).
+- rustc stops after unresolved macros/derives/attributes and hides all later errors in
+  every module; `check_all` drops those candidates (`external`) and rechecks until none
+  remain. Without that, a batch looked 83% clean.
+- Not yet: trained roles in the loop (phase 2), planner roles, a retry loop that feeds
+  `cargo check` errors back.
+
 ## Layout
 
 `swarm/` is a separate crate with its own `[workspace]` (like `wir/`). It depends
@@ -284,8 +338,9 @@ swarm/
     skeleton.rs   hole markers, extraction (syn), splicing, parse checks
     roles.rs      role config (roles/*.json)
     dataset.rs    code.bin loader, per-role instances, held-out file split
-    swarm.rs      dispatcher, queue, verifier, oracle mode (phase 1, not written)
-  src/bin/        phase0, show_failures (later: oracle, train_role, run_swarm)
+    swarm.rs      slots, Filler trait (oracle, swap), dispatcher, byte spans, error charging
+    check.rs      scratch-crate cargo check over many candidates
+  src/bin/        phase0, show_failures, make_tokenizer, oracle (later: train_role, run_swarm)
 ```
 
 ## Open questions
@@ -310,3 +365,6 @@ swarm/
   (134,655 chunks); 1-token special-token markers (`swarm/tokenizer.json`, 25 tokens, ids
   2048-2072); context stays 512; `swarm/` stays its own crate. Phase 0 rerun: all checks 0
   failures, `variants` has 3,834 training fills.
+- 2026-11-12: Phase 1 done: dispatcher, splicer, `syn` per fill and batched `cargo check`
+  with errors charged to fills; oracle rebuilds 13,003/13,003 held-out chunks; ceiling 21% of
+  chunks compile alone; per-kind one-hole swap table above. Nothing trained.

@@ -16,3 +16,4 @@ cargo run --release --bin show_failures -- --kind pat   # fills that fail to par
 
 Own `[workspace]`, path dependency on `yumon-pet` (`default-features = false`), target dir
 `../target`. Roles live in `roles/*.json`.
+cargo run --release --bin oracle -- --check 1500   # phase 1: oracle swarm, cargo check, per-kind swaps (about 1 min)
