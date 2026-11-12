@@ -1,0 +1,15 @@
+{
+  "name": "planner",
+  "train": {
+    "epochs": 10
+  },
+  "roles": [
+    {
+      "name": "planner",
+      "kinds": [
+        "item"
+      ],
+      "out_vocab": 2073
+    }
+  ]
+}

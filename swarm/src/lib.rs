@@ -4,3 +4,4 @@ pub mod skeleton;
 pub mod swarm;
 pub mod check;
 pub mod worker;
+pub mod planner;
