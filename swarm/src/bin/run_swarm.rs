@@ -6,6 +6,7 @@
 //! cargo run --release --bin run_swarm -- [--held-out 50] [--seed 0] [--check]
 //!   [--planner ../checkpoints/swarm/planner] [--workers ../checkpoints/swarm]
 //!   [--roles roles/kinds.json] [--scratch out/scratch] [--limit-chunks N]
+//!   [--verbose] (one line per hole) [--max-fills 300] [--no-check]
 //!
 //! `--doc` prints one program. `--held-out N` runs N documented chunks from held-out files
 //! (spread evenly), compares the plan with the real skeleton, `syn`-parses and (default)
@@ -36,9 +37,47 @@ struct Outcome {
     by: BTreeMap<String, usize>,
 }
 
-fn run_one(planner: &Planner, workers: &[Worker], doc: &str) -> Outcome {
-    let mut filler = SwarmFiller::new(planner, doc.to_owned(), workers);
-    let (slot, stats) = sw::run(&mut filler, ROOT, &Config::default());
+/// Prints each hole as it is written (kind, depth, output size, time) so a long run can be watched.
+struct Logged<F: sw::Filler> {
+    inner: F,
+    verbose: bool,
+    n: usize,
+}
+
+impl<F: sw::Filler> sw::Filler for Logged<F> {
+    fn fill(&mut self, req: &sw::Request) -> Option<String> {
+        let t = Instant::now();
+        let out = self.inner.fill(req);
+        self.n += 1;
+        if self.verbose {
+            println!(
+                "    hole {:>3} {:<9} depth {} ctx {:>4} chars -> {:>4} chars in {:>5.0} ms",
+                self.n, req.kind, req.path.len(), req.context.len(), out.as_ref().map_or(0, |o| o.len()),
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        if self.verbose {
+            if let Some(o) = &out {
+                if !sw::check_fill(req.kind, o) {
+                    let why = match sw::parse_fill(req.kind, o) {
+                        Err(e) => e.to_string(),
+                        Ok(_) => "syn rejects it".into(),
+                    };
+                    let clip: String = o.chars().take(160).collect::<String>().replace('\n', "\\n");
+                    println!("        REJECTED ({why}): {clip}");
+                }
+            }
+        }
+        out
+    }
+    fn name(&self, kind: &str) -> &str {
+        self.inner.name(kind)
+    }
+}
+
+fn run_one(planner: &Planner, workers: &[Worker], doc: &str, verbose: bool, max_fills: usize) -> Outcome {
+    let mut filler = Logged { inner: SwarmFiller::new(planner, doc.to_owned(), workers), verbose, n: 0 };
+    let (slot, stats) = sw::run(&mut filler, ROOT, &Config { max_fills, ..Config::default() });
     let plan = slot.fill.as_ref().map(|f| {
         let mut t = String::new();
         for (i, seg) in f.segments.iter().enumerate() {
@@ -68,6 +107,9 @@ fn main() -> Result<()> {
     let roles = RoleSet::load(&PathBuf::from(arg("--roles").unwrap_or("roles/kinds.json".into())))?;
     let scratch = PathBuf::from(arg("--scratch").unwrap_or("out/scratch".into()));
     let tokenizer = PathBuf::from("tokenizer.json");
+    let verbose = flag("--verbose");
+    // a looping planner or worker can keep spawning holes; the library default is 4000
+    let max_fills: usize = arg("--max-fills").map(|v| v.parse()).transpose()?.unwrap_or(300);
 
     let planner = Planner::load(&planner_dir).with_context(|| format!("planner at {}", planner_dir.display()))?;
     let mut workers = Vec::new();
@@ -88,7 +130,7 @@ fn main() -> Result<()> {
 
     if let Some(doc) = arg("--doc") {
         let doc = as_doc(&doc);
-        let o = run_one(&planner, &workers, &doc);
+        let o = run_one(&planner, &workers, &doc, true, max_fills);
         println!("\n--- plan\n{}", o.plan.as_deref().unwrap_or("(no plan)"));
         println!(
             "\n--- program ({} fills, {} retries, {} rejected, {} gave up, {} holes left open)\n{}",
@@ -138,9 +180,15 @@ fn main() -> Result<()> {
 
     let t = Instant::now();
     let mut outs = Vec::new();
-    for c in &picks {
+    for (i, c) in picks.iter().enumerate() {
         let doc = doc_prefix(&c.text);
-        let mut o = run_one(&planner, &workers, doc);
+        let t1 = Instant::now();
+        let mut o = run_one(&planner, &workers, doc, verbose, max_fills);
+        println!(
+            "[{:>3}/{}] {:>5.1}s  fills {:>3} retries {:>3} gave up {:>2} open {:>2}  {}",
+            i + 1, picks.len(), t1.elapsed().as_secs_f64(), o.stats.fills, o.stats.retries, o.stats.gave_up, o.open,
+            doc.lines().next().unwrap_or("").chars().take(70).collect::<String>()
+        );
         let root = dataset::extract_chunk(c)?;
         o.truth = root.skeleton().strip_prefix(doc).map(str::to_owned);
         outs.push((o, c.text.clone()));
