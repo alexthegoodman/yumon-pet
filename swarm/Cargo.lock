@@ -6800,6 +6800,7 @@ name = "swarm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "burn",
  "proc-macro2",
  "quote",
  "rayon",

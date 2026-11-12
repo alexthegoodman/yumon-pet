@@ -185,6 +185,11 @@ pub fn parse_fill(kind: &str, text: &str) -> Result<Filled> {
     Ok(Filled { segments, children, by: String::new(), tries: 0 })
 }
 
+/// Does this text parse as a fill of `kind` (sub-holes written as `<hole_KIND>`)?
+pub fn check_fill(kind: &str, text: &str) -> bool {
+    parse_fill(kind, text).is_ok_and(|f| fill_ok(kind, &f))
+}
+
 /// Does this fill (sub-holes still open) pass its `syn` check?
 fn fill_ok(kind: &str, f: &Filled) -> bool {
     let mut text = String::new();

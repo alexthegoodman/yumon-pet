@@ -1,17 +1,125 @@
 {
   "name": "kinds",
   "roles": [
-    { "name": "block",     "kinds": ["block"] },
-    { "name": "expr",      "kinds": ["expr"] },
-    { "name": "literal",   "kinds": ["literal"] },
-    { "name": "call_args", "kinds": ["call_args"] },
-    { "name": "pat",       "kinds": ["pat"] },
-    { "name": "iter",      "kinds": ["iter"] },
-    { "name": "cond",      "kinds": ["cond"] },
-    { "name": "arms",      "kinds": ["arms"] },
-    { "name": "fields",    "kinds": ["fields"] },
-    { "name": "variants",  "kinds": ["variants"] },
-    { "name": "sig",       "kinds": ["sig"] },
-    { "name": "name",      "kinds": ["name"] }
+    {
+      "name": "block",
+      "kinds": [
+        "block"
+      ],
+      "out_vocab": 256,
+      "train": {
+        "epochs": 3
+      }
+    },
+    {
+      "name": "expr",
+      "kinds": [
+        "expr"
+      ],
+      "out_vocab": 2073,
+      "train": {
+        "epochs": 2
+      }
+    },
+    {
+      "name": "literal",
+      "kinds": [
+        "literal"
+      ],
+      "out_vocab": 512,
+      "train": {
+        "epochs": 20
+      }
+    },
+    {
+      "name": "call_args",
+      "kinds": [
+        "call_args"
+      ],
+      "out_vocab": 2073,
+      "train": {
+        "epochs": 3
+      }
+    },
+    {
+      "name": "pat",
+      "kinds": [
+        "pat"
+      ],
+      "out_vocab": 1024,
+      "train": {
+        "epochs": 3
+      }
+    },
+    {
+      "name": "iter",
+      "kinds": [
+        "iter"
+      ],
+      "out_vocab": 1024,
+      "train": {
+        "epochs": 20
+      }
+    },
+    {
+      "name": "cond",
+      "kinds": [
+        "cond"
+      ],
+      "out_vocab": 2073,
+      "train": {
+        "epochs": 10
+      }
+    },
+    {
+      "name": "arms",
+      "kinds": [
+        "arms"
+      ],
+      "out_vocab": 256,
+      "train": {
+        "epochs": 20
+      }
+    },
+    {
+      "name": "fields",
+      "kinds": [
+        "fields"
+      ],
+      "out_vocab": 2073,
+      "train": {
+        "epochs": 15
+      }
+    },
+    {
+      "name": "variants",
+      "kinds": [
+        "variants"
+      ],
+      "out_vocab": 2073,
+      "train": {
+        "epochs": 30
+      }
+    },
+    {
+      "name": "sig",
+      "kinds": [
+        "sig"
+      ],
+      "out_vocab": 2073,
+      "train": {
+        "epochs": 5
+      }
+    },
+    {
+      "name": "name",
+      "kinds": [
+        "name"
+      ],
+      "out_vocab": 1024,
+      "train": {
+        "epochs": 3
+      }
+    }
   ]
 }

@@ -403,3 +403,10 @@ enums, so `variants` has no data. `cargo test --release` in `swarm/` runs 3 test
 Swarm follow-up (2026-11-11): chunker and `document` accept enums; `code.bin` rebuilt (134,655 chunks, backup `code.bin.pre-enums`). `swarm/tokenizer.json` (`make_tokenizer`) adds 25 one-token markers (ids 2048-2072); prompts max out below 512. Phase 2 must extend the checkpoint's embedding to 2,073 rows.
 
 Swarm phase 1 (2026-11-12): `swarm.rs` (Slot, Filler, Oracle, SwapOne, `run`, `charge`), `check.rs` (`check_all`, batched scratch-crate cargo check, `external` for unresolved derives), bin `oracle` (`--check N`, ~1 min at 1500; 10k modules in one crate is too slow). Results in docs/SWARM.md 'Phase 1 results'. 8 tests.
+
+Swarm phase 2 (2026-11-12): one separate decoder per role. `YumonDecBrain` gained `grow_vocab`, `logits_rows`
+(logits over chosen rows of a tied table) and `greedy_rows` (KV-cached, restricted to rows). `swarm/src/worker.rs`
+holds role data (prompt-masked loss), rows, batching and `Worker`; bins `train_role` and `eval_role`,
+`swarm/train_roles.ps1` runs roles in sequence. Roles in `swarm/roles/kinds.json` carry `out_vocab`,
+optional `model` (own shape/checkpoint) and `train`. Checkpoints go to `checkpoints/swarm/<role>/`.
+Smoke-tested only; real training is left to Alex. docs/SWARM.md 'Phase 2 setup'.

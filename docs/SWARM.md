@@ -320,6 +320,49 @@ crate did not finish in 30 min, 1,500 take 30-60 s).
 - Not yet: trained roles in the loop (phase 2), planner roles, a retry loop that feeds
   `cargo check` errors back.
 
+## Phase 2 setup (2026-11-12)
+
+Code is ready and smoke-tested; no real training has been run (that is left to Alex).
+
+- **One model per role.** Each role is its own decoder, not a shared trunk with a different
+  head: a shared one would need too much capacity. A role starts from the set's `base`
+  checkpoint (sugar-maniac) with the table grown to 2,073 rows, or from its own shape via the
+  role's `model` block (`embed_dim`, `n_layers`, `attn_heads`, `ff_dim`, `token_embed_dim`,
+  `jl_ffn`), or from another `checkpoint`. Roles can differ in size.
+- **Model changes** (`src/brain/decoder_model.rs`): `grow_vocab(vocab, noise)` appends rows at
+  the mean of the old rows plus N(0, 0.02) noise (old rows untouched, tested); `logits_rows`
+  computes logits for only the given rows of the tied table; `greedy_rows` decodes through the
+  KV cache restricted to the rows (stops at EOS; a test checks it equals the full forward).
+- **Data** (`swarm/src/worker.rs`): sample = `BOS context <fill> fill EOS`, loss on the fill
+  tokens only (the prompt mask), batches right-padded and length-bucketed. Training fills with
+  a token outside the role's rows are dropped and counted; held-out fills outside the rows
+  stay in the exact-match eval as misses. A role's rows = EOS + all 12 `<hole_KIND>` markers +
+  the most frequent training fill tokens up to `out_vocab`.
+- **`out_vocab` per role** (`roles/kinds.json`, from the coverage table): block 256, arms 256,
+  literal 512 (256 covered only 70%), name 1024, pat 1024, iter 1024, cond 2073, expr 2073,
+  call_args 2073, sig 2073, fields 2073, variants 2073 (2073 = the whole table, no restriction).
+  Copy head vs more rows is left for later (card `swarm-copy-head`).
+- **`train_role`**: AdamW (eps 1e-7, grad clip 1, wd 0.01), warm-up then cosine from `first_lr`
+  5e-4 to `last_lr` 5e-5, batch 16; epochs are per role in `roles/kinds.json` (small roles get more: variants 30, iter/arms/literal 20, fields 15, cond 10, sig 5, call_args/name/pat/block 3, expr 2; a first guess, the best held-out epoch is what is kept). Each epoch it
+  prints held-out loss, top-1/top-3, greedy exact and parse rates and two example fills, and
+  saves the best held-out epoch to `../checkpoints/swarm/<role>/` (full decoder + `role.json`
+  with the rows). `--resume` continues from it (optimizer state is not saved). `--check`
+  trains nothing, `--steps N` stops early, `--max-samples` caps an epoch.
+- **`eval_role`**: greedy fills on held-out instances (exact, `syn` parse), then the worker
+  swapped into the oracle swarm in held-out chunks that compile with ground truth. A worker fill
+  whose sub-holes differ from the truth cannot be completed by the oracle (it fills by path),
+  so those are counted as `reshaped` and not checked; parse, exact and `cargo check` rates are
+  over the rest. Writes `out/phase2/<role>.json`.
+- **Smoke results** (4,000 chunks, not representative): block, 400 steps at batch 16 in 74 s
+  (about 6 steps/s, 29k tokens/s on the Intel UHD 770 once warm): held-out loss 0.54, top-1
+  80%, greedy exact 20-27%, parses 98-100%. A from-scratch 48-wide, 3-layer `name` role (169k
+  params) and `--resume` also ran. Undertrained `name` greedy output can loop on one token
+  (`___...`); the dispatcher's retries do not help with greedy decoding, so a repeat guard or
+  sampling is a follow-up.
+- Rough budget from the smoke speed (sequences are longer for the big roles, so expect
+  slower): block has 145k training samples = about 9k steps per epoch at batch 16, expr 320k =
+  20k steps.
+
 ## Layout
 
 `swarm/` is a separate crate with its own `[workspace]` (like `wir/`). It depends
@@ -368,3 +411,8 @@ swarm/
 - 2026-11-12: Phase 1 done: dispatcher, splicer, `syn` per fill and batched `cargo check`
   with errors charged to fills; oracle rebuilds 13,003/13,003 held-out chunks; ceiling 21% of
   chunks compile alone; per-kind one-hole swap table above. Nothing trained.
+- 2026-11-12: Phase 2 set up, nothing trained: `worker.rs`, bins `train_role` and `eval_role`,
+  `train_roles.ps1`, `grow_vocab` / `logits_rows` / `greedy_rows` on the decoder, per-role
+  `out_vocab` / `model` / `train` in `roles/kinds.json`. 12 swarm tests (cached greedy = full
+  forward, vocab growth keeps old rows). Smoke runs only.
+

@@ -24,3 +24,4 @@ starters/*
 
 .env
 /swarm/out
+/swarm/target

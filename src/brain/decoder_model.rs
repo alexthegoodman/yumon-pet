@@ -631,11 +631,108 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         if !self.config.tie_embeddings {
             return self.token_head.forward(x);
         }
-        let x = match &self.head_down {
+        tied_logits(self.tied_features(x), self.embedding.weight.val())
+    }
+    /// Normed hidden states at table width (through `head_down` when factorized).
+    fn tied_features(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        match &self.head_down {
             Some(down) => down.forward(x),
             None => x,
+        }
+    }
+
+    /// Grows a tied table to `vocab` rows. New rows start at the mean of the old rows
+    /// plus N(0, `noise`) (a fixed-seed generator), so new tokens begin as an
+    /// average token instead of a random direction. Used to add special tokens to a
+    /// pretrained decoder: every old id keeps its row.
+    pub fn grow_vocab(mut self, vocab: usize, noise: f32, device: &B::Device) -> Self {
+        assert!(self.config.tie_embeddings, "grow_vocab needs a tied table (the head is the table)");
+        let [old, width] = self.embedding.weight.dims();
+        assert!(vocab >= old, "cannot shrink the table");
+        if vocab == old { return self; }
+        // Detached: on an autodiff backend the new Param must start from untracked tensors.
+        let table = self.embedding.weight.val().detach();
+        let mean = table.clone().mean_dim(0);
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut unit = || {
+            state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
         };
-        tied_logits(x, self.embedding.weight.val())
+        let extra: Vec<f32> = (0..(vocab - old) * width).map(|_| {
+            // Box-Muller
+            let (a, b) = (unit().max(1e-12), unit());
+            ((-2.0 * a.ln()).sqrt() * (std::f64::consts::TAU * b).cos()) as f32 * noise
+        }).collect();
+        let noise = Tensor::<B, 2>::from_data(TensorData::new(extra, [vocab - old, width]), device);
+        let rows = mean.expand([vocab - old, width]) + noise;
+        self.embedding.weight = burn::module::Param::from_tensor(Tensor::cat(vec![table, rows], 0).detach());
+        self.config.0.vocab_size = vocab;
+        self
+    }
+
+    /// Hidden states -> logits over only `rows` of the tied table: [batch, seq, rows.len()].
+    /// Column j is token `rows[j]`. Lets a specialist write from a small slice of the
+    /// vocabulary while still reading all of it.
+    pub fn logits_rows(&self, x_tokens: Tensor<B, 2, Int>, rows: Tensor<B, 1, Int>) -> Tensor<B, 3> {
+        assert!(self.config.tie_embeddings, "logits_rows needs a tied table");
+        let [_, seq] = x_tokens.dims();
+        assert!(seq > 0 && seq <= self.config.max_seq_len);
+        let ropes = self.ropes(seq, &x_tokens.device());
+        let mut x = self.dropout.forward(self.embed(x_tokens));
+        for (layer, block) in self.blocks.iter().enumerate() {
+            x = self.residual_jl(layer, x);
+            x = block.forward(x, ropes.at(layer), self.block_jl(layer));
+        }
+        x = self.residual_jl(self.blocks.len(), x);
+        self.rows_head(x, rows)
+    }
+    fn rows_head(&self, x: Tensor<B, 3>, rows: Tensor<B, 1, Int>) -> Tensor<B, 3> {
+        let x = self.tied_features(self.norm.forward(x));
+        tied_logits(x, self.embedding.weight.val().select(0, rows))
+    }
+
+    /// Greedy decoding restricted to `rows`: feeds `prompt` once, then one token per
+    /// step through the KV cache, until `stop` or `max_new` tokens. Returns the token ids
+    /// written (without `stop`). `rows` must contain `stop`.
+    pub fn greedy_rows(&self, prompt: &[u32], rows: &[u32], stop: u32, max_new: usize,
+        device: &B::Device) -> Vec<u32> {
+        assert!(!prompt.is_empty() && prompt.len() < self.config.max_seq_len);
+        let row_ids = Tensor::<B, 1, Int>::from_ints(
+            rows.iter().map(|&r| r as i32).collect::<Vec<_>>().as_slice(), device);
+        let mut cache = self.new_kv_cache(device);
+        let mut input: Vec<i32> = prompt.iter().map(|&t| t as i32).collect();
+        let mut out = Vec::new();
+        while out.len() < max_new && cache.len() + input.len() <= self.config.max_seq_len {
+            let t = input.len();
+            let tokens = Tensor::<B, 2, Int>::from_ints(TensorData::new(input.clone(), [1, t]), device);
+            let hidden = self.hidden_cached(tokens, &mut cache);
+            let last = hidden.narrow(1, t - 1, 1);
+            let logits = self.rows_head(last, row_ids.clone());
+            let best = logits.argmax(2).into_data().convert::<i64>().to_vec::<i64>().unwrap()[0] as usize;
+            let token = rows[best];
+            if token == stop { break; }
+            out.push(token);
+            input = vec![token as i32];
+        }
+        out
+    }
+    /// `forward_cached` up to the final residual (before the norm and head).
+    fn hidden_cached(&self, tokens: Tensor<B, 2, Int>, cache: &mut KvCache<B>) -> Tensor<B, 3> {
+        let [_, t] = tokens.dims();
+        assert!(t > 0 && cache.len() + t <= self.config.max_seq_len);
+        let ropes = Ropes {
+            wide: cache.next_rope(t),
+            narrow: cache.next_narrow_rope(t),
+            from: self.config.jl_from(JlSite::Residual).unwrap_or(usize::MAX),
+        };
+        let mut x = self.embed(tokens);
+        for (layer, block) in self.blocks.iter().enumerate() {
+            x = self.residual_jl(layer, x);
+            x = block.forward_cached(x, ropes.at(layer), self.block_jl(layer), cache.layer(layer));
+        }
+        x = self.residual_jl(self.blocks.len(), x);
+        cache.advance(t);
+        x
     }
 
     /// The JL map block `layer` applies itself.
