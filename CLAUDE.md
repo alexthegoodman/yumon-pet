@@ -388,3 +388,14 @@ code BPE, tied). Roles read the full vocab and write from 256 rows of the tied t
 Input is `///` doc comments; no Kilo Code. Code goes in `swarm/` (own crate, path
 dependency on yumon-pet). Phases 0-6 end with RL on cargo check error codes. Nothing
 built yet.
+
+Yumon Swarm phase 0 (2026-11-11): `swarm/` has `skeleton.rs` (syn extraction into a
+tree of typed holes with exact splicing, `fill_parses` / `skeleton_parses` checks),
+`roles.rs` (`roles/kinds.json`, `coarse.json`), `dataset.rs` (`load_chunks` decodes
+`code.bin` ids to text, `instances` gives context/target pairs, `is_validation` holds
+out about a tenth of files by hash) and bins `phase0` and `show_failures`. Worker
+context = whole chunk with the target's ancestors expanded, siblings open, target as
+`hole!(TARGET kind)`; target = the fill with its own holes open; separator
+`"\n// fill\n"`. 130k chunks: 0 failures, byte-exact rebuilds. 256 output rows cover
+whole fills only for block/arms/literal (see docs/SWARM.md table); `code.bin` has no
+enums, so `variants` has no data. `cargo test --release` in `swarm/` runs 3 tests.

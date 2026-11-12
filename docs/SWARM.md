@@ -163,6 +163,95 @@ Each phase ends with numbers that can be checked on their own.
    `cargo check` as separate modules to spread the cost. Error codes can also act as
    feedback text for a "repair" role.
 
+## Phase 0 results (2026-11-11)
+
+Run: `cd swarm && cargo run --release --bin phase0` (about 40 s after build; writes
+`swarm/out/phase0/`: `report.json`, `examples.txt`, `vocab-<set>.json`). Unit tests:
+`cargo test --release` (3 tests: byte-exact rebuild, skeleton shape, target contexts).
+
+### What the extractor does
+
+`skeleton.rs` cuts a chunk into a tree of `Node`s (`kind`, text segments, child holes).
+Holes are the outermost eligible syntax at each level, and each fill is decomposed again
+(depth limit 8):
+
+| Parent | Holes |
+| --- | --- |
+| item (root) | fn/method: `name`, `sig` (parameters through return type; omitted when empty), body `block`; struct: `name`, `fields`; enum: `name`, `variants` |
+| `block` | `let`: `pat` + init (`literal` if it is one, else `expr`); `for`: `pat`, `iter`, `block`; `while`: `cond`, `block`; `if`/`else if`/`else`: `cond`, `block`; `match`: scrutinee `expr`, `arms`; bare/unsafe block; other statements (calls, assignments, macros with `;`): `expr` |
+| `arms` | per arm: `pat`, body (`block` if braced, else `expr`/`literal`); guards stay concrete |
+| `expr`, `iter`, `cond` | `call_args` for calls and method calls; control flow as in `block` |
+
+Layout survives: hole ranges are trimmed, so skeletons keep `{`, newline, `hole!(block)`,
+newline, `}`. Brace macros without `;` (`table! { .. }`) stay concrete. A worker's target is
+the fill with its own holes still open (`Node::skeleton`). Its context (`Node::context`) is
+the whole chunk with the target's ancestors expanded, siblings open and the target written
+`hole!(TARGET kind)`. That is what a top-down, breadth-first dispatcher would hold when it
+reaches the hole. Worker prompt = `BOS`, context, `"\n// fill\n"` (5 tokens), fill, `EOS`.
+
+### Numbers (130,414 chunks from `training-cache/code.bin`, 908 of 9,086 files held out)
+
+- Extraction: 0 chunks fail to parse, 0 byte-for-byte rebuild mismatches, 0 skeleton parse
+  failures, 0 fill parse failures, over all 1,095,900 nodes in training files. (The checkers
+  found and fixed four extractor/wrapper bugs on the way: or-patterns in `let` wrappers,
+  typed `let` patterns, brace macros as statements, trailing `//` comments swallowing the
+  wrapper's closing text.)
+- Instances per kind (training files): expr 320,102; block 145,136; pat 138,203; name
+  117,813; call_args 111,681; sig 82,307; cond 23,653; fields 12,810; literal 9,081; arms
+  8,936; iter 8,365; **variants 0**. By depth 1-8: 313,543 / 392,314 / 193,515 / 56,364 /
+  16,418 / 4,605 / 1,125 / 203.
+- **No `variants` data**: the chunker behind `code.bin` only keeps structs, functions and
+  methods, so no enum is in the cache. The extractor handles enums (unit test); the data
+  has to come from the raw sources (card `swarm-enum-source`).
+- Prompt length (context + separator + fill, tokens): p50 60-176, p99 281-538 by kind.
+  Share over 512: 2.0% literal, 0.3% fields, 0.2% pat, 0.1% expr/call_args/arms, 0% others.
+  Cropping is nearly unnecessary at 512; only `literal` and `fields` sometimes need it.
+- Marker cost (code BPE): `hole!(kind)` is 6-10 tokens, `hole!(TARGET kind)` 11-14. A
+  skeleton with ten open holes spends about 70 of 512 tokens on markers. Syn placeholders
+  for list positions are cheaper for `name` (4 vs 6), `variants` (4 vs 9), `arms` (5 vs 8)
+  and dearer for `sig` (11 vs 7). Decision: models see the text marker everywhere; the
+  assembler swaps in placeholders (`syn_placeholder`) only to parse skeletons. A shorter
+  marker (`hole!(e)`) is untested.
+- Fill length (tokens, p50/p90/p99): block 17/92/201, expr 18/44/146, call_args 10/42/168,
+  pat 3/10/24, name 6/16/31, sig 15/41/83, fields 44/191/394, arms 50/108/233.
+
+### 256 output rows: coverage
+
+Rows = EOS plus the most frequent target tokens of the role's training fills (markers
+included). Share of held-out fills whose every token is inside the rows, by output rows:
+
+| kind | 256 | 512 | 1024 | 2048 |
+| --- | --- | --- | --- | --- |
+| block | 88.4% | 89.8% | 92.7% | 100% |
+| arms | 92.1% | 94.1% | 96.8% | 98.7% |
+| literal | 70.2% | 82.0% | 90.6% | 96.4% |
+| pat | 42.2% | 65.0% | 91.6% | 100% |
+| iter | 38.6% | 65.0% | 91.0% | 98.0% |
+| name | 27.7% | 56.9% | 99.6% | 100% |
+| sig | 25.0% | 39.8% | 77.8% | 99.9% |
+| call_args | 19.7% | 37.2% | 69.7% | 100% |
+| expr | 15.6% | 34.2% | 73.4% | 100% |
+| cond | 12.4% | 36.1% | 78.9% | 96.8% |
+| fields | 2.3% | 5.7% | 24.1% | 99.8% |
+
+(The 2048 column is below 100% where a held-out token never appears in training fills.)
+At the token level 256 rows cover 75-82% of target tokens for value roles and 96-99% for
+`block` and `arms`. So the 256-row plan holds for flow roles (`block`, `arms`) and `literal`;
+`name`, `pat`, `iter` need about 1024; `expr`, `call_args`, `cond`, `sig` need 1024-2048 or a
+copy head; `fields` needs the full table. Phase 2 sets `out_vocab` per role from this table
+(`roles/*.json` has the field; default 256). Two role sets exist: `kinds` (one role per
+kind, 12) and `coarse` (5); 15- and 40-role sets need finer kinds (phase 5).
+
+### Build time (Windows, release)
+
+First build of the `swarm/` crate: 3m12s dev, about 3 minutes again for release (all
+dependencies, including burn/cubecl/wgpu through the `yumon-pet` path dependency). After
+that, editing swarm code rebuilds only swarm: 5.1 s for a bin, 8.8 s for the lib (dominated
+by linking the yumon-pet rlib). A bin inside yumon-pet (`view_code_bucket`,
+`--no-default-features`) rebuilt in 2.6 s, but its first build also took 3m17s. So the
+separate crate does not beat a bin in yumon-pet on edit cycles (about 5-9 s vs 3 s); it
+does keep swarm edits from touching yumon-pet. Decision: keep `swarm/`.
+
 ## Layout
 
 `swarm/` is a separate crate with its own `[workspace]` (like `wir/`). It depends
@@ -178,23 +267,30 @@ swarm/
   Cargo.toml
   roles/        role configs (job, hole kinds, crop window, output vocab size)
   src/
-    skeleton.rs   hole markers, extraction, splicing
-    roles.rs      role config, vocab selection, coverage
-    dataset.rs    per-role samples from code.bin / documented tiers
-    swarm.rs      dispatcher, queue, verifier, oracle mode
-  src/bin/        extract, coverage, oracle, train_role, run_swarm
+    skeleton.rs   hole markers, extraction (syn), splicing, parse checks
+    roles.rs      role config (roles/*.json)
+    dataset.rs    code.bin loader, per-role instances, held-out file split
+    swarm.rs      dispatcher, queue, verifier, oracle mode (phase 1, not written)
+  src/bin/        phase0, show_failures (later: oracle, train_role, run_swarm)
 ```
 
 ## Open questions
 
-- Markers for field and arm lists (phase 0).
+- Markers for field and arm lists: settled in phase 0 (text markers everywhere, syn
+  placeholders only for parsing); shorter markers untested.
 - Whether one shared fine-tuned trunk with per-role output rows (cheap) does as well
   as fully separate role models (the "many models" version). Worth testing in
   phase 2, since both start from the same checkpoint.
-- Whether the 512-token context is enough for workers, given cropping.
+- Whether the 512-token context is enough for workers: yes for 98%+ of fills (phase 0).
+- Output rows per role (see the coverage table), and whether a copy head beats more rows.
+- Where `variants` data comes from (no enums in `code.bin`).
 - How the planner decides that a hole kind should be filled by a written piece
   rather than a trained one (probably the dispatcher's job, not a model's).
 
 ## Log
 
 - 2026-11-11: Plan written. `swarm/` created (README only). Nothing built or trained.
+- 2026-11-11: Phase 0 done. `swarm/` crate (skeleton, roles, dataset, `phase0`,
+  `show_failures`), `roles/kinds.json` and `roles/coarse.json`. 130k chunks extract with 0
+  failures and byte-exact rebuilds; coverage, prompt lengths, marker costs and build times
+  above. Gaps: no `variants` data, 256 rows too few for most value roles. Nothing trained.

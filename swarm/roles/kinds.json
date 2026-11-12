@@ -1,0 +1,17 @@
+{
+  "name": "kinds",
+  "roles": [
+    { "name": "block",     "kinds": ["block"] },
+    { "name": "expr",      "kinds": ["expr"] },
+    { "name": "literal",   "kinds": ["literal"] },
+    { "name": "call_args", "kinds": ["call_args"] },
+    { "name": "pat",       "kinds": ["pat"] },
+    { "name": "iter",      "kinds": ["iter"] },
+    { "name": "cond",      "kinds": ["cond"] },
+    { "name": "arms",      "kinds": ["arms"] },
+    { "name": "fields",    "kinds": ["fields"] },
+    { "name": "variants",  "kinds": ["variants"] },
+    { "name": "sig",       "kinds": ["sig"] },
+    { "name": "name",      "kinds": ["name"] }
+  ]
+}

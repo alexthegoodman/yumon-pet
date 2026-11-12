@@ -1,0 +1,23 @@
+[package]
+name = "swarm"
+version = "0.1.0"
+edition = "2024"
+description = "Yumon Swarm: tiny specialist decoders writing Rust through skeletons with typed holes"
+
+# Standalone crate (like wir/): keeps swarm edits from rebuilding yumon-pet.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+yumon-pet = { path = "..", default-features = false }
+anyhow = "1.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+syn = { version = "=2.0.117", features = ["full", "parsing", "visit", "visit-mut", "extra-traits"] }
+quote = "=1.0.45"
+proc-macro2 = { version = "=1.0.106", features = ["span-locations"] }
+tokenizers = { version = "0.19" }
+rayon = "1.11.0"
+sha2 = "0.10"

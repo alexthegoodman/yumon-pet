@@ -1,0 +1,10 @@
+{
+  "name": "coarse",
+  "roles": [
+    { "name": "flow",    "kinds": ["block", "arms"] },
+    { "name": "value",   "kinds": ["expr", "iter", "cond", "literal", "call_args"] },
+    { "name": "pattern", "kinds": ["pat"] },
+    { "name": "decl",    "kinds": ["sig", "name"] },
+    { "name": "data",    "kinds": ["fields", "variants"] }
+  ]
+}
