@@ -35,12 +35,13 @@ fn total_width(rows: &[Row], gap: u32) -> u32 {
   fill with `syn` (and the finished file with `cargo check`). A fill that doesn't
   parse is retried or sent back up as a rejected hole.
 
-Hole markers are plain text that the 2,048-token code BPE already encodes, so the
-base model needs no new embedding rows. `hole!(kind)` is a valid macro in
-expression, statement, pattern, type and item position, so `syn` parses those
-skeletons as they are. Field lists and match-arm lists don't allow macros there.
-Phase 0 picks a marker for those (for example a placeholder field or arm the
-assembler recognises) and measures how many tokens each marker costs.
+Hole markers are special tokens, one per kind (`<hole_expr>`, `<hole_block>`, ...; the
+target is `<target_expr>` etc.). Decided after phase 0 measured the text form
+`hole!(kind)` at 6-10 tokens per marker. The base embedding table grows by 25 rows (see
+"Special-token markers"). The text form `hole!(kind)` is still what `syn` is given when a
+skeleton is checked (valid macro in expression, statement, pattern and item position);
+list positions that don't allow macros (fields, variants, arms, names, signatures) get a
+placeholder (`syn_placeholder`), which only the assembler sees.
 
 ### Why this format
 
@@ -104,9 +105,9 @@ per-role decision based on the coverage numbers.
 ### Worker prompt
 
 ```
-<BOS> /// doc comment
-<skeleton with the target hole written as hole!(TARGET kind) and the rest as hole!(kind)>
-<SEP-like marker> fill <EOS>
+<BOS> (doc comment is part of the skeleton text)
+<skeleton with the target hole written as <target_KIND> and the rest as <hole_KIND>>
+<fill> fill <EOS>
 ```
 
 Loss counts only the fill tokens. The decoder trainer has no prompt loss mask
@@ -163,7 +164,7 @@ Each phase ends with numbers that can be checked on their own.
    `cargo check` as separate modules to spread the cost. Error codes can also act as
    feedback text for a "repair" role.
 
-## Phase 0 results (2026-11-11)
+## Phase 0 results (2026-11-11, rerun after enums and special tokens)
 
 Run: `cd swarm && cargo run --release --bin phase0` (about 40 s after build; writes
 `swarm/out/phase0/`: `report.json`, `examples.txt`, `vocab-<set>.json`). Unit tests:
@@ -182,65 +183,78 @@ Holes are the outermost eligible syntax at each level, and each fill is decompos
 | `arms` | per arm: `pat`, body (`block` if braced, else `expr`/`literal`); guards stay concrete |
 | `expr`, `iter`, `cond` | `call_args` for calls and method calls; control flow as in `block` |
 
-Layout survives: hole ranges are trimmed, so skeletons keep `{`, newline, `hole!(block)`,
+Layout survives: hole ranges are trimmed, so skeletons keep `{`, newline, `<hole_block>`,
 newline, `}`. Brace macros without `;` (`table! { .. }`) stay concrete. A worker's target is
 the fill with its own holes still open (`Node::skeleton`). Its context (`Node::context`) is
 the whole chunk with the target's ancestors expanded, siblings open and the target written
-`hole!(TARGET kind)`. That is what a top-down, breadth-first dispatcher would hold when it
-reaches the hole. Worker prompt = `BOS`, context, `"\n// fill\n"` (5 tokens), fill, `EOS`.
+`<target_kind>`. That is what a top-down, breadth-first dispatcher would hold when it
+reaches the hole. Worker prompt = `BOS`, context, `<fill>`, fill, `EOS`.
 
-### Numbers (130,414 chunks from `training-cache/code.bin`, 908 of 9,086 files held out)
+### Special-token markers
+
+Every marker is one token. `swarm/tokenizer.json` (built by `cargo run --release --bin
+make_tokenizer`) is the code BPE plus 25 special tokens appended as ids 2048-2072, so every
+base id is unchanged: `<hole_KIND>` x12, `<target_KIND>` x12 and `<fill>`. Skeletons are
+text with those strings; `syn_placeholder` swaps in Rust-parseable stand-ins only when a
+skeleton is checked. Consequence for phase 2: the embedding table grows from 2,048 to 2,073
+rows (the base model's tied table, `embed_in` and the head all see 25 new rows, initialised
+fresh or from the mean of the base rows), and a role's output rows must include its own
+markers (they are among the most frequent targets). No source chunk contains a marker string.
+Before special tokens `hole!(kind)` cost 6-10 tokens (11-14 for the target form); the same
+prompts are now about 35% shorter (p50 37-111 tokens, p99 256-463).
+
+### Numbers (134,655 chunks from `training-cache/code.bin`, 913 of 9,125 files held out)
 
 - Extraction: 0 chunks fail to parse, 0 byte-for-byte rebuild mismatches, 0 skeleton parse
-  failures, 0 fill parse failures, over all 1,095,900 nodes in training files. (The checkers
+  failures, 0 fill parse failures, over all 1,107,412 nodes in training files. (The checkers
   found and fixed four extractor/wrapper bugs on the way: or-patterns in `let` wrappers,
   typed `let` patterns, brace macros as statements, trailing `//` comments swallowing the
   wrapper's closing text.)
 - Instances per kind (training files): expr 320,102; block 145,136; pat 138,203; name
-  117,813; call_args 111,681; sig 82,307; cond 23,653; fields 12,810; literal 9,081; arms
-  8,936; iter 8,365; **variants 0**. By depth 1-8: 313,543 / 392,314 / 193,515 / 56,364 /
+  121,652; call_args 111,681; sig 82,307; cond 23,653; fields 12,810; literal 9,081; arms
+  8,936; iter 8,365; variants 3,834. By depth 1-8: 321,216 / 392,314 / 193,515 / 56,364 /
   16,418 / 4,605 / 1,125 / 203.
-- **No `variants` data**: the chunker behind `code.bin` only keeps structs, functions and
-  methods, so no enum is in the cache. The extractor handles enums (unit test); the data
-  has to come from the raw sources (card `swarm-enum-source`).
-- Prompt length (context + separator + fill, tokens): p50 60-176, p99 281-538 by kind.
-  Share over 512: 2.0% literal, 0.3% fields, 0.2% pat, 0.1% expr/call_args/arms, 0% others.
-  Cropping is nearly unnecessary at 512; only `literal` and `fields` sometimes need it.
-- Marker cost (code BPE): `hole!(kind)` is 6-10 tokens, `hole!(TARGET kind)` 11-14. A
-  skeleton with ten open holes spends about 70 of 512 tokens on markers. Syn placeholders
-  for list positions are cheaper for `name` (4 vs 6), `variants` (4 vs 9), `arms` (5 vs 8)
-  and dearer for `sig` (11 vs 7). Decision: models see the text marker everywhere; the
-  assembler swaps in placeholders (`syn_placeholder`) only to parse skeletons. A shorter
-  marker (`hole!(e)`) is untested.
-- Fill length (tokens, p50/p90/p99): block 17/92/201, expr 18/44/146, call_args 10/42/168,
-  pat 3/10/24, name 6/16/31, sig 15/41/83, fields 44/191/394, arms 50/108/233.
+- Enums: `rust_units` (`src/brain/code_corpus.rs`) and `code_documented::document` now accept
+  enums, and `code.bin` was rebuilt: 134,655 chunks (was 130,414; +4,241 enum chunks; same
+  tokenizer sha256, same config `configs/yumon-code-dec.json`, 4m30s). The old file is
+  `training-cache/code.bin.pre-enums`. Not rebuilt: `code_long.bin` (2048 pretraining) and the
+  `documented/` / `undocumented/` tiers (they are text records; `gen_synthetic_captions` will
+  caption the new enum chunks when it next runs).
+- Prompt length (context + `<fill>` + fill + BOS/EOS, tokens): p99 256-463 by kind; 0% of any
+  kind over 512, so no cropping is needed at 512.
+- Fill length (tokens, p50/p90/p99): block 7/51/134, expr 13/43/145, call_args 10/42/168,
+  pat 3/10/24, name 6/16/30, sig 15/41/83, fields 44/191/394, variants 46/195/371,
+  arms 22/55/118.
 
-### 256 output rows: coverage
+### Output rows: coverage
 
 Rows = EOS plus the most frequent target tokens of the role's training fills (markers
-included). Share of held-out fills whose every token is inside the rows, by output rows:
+included). Share of held-out fills whose every token is inside the rows, by output rows
+(the last column is the full 2,073-row table):
 
-| kind | 256 | 512 | 1024 | 2048 |
+| kind | 256 | 512 | 1024 | 2073 |
 | --- | --- | --- | --- | --- |
-| block | 88.4% | 89.8% | 92.7% | 100% |
+| block | 88.3% | 89.8% | 92.7% | 100% |
 | arms | 92.1% | 94.1% | 96.8% | 98.7% |
 | literal | 70.2% | 82.0% | 90.6% | 96.4% |
 | pat | 42.2% | 65.0% | 91.6% | 100% |
-| iter | 38.6% | 65.0% | 91.0% | 98.0% |
-| name | 27.7% | 56.9% | 99.6% | 100% |
+| iter | 38.9% | 65.0% | 91.0% | 98.0% |
+| name | 26.4% | 55.3% | 99.5% | 100% |
 | sig | 25.0% | 39.8% | 77.8% | 99.9% |
 | call_args | 19.7% | 37.2% | 69.7% | 100% |
-| expr | 15.6% | 34.2% | 73.4% | 100% |
-| cond | 12.4% | 36.1% | 78.9% | 96.8% |
+| expr | 15.0% | 32.7% | 72.8% | 100% |
+| cond | 12.3% | 36.1% | 78.8% | 96.8% |
+| variants | 4.5% | 11.2% | 31.8% | 98.5% |
 | fields | 2.3% | 5.7% | 24.1% | 99.8% |
 
-(The 2048 column is below 100% where a held-out token never appears in training fills.)
-At the token level 256 rows cover 75-82% of target tokens for value roles and 96-99% for
+(The last column is below 100% where a held-out token never appears in training fills.)
+At the token level 256 rows cover 74-83% of target tokens for value roles and 93-98% for
 `block` and `arms`. So the 256-row plan holds for flow roles (`block`, `arms`) and `literal`;
-`name`, `pat`, `iter` need about 1024; `expr`, `call_args`, `cond`, `sig` need 1024-2048 or a
-copy head; `fields` needs the full table. Phase 2 sets `out_vocab` per role from this table
-(`roles/*.json` has the field; default 256). Two role sets exist: `kinds` (one role per
-kind, 12) and `coarse` (5); 15- and 40-role sets need finer kinds (phase 5).
+`name`, `pat`, `iter` need about 1024; `expr`, `call_args`, `cond`, `sig` need 1024 or more
+(or a copy head); `fields` and `variants` need the full table. Phase 2 sets `out_vocab` per
+role from this table (`roles/*.json` has the field; default 256). Two role sets exist:
+`kinds` (one role per kind, 12) and `coarse` (5); 15- and 40-role sets need finer kinds
+(phase 5).
 
 ### Build time (Windows, release)
 
@@ -276,14 +290,12 @@ swarm/
 
 ## Open questions
 
-- Markers for field and arm lists: settled in phase 0 (text markers everywhere, syn
-  placeholders only for parsing); shorter markers untested.
+- Markers: settled (one special token per kind, ids 2048-2072; see "Special-token markers").
 - Whether one shared fine-tuned trunk with per-role output rows (cheap) does as well
   as fully separate role models (the "many models" version). Worth testing in
   phase 2, since both start from the same checkpoint.
-- Whether the 512-token context is enough for workers: yes for 98%+ of fills (phase 0).
+- Context stays 512 (decided): with 1-token markers no prompt of any kind exceeds it.
 - Output rows per role (see the coverage table), and whether a copy head beats more rows.
-- Where `variants` data comes from (no enums in `code.bin`).
 - How the planner decides that a hole kind should be filled by a written piece
   rather than a trained one (probably the dispatcher's job, not a model's).
 
@@ -293,4 +305,8 @@ swarm/
 - 2026-11-11: Phase 0 done. `swarm/` crate (skeleton, roles, dataset, `phase0`,
   `show_failures`), `roles/kinds.json` and `roles/coarse.json`. 130k chunks extract with 0
   failures and byte-exact rebuilds; coverage, prompt lengths, marker costs and build times
-  above. Gaps: no `variants` data, 256 rows too few for most value roles. Nothing trained.
+  above. Gap: 256 rows too few for most value roles. Nothing trained.
+- 2026-11-11: Follow-ups from review: enums added to the chunker and `code.bin` recached
+  (134,655 chunks); 1-token special-token markers (`swarm/tokenizer.json`, 25 tokens, ids
+  2048-2072); context stays 512; `swarm/` stays its own crate. Phase 0 rerun: all checks 0
+  failures, `variants` has 3,834 training fills.

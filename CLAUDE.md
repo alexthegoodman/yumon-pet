@@ -399,3 +399,5 @@ context = whole chunk with the target's ancestors expanded, siblings open, targe
 `"\n// fill\n"`. 130k chunks: 0 failures, byte-exact rebuilds. 256 output rows cover
 whole fills only for block/arms/literal (see docs/SWARM.md table); `code.bin` has no
 enums, so `variants` has no data. `cargo test --release` in `swarm/` runs 3 tests.
+
+Swarm follow-up (2026-11-11): chunker and `document` accept enums; `code.bin` rebuilt (134,655 chunks, backup `code.bin.pre-enums`). `swarm/tokenizer.json` (`make_tokenizer`) adds 25 one-token markers (ids 2048-2072); prompts max out below 512. Phase 2 must extend the checkpoint's embedding to 2,073 rows.

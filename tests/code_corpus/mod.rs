@@ -164,10 +164,12 @@ trait Example {
     fn abstract_method();
     fn concrete(&self) { if true {} }
 }
+/// A mode.
+enum Mode { A, B(u8) }
 macro_rules! ignored { () => { fn fake() {} }; }
 "###;
     let units = code_corpus::rust_units(text).unwrap();
-    assert_eq!(units.len(), 7);
+    assert_eq!(units.len(), 8);
     for (unit, _) in &units { syn::parse_file(unit).unwrap(); }
     assert!(units[0].0.starts_with("/// A documented type."));
     assert!(units[0].0.contains("#[derive(Clone)]"));
@@ -178,6 +180,7 @@ macro_rules! ignored { () => { fn fake() {} }; }
     assert!(!units[4].0.contains("fn other"));
     assert!(units[6].0.starts_with("trait Example {"));
     assert!(!units[6].0.contains("abstract_method"));
+    assert!(units[7].0.starts_with("/// A mode.") && units[7].0.contains("enum Mode"));
 }
 
 #[test]

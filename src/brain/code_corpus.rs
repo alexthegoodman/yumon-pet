@@ -305,7 +305,7 @@ pub fn load_tokenizer(path: &str) -> Result<TokenizerKind> {
     Ok(TokenizerKind::Bpe(tok))
 }
 
-/// Extract complete structs and functions using Rust syntax, never brace counting.
+/// Extract complete structs, enums and functions using Rust syntax, never brace counting.
 /// Methods retain the original impl/trait header and a closing brace. Attributes
 /// and doc comments belong to their item; macro bodies are not expanded.
 fn rust_units(text: &str) -> Result<Vec<(String, usize)>> {
@@ -316,7 +316,7 @@ fn rust_units(text: &str) -> Result<Vec<(String, usize)>> {
     fn collect(text: &str, items: &[syn::Item], units: &mut Vec<(String, usize)>) -> Result<()> {
         for item in items {
             match item {
-                syn::Item::Struct(_) | syn::Item::Fn(_) => {
+                syn::Item::Struct(_) | syn::Item::Enum(_) | syn::Item::Fn(_) => {
                     units.push((slice(text, item.span())?.to_owned(), item.span().start().line));
                 }
                 syn::Item::Mod(module) => {
@@ -358,7 +358,7 @@ fn rust_units(text: &str) -> Result<Vec<(String, usize)>> {
     Ok(units)
 }
 
-/// One complete struct/function per sample. Oversized items are reported and
+/// One complete struct/enum/function per sample. Oversized items are reported and
 /// skipped, never truncated. Increase max_seq_len to include larger items.
 pub fn chunk_source(text: &str, tokenizer: &TokenizerKind, max_seq_len: usize, source: &str) -> Result<Vec<Sample>> {
     ensure!(max_seq_len >= 2, "max_seq_len must be >= 2");

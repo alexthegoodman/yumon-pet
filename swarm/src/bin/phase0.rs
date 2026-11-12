@@ -14,7 +14,8 @@ use swarm::{
 };
 use tokenizers::Tokenizer;
 
-const VOCAB: usize = 2048;
+/// 2,048 code BPE ids plus the 25 swarm special tokens (`make_tokenizer`).
+const VOCAB: usize = 2048 + 25;
 const EOS: u32 = 2;
 
 #[derive(Default)]
@@ -144,7 +145,7 @@ fn main() -> Result<()> {
     let role_files = arg("--roles").unwrap_or("roles/kinds.json,roles/coarse.json".into());
     let cache = PathBuf::from(arg("--cache").unwrap_or("../training-cache/code.bin".into()));
     let tokenizer = PathBuf::from(arg("--tokenizer").unwrap_or(
-        "../checkpoints/yumon-code-dec-sugar-maniac/code_32h_4l_2a_128ff_512len_b16_DecoderOnly_f32_curriculum_documented_tiers_v3_tok64_jl_ffn16_at0_tied/tokenizer.json".into(),
+        "tokenizer.json".into(),
     ));
     let out = PathBuf::from(arg("--out").unwrap_or("out/phase0".into()));
     std::fs::create_dir_all(&out)?;
@@ -158,16 +159,18 @@ fn main() -> Result<()> {
     let all_files: std::collections::HashSet<_> = chunks.iter().map(|c| &c.file).collect();
     println!("files {} (held out {})", all_files.len(), val_files.len());
 
-    println!("\nmarker token costs (code BPE):");
-    let mut markers = vec![];
+    println!("\nmarkers:");
     for k in KINDS {
-        let text = ids(&tok, &skeleton::marker(k)).len();
-        let target = ids(&tok, &skeleton::target_marker(k)).len();
-        let syn = ids(&tok, &skeleton::syn_placeholder(k)).len();
-        println!("  {k:10} hole!({k}) {text:2}  TARGET {target:2}  syn placeholder {syn:2}");
-        markers.push(serde_json::json!({"kind": k, "marker": text, "target": target, "syn_placeholder": syn}));
+        for text in [skeleton::marker(k), skeleton::target_marker(k)] {
+            anyhow::ensure!(ids(&tok, &text).len() == 1, "{text} is not one token; run make_tokenizer");
+        }
     }
-    println!("  fill separator {:?}: {} tokens", FILL_SEP, ids(&tok, FILL_SEP).len());
+    anyhow::ensure!(ids(&tok, FILL_SEP).len() == 1, "{FILL_SEP} is not one token");
+    println!("  all {} open/target markers and the fill separator are 1 token", 2 * KINDS.len());
+    let clashes = chunks.iter().filter(|c| skeleton::special_tokens().iter().any(|t| c.text.contains(t.as_str()))).count();
+    println!("  chunks that already contain a marker string: {clashes}");
+    let markers: Vec<serde_json::Value> = Vec::new();
+
 
     let t = std::time::Instant::now();
     let mut train = scan(&chunks, &tok, true);
@@ -275,7 +278,7 @@ fn main() -> Result<()> {
     // Output-vocabulary sweep: how many held-out fills fit entirely inside N rows.
     println!("
 fills fully inside the role's rows, by output rows (one role per kind):");
-    let sizes = [256usize, 512, 1024, 2048];
+    let sizes = [256usize, 512, 1024, VOCAB];
     let kinds_set = RoleSet::load(std::path::Path::new("roles/kinds.json"))?;
     print!("{:10}", "kind");
     for n in sizes { print!(" {n:>7}"); }

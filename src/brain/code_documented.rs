@@ -24,7 +24,7 @@ pub fn document(source: &str, comment: &str) -> Result<String> {
     let mut positions = Vec::new();
     for item in &file.items {
         match item {
-            syn::Item::Fn(_) | syn::Item::Struct(_) => {
+            syn::Item::Fn(_) | syn::Item::Struct(_) | syn::Item::Enum(_) => {
                 positions.push(item.span().byte_range().start)
             }
             syn::Item::Impl(block) => {
@@ -46,7 +46,7 @@ pub fn document(source: &str, comment: &str) -> Result<String> {
     }
     ensure!(
         positions.len() == 1,
-        "expected one function, method, or struct per sample"
+        "expected one function, method, struct, or enum per sample"
     );
     // syn spans exclude an initial BOM/shebang; restore their byte offsets.
     let bom = usize::from(source.starts_with('\u{feff}')) * '\u{feff}'.len_utf8();

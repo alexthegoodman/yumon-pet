@@ -595,6 +595,7 @@ The comment will be inserted immediately before the documented item's attributes
                 "#!/usr/bin/env rust-script\nfn f() {}",
                 "#[inline]\nfn f() {}",
                 "/// Old docs.\nstruct Café { value: u32 }",
+                "#[derive(Debug)]\nenum Mode { A, B(u8) }",
                 "impl Café {\n    #[inline]\n    fn f(&self) {}\n}",
                 "trait T { fn f(&self) {} }",
             ] {
@@ -607,6 +608,7 @@ The comment will be inserted immediately before the documented item's attributes
                 let attrs = match &file.items[0] {
                     syn::Item::Fn(f) => &f.attrs,
                     syn::Item::Struct(s) => &s.attrs,
+                    syn::Item::Enum(e) => &e.attrs,
                     syn::Item::Impl(i) => match &i.items[0] {
                         syn::ImplItem::Fn(f) => &f.attrs,
                         _ => unreachable!(),

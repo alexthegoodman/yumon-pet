@@ -1,7 +1,7 @@
 //! Hole markers, extraction (source -> tree of skeletons and fills) and splicing.
 //!
 //! A `Node` is one fill. Its text is `segments[0] child0 segments[1] child1 ...`;
-//! the skeleton is the same text with every child replaced by `hole!(kind)`.
+//! the skeleton is the same text with every child replaced by its `<hole_kind>` token text.
 //! Extraction is exact: `assemble` gives back the original bytes.
 use anyhow::{Context, Result, bail};
 use proc_macro2::LineColumn;
@@ -14,15 +14,30 @@ pub const KINDS: [&str; 12] = [
 ];
 pub const MAX_DEPTH: usize = 8;
 
+/// Open hole as models see it: one special token per kind (ids 2048.. in
+/// `swarm/tokenizer.json`, built by `make_tokenizer`).
 pub fn marker(kind: &str) -> String {
-    format!("hole!({kind})")
+    format!("<hole_{kind}>")
 }
+/// The hole a worker must fill, also one token per kind.
 pub fn target_marker(kind: &str) -> String {
-    format!("hole!(TARGET {kind})")
+    format!("<target_{kind}>")
+}
+/// Between a worker's context and its fill.
+pub const FILL: &str = "<fill>";
+
+/// Every swarm special token, in id order starting at the base vocab size.
+pub fn special_tokens() -> Vec<String> {
+    KINDS
+        .iter()
+        .map(|k| marker(k))
+        .chain(KINDS.iter().map(|k| target_marker(k)))
+        .chain(std::iter::once(FILL.to_owned()))
+        .collect()
 }
 
-/// What `syn` is given where the text marker is not valid Rust (field lists, arms,
-/// names, signatures). Only used to check skeletons; models see the text marker.
+/// What `syn` is given where a skeleton is checked for parseability: the special
+/// tokens are not Rust. Models never see these.
 pub fn syn_placeholder(kind: &str) -> String {
     match kind {
         "name" => "__hole".into(),
@@ -30,7 +45,7 @@ pub fn syn_placeholder(kind: &str) -> String {
         "fields" => "__hole: ()".into(),
         "variants" => "__Hole".into(),
         "arms" => "__ => (),".into(),
-        other => marker(other),
+        other => format!("hole!({other})"),
     }
 }
 
@@ -461,23 +476,32 @@ impl P { fn len(&self) -> f32 { self.x.hypot(self.y) } }
     fn skeleton_shape() {
         let n = extract(SRC).unwrap();
         let s = n.skeleton();
-        assert!(s.contains("fn hole!(name)hole!(sig) {"), "{s}");
-        assert!(s.contains("struct hole!(name) {hole!(fields)}") || s.contains("struct hole!(name) { hole!(fields) }"), "{s}");
+        assert!(s.contains("fn <hole_name><hole_sig> {"), "{s}");
+        assert!(s.contains("struct <hole_name> {<hole_fields>}") || s.contains("struct <hole_name> { <hole_fields> }"), "{s}");
+        assert!(s.contains("enum <hole_name> {<hole_variants>}") || s.contains("enum <hole_name> { <hole_variants> }"), "{s}");
         let body = &n.children[2];
         assert_eq!(body.kind, "block");
         let sk = body.skeleton();
-        assert!(sk.contains("let hole!(pat) = hole!(literal);"), "{sk}");
-        assert!(sk.contains("for hole!(pat) in hole!(iter) {"), "{sk}");
-        assert!(sk.contains("match hole!(expr) {"), "{sk}");
+        assert!(sk.contains("let <hole_pat> = <hole_literal>;"), "{sk}");
+        assert!(sk.contains("for <hole_pat> in <hole_iter> {"), "{sk}");
+        assert!(sk.contains("match <hole_expr> {"), "{sk}");
+    }
+
+    #[test]
+    fn special_tokens_are_unique() {
+        let t = special_tokens();
+        assert_eq!(t.len(), 2 * KINDS.len() + 1);
+        let set: std::collections::HashSet<_> = t.iter().collect();
+        assert_eq!(set.len(), t.len());
     }
 
     #[test]
     fn contexts_mark_the_target() {
         let n = extract(SRC).unwrap();
         let ctx = n.context(&[2]);
-        assert!(ctx.contains("hole!(TARGET block)"), "{ctx}");
-        assert!(ctx.contains("hole!(name)"), "{ctx}");
+        assert!(ctx.contains("<target_block>"), "{ctx}");
+        assert!(ctx.contains("<hole_name>"), "{ctx}");
         let deep = n.context(&[2, 2]);
-        assert!(deep.contains("let hole!(pat)"), "{deep}");
+        assert!(deep.contains("let <hole_pat>"), "{deep}");
     }
 }

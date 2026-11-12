@@ -9,6 +9,7 @@ Status: phase 0 done (extraction, role configs, coverage). Phase 1 (oracle swarm
 
 ```
 cargo test --release                 # extractor tests (byte-exact rebuild, skeleton shape)
+cargo run --release --bin make_tokenizer   # tokenizer.json: code BPE + 25 marker tokens
 cargo run --release --bin phase0     # stats, coverage, marker costs -> out/phase0/
 cargo run --release --bin show_failures -- --kind pat   # fills that fail to parse
 ```

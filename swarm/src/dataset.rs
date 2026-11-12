@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-/// Between the worker's context and its fill. Plain text the code BPE already encodes.
-pub const FILL_SEP: &str = "\n// fill\n";
+/// Between the worker's context and its fill (one special token).
+pub const FILL_SEP: &str = crate::skeleton::FILL;
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -18,7 +18,7 @@ pub struct Instance {
     pub kind: String,
     pub depth: usize,
     pub path: Vec<usize>,
-    /// Ancestors expanded, siblings open, target marked `hole!(TARGET kind)`.
+    /// Ancestors expanded, siblings open, target marked `<target_kind>`.
     pub context: String,
     /// What the worker writes: the fill with its own holes still open.
     pub target: String,
