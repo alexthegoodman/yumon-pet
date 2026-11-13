@@ -14,6 +14,8 @@ pub struct Request<'a> {
     pub path: &'a [usize],
     /// Whole chunk, ancestors expanded, siblings open, target as `<target_KIND>`.
     pub context: &'a str,
+    /// 0 for the first try of a hole; retries are 1, 2, ... (workers sample on those).
+    pub attempt: usize,
 }
 
 /// Anything that can write a hole: the oracle, a sampler, later a trained role.
@@ -234,7 +236,7 @@ pub fn run(filler: &mut dyn Filler, root_kind: &str, cfg: &Config) -> (Slot, Run
         let context = if path.is_empty() { marker(&kind) } else { root.context(&path) };
         let mut accepted = None;
         for attempt in 0..=cfg.max_retries {
-            let req = Request { kind: &kind, path: &path, context: &context };
+            let req = Request { kind: &kind, path: &path, context: &context, attempt };
             let Some(text) = filler.fill(&req) else {
                 stats.gave_up += 1;
                 break;

@@ -7,6 +7,7 @@
 //!   [--planner ../checkpoints/swarm/planner] [--workers ../checkpoints/swarm]
 //!   [--roles roles/kinds.json] [--scratch out/scratch] [--limit-chunks N]
 //!   [--verbose] (one line per hole) [--max-fills 300] [--no-check]
+//!   [--retries 4] [--temp 0.8] [--top-k 40] (attempt 0 is greedy, retries sample)
 //!
 //! `--doc` prints one program. `--held-out N` runs N documented chunks from held-out files
 //! (spread evenly), compares the plan with the real skeleton, `syn`-parses and (default)
@@ -75,9 +76,9 @@ impl<F: sw::Filler> sw::Filler for Logged<F> {
     }
 }
 
-fn run_one(planner: &Planner, workers: &[Worker], doc: &str, verbose: bool, max_fills: usize) -> Outcome {
+fn run_one(planner: &Planner, workers: &[Worker], doc: &str, verbose: bool, max_fills: usize, retries: usize) -> Outcome {
     let mut filler = Logged { inner: SwarmFiller::new(planner, doc.to_owned(), workers), verbose, n: 0 };
-    let (slot, stats) = sw::run(&mut filler, ROOT, &Config { max_fills, ..Config::default() });
+    let (slot, stats) = sw::run(&mut filler, ROOT, &Config { max_fills, max_retries: retries });
     let plan = slot.fill.as_ref().map(|f| {
         let mut t = String::new();
         for (i, seg) in f.segments.iter().enumerate() {
@@ -110,13 +111,22 @@ fn main() -> Result<()> {
     let verbose = flag("--verbose");
     // a looping planner or worker can keep spawning holes; the library default is 4000
     let max_fills: usize = arg("--max-fills").map(|v| v.parse()).transpose()?.unwrap_or(300);
+    // first try is greedy; retries sample (temperature, top-k) so they differ from it
+    let retries: usize = arg("--retries").map(|v| v.parse()).transpose()?.unwrap_or(4);
+    let temperature: f32 = arg("--temp").map(|v| v.parse()).transpose()?.unwrap_or(0.8);
+    let top_k: usize = arg("--top-k").map(|v| v.parse()).transpose()?.unwrap_or(40);
 
-    let planner = Planner::load(&planner_dir).with_context(|| format!("planner at {}", planner_dir.display()))?;
+    let mut planner = Planner::load(&planner_dir).with_context(|| format!("planner at {}", planner_dir.display()))?;
+    planner.worker.temperature = temperature;
+    planner.worker.top_k = top_k;
     let mut workers = Vec::new();
     for r in roles.roles.iter().filter(|r| !r.written) {
         let dir = workers_dir.join(&r.name);
         if dir.join("model.bin").exists() {
-            workers.push(Worker::load(&dir)?);
+            let mut w = Worker::load(&dir)?;
+            w.temperature = temperature;
+            w.top_k = top_k;
+            workers.push(w);
         } else {
             println!("no worker checkpoint for {} ({})", r.name, dir.display());
         }
@@ -130,7 +140,7 @@ fn main() -> Result<()> {
 
     if let Some(doc) = arg("--doc") {
         let doc = as_doc(&doc);
-        let o = run_one(&planner, &workers, &doc, true, max_fills);
+        let o = run_one(&planner, &workers, &doc, true, max_fills, retries);
         println!("\n--- plan\n{}", o.plan.as_deref().unwrap_or("(no plan)"));
         println!(
             "\n--- program ({} fills, {} retries, {} rejected, {} gave up, {} holes left open)\n{}",
@@ -183,7 +193,7 @@ fn main() -> Result<()> {
     for (i, c) in picks.iter().enumerate() {
         let doc = doc_prefix(&c.text);
         let t1 = Instant::now();
-        let mut o = run_one(&planner, &workers, doc, verbose, max_fills);
+        let mut o = run_one(&planner, &workers, doc, verbose, max_fills, retries);
         println!(
             "[{:>3}/{}] {:>5.1}s  fills {:>3} retries {:>3} gave up {:>2} open {:>2}  {}",
             i + 1, picks.len(), t1.elapsed().as_secs_f64(), o.stats.fills, o.stats.retries, o.stats.gave_up, o.open,

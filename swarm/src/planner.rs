@@ -143,8 +143,8 @@ impl Planner {
     }
 
     /// The whole root text for these doc lines: the doc itself, then the planned skeleton.
-    pub fn plan(&self, doc: &str) -> Option<String> {
-        let body = self.worker.fill(doc)?;
+    pub fn plan(&self, doc: &str, attempt: usize) -> Option<String> {
+        let body = self.worker.fill_attempt(doc, attempt)?;
         Some(format!("{doc}{body}"))
     }
 }
@@ -154,12 +154,11 @@ pub struct SwarmFiller<'a> {
     pub planner: &'a Planner,
     pub doc: String,
     pub workers: &'a [Worker],
-    cache: Option<String>,
 }
 
 impl<'a> SwarmFiller<'a> {
     pub fn new(planner: &'a Planner, doc: String, workers: &'a [Worker]) -> Self {
-        Self { planner, doc, workers, cache: None }
+        Self { planner, doc, workers }
     }
     fn worker(&self, kind: &str) -> Option<&Worker> {
         self.workers.iter().find(|w| w.handles(kind))
@@ -169,13 +168,9 @@ impl<'a> SwarmFiller<'a> {
 impl Filler for SwarmFiller<'_> {
     fn fill(&mut self, req: &Request) -> Option<String> {
         if req.path.is_empty() {
-            // greedy decoding gives the same text on a retry, so plan once
-            if self.cache.is_none() {
-                self.cache = self.planner.plan(&self.doc);
-            }
-            return self.cache.clone();
+            return self.planner.plan(&self.doc, req.attempt);
         }
-        self.worker(req.kind)?.fill(req.context)
+        self.worker(req.kind)?.fill_attempt(req.context, req.attempt)
     }
     fn name(&self, kind: &str) -> &str {
         if kind == ROOT { "planner" } else { self.worker(kind).map_or("none", |w| w.meta.role.as_str()) }

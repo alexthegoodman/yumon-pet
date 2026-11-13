@@ -330,6 +330,9 @@ pub struct Worker {
     rows: Vec<u32>,
     fill_id: u32,
     device: <Infer as Backend>::Device,
+    /// Retries (attempt > 0) sample from the top `top_k` at this temperature; attempt 0 is greedy.
+    pub temperature: f32,
+    pub top_k: usize,
 }
 
 impl Worker {
@@ -340,7 +343,7 @@ impl Worker {
         ensure!(cfg.vocab_size == VOCAB, "{}: vocab {} (expected {VOCAB})", dir.display(), cfg.vocab_size);
         let tok = load_tokenizer(&dir.join("tokenizer.json"))?;
         let fill_id = encode(&tok, FILL_SEP)[0];
-        Ok(Worker { rows: meta.rows.clone(), meta, model, tok, fill_id, device })
+        Ok(Worker { rows: meta.rows.clone(), meta, model, tok, fill_id, device, temperature: 0.8, top_k: 40 })
     }
 
     pub fn handles(&self, kind: &str) -> bool {
@@ -355,6 +358,29 @@ impl Worker {
         }
         let max_new = CONTEXT - prompt.len() - 1;
         Some(self.model.greedy_rows(prompt, &self.rows, EOS, max_new, &self.device))
+    }
+
+    /// Attempt 0 is greedy; later attempts sample (seeded by the prompt and the attempt, so a
+    /// run repeats exactly).
+    pub fn fill_ids_attempt(&self, prompt: &[u32], attempt: usize) -> Option<Vec<u32>> {
+        if attempt == 0 {
+            return self.fill_ids(prompt);
+        }
+        if prompt.len() + 2 > CONTEXT {
+            return None;
+        }
+        let max_new = CONTEXT - prompt.len() - 1;
+        let mut seed = 0xcbf2_9ce4_8422_2325u64;
+        for &t in prompt {
+            seed = (seed ^ t as u64).wrapping_mul(0x100_0000_01b3);
+        }
+        seed ^= (attempt as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        Some(self.model.sample_rows(prompt, &self.rows, EOS, max_new, self.temperature, self.top_k, seed, &self.device))
+    }
+
+    pub fn fill_attempt(&self, context: &str, attempt: usize) -> Option<String> {
+        let ids = self.fill_ids_attempt(&self.prompt_for(context), attempt)?;
+        Some(self.decode(&ids))
     }
 
     pub fn prompt_for(&self, context: &str) -> Vec<u32> {
@@ -384,7 +410,7 @@ pub struct ModelFiller<'a> {
 impl Filler for ModelFiller<'_> {
     fn fill(&mut self, req: &Request) -> Option<String> {
         match self.workers.iter().find(|w| w.handles(req.kind)) {
-            Some(w) => w.fill(req.context),
+            Some(w) => w.fill_attempt(req.context, req.attempt),
             None => self.truth.as_mut().and_then(|t| t.fill(req)),
         }
     }
@@ -402,7 +428,7 @@ pub struct WorkerSwap<'a> {
 
 impl Filler for WorkerSwap<'_> {
     fn fill(&mut self, req: &Request) -> Option<String> {
-        if req.path == self.path.as_slice() { self.worker.fill(req.context) } else { self.truth.fill(req) }
+        if req.path == self.path.as_slice() { self.worker.fill_attempt(req.context, req.attempt) } else { self.truth.fill(req) }
     }
     fn name(&self, kind: &str) -> &str {
         if self.worker.handles(kind) { "swap" } else { "oracle" }
@@ -487,6 +513,23 @@ mod tests {
             assert_eq!(rows[best], want, "cached greedy and full forward disagree at length {t}");
             seq.push(want);
         }
+    }
+
+    #[test]
+    fn sampling_with_top_k_one_is_greedy_and_seeds_repeat() {
+        use burn::module::AutodiffModule;
+        let model = tiny().valid();
+        let device: <Infer as Backend>::Device = Default::default();
+        let rows: Vec<u32> = (0..VOCAB as u32).step_by(7).collect();
+        let seq: Vec<u32> = vec![1, 40, 41, 300, 2060];
+        let greedy = model.greedy_rows(&seq, &rows, u32::MAX, 6, &device);
+        let top1 = model.sample_rows(&seq, &rows, u32::MAX, 6, 0.8, 1, 7, &device);
+        assert_eq!(greedy, top1);
+        let a = model.sample_rows(&seq, &rows, u32::MAX, 12, 1.5, 40, 3, &device);
+        let b = model.sample_rows(&seq, &rows, u32::MAX, 12, 1.5, 40, 3, &device);
+        let c = model.sample_rows(&seq, &rows, u32::MAX, 12, 1.5, 40, 4, &device);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 
     #[test]

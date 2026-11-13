@@ -716,6 +716,47 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         }
         out
     }
+    /// Like `greedy_rows`, but each token is sampled from the top `top_k` of the softmax at
+    /// `temperature` (xorshift generator seeded with `seed`, so a run repeats exactly).
+    pub fn sample_rows(&self, prompt: &[u32], rows: &[u32], stop: u32, max_new: usize,
+        temperature: f32, top_k: usize, seed: u64, device: &B::Device) -> Vec<u32> {
+        assert!(!prompt.is_empty() && prompt.len() < self.config.max_seq_len);
+        let row_ids = Tensor::<B, 1, Int>::from_ints(
+            rows.iter().map(|&r| r as i32).collect::<Vec<_>>().as_slice(), device);
+        let mut cache = self.new_kv_cache(device);
+        let mut input: Vec<i32> = prompt.iter().map(|&t| t as i32).collect();
+        let mut out = Vec::new();
+        let mut state = seed | 1;
+        let mut unit = move || {
+            state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let inv_t = 1.0 / temperature.max(1e-4);
+        while out.len() < max_new && cache.len() + input.len() <= self.config.max_seq_len {
+            let t = input.len();
+            let tokens = Tensor::<B, 2, Int>::from_ints(TensorData::new(input.clone(), [1, t]), device);
+            let hidden = self.hidden_cached(tokens, &mut cache);
+            let last = hidden.narrow(1, t - 1, 1);
+            let logits = self.rows_head(last, row_ids.clone());
+            let logits: Vec<f32> = logits.into_data().convert::<f32>().to_vec::<f32>().unwrap();
+            let mut order: Vec<usize> = (0..logits.len()).collect();
+            order.sort_by(|&a, &b| logits[b].partial_cmp(&logits[a]).unwrap_or(std::cmp::Ordering::Equal));
+            order.truncate(top_k.clamp(1, logits.len()));
+            let top = logits[order[0]];
+            let weights: Vec<f64> = order.iter().map(|&i| (((logits[i] - top) * inv_t) as f64).exp()).collect();
+            let mut pick = unit() * weights.iter().sum::<f64>();
+            let mut best = order[0];
+            for (&i, w) in order.iter().zip(&weights) {
+                if pick < *w { best = i; break; }
+                pick -= w;
+            }
+            let token = rows[best];
+            if token == stop { break; }
+            out.push(token);
+            input = vec![token as i32];
+        }
+        out
+    }
     /// `forward_cached` up to the final residual (before the norm and head).
     fn hidden_cached(&self, tokens: Tensor<B, 2, Int>, cache: &mut KvCache<B>) -> Tensor<B, 3> {
         let [_, t] = tokens.dims();
