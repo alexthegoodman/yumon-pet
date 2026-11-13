@@ -18,7 +18,7 @@ param(
     [string[]]$Only = @(),
     [int]$HoleNegatives = 20000,
     [int]$ProgramNegatives = 3000,
-    [int]$CriticEpochs = 3,
+    [int]$CriticEpochs = 1,
     [int]$Iters = 100,
     [int]$Docs = 8,
     [int]$Group = 4,
@@ -57,7 +57,7 @@ if (Want "negatives") {
 }
 if (Want "critics") {
     foreach ($level in "hole", "program") {
-        Run "critic ($level)" (@("--bin", "train_critic", "--", "--level", $level, "--negatives", "$neg/neg_$level.jsonl",
+        Run "critic ($level)" (@("--bin", "train_critic", "--", "--steps", "1024", "--limit-chunks", "1024", "--val-items", "32", "--level", $level, "--negatives", "$neg/neg_$level.jsonl",
             "--epochs", $CriticEpochs, "--out", "$ck/critic_$level") + $CriticExtra)
     }
 }
