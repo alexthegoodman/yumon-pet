@@ -415,4 +415,4 @@ swarm/
   `train_roles.ps1`, `grow_vocab` / `logits_rows` / `greedy_rows` on the decoder, per-role
   `out_vocab` / `model` / `train` in `roles/kinds.json`. 12 swarm tests (cached greedy = full
   forward, vocab growth keeps old rows). Smoke runs only.
-
+- 2026-11-12: Phase 6 set up (RL), nothing trained: `critic.rs`, `rl.rs`, bins `gen_negatives`, `train_critic`, `train_rl`; `run_swarm --out`. See docs/SWARM_RL.md 'Implementation'.

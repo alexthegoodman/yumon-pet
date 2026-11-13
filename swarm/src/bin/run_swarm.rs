@@ -7,6 +7,7 @@
 //!   [--planner ../checkpoints/swarm/planner] [--workers ../checkpoints/swarm]
 //!   [--roles roles/kinds.json] [--scratch out/scratch] [--limit-chunks N]
 //!   [--verbose] (one line per hole) [--max-fills 300] [--no-check]
+//!   [--out out/phase3] (where samples.md and report.json go)
 //!   [--retries 4] [--temp 0.8] [--top-k 40] (attempt 0 is greedy, retries sample)
 //!
 //! `--doc` prints one program. `--held-out N` runs N documented chunks from held-out files
@@ -278,7 +279,8 @@ fn main() -> Result<()> {
         }
     }
 
-    std::fs::create_dir_all("out/phase3")?;
+    let out_dir = PathBuf::from(arg("--out").unwrap_or("out/phase3".into()));
+    std::fs::create_dir_all(&out_dir)?;
     let mut md = String::from("# Swarm samples (held-out documented chunks)\n\n");
     for (i, (o, original)) in outs.iter().enumerate() {
         md.push_str(&format!(
@@ -287,9 +289,9 @@ fn main() -> Result<()> {
             o.open, o.program.as_deref().unwrap_or("(incomplete)"), original
         ));
     }
-    std::fs::write("out/phase3/samples.md", md)?;
+    std::fs::write(out_dir.join("samples.md"), md)?;
     std::fs::write(
-        "out/phase3/report.json",
+        out_dir.join("report.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "docs": n_all, "planned": planned, "plan_parses": plan_ok, "same_shape": same_shape, "plan_exact": exact,
             "complete": complete.len(), "parse": parse_ok, "checked": checked, "clean": clean,

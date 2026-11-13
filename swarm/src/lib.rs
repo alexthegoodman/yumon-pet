@@ -5,3 +5,5 @@ pub mod swarm;
 pub mod check;
 pub mod worker;
 pub mod planner;
+pub mod critic;
+pub mod rl;

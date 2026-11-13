@@ -350,6 +350,27 @@ impl Worker {
         self.meta.kinds.iter().any(|k| k == kind)
     }
 
+    pub fn model(&self) -> &YumonDecBrain<Infer> {
+        &self.model
+    }
+
+    /// Swap in updated weights (RL), keeping rows, tokenizer and metadata.
+    pub fn set_model(&mut self, model: YumonDecBrain<Infer>) {
+        self.model = model;
+    }
+
+    /// Always sampled (RL rollouts): the ids written and whether the model ended with EOS
+    /// (false = cut off at the context limit).
+    pub fn rollout_ids(&self, prompt: &[u32], seed: u64, temperature: f32, top_k: usize) -> Option<(Vec<u32>, bool)> {
+        if prompt.len() + 2 > CONTEXT {
+            return None;
+        }
+        let max_new = CONTEXT - prompt.len() - 1;
+        let ids = self.model.sample_rows(prompt, &self.rows, EOS, max_new, temperature, top_k, seed, &self.device);
+        let ended = ids.len() < max_new;
+        Some((ids, ended))
+    }
+
     /// Greedy fill for a context (`<target_KIND>` marks the hole); `None` when the
     /// prompt leaves no room.
     pub fn fill_ids(&self, prompt: &[u32]) -> Option<Vec<u32>> {

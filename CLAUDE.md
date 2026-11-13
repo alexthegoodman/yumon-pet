@@ -422,3 +422,4 @@ references; harness.js; build.py; `demos/tests/beam_page.{feature,mjs}`). Networ
 exact best sentence on 16/16 prompts at width 8 (greedy 8/16); width 2 can be worse than greedy.
 Export goes to `tmp/wir-beam/beam_demo.json`. `tests/beam.rs`: 4 tests.
 
+Swarm RL (2026-11-12): see docs/SWARM_RL.md 'Implementation'. `swarm/src/critic.rs` (decoder reward model: EOS-row logit at the last token, listwise loss vs other/same/swarm negatives, per-kind calibration in `critic.json`; hole and program levels), `rl.rs` (sampled rollouts recorded as traces, per-hole values from hole critic + shared program critic + syn rejects + cargo-check errors charged by span + tree credit, group-relative advantages per role, one REINFORCE step per role with KL to the frozen start). Bins `gen_negatives`, `train_critic` (default from-scratch 96x6, `--init` for a checkpoint), `train_rl` (out `../checkpoints/swarm-rl`, `--only` roles); `run_swarm --out`. Smoke only; real runs left to Alex.

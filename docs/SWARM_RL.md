@@ -64,3 +64,82 @@ Don't simply use the discriminator's raw confidence as the reward.
 A discriminator can become overconfident, especially on unfamiliar code. I'd use pairwise ranking, calibration against held-out examples, and reward normalization.
 
 I'd also retain compilation and behavioral tests as independent checks, rather than allowing the discriminator to become the sole authority.
+
+---
+
+## Implementation (2026-11-12)
+
+Code is in `swarm/`: `src/critic.rs`, `src/rl.rs`, bins `gen_negatives`, `train_critic`, `train_rl`.
+Smoke-tested only; the real runs are left to Alex.
+
+### Phase 1: critic (D1)
+
+- A critic is a decoder that reads `[BOS] context <fill> fill [EOS]` and outputs the EOS-row logit at
+  the last token. No new head, so any decoder can be one. Default is a from-scratch 96 wide, 6 layer
+  model (1.08M params); `--init <checkpoint>` starts from a pretrained decoder, `--embed/--layers/--heads/--ff`
+  set the shape. Which wins is untested.
+- Two levels, same code. `hole`: context = the worker's prompt, fill = one hole's fill (the per-worker
+  reward). `program`: context = the doc comment, fill = the whole program below it (the shared reward).
+- Listwise loss: each real fill vs K wrong ones (`--k 3`). Negatives, easy to hard: `other` (same kind,
+  random chunk), `same` (another hole of the chunk / another chunk of the file), `swarm` (written by the
+  current swarm, `gen_negatives`). Hardest kinds are picked first.
+- Held-out = whole files (`dataset::is_validation`), and held-out negatives come from held-out files only.
+  Each epoch prints ranking accuracy per negative kind and per hole kind; the checkpoint kept is the best
+  macro mean.
+- Calibration (not raw confidence): `critic.json` holds, per kind, the mean raw score of real fills and of
+  wrong ones (the swarm's when there are 20+). Reward = 0 at the typical wrong fill, 1 at the typical real
+  one, clamped to [-1.5, 2].
+
+```
+cargo run --release --bin gen_negatives -- --level hole      # 20k, about 50 min
+cargo run --release --bin gen_negatives -- --level program   # 3k
+cargo run --release --bin train_critic -- --level hole    --negatives out/critic/neg_hole.jsonl
+cargo run --release --bin train_critic -- --level program --negatives out/critic/neg_program.jsonl
+```
+
+Smoke (1.8k steps, 188k-param pretrained critic, 600 held-out items): other 63%, same 47%, swarm 68%. The
+`same` arm is below chance, which is why the default critic is bigger. Do not start RL until held-out
+accuracy on `swarm` negatives is clearly above chance.
+
+### Phase 2: RL (G1/G2)
+
+`train_rl` loads the planner and all 12 workers as trainable policies (`--only a,b` trains a subset) and
+the critics frozen. Per iteration: `--docs` training docs x `--group` sampled rollouts of the whole swarm.
+Every attempt of every hole is a trace with its sampled token ids.
+
+Credit assignment, the part that makes this one swarm and not one model:
+
+| signal | goes to |
+| --- | --- |
+| attempt `syn` rejected | that attempt only, `-syntax` |
+| hole critic (calibrated) | the fill it scored, `critic` |
+| program critic | every accepted fill of that program, `program` |
+| `cargo check` clean | every accepted fill, `clean`; `-program` if incomplete or no parse |
+| `cargo check` error | the deepest fill whose bytes contain the span, `-compile * min(n,3)/3` |
+| sub-hole values | the parent fill, `lambda` x mean of its children (tree credit) |
+
+Then advantage = value minus the mean of the same role in the same doc's group (role batch mean if under
+two), over the role's spread, clipped to +-3. Each role takes one on-policy REINFORCE step on its own
+weights (token-mean per trace, AdamW, lr 2e-5), plus `--kl` x KL to its frozen starting weights. Dropout
+is switched off in the staged copies so the gradient forward matches the rollouts. Sources are never
+touched: checkpoints go to `../checkpoints/swarm-rl/<role>/`, `rl.csv` logs every iteration.
+
+```
+cargo run --release --bin train_rl -- --critic-hole ../checkpoints/swarm/critic_hole --critic-program ../checkpoints/swarm/critic_program
+cargo run --release --bin run_swarm -- --planner ../checkpoints/swarm-rl/planner --workers ../checkpoints/swarm-rl --out out/phase6
+```
+
+`run_swarm` on the RL weights is the held-out check, with `cargo check` as the judge the critic cannot
+game. Compare `out/phase6/report.json` with `out/phase3/report.json`.
+
+Smoke: 3 iterations, 3 docs x 3 rollouts, 13 roles stepping, KL moves off 0, 4/9 programs `cargo check`
+clean on the last one. Nothing about learning can be read from that.
+
+### Known limits
+
+- Only 21% of chunks compile alone even with ground truth, so `clean` is rare; group-relative advantages
+  remove the constant part, but `compile` is a weak signal. Program critic and hole critic carry the load.
+- Errors are charged by span; `pat` (9%) and `sig` (29%) errors show up at use sites (phase 1 table).
+- The critic is the sole semantic judge. Reward hacking shows as critic reward rising while `run_swarm`
+  clean/parse rates or the samples get worse. Retrain the critic on the new swarm's negatives, then repeat.
+- One step per rollout batch, no PPO ratio; a batch of up to `--max-batch` traces per role.
