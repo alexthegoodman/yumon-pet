@@ -1,0 +1,34 @@
+{
+  "architecture": "decoder-only",
+  "source": "../../rust-code",
+  "curriculum": "training-cache",
+  "cache": "training-cache/code.bin",
+  "tokenizer": "yumon_code_bpe",
+  "max_seq_len": 512,
+  "exclude_dirs": [
+    ".git",
+    "target",
+    "node_modules"
+  ],
+  "seed": 4815162342,
+  "vocab_size": 2048,
+  "token_embed_dim": 512,
+  "embed_dim": 256,
+  "n_layers": 24,
+  "attn_heads": 8,
+  "ff_dim": 512,
+  "batch_size": 4,
+  "epochs": 10,
+  "first_lr": 0.001,
+  "last_lr": 0.0001,
+  "validation_fraction": 0.0002,
+  "out_dir": "checkpoints/yumon-code-sugar-maniac-2",
+  "tie_embeddings": true,
+  "eval_stage": "code",
+  "jl": {
+    "site": "ffn",
+    "dim": 64,
+    "from_layer": 0,
+    "seed": 1
+  }
+}
