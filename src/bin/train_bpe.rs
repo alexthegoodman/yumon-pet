@@ -48,7 +48,8 @@ fn main() -> anyhow::Result<()> {
             sentences.iter().collect(), 
             // 65536, // near GPT-2
             // 16384 // expressive (runpod)
-            2048 // more budget (local)
+            8192
+            // 2048 // more budget (local)
             // 1024
             // 4096 // medium
         )?.save(

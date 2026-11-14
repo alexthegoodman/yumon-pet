@@ -21,6 +21,7 @@ use super::{
     fixer::fix_json_syntax,
     flash_attn::backend::{FlashAttention, causal_flash_attention},
     jl::{JlProjection, JlSet, JlSite},
+    ngrammer::{NgramConfig, NgramLayer},
     model::{GenerationResult, MLP, MLPConfig, RMSNorm, RMSNormConfig, TEMPERATURE, TOP_K},
     samples::{Action, CardinalDir, TrainingStage},
     tokenizer::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN},
@@ -185,13 +186,15 @@ pub struct KvCache<B: Backend> {
     rope: RopeTables<B>,
     /// RoPE at the narrower head width of blocks after a JL residual projection.
     narrow_rope: Option<RopeTables<B>>,
+    /// Last cluster ids per head of each N-Grammer layer ([1, heads]), for the next chunk's first bigram.
+    ngram_last: Vec<Option<Tensor<B, 2, Int>>>,
 }
 impl<B: Backend> KvCache<B> {
     pub fn new(layers: usize, max_seq_len: usize, head_dim: usize, device: &B::Device) -> Self {
-        Self { layers: (0..layers).map(|_| None).collect(), len: 0, rope: RopeTables::new(max_seq_len, head_dim, device), narrow_rope: None }
+        Self { layers: (0..layers).map(|_| None).collect(), len: 0, rope: RopeTables::new(max_seq_len, head_dim, device), narrow_rope: None, ngram_last: Vec::new() }
     }
     pub fn new_mrope(layers: usize, coords: &[Vec<(f32, f32, f32)>], head_dim: usize, device: &B::Device) -> Self {
-        Self { layers: (0..layers).map(|_| None).collect(), len: 0, rope: RopeTables::new_mrope(coords, head_dim, device), narrow_rope: None }
+        Self { layers: (0..layers).map(|_| None).collect(), len: 0, rope: RopeTables::new_mrope(coords, head_dim, device), narrow_rope: None, ngram_last: Vec::new() }
     }
     pub(super) fn with_narrow_rope(mut self, rope: RopeTables<B>) -> Self {
         self.narrow_rope = Some(rope);
@@ -203,6 +206,10 @@ impl<B: Backend> KvCache<B> {
         self.narrow_rope.as_ref().map(|r| r.slice(self.len, len))
     }
     pub(super) fn layer(&mut self, layer: usize) -> &mut KvSlot<B> { &mut self.layers[layer] }
+    fn ngram_slot(&mut self, index: usize) -> &mut Option<Tensor<B, 2, Int>> {
+        if self.ngram_last.len() <= index { self.ngram_last.resize_with(index + 1, || None); }
+        &mut self.ngram_last[index]
+    }
     pub(super) fn advance(&mut self, len: usize) { self.len += len; }
     pub fn len(&self) -> usize { self.len }
 }
@@ -359,6 +366,9 @@ pub struct YumonDecBrain<B: Backend> {
     /// Tied head when the head width differs from the table width: head -> table.
     /// The projections are the last fields so older records load as `JlDecBrain`.
     head_down: Option<Linear<B>>,
+    /// N-Grammer layers (config.ngram), in layer order. Last field, so older records
+    /// load through the shorter layouts below.
+    ngram: Vec<NgramLayer<B>>,
 }
 
 /// Tied-head logits `x E^T`: x [batch, seq, d], table E [vocab, d].
@@ -370,6 +380,20 @@ pub(crate) fn tied_logits<B: Backend>(x: Tensor<B, 3>, table: Tensor<B, 2>) -> T
     let [vocab, _] = table.dims();
     let table_t = table.transpose().reshape([d * vocab]).reshape([d, vocab]);
     x.reshape([batch * seq, d]).matmul(table_t).reshape([batch, seq, vocab])
+}
+
+/// Record layout before N-Grammer layers (with the embedding projections).
+#[derive(Module, Debug)]
+struct ProjDecBrain<B: Backend> {
+    config: Ignored<YumonDecBrainConfig>,
+    embedding: Embedding<B>,
+    blocks: Vec<DecBlock<B>>,
+    norm: RMSNorm<B>,
+    dropout: Dropout,
+    token_head: Linear<B>,
+    jl: Vec<JlProjection<B>>,
+    embed_in: Option<Linear<B>>,
+    head_down: Option<Linear<B>>,
 }
 
 /// Record layout before the embedding projections.
@@ -403,20 +427,28 @@ struct LegacyDecBrain<B: Backend> {
 fn load_dec_record<B: Backend, R: Recorder<B>>(recorder: &R, args: R::LoadArgs,
     config: &YumonDecBrainConfig, device: &B::Device) -> Result<YumonDecBrainRecord<B>> {
     let err = |e| anyhow::anyhow!("load: {e:?}");
-    if config.embed_in_dims().is_some() || config.head_down_dims().is_some() {
+    if config.active_ngram().is_some() {
         return recorder.load(args, device).map_err(err);
+    }
+    if config.embed_in_dims().is_some() || config.head_down_dims().is_some() {
+        let old = recorder.load::<ProjDecBrainRecord<B>>(args, device).map_err(err)?;
+        return Ok(YumonDecBrainRecord {
+            config: old.config, embedding: old.embedding, blocks: old.blocks, norm: old.norm,
+            dropout: old.dropout, token_head: old.token_head, jl: old.jl, embed_in: old.embed_in,
+            head_down: old.head_down, ngram: Vec::new(),
+        });
     }
     if config.active_jl().is_some() {
         let old = recorder.load::<JlDecBrainRecord<B>>(args, device).map_err(err)?;
         return Ok(YumonDecBrainRecord {
             config: old.config, embedding: old.embedding, blocks: old.blocks, norm: old.norm,
-            dropout: old.dropout, token_head: old.token_head, jl: old.jl, embed_in: None, head_down: None,
+            dropout: old.dropout, token_head: old.token_head, jl: old.jl, embed_in: None, head_down: None, ngram: Vec::new(),
         });
     }
     let old = recorder.load::<LegacyDecBrainRecord<B>>(args, device).map_err(err)?;
     Ok(YumonDecBrainRecord {
         config: old.config, embedding: old.embedding, blocks: old.blocks, norm: old.norm,
-        dropout: old.dropout, token_head: old.token_head, jl: Vec::new(), embed_in: None, head_down: None,
+        dropout: old.dropout, token_head: old.token_head, jl: Vec::new(), embed_in: None, head_down: None, ngram: Vec::new(),
     })
 }
 #[derive(Config, Debug)]
@@ -447,6 +479,9 @@ pub struct YumonDecBrainConfig {
     /// width); a learned projection maps it to the model width.
     #[config(default = "None")]
     pub token_embed_dim: Option<usize>,
+    /// N-Grammer layers (ngrammer.rs).
+    #[config(default = "None")]
+    pub ngram: Option<NgramConfig>,
 }
 
 /// Widths of one block: residual, MLP hidden, per-head attention, MLP input.
@@ -455,6 +490,11 @@ struct BlockWidths { width: usize, ff: usize, head: usize, mlp_in: usize }
 impl YumonDecBrainConfig {
     /// The JL config when it adds a projection.
     fn active_jl(&self) -> Option<&JlSet> { self.jl.as_ref().filter(|j| j.active()) }
+    fn active_ngram(&self) -> Option<&NgramConfig> { self.ngram.as_ref() }
+    /// Index into `YumonDecBrain.ngram` of the layer before block `layer`.
+    fn ngram_index(&self, layer: usize) -> Option<usize> {
+        self.active_ngram().and_then(|n| n.layers.iter().position(|&l| l == layer))
+    }
     /// The active map at `site`.
     pub fn jl_site(&self, site: JlSite) -> Option<&crate::brain::jl::JlConfig> {
         self.active_jl().and_then(|j| j.site(site))
@@ -509,6 +549,9 @@ impl YumonDecBrainConfig {
         );
         if let Some(jl) = &self.jl {
             jl.validate(self.embed_dim, self.attn_heads, self.n_layers).expect("invalid jl config");
+        }
+        if let Some(ng) = &self.ngram {
+            ng.validate(self.n_layers, |l| self.width_at(l)).expect("invalid ngram config");
         }
         let linear = |from: usize, to: usize| LinearConfig::new(from, to).with_bias(false).init(device);
         let mut jl = Vec::new();
@@ -566,6 +609,9 @@ impl YumonDecBrainConfig {
             jl,
             embed_in: self.embed_in_dims().map(projection),
             head_down: self.head_down_dims().map(projection),
+            ngram: self.active_ngram().map_or_else(Vec::new, |n| {
+                n.layers.iter().map(|&l| NgramLayer::new(n, self.width_at(l), l, device)).collect()
+            }),
         }
     }
     /// Weights in the model, embeddings, head and JL maps included.
@@ -580,7 +626,7 @@ impl YumonDecBrainConfig {
         let head = if self.tie_embeddings { 2 } else { out * v + v };
         let projections: usize = [self.embed_in_dims(), self.head_down_dims()].into_iter().flatten()
             .map(|(from, to)| from * to).sum();
-        v * self.effective_token_embed_dim() + projections + blocks + out + head + self.jl_param_count()
+        v * self.effective_token_embed_dim() + projections + blocks + out + head + self.jl_param_count() + self.ngram_param_count()
     }
     /// Weights in the JL maps (frozen unless jl.trainable).
     pub fn jl_param_count(&self) -> usize {
@@ -591,6 +637,10 @@ impl YumonDecBrainConfig {
                 + self.jl_covers(JlSite::Ffn, l).map_or(0, |k| width * k)
         }).sum();
         residual + blocks
+    }
+    /// Weights in the N-Grammer layers (centroids, bigram tables, projections).
+    pub fn ngram_param_count(&self) -> usize {
+        self.active_ngram().map_or(0, |n| n.layers.iter().map(|&l| n.param_count(self.width_at(l))).sum())
     }
     /// Per-head width of blocks after a residual JL map, if any.
     fn narrow_head_dim(&self) -> Option<usize> {
@@ -608,6 +658,7 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         let mut trace = Vec::with_capacity(self.blocks.len());
         for (layer, block) in self.blocks.iter().enumerate() {
             x = self.residual_jl(layer, x);
+            x = self.ngram_train(layer, x, &mut None);
             let (next, mlp_in, mlp_out) = block.forward_probe(x, ropes.at(layer), self.block_jl(layer),
                 mlps.get(layer).and_then(Option::as_ref));
             trace.push((mlp_in, mlp_out));
@@ -681,6 +732,7 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         let mut x = self.dropout.forward(self.embed(x_tokens));
         for (layer, block) in self.blocks.iter().enumerate() {
             x = self.residual_jl(layer, x);
+            x = self.ngram_train(layer, x, &mut None);
             x = block.forward(x, ropes.at(layer), self.block_jl(layer));
         }
         x = self.residual_jl(self.blocks.len(), x);
@@ -769,11 +821,31 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         let mut x = self.embed(tokens);
         for (layer, block) in self.blocks.iter().enumerate() {
             x = self.residual_jl(layer, x);
+            x = self.ngram_cached(layer, x, cache);
             x = block.forward_cached(x, ropes.at(layer), self.block_jl(layer), cache.layer(layer));
         }
         x = self.residual_jl(self.blocks.len(), x);
         cache.advance(t);
         x
+    }
+
+    /// The N-Grammer layer before block `layer`, over a whole sequence; adds its
+    /// centroid loss to `aux`.
+    fn ngram_train(&self, layer: usize, x: Tensor<B, 3>, aux: &mut Option<Tensor<B, 1>>) -> Tensor<B, 3> {
+        let Some(i) = self.config.ngram_index(layer) else { return x };
+        let weight = self.config.active_ngram().map_or(0.0, |n| n.loss_weight);
+        let out = self.ngram[i].forward(x, None, weight);
+        *aux = Some(match aux.take() { Some(a) => a + out.loss, None => out.loss });
+        out.x
+    }
+    /// The N-Grammer layer before block `layer` for cached decoding (one sequence):
+    /// the first new token pairs with the last id the previous chunk left.
+    fn ngram_cached(&self, layer: usize, x: Tensor<B, 3>, cache: &mut KvCache<B>) -> Tensor<B, 3> {
+        let Some(i) = self.config.ngram_index(layer) else { return x };
+        let slot = cache.ngram_slot(i);
+        let out = self.ngram[i].forward(x, slot.take(), 0.0);
+        *slot = Some(out.last);
+        out.x
     }
 
     /// The JL map block `layer` applies itself.
@@ -805,17 +877,23 @@ impl<B: FlashAttention> YumonDecBrain<B> {
     }
 
     /// Logits [batch, seq, vocab]. Right-padded input only (see module docs).
-    pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+    pub fn forward(&self, tokens: Tensor<B, 2, Int>) -> Tensor<B, 3> { self.forward_aux(tokens).0 }
+
+    /// `forward` plus the N-Grammer centroid loss (zeros without N-Grammer layers).
+    pub fn forward_aux(&self, tokens: Tensor<B, 2, Int>) -> (Tensor<B, 3>, Tensor<B, 1>) {
+        let device = tokens.device();
         let [_, seq] = tokens.dims();
         assert!(seq > 0 && seq <= self.config.max_seq_len);
         let ropes = self.ropes(seq, &tokens.device());
         let mut x = self.dropout.forward(self.embed(tokens));
+        let mut aux = None;
         for (layer, block) in self.blocks.iter().enumerate() {
             x = self.residual_jl(layer, x);
+            x = self.ngram_train(layer, x, &mut aux);
             x = block.forward(x, ropes.at(layer), self.block_jl(layer));
         }
         x = self.residual_jl(self.blocks.len(), x);
-        self.head(x)
+        (self.head(x), aux.unwrap_or_else(|| Tensor::zeros([1], &device)))
     }
 
     /// Logits [1, t, vocab] for `t` new tokens after those already in `cache`.
@@ -830,6 +908,7 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         let mut x = self.embed(tokens);
         for (layer, block) in self.blocks.iter().enumerate() {
             x = self.residual_jl(layer, x);
+            x = self.ngram_cached(layer, x, cache);
             x = block.forward_cached(x, ropes.at(layer), self.block_jl(layer), cache.layer(layer));
         }
         x = self.residual_jl(self.blocks.len(), x);
@@ -946,6 +1025,8 @@ pub struct DecMetadata {
     pub tie_embeddings: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_embed_dim: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ngram: Option<NgramConfig>,
 }
 impl DecMetadata {
     pub fn config(&self) -> YumonDecBrainConfig {
@@ -962,6 +1043,7 @@ impl DecMetadata {
             jl: self.jl.clone(),
             tie_embeddings: self.tie_embeddings,
             token_embed_dim: self.token_embed_dim,
+            ngram: self.ngram.clone(),
         }
     }
 }
@@ -1465,6 +1547,7 @@ mod tests {
             jl: None,
             tie_embeddings: false,
             token_embed_dim: None,
+            ngram: None,
         };
         model.save(path.to_str().unwrap(), &tokenizer, &meta).unwrap();
         let (restored, tok, restored_config) =
@@ -1557,6 +1640,89 @@ mod tests {
                 assert_eq!(changed, trainable, "{}", jl.tag());
             }
         }
+    }
+
+    fn ngram_configs() -> Vec<YumonDecBrainConfig> {
+        ["16x2@0", "8x2@0,1", "8x4@1", "16@0"].iter()
+            .map(|spec| tiny_config().with_max_seq_len(16).with_ngram(NgramConfig::parse(spec).unwrap()))
+            .chain([tiny_config().with_max_seq_len(16).with_jl(JlSet::parse("residual:8@1").ok())
+                .with_ngram(NgramConfig::parse("8x2@1").unwrap())])
+            .collect()
+    }
+
+    /// Param count, cached decoding with the bigram carried across chunks, and the
+    /// layer's effect: zero-initialised it is a no-op, with a projection it is not.
+    #[test]
+    fn ngram_param_count_cache_and_effect() {
+        let device = Default::default();
+        let ids: Vec<i32> = (0..12).map(|i| 4 + (i * 5) % 28).collect();
+        let tensor = |ids: &[i32]| Tensor::<Inner, 2, Int>::from_ints(TensorData::new(ids.to_vec(), [1, ids.len()]), &device);
+        for config in ngram_configs() {
+            let what = config.ngram.as_ref().unwrap().tag();
+            let mut model: YumonDecBrain<Inner> = config.init(&device);
+            assert_eq!(model.num_params(), config.param_count(), "{what}");
+            let (_, aux) = model.forward_aux(tensor(&ids));
+            assert!(values(aux).iter().all(|v| *v > 0.0), "{what}: centroid loss");
+            for (i, layer) in model.ngram.iter_mut().enumerate() { layer.randomize_out(10 + i as u64); }
+            let full = values(model.forward(tensor(&ids)));
+            let mut cache = model.new_kv_cache(&device);
+            let mut cached = Vec::new();
+            let mut start = 0;
+            for n in [4, 1, 1, 3, 1, 2] {
+                cached.extend(values(model.forward_cached(tensor(&ids[start..start + n]), &mut cache)));
+                start += n;
+            }
+            assert_close(cached, full, 1e-4, &format!("cached logits {what}"));
+        }
+    }
+
+    /// With the projection at zero the N-Grammer layer changes nothing.
+    #[test]
+    fn ngram_starts_as_noop() {
+        let device = Default::default();
+        let config = tiny_config().with_max_seq_len(16).with_ngram(NgramConfig::parse("8x2@0,1").unwrap());
+        let model: YumonDecBrain<Inner> = config.init(&device);
+        let mut bare = model.clone();
+        bare.config.0.ngram = None;
+        bare.ngram.clear();
+        let input = || Tensor::<Inner, 2, Int>::from_ints([[1, 4, 5, 6, 7]], &device);
+        assert_close(values(model.forward(input())), values(bare.forward(input())), 1e-6, "noop");
+    }
+
+    /// Centroids train from the aux loss, the bigram table and projection from the LM loss,
+    /// and a checkpoint round-trips them.
+    #[test]
+    fn ngram_gradients_and_roundtrip() {
+        let device = Default::default();
+        let config = tiny_config().with_max_seq_len(16).with_ngram(NgramConfig::parse("8x2@0,1").unwrap());
+        let mut model: YumonDecBrain<Balanced> = config.init(&device);
+        for (i, layer) in model.ngram.iter_mut().enumerate() { layer.randomize_out(3 + i as u64); }
+        let (logits, aux) = model.forward_aux(Tensor::from_ints([[1, 4, 5, 6, 7, 8]], &device));
+        let grads = (logits.powf_scalar(2.0).mean() + aux).backward();
+        for layer in &model.ngram {
+            assert!(layer.centroids().grad(&grads).is_some(), "centroids get the k-means loss");
+            assert!(layer.bigrams_weight().grad(&grads).is_some(), "bigram table gets the LM loss");
+        }
+        let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+        let input = || Tensor::<Inner, 2, Int>::from_ints([[1, 4, 5]], &device);
+        let mut inner: YumonDecBrain<Inner> = config.init(&device);
+        for (i, layer) in inner.ngram.iter_mut().enumerate() { layer.randomize_out(5 + i as u64); }
+        let bytes = recorder.record(inner.clone().into_record(), ()).unwrap();
+        let record = load_dec_record(&recorder, bytes, &config, &device).unwrap();
+        let restored: YumonDecBrain<Inner> = config.init(&device).load_record(record);
+        assert_close(values(inner.forward(input())), values(restored.forward(input())), 1e-6, "ngram roundtrip");
+        // A checkpoint with factorized embeddings from before N-Grammer layers still loads.
+        let config = tiny_config().with_max_seq_len(16).with_tie_embeddings(true).with_token_embed_dim(Some(24));
+        let model: YumonDecBrain<Inner> = config.init(&device);
+        let old = ProjDecBrain {
+            config: model.config.clone(), embedding: model.embedding.clone(), blocks: model.blocks.clone(),
+            norm: model.norm.clone(), dropout: model.dropout.clone(), token_head: model.token_head.clone(),
+            jl: Vec::new(), embed_in: model.embed_in.clone(), head_down: model.head_down.clone(),
+        };
+        let bytes = recorder.record(old.into_record(), ()).unwrap();
+        let record = load_dec_record(&recorder, bytes, &config, &device).unwrap();
+        let restored: YumonDecBrain<Inner> = config.init(&device).load_record(record);
+        assert_close(values(model.forward(input())), values(restored.forward(input())), 1e-6, "pre-ngram load");
     }
 
     /// Records saved before the JL field existed still load (no maps).

@@ -268,6 +268,8 @@ pub struct RunConfig {
     pub mamba: Option<Mamba2Settings>,
     /// Decoder-only JL projection experiment (brain::jl).
     pub jl: Option<crate::brain::jl::JlSet>,
+    /// Decoder-only N-Grammer layers (brain::ngrammer).
+    pub ngram: Option<crate::brain::ngrammer::NgramConfig>,
 }
 
 /// Number of held-out prompts run through the model every time we do a
@@ -582,6 +584,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 + &config.router.as_ref().map_or(String::new(), |g| g.tag(crate::brain::optimizers::ParamGroup::Router))
                 + &config.experts.as_ref().map_or(String::new(), |g| g.tag(crate::brain::optimizers::ParamGroup::Experts))
                 + &config.jl.as_ref().map_or(String::new(), |j| j.tag())
+                + &config.ngram.as_ref().map_or(String::new(), |n| n.tag())
                 + if config.tie_embeddings { "_tied" } else { "" },
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
             n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
@@ -607,6 +610,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             expert_group: config.experts.clone(),
             mamba: config.mamba.clone(),
             jl: config.jl.clone(),
+            ngram: config.ngram.clone(),
         };
         let run_dir = config.out_dir.join(&run.name);
         std::fs::create_dir_all(&run_dir)?;
@@ -619,7 +623,7 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
         }
         std::fs::write(identity_path, serde_json::to_vec_pretty(&identity)?)?;
         let device = <TrainBackend as Backend>::Device::default();
-        if config.adaptive_loss.is_some() || config.jl.is_some() {
+        if config.adaptive_loss.is_some() || config.jl.is_some() || config.ngram.is_some() {
             // Adaptive-loss and JL experiment arms must share initialization and dropout streams.
             <TrainBackend as Backend>::seed(&device, config.seed);
         }
@@ -1499,6 +1503,7 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
             .with_ff_dim(run_cfg.ff_dim).with_max_seq_len(run_cfg.max_seq_len)
             .with_dropout_rate(run_cfg.dropout_rate)
             .with_jl(run_cfg.jl.clone())
+            .with_ngram(run_cfg.ngram.clone())
             .with_tie_embeddings(run_cfg.tie_embeddings)
             .with_token_embed_dim(run_cfg.token_embed_dim);
         println!("Decoder-only: {:.2}M parameters, flash attention, BalancedCheckpointing{}.",
@@ -1512,7 +1517,7 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
         let same = |saved: &YumonDecBrainConfig| saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
             && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
             && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
-            && saved.jl == config.jl && saved.token_embed_dim == config.token_embed_dim;
+            && saved.jl == config.jl && saved.ngram == config.ngram && saved.token_embed_dim == config.token_embed_dim;
         // Decoder runs named `_tied` before tying existed hold untied weights.
         let same_tie = |saved: &YumonDecBrainConfig| -> Result<()> {
             anyhow::ensure!(saved.tie_embeddings == config.tie_embeddings,
@@ -1529,6 +1534,10 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
             println!("JL maps hold {} weights; residual width per layer {:?} then head {}.",
                 config.jl_param_count(), (0..config.n_layers).map(|l| config.width_at(l)).collect::<Vec<_>>(),
                 config.width_at(config.n_layers));
+        }
+        if let Some(ng) = &config.ngram {
+            println!("N-Grammer: {} clusters x {} heads before blocks {:?}, {} weights, centroid loss weight {}.",
+                ng.num_clusters, ng.heads, ng.layers, config.ngram_param_count(), ng.loss_weight);
         }
         if !run_dir.join("model.bin").exists() {
             if let Some(init_path) = &run_cfg.init_checkpoint {
@@ -1550,8 +1559,7 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
     }
     fn set_stage(&mut self, stage: TrainingStage) { self.config.0.training_stage = stage; }
     fn forward_train(&self, tokens: Tensor<TrainBackend, 2, Int>) -> (Tensor<TrainBackend, 3>, Tensor<TrainBackend, 1>) {
-        let device = tokens.device();
-        (self.forward(tokens), Tensor::zeros([1], &device))
+        self.forward_aux(tokens)
     }
     fn save_run(&self, dir: &str, tokenizer: &TokenizerKind, p: &RunProgress) -> Result<()> {
         let meta = DecMetadata {
@@ -1569,6 +1577,7 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
             ff_dim:         p.run_cfg.ff_dim,
             max_seq_len:    p.run_cfg.max_seq_len,
             jl:             self.config.jl.clone(),
+            ngram:          self.config.ngram.clone(),
             tie_embeddings: self.config.tie_embeddings,
             token_embed_dim: self.config.token_embed_dim,
         };
@@ -2560,6 +2569,7 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     expert_group: None,
                                     mamba: None,
                                     jl: None,
+                                    ngram: None,
                                 });
                             }
                         }

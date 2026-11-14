@@ -37,6 +37,10 @@ fn main() -> anyhow::Result<()> {
         /// to stack sites. Replaces the config's `jl` maps, keeping their seed and ff_dim.
         #[arg(long)]
         jl: Option<String>,
+        /// N-Grammer arm (docs/NGRAMMER.md): `none` or `K[xH][@L1,L2]` (clusters, heads, blocks
+        /// each layer sits before), e.g. `64x4@0`. Keeps the config's loss_weight and seed.
+        #[arg(long)]
+        ngram: Option<String>,
     }
     let args = Args::parse();
     if args.smoke_test {
@@ -74,6 +78,15 @@ fn main() -> anyhow::Result<()> {
             }
         }
         config.jl = Some(arm);
+        config.validate()?;
+    }
+    if let Some(spec) = &args.ngram {
+        let mut arm = yumon_pet::brain::ngrammer::NgramConfig::parse(spec)?;
+        if let (Some(arm), Some(base)) = (arm.as_mut(), config.ngram.as_ref()) {
+            arm.loss_weight = base.loss_weight;
+            arm.seed = base.seed;
+        }
+        config.ngram = arm;
         config.validate()?;
     }
     anyhow::ensure!(

@@ -1,0 +1,43 @@
+{
+  "architecture": "decoder-only",
+  "source": "../rust-code",
+  "cache": "training-cache/massive/pretrain/samples.bin",
+  "tokenizer": "yumon_bpe",
+  "max_seq_len": 256,
+  "exclude_dirs": [
+    ".git",
+    "target",
+    "node_modules"
+  ],
+  "seed": 4815162342,
+  "vocab_size": 2048,
+  "token_embed_dim": 512,
+  "embed_dim": 128,
+  "n_layers": 6,
+  "attn_heads": 4,
+  "ff_dim": 512,
+  "batch_size": 4,
+  "epochs": 10,
+  "first_lr": 0.001,
+  "last_lr": 0.0001,
+  "validation_fraction": 0.0002,
+  "out_dir": "checkpoints/yumon-base-dec-jl-ffn-ngram-multi-sugar-maniac",
+  "tie_embeddings": true,
+  "eval_stage": "base",
+  "jl": {
+    "site": "ffn",
+    "dim": 32,
+    "from_layer": 0,
+    "seed": 1
+  },
+  "ngram": {
+    "layers": [
+      0,
+      3
+    ],
+    "num_clusters": 64,
+    "heads": 4,
+    "loss_weight": 0.25,
+    "seed": 1
+  }
+}

@@ -247,6 +247,20 @@ older decoder checkpoints still load.
 cargo run --release --bin train_code -- --config configs/yumon-dec-base-pretrain-jl.json --jl residual:64@3
 ```
 
+### N-Grammer layers (experimental, decoder-only)
+
+An optional `ngram` section ([design](docs/NGRAMMER.md), `src/brain/ngrammer.rs`, after
+lucidrains/n-grammer-pytorch) adds latent bigram embeddings before the blocks in `layers`:
+the residual stream is product-quantized into `heads` cluster ids (`num_clusters` centroids
+each), the (previous id, id) pair indexes a learned table, and the result is projected
+(zero-initialised) and added to the stream. Independent of `jl`; both can be set.
+`--ngram K[xH][@L1,L2]` or `--ngram none` picks the arm. Run names gain `_ngram...`; older
+checkpoints still load.
+
+```sh
+cargo run --release --bin train_code -- --config configs/yumon-dec-base-pretrain-jl-ffn64-ngram.json --ngram 128x8@0,3
+```
+
 ## Yumon Nano / InstaCode Edit:
 
 ```

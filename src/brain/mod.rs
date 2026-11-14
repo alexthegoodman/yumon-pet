@@ -3,6 +3,7 @@
 pub mod model;
 pub mod decoder_model;
 pub mod jl;
+pub mod ngrammer;
 pub use decoder_model::KvCache;
 pub mod reference_model;
 pub mod xlstm_model;

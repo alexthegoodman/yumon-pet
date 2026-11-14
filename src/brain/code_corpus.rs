@@ -136,6 +136,8 @@ pub struct CodeConfig {
     /// Johnson-Lindenstrauss projection experiment (docs/JL.md); architecture
     /// "decoder-only" only. `{"site": "none"}` is the baseline arm.
     pub jl: Option<super::jl::JlSet>,
+    /// N-Grammer layers (docs/NGRAMMER.md); architecture "decoder-only" only.
+    pub ngram: Option<super::ngrammer::NgramConfig>,
     /// Drop this many of the hardest difficulty deciles (0-9) from a
     /// difficulty-sorted cache before the validation split, e.g. 2 keeps the
     /// easiest 80% (the deciles `cache_yumon_talk` prints). 0 keeps everything.
@@ -164,7 +166,7 @@ impl Default for CodeConfig {
             token_embed_dim: None,
             router: None,
             experts: None,
-            mamba: None, shuffle: None, jl: None, drop_hardest_deciles: 0,
+            mamba: None, shuffle: None, jl: None, ngram: None, drop_hardest_deciles: 0,
         }
     }
 }
@@ -248,6 +250,11 @@ impl CodeConfig {
         if let Some(jl) = &self.jl {
             ensure!(self.architecture == CodeArchitecture::DecoderOnly, "jl requires architecture \"decoder-only\"");
             jl.validate(self.embed_dim, self.attn_heads, self.n_layers)?;
+        }
+        if let Some(ng) = &self.ngram {
+            ensure!(self.architecture == CodeArchitecture::DecoderOnly, "ngram requires architecture \"decoder-only\"");
+            let jl = self.jl.as_ref().filter(|j| j.active());
+            ng.validate(self.n_layers, |l| jl.map_or(self.embed_dim, |j| j.width_at(self.embed_dim, l)))?;
         }
         Ok(())
     }
