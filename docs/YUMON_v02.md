@@ -1,6 +1,6 @@
 # Yumon v0.2.0
 
-Yumon Portal displays Yumon in all his glory. You can watch him build inside a suburban setting, swim in a fish tank, watch his commentary on RSS feeds, chat directly with him, or even generate images with him.
+Yumon Portal v0.2.0 is deliberately small: chat directly with Yumon, and watch the WIR Yumon Ant colony and WIR Chess player, whose judgment comes from written neural networks.
 
 However, this was only the first stage to Yumon. Yumon is envisioned as **a companion who entertains and socializes to the benefit of his owner**. He is not utility focused, and thus does not require broad knowledge or problem solving.
 

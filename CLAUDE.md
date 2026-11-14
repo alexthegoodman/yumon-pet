@@ -423,3 +423,12 @@ exact best sentence on 16/16 prompts at width 8 (greedy 8/16); width 2 can be wo
 Export goes to `tmp/wir-beam/beam_demo.json`. `tests/beam.rs`: 4 tests.
 
 Swarm RL (2026-11-12): see docs/SWARM_RL.md 'Implementation'. `swarm/src/critic.rs` (decoder reward model: EOS-row logit at the last token, listwise loss vs other/same/swarm negatives, per-kind calibration in `critic.json`; hole and program levels), `rl.rs` (sampled rollouts recorded as traces, per-hole values from hole critic + shared program critic + syn rejects + cargo-check errors charged by span + tree credit, group-relative advantages per role, one REINFORCE step per role with KL to the frozen start). Bins `gen_negatives`, `train_critic` (default from-scratch 96x6, `--init` for a checkpoint), `train_rl` (out `../checkpoints/swarm-rl`, `--only` roles); `run_swarm --out`. Smoke only; real runs left to Alex.
+
+Yumon Portal v0.2.0 (2026-11-13): `src/bin/yumon_portal.rs` + `portal_ui.html` are now only the WIR Yumon Ant and
+WIR Chess simulations (left, sandboxed iframe, pages embedded from `src/bin/sims/`, copied from `wir/demos/{ant,chess}`)
+and Chat (right). Model is embedded from `assets/portal_model/` = `yumon-dec-ngram-white-dwarf` (decoder-only, 8192 BPE,
+plain `Human:`/`Yumon:` prompts; no Yumon Talk, no n-gram decompressor); the old model is in `assets/portal_model_v0.1.0`.
+`--checkpoint <dir>` loads another decoder-only checkpoint. Removed: Product Hunt feed (`src/bin/rss/`), Paint tab, the
+three.js universe (`universe_view.js`, `vendor/`). BDD: `node tests/portal/portal_ui.mjs <shots>` (Playwright from
+../allegiance). Re-copy the sim pages after rebuilding the WIR demos. `scripts/package_release.ps1` now defaults to v0.2.0
+and ships only the exe.

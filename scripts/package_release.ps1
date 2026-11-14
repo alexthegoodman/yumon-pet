@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "v0.1.0"
+    [string]$Version = "v0.2.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,12 +32,6 @@ if (Test-Path $stageDir) {
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
 Copy-Item "$repoDir/target/release/yumon_portal.exe" "$stageDir/yumon_portal.exe"
-
-$decompressorSrc = Join-Path $repoDir "training-cache/ngram_decompressor.bin"
-if (-not (Test-Path $decompressorSrc)) {
-    Write-Error "Could not find $decompressorSrc"
-}
-Copy-Item $decompressorSrc "$stageDir/ngram_decompressor.bin"
 
 # 3. Create zip archive
 Write-Host "`n[3/4] Creating zip archive $zipPath ..." -ForegroundColor Yellow
