@@ -115,10 +115,10 @@ pre#src { margin: 0; max-height: 340px; overflow: auto; font-family: var(--mono)
 
 <div class="wrap">
   <header>
-    <div>
+    <!-- <div>
       <h1>Yumon <span>Ant</span></h1>
       <p class="lede">A side-view colony where every ant is a pair of compiled WIR networks: senses read off the grid, a brain picks a task, a heading, actions and a feeling. Feed it, bury it, scare it, start new colonies along the endless ground.</p>
-    </div>
+    </div> -->
     <dl class="stats" aria-label="Colony totals">
       <div><dt>Ants</dt><dd id="s-ants">0</dd></div>
       <div><dt>Eggs</dt><dd id="s-eggs">0</dd></div>
@@ -177,26 +177,14 @@ pre#src { margin: 0; max-height: 340px; overflow: auto; font-family: var(--mono)
         <span id="hover"></span>
       </div>
     </div>
-
+<!-- 
     <aside>
-      <section class="card" aria-labelledby="h-insp">
-        <h2 id="h-insp">Inspector</h2>
-        <div id="inspector"></div>
-        <p class="tiny"><label><input type="checkbox" id="follow"> Follow this ant</label></p>
-      </section>
-      <section class="card" aria-labelledby="h-feel">
-        <h2 id="h-feel">Feelings</h2>
-        <ul class="legend" id="legend"></ul>
-        <p class="note">The brain's last output is a one-hot emote. Faded ants are old; old ants forage more and dig less, as in real colonies.</p>
-      </section>
-      <section class="card" aria-labelledby="h-cols">
-        <h2 id="h-cols">Colonies</h2>
-        <ul class="cols" id="colonies"></ul>
-      </section>
-    </aside>
+      
+    </aside> -->
   </div>
 
   <div class="about">
+    <div style="display: none;">
     <section class="card" aria-labelledby="h-nets">
       <h2 id="h-nets">The networks</h2>
       <p class="tiny"><label>Brain <select id="brain-pick" aria-label="Brain network"></select></label></p>
@@ -222,6 +210,21 @@ pre#src { margin: 0; max-height: 340px; overflow: auto; font-family: var(--mono)
         <button type="button" role="tab" data-src="path" id="tab-path">Path step</button>
       </div>
       <pre id="src" tabindex="0"></pre>
+    </section>
+    </div>
+    <section class="card" aria-labelledby="h-insp">
+      <h2 id="h-insp">Inspector</h2>
+      <div id="inspector"></div>
+      <p class="tiny"><label><input type="checkbox" id="follow"> Follow this ant</label></p>
+    </section>
+    <section class="card" aria-labelledby="h-feel">
+      <h2 id="h-feel">Feelings</h2>
+      <ul class="legend" id="legend"></ul>
+      <p class="note">The brain's last output is a one-hot emote. Faded ants are old; old ants forage more and dig less, as in real colonies.</p>
+    </section>
+    <section class="card" aria-labelledby="h-cols">
+      <h2 id="h-cols">Colonies</h2>
+      <ul class="cols" id="colonies"></ul>
     </section>
   </div>
 </div>

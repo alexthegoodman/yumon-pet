@@ -438,7 +438,7 @@ mod desktop {
         let proxy = event_loop.create_proxy();
         let mut builder = WindowBuilder::new()
             .with_title("Yumon Portal")
-            .with_inner_size(LogicalSize::new(1440, 760))
+            .with_inner_size(LogicalSize::new(1100, 760))
             .with_decorations(false)
             .with_transparent(true)
             .with_always_on_top(true)

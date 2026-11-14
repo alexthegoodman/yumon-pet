@@ -121,10 +121,10 @@ pre.src { max-height: 360px; overflow: auto; font: 12px/1.5 var(--font-mono); ba
 </style>
 
 <div class="wrap">
-  <header>
+  <!-- <header>
     <h1>WIR <span>Chess</span></h1>
     <p class="lede">Every judgment this player makes comes from a written neural network: attention heads and ReLU layers compiled from WIR source, with no training. The host knows only the rules and how far to look ahead. Turn on the lens to see what the network attends to.</p>
-  </header>
+  </header> -->
   <div class="main">
     <div class="boardcol">
       <div class="status" id="status"></div>
@@ -142,7 +142,7 @@ pre.src { max-height: 360px; overflow: auto; font: 12px/1.5 var(--font-mono); ba
         <button class="btn" id="flip">Flip</button>
       </div>
     </div>
-    <div class="side">
+    <div class="side" style="display: none;">
       <section class="panel">
         <h2>Opponent</h2>
         <div class="seg" role="group" aria-label="Lookahead" id="levels"></div>
