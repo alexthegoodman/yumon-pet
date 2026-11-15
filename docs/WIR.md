@@ -602,6 +602,21 @@ cargo run --release -- tactics --rule-only --arenas 8 --steps 600 --no-fear     
 cargo test --test tactics
 ```
 
+### In a game: World of Music (Nov 15, 2026)
+
+The tactical networks now run the enemies of World of Music, a cel-shaded third-person game in
+entropy-engine (`examples/studio-bundle/src/games/world_of_music/`, docs/WORLD_OF_MUSIC.md
+there). The export above (`tactics --export`) is imported by `tools/wom_import_wir.mjs` into a
+TS module; `wom_wir.ts` is a port of the Skirmish page's runner (sparse eval, the path step at
+every cell, senses, brains) plus the plain rules. Each corrupted patch of an island gets a
+1.5 m grid (cliffs, deep water, other heights and closed gates are walls); the "player" goal is
+every friend (Agent Tom and his Tones), exposure is the union of their sight, and each enemy's
+hp is scaled to the brain's 1..12. Grunt -> Smudge, rusher -> Thornback (bites instead of
+shooting), sniper -> Spitter. Decisions every 0.3 s; the game moves enemies smoothly toward the
+chosen neighbour cell and turns `fire` into a dodgeable bolt. The game's tests compare every
+field cell, sense vector and plan with the rules (random inputs and a live arena: 0 differences;
+the live BDD run had 113 decisions in one fight, 0 differences).
+
 ## Yumon Ant: a colony of networks (Nov 7, 2026)
 
 A side-view ant colony on ground that extends without bound, where each ant is a pair of WIR networks. Nothing is trained. `wir ant` (`src/ant.rs`) writes and checks the programs; the colony host is plain JavaScript (`wir/demos/ant/ant_core.js`) and runs the exported weights.

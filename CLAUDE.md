@@ -432,3 +432,8 @@ plain `Human:`/`Yumon:` prompts; no Yumon Talk, no n-gram decompressor); the old
 three.js universe (`universe_view.js`, `vendor/`). BDD: `node tests/portal/portal_ui.mjs <shots>` (Playwright from
 ../allegiance). Re-copy the sim pages after rebuilding the WIR demos. `scripts/package_release.ps1` now defaults to v0.2.0
 and ships only the exe.
+
+World of Music (2026-11-15): entropy-engine's new game uses the WIR tactics brains for its
+enemies (docs/WIR.md "In a game: World of Music"). Regenerate the weights with `cargo run
+--release -- tactics --out examples --export ../tmp/wir-tactics/tactics_demo.json` here, then
+`node tools/wom_import_wir.mjs` in entropy-engine's examples/studio-bundle. No yumon-pet code changed.
