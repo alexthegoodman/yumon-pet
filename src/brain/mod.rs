@@ -4,6 +4,7 @@ pub mod model;
 pub mod decoder_model;
 pub mod jl;
 pub mod ngrammer;
+pub mod blt;
 pub use decoder_model::KvCache;
 pub mod reference_model;
 pub mod xlstm_model;

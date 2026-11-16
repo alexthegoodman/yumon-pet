@@ -138,6 +138,9 @@ pub struct CodeConfig {
     pub jl: Option<super::jl::JlSet>,
     /// N-Grammer layers (docs/NGRAMMER.md); architecture "decoder-only" only.
     pub ngram: Option<super::ngrammer::NgramConfig>,
+    /// Byte Latent Transformer / byte LM run (docs/BLT.md); `train_code` hands the
+    /// prepared cache to `blt::run`.
+    pub blt: Option<super::blt::BltConfig>,
     /// Drop this many of the hardest difficulty deciles (0-9) from a
     /// difficulty-sorted cache before the validation split, e.g. 2 keeps the
     /// easiest 80% (the deciles `cache_yumon_talk` prints). 0 keeps everything.
@@ -166,7 +169,7 @@ impl Default for CodeConfig {
             token_embed_dim: None,
             router: None,
             experts: None,
-            mamba: None, shuffle: None, jl: None, ngram: None, drop_hardest_deciles: 0,
+            mamba: None, shuffle: None, jl: None, ngram: None, blt: None, drop_hardest_deciles: 0,
         }
     }
 }
@@ -255,6 +258,12 @@ impl CodeConfig {
             ensure!(self.architecture == CodeArchitecture::DecoderOnly, "ngram requires architecture \"decoder-only\"");
             let jl = self.jl.as_ref().filter(|j| j.active());
             ng.validate(self.n_layers, |l| jl.map_or(self.embed_dim, |j| j.width_at(self.embed_dim, l)))?;
+        }
+        if let Some(blt) = &self.blt {
+            ensure!(self.architecture == CodeArchitecture::DecoderOnly, "blt requires architecture \"decoder-only\"");
+            ensure!(self.jl.is_none() && self.ngram.is_none() && self.adaptive_loss.is_none() && self.optimizer.is_none(),
+                "blt runs take no jl, ngram, adaptive_loss or optimizer section");
+            blt.validate(self)?;
         }
         Ok(())
     }

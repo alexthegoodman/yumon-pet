@@ -432,3 +432,11 @@ plain `Human:`/`Yumon:` prompts; no Yumon Talk, no n-gram decompressor); the old
 three.js universe (`universe_view.js`, `vendor/`). BDD: `node tests/portal/portal_ui.mjs <shots>` (Playwright from
 ../allegiance). Re-copy the sim pages after rebuilding the WIR demos. `scripts/package_release.ps1` now defaults to v0.2.0
 and ships only the exe.
+
+WIR DAW brain (2026-11-16): see docs/WIR.md "Entropy DAW next steps". `wir daw` (wir/src/daw.rs:
+`brain_program`, plain-code `scores`/`params`, `features` = the host's history reading, `evaluate`,
+`read_sessions`) writes `examples/daw_brain.wir` and exports entropy-engine
+`src/prediction/daw_brain.json` (`--export`, `--vectors 64`); `--sessions` scores it on
+`gen_daw_data` output and lists top misses. The action list must match Entropy's `DawAction`
+order (vocabulary v3, 56 actions); Entropy refuses a brain whose list differs. Held-out: 80.0%
+top-1, 92.3% top-3 vs the old MoE's 78.7 / 88.6. `tests/daw.rs`: 4 tests.

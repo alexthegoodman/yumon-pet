@@ -534,6 +534,9 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
         }
     }
     prepared.print_plan(config.epochs, config.batch_size);
+    if let Some(blt) = &config.blt {
+        return crate::brain::blt::run(config, blt, &tokenizer, prepared, &prompts, check_only);
+    }
     if check_only { return Ok(()); }
 
     {
@@ -942,7 +945,7 @@ const MAX_VAL_SAMPLES: usize = 2048;
 /// sequence and padded. Targets are next tokens over the separator and reply
 /// only (PAD elsewhere). Plain-text samples are [BOS][text][EOS] with every
 /// token trained. Returns token ids, targets and the supervised count.
-fn build_moe_batch(
+pub(crate) fn build_moe_batch(
     samples:     &[crate::brain::samples::Sample],
     batch_idx:   &[usize],
     sep_tokens:  &[usize],
@@ -1016,7 +1019,7 @@ fn trim_batch(ids: Vec<i32>, targets: Vec<i32>, rows: usize, max_seq_len: usize)
 /// Number of supervised targets among the three highest logits. Softmax preserves
 /// their order, so no probability tensor or full vocabulary sort is needed.
 /// Ties prefer the lower token ID. Integer reductions avoid BF16 count rounding.
-fn top3_correct<B: Backend>(logits: Tensor<B, 2>, targets: Tensor<B, 1, Int>) -> usize {
+pub(crate) fn top3_correct<B: Backend>(logits: Tensor<B, 2>, targets: Tensor<B, 1, Int>) -> usize {
     let [rows, vocab] = logits.dims();
     let logits = logits.detach();
     let targets = targets.reshape([rows, 1]);
@@ -1033,7 +1036,7 @@ fn top3_correct<B: Backend>(logits: Tensor<B, 2>, targets: Tensor<B, 1, Int>) ->
 /// Mean cross-entropy per supervised (non-PAD) target. Burn 0.20's
 /// CrossEntropyLoss zeroes PAD rows but still divides by every row, which
 /// scales the loss by the fraction of positions that are supervised.
-fn masked_token_ce<B: Backend>(
+pub(crate) fn masked_token_ce<B: Backend>(
     logits:     Tensor<B, 2>,
     targets:    Tensor<B, 1, Int>,
     supervised: usize,

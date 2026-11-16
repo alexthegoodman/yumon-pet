@@ -37,7 +37,7 @@ use burn::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Module, Debug)]
-struct DecBlock<B: Backend> {
+pub(crate) struct DecBlock<B: Backend> {
     attn_norm: RMSNorm<B>,
     q: Linear<B>,
     k: Linear<B>,
@@ -309,6 +309,28 @@ impl<B: FlashAttention> DecBlock<B> {
     fn forward(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, jl: BlockJl<B>) -> Tensor<B, 3> {
         let (q, k, v) = self.qkv(&x, rope, jl);
         self.finish(x, causal_flash_attention(q, k, v), jl, None).0
+    }
+    /// Causal block with no JL maps (used by blt.rs).
+    pub(crate) fn forward_plain(&self, x: Tensor<B, 3>, rope: &RopeTables<B>) -> Tensor<B, 3> {
+        self.forward(x, rope, BlockJl { attention: None, ffn: None })
+    }
+}
+
+impl<B: Backend> DecBlock<B> {
+    /// A plain pre-norm block: RoPE attention over `heads` and a SwiGLU MLP of width `ff`.
+    pub(crate) fn new(width: usize, heads: usize, ff: usize, device: &B::Device) -> Self {
+        assert!(width % heads == 0 && (width / heads) % 2 == 0, "block width must split into even heads");
+        let linear = |from: usize, to: usize| LinearConfig::new(from, to).with_bias(false).init(device);
+        DecBlock {
+            attn_norm: RMSNormConfig::new(width).init(device),
+            q: linear(width, width),
+            k: linear(width, width),
+            v: linear(width, width),
+            o: linear(width, width),
+            ffn_norm: RMSNormConfig::new(width).init(device),
+            mlp: MLPConfig::new(width, ff).init(device),
+            heads,
+        }
     }
 }
 

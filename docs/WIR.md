@@ -1011,3 +1011,41 @@ Not done: length normalization, top-p/nucleus (needs a cumulative sum), a real l
 behind the costs, a bound that includes float rounding, batching several searches per
 sequence.
 
+## Entropy DAW next steps: a written brain replaces a trained MoE (Nov 16, 2026)
+
+`wir daw` (`wir/src/daw.rs`, `examples/daw_brain.wir`) is the predictor behind Entropy DAW's
+Suggested Next Steps. It replaced a Burn MoE transformer (4 layers, 128 wide, 4 experts) trained
+on 20,000 simulated sessions.
+
+**Program.** A 0.2 choice program. Inputs: `after_x` (one-hot last substantive action, 56),
+`start`, the active track's family, track count, pattern and song fill in quarters, mixer moves so
+far (capped at 4), the last action's on/off, the gate knob, whether a solo is on, the last note's
+row and step with its step gap and row change, the pattern length, the last clip's lane, bar,
+length and whether it reaches the song's end, the last mixer track. Outputs: `key_x = 64 * score_x
++ tie-break` for every action, plus `note_row note_step erase_row erase_step clip_lane clip_bar
+clip_bars mix_track solo_on pattern_bars`. Scores are sums of written terms ("after set_root_note,
+set_pattern_length +12"; "after set_volume with a solo on, solo_track +10"). Hidden [111, 95, 95,
+96, 93], 1,366 non-zero weights; 200k random inputs exact against the plain-code rule.
+
+**Interface actions left out.** Entropy's vocabulary went from 72 to 56 actions (v3): views,
+windows, selection, transport, loop mode, snap, note previews, undo, saving and guitar on/off are
+neither inputs nor predictions.
+
+**Results** (1000 held-out simulated sessions, genre/instrument pairs never in the train split,
+66,471 next steps; i5-12500, release):
+
+| Predictor | Top-1 | Top-3 |
+|---|---|---|
+| Burn MoE, logits restricted to the 56 actions, full history | 78.7% | 88.6% |
+| Bigram counts from the train split (reference) | 77.4% | 90.8% |
+| WIR brain | 80.0% | 92.3% |
+
+The rules were written after reading the session simulator and tuned on the train split only
+(first version 76.1% / 90.8% on train, then solo-state and clip-end terms: 78.5% / 91.5%). So
+this measures agreement with simulated workflows, not real users. The softmax temperature (2) was
+picked by mean log-likelihood on the train split (1, 1.5, 2, 3, 4: best at 2, -0.99 nats).
+Remaining misses are mostly unpredictable from the history: a slip that is clicked off again
+(add_note -> remove_note, 4.4k of the 32k train misses) and where a writing run ends
+(add_note -> set_volume / add_track / a move). Parameters when the action is right: note row
+41%, step 34% (melodic contour is not in the inputs), clip lane+bar+length 40%, mixer track 87%.
+In Entropy one ranking takes 2.5 us median, a 3-step plan about 10 us.

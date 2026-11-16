@@ -1,0 +1,51 @@
+{
+  "architecture": "decoder-only",
+  "source": "../rust-code",
+  "cache": "training-cache/massive-2/pretrain/samples.bin",
+  "tokenizer": "yumon_bpe",
+  "max_seq_len": 256,
+  "exclude_dirs": [
+    ".git",
+    "target",
+    "node_modules"
+  ],
+  "seed": 4815162342,
+  "vocab_size": 8192,
+  "embed_dim": 128,
+  "n_layers": 6,
+  "attn_heads": 4,
+  "ff_dim": 512,
+  "batch_size": 4,
+  "epochs": 2,
+  "first_lr": 0.001,
+  "last_lr": 0.0001,
+  "validation_fraction": 0.0001,
+  "out_dir": "checkpoints/yumon-blt",
+  "tie_embeddings": true,
+  "eval_stage": "base",
+  "blt": {
+    "model": "blt",
+    "max_bytes": 1536,
+    "local_dim": 128,
+    "local_heads": 4,
+    "local_ff": 512,
+    "encoder_layers": 1,
+    "decoder_layers": 2,
+    "hash_ngrams": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "hash_buckets": 4096,
+    "cross_k": 2,
+    "patching": {
+      "mode": "entropy",
+      "model": "checkpoints/yumon-bytelm/bytelm_64h_2l_4a_256ff_1536b_b4_tied",
+      "threshold": 2.0,
+      "max_len": 16
+    }
+  }
+}
