@@ -261,6 +261,17 @@ checkpoints still load.
 cargo run --release --bin train_code -- --config configs/yumon-dec-base-pretrain-jl-ffn64-ngram.json --ngram 128x8@0,3
 ```
 
+### Byte Latent Transformer (experimental)
+
+An optional `blt` section ([design](docs/BLT.md), `src/brain/blt.rs`) trains a byte-level
+patch model (or a plain byte LM) on the same BPE cache, reporting nats per BPE token for
+comparison. Patching is static, space or entropy (from a trained byte LM). Saves every 500
+steps (resumable mid-epoch), validates every 2,000; generation is KV-cached.
+
+```sh
+cargo run --release --bin train_code -- --config configs/yumon-blt-space.json
+```
+
 ## Yumon Nano / InstaCode Edit:
 
 ```

@@ -183,7 +183,7 @@ fn blt_trains_and_round_trips_a_checkpoint() {
     assert!(losses[0] > 4.0 && *losses.last().unwrap() < 0.05, "loss {} -> {}", losses[0], losses.last().unwrap());
     // Generation rebuilds patches as it goes; a memorized row must come back out.
     let patcher = Patcher::<Gpu> { patching: patching.clone(), entropy: None };
-    let text = generate(&model.valid(), Some(&patcher), Some(&config), "fn main() { pr", 40, 64, 1, &device);
+    let text = generate(&model.valid(), Some(&patcher), "fn main() { pr", 40, 64, 1, &device);
     assert_eq!(text, "intln!(\"hello, world\"); }");
 
     let dir = std::env::temp_dir().join(format!("yumon-blt-test-{}", std::process::id()));
@@ -223,6 +223,111 @@ fn entropy_patcher_reads_a_byte_lm_causally() {
         assert_eq!(part, full[..=k], "entropy starts through {k} depend on later bytes");
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Feeds `row` to a KV-cached decoder in `chunks` and checks every position's logits
+/// against the full forward.
+fn assert_cached_matches<M: ByteModel<Gpu>>(model: &M, patcher: Option<&Patcher<Gpu>>,
+    config: Option<&BltModelConfig>, row: &[u32], chunks: &[usize], device: &<Gpu as Backend>::Device) {
+    let rows = rows_of(&[row.to_vec()]);
+    let starts = patcher.map(|p| p.starts(&rows, device));
+    let full: Vec<f32> = model.byte_logits(&make_batch::<Gpu>(&rows, starts.as_deref().zip(config), device))
+        .into_data().convert::<f32>().to_vec().unwrap();
+    let mut decoder = model.decoder(patcher, row.len(), device);
+    let mut at = 0;
+    for &len in chunks {
+        let got: Vec<f32> = decoder.feed(&row[at..at + len]).into_data().convert::<f32>().to_vec().unwrap();
+        let want = &full[at * BYTE_VOCAB..(at + len) * BYTE_VOCAB];
+        let worst = got.iter().zip(want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(worst < 1e-4, "positions {at}..{}: cached logits differ by {worst}", at + len);
+        at += len;
+    }
+    assert_eq!(at, row.len());
+}
+
+#[test]
+fn kv_cached_decoding_matches_the_full_forward() {
+    let device = Default::default();
+    let row = random_row(60, 5);
+    // A prompt, single bytes, a mid-row chunk, then single bytes to the end.
+    let mut chunks = vec![7, 1, 1, 1, 9];
+    chunks.resize(chunks.len() + 60 - 19, 1);
+    let config = tiny_config();
+    let model = config.init::<Gpu>(&device);
+    for patching in [Patching::Static { size: 4 }, Patching::Space { max_len: 5 }] {
+        let patcher = Patcher::<Gpu> { patching, entropy: None };
+        assert_cached_matches(&model, Some(&patcher), Some(&config), &row, &chunks, &device);
+    }
+
+    let lm = YumonDecBrainConfig::new(BYTE_VOCAB, TrainingStage::Language).with_embed_dim(32).with_hidden_units(32)
+        .with_n_layers(2).with_attn_heads(2).with_ff_dim(64).with_max_seq_len(64).with_dropout_rate(0.0);
+    let dir = std::env::temp_dir().join(format!("yumon-blt-kv-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(BYTE_LM_FILE), serde_json::to_vec(&json!({"model": lm})).unwrap()).unwrap();
+    lm.init::<Gpu>(&device).save_file(dir.join("model"), &BinFileRecorder::<FullPrecisionSettings>::new()).unwrap();
+    let (byte_lm, _) = load_byte_lm::<Gpu>(&dir, &device).unwrap();
+    assert_cached_matches(&byte_lm, None, None, &row, &chunks, &device);
+    let mut h = Patcher::entropies(&byte_lm, &rows_of(&[row.clone()]), &device).remove(0);
+    h.sort_by(f32::total_cmp);
+    let threshold = (h[h.len() / 2] + h[h.len() / 2 + 1]) / 2.0;
+    let patcher = Patcher::<Gpu>::new(&Patching::Entropy { model: dir.clone(), threshold, max_len: 6 }, 60, &device).unwrap();
+    assert_cached_matches(&model, Some(&patcher), Some(&config), &row, &chunks, &device);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Generation speed at the yumon-blt-space shape (untrained): greedy bytes after a
+/// prompt, rerunning the full row each byte vs the KV-cached decoder.
+/// `cargo test --release --lib kv_cache_speed -- --ignored --nocapture`
+#[test]
+#[ignore = "timing probe"]
+fn kv_cache_speed() {
+    let device = Default::default();
+    let config = BltModelConfig::new(128, 4, 512, 1, 2, 128, 4, 512, 6, vec![3, 4, 5, 6, 7, 8], 4096, 2).with_dropout(0.0);
+    let model = config.init::<Gpu>(&device);
+    let patcher = Patcher::<Gpu> { patching: Patching::Space { max_len: 16 }, entropy: None };
+    let argmax = |v: Vec<f32>| v.iter().enumerate().skip(BYTE_OFFSET as usize).max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32;
+    for (prompt, new) in [(40, 160), (1200, 160)] {
+        let mut row = random_row(prompt, 9);
+        let started = std::time::Instant::now();
+        for _ in 0..new {
+            let rows = rows_of(&[row.clone()]);
+            let starts = patcher.starts(&rows, &device);
+            let logits = model.forward(&make_batch::<Gpu>(&rows, Some((&starts, &config)), &device));
+            row.push(argmax(logits.narrow(1, row.len() - 1, 1).into_data().convert::<f32>().to_vec().unwrap()));
+        }
+        let full = started.elapsed().as_secs_f64() * 1000.0 / new as f64;
+        let full_text = row.clone();
+
+        let mut row = random_row(prompt, 9);
+        let mut decoder = model.decoder(Some(&patcher), prompt + new, &device);
+        let started = std::time::Instant::now();
+        let mut fed = 0;
+        for _ in 0..new {
+            let logits = decoder.feed(&row[fed..]);
+            fed = row.len();
+            let rows = logits.dims()[0];
+            row.push(argmax(logits.narrow(0, rows - 1, 1).into_data().convert::<f32>().to_vec().unwrap()));
+        }
+        let cached = started.elapsed().as_secs_f64() * 1000.0 / new as f64;
+        println!("prompt {prompt} + {new} bytes: full rerun {full:.1} ms/byte, cached {cached:.1} ms/byte, same text: {}", row == full_text);
+        // Greedy text can split on a near tie; compare logits along the full-rerun text.
+        let rows = rows_of(&[full_text.clone()]);
+        let starts = patcher.starts(&rows, &device);
+        let want: Vec<f32> = model.forward(&make_batch::<Gpu>(&rows, Some((&starts, &config)), &device)).into_data().convert::<f32>().to_vec().unwrap();
+        let mut decoder = model.decoder(Some(&patcher), full_text.len(), &device);
+        let mut got: Vec<f32> = decoder.feed(&full_text[..prompt]).into_data().convert::<f32>().to_vec().unwrap();
+        for p in prompt..full_text.len() {
+            got.extend(decoder.feed(&full_text[p..=p]).into_data().convert::<f32>().to_vec::<f32>().unwrap());
+        }
+        let worst = got.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        let split = row.iter().zip(&full_text).position(|(a, b)| a != b);
+        let margin = split.map(|p| {
+            let mut v = want[(p - 1) * BYTE_VOCAB..p * BYTE_VOCAB].to_vec();
+            v.sort_by(|a, b| b.total_cmp(a));
+            v[0] - v[1]
+        });
+        println!("  worst logit difference {worst:.2e}; first split at {split:?}, full-rerun top-2 margin there {margin:?}");
+    }
 }
 
 /// Burn 0.20 / CubeCL 0.9 on WGPU (Intel UHD 770): the input gradient of a matmul,

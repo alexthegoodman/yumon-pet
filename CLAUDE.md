@@ -440,3 +440,14 @@ WIR DAW brain (2026-11-16): see docs/WIR.md "Entropy DAW next steps". `wir daw` 
 `gen_daw_data` output and lists top misses. The action list must match Entropy's `DawAction`
 order (vocabulary v3, 56 actions); Entropy refuses a brain whose list differs. Held-out: 80.0%
 top-1, 92.3% top-3 vs the old MoE's 78.7 / 88.6. `tests/daw.rs`: 4 tests.
+
+Byte Latent Transformer (2026-11-16): see docs/BLT.md. Optional `blt` config section (`src/brain/blt.rs`,
+dispatched from `run_code`; decoder-only, no jl/ngram/adaptive_loss/optimizer) trains a BLT or plain byte LM
+(`model: "byte-lm"`, the entropy model) on the usual BPE cache, rows decoded to bytes per batch (`TokenBytes`;
+byte id = b + 4, vocab 260); val reports bpb and nats per BPE token (compare white-dwarf 3.6635). Patching static /
+space / entropy, all causal. Own loop: decoder dashboard + `blt_chart.png`, saves model + `optimizer.bin` +
+`progress.json` every 500 steps (mid-epoch resume), val + eval prompts every 2,000. `ByteModel::decoder` is
+KV-cached (`BltDecoder`: patches run encoder cross + global once on close; `DecBlock::forward_cached_plain`),
+exact vs full forward, 11-15 ms/byte vs 61-267. Configs `yumon-blt-{space,static4,entropy}.json`,
+`yumon-bytelm-entropy.json`. 9 tests in tests/blt plus ignored `kv_cache_speed` and the WGPU small-row matmul dX
+bug repro. Smoke-tested only; full runs not done.

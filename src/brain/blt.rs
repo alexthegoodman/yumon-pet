@@ -26,7 +26,7 @@ use super::{
     bpe::TokenizerKind,
     code_corpus::CodeConfig,
     code_curriculum::PreparedCode,
-    decoder_model::{DecBlock, RopeTables, YumonDecBrain, YumonDecBrainConfig},
+    decoder_model::{DecBlock, KvCache, KvSlot, RopeTables, YumonDecBrain, YumonDecBrainConfig},
     flash_attn::backend::FlashAttention,
     model::{RMSNorm, RMSNormConfig, TEMPERATURE, TOP_K},
     sample_cache::CacheObjective,
@@ -581,6 +581,22 @@ impl<B: Backend> EncoderCross<B> {
         let attn = softmax(scores, 3).matmul(v).swap_dims(1, 2).reshape([rows, count, d]);
         self.pool.forward(pooled) + self.o.forward(attn)
     }
+
+    /// `forward` for one patch's own bytes h [1, len, d]: its vector [1, 1, global].
+    fn patch(&self, h: Tensor<B, 3>) -> Tensor<B, 3> {
+        let [_, len, d] = h.dims();
+        let heads = self.heads;
+        let dh = d / heads;
+        let pooled = h.clone().sum_dim(1) / len as f64;
+        let kv = self.norm.forward(h);
+        let split = |t: Tensor<B, 3>, len: usize| t.reshape([1, len, heads, dh]).swap_dims(1, 2);
+        let q = split(self.q.forward(self.norm.forward(pooled.clone())), 1);
+        let k = split(self.k.forward(kv.clone()), len);
+        let v = split(self.v.forward(kv), len);
+        let scores = q.matmul(k.swap_dims(2, 3)) / (dh as f64).sqrt();
+        let attn = softmax(scores, 3).matmul(v).swap_dims(1, 2).reshape([1, 1, d]);
+        self.pool.forward(pooled) + self.o.forward(attn)
+    }
 }
 
 impl<B: Backend> DecoderCross<B> {
@@ -631,12 +647,158 @@ impl<B: FlashAttention> BltModel<B> {
 /// What the byte trainer needs from a model.
 pub trait ByteModel<B: Backend> {
     fn byte_logits(&self, batch: &ByteBatch<B>) -> Tensor<B, 3>;
+    /// A KV-cached decoder over one row of at most `max_bytes` bytes.
+    fn decoder<'a>(&'a self, patcher: Option<&'a Patcher<B>>, max_bytes: usize, device: &B::Device)
+        -> Box<dyn ByteDecoder<B> + 'a>;
 }
 impl<B: FlashAttention> ByteModel<B> for BltModel<B> {
     fn byte_logits(&self, batch: &ByteBatch<B>) -> Tensor<B, 3> { self.forward(batch) }
+    fn decoder<'a>(&'a self, patcher: Option<&'a Patcher<B>>, max_bytes: usize, device: &B::Device)
+        -> Box<dyn ByteDecoder<B> + 'a> {
+        Box::new(BltDecoder::new(self, patcher.expect("BLT decoding needs a patcher"), max_bytes, device))
+    }
 }
 impl<B: FlashAttention> ByteModel<B> for YumonDecBrain<B> {
     fn byte_logits(&self, batch: &ByteBatch<B>) -> Tensor<B, 3> { self.forward(batch.bytes.clone()) }
+    fn decoder<'a>(&'a self, _: Option<&'a Patcher<B>>, _: usize, device: &B::Device) -> Box<dyn ByteDecoder<B> + 'a> {
+        Box::new(ByteLmDecoder { model: self, cache: self.new_kv_cache(device), device: device.clone() })
+    }
+}
+
+/// Feeds bytes one chunk at a time (the prompt, then one byte per step).
+pub trait ByteDecoder<B: Backend> {
+    /// Logits [t, 260] at the `t` new positions.
+    fn feed(&mut self, bytes: &[u32]) -> Tensor<B, 2>;
+}
+
+fn ids_row<B: Backend>(bytes: &[u32], device: &B::Device) -> Tensor<B, 2, Int> {
+    Tensor::from_ints(TensorData::new(bytes.iter().map(|&b| b as i32).collect::<Vec<_>>(), [1, bytes.len()]), device)
+}
+
+struct ByteLmDecoder<'a, B: FlashAttention> {
+    model: &'a YumonDecBrain<B>,
+    cache: KvCache<B>,
+    device: B::Device,
+}
+impl<B: FlashAttention> ByteDecoder<B> for ByteLmDecoder<'_, B> {
+    fn feed(&mut self, bytes: &[u32]) -> Tensor<B, 2> {
+        let t = bytes.len();
+        self.model.forward_cached(ids_row(bytes, &self.device), &mut self.cache).reshape([t, BYTE_VOCAB])
+    }
+}
+
+/// KV-cached BLT decoding, exact against `BltModel::forward`. A position only ever
+/// reads closed patches, and patch starts depend only on earlier bytes, so each byte
+/// runs the encoder and decoder blocks once, and each patch runs the encoder
+/// cross-attention and the global blocks once, when its last byte arrives.
+pub struct BltDecoder<'a, B: FlashAttention> {
+    model: &'a BltModel<B>,
+    patcher: &'a Patcher<B>,
+    /// The entropy model's cache, for entropy patching.
+    entropy: Option<KvCache<B>>,
+    bytes: Vec<u32>,
+    entropies: Vec<f32>,
+    encoder: Vec<KvSlot<B>>,
+    global: Vec<KvSlot<B>>,
+    decoder: Vec<KvSlot<B>>,
+    byte_rope: RopeTables<B>,
+    patch_rope: RopeTables<B>,
+    /// Encoder states [1, len, local] of the open patch's bytes.
+    open: Option<Tensor<B, 3>>,
+    /// Normed global outputs [closed, global] of closed patches.
+    closed: Option<Tensor<B, 2>>,
+    count: usize,
+    max_bytes: usize,
+    device: B::Device,
+}
+
+impl<'a, B: FlashAttention> BltDecoder<'a, B> {
+    pub fn new(model: &'a BltModel<B>, patcher: &'a Patcher<B>, max_bytes: usize, device: &B::Device) -> Self {
+        let c = &model.config;
+        Self {
+            model, patcher,
+            entropy: patcher.entropy.as_ref().map(|m| m.new_kv_cache(device)),
+            bytes: Vec::new(), entropies: Vec::new(),
+            encoder: (0..model.encoder.len()).map(|_| None).collect(),
+            global: (0..model.global.len()).map(|_| None).collect(),
+            decoder: (0..model.decoder.len()).map(|_| None).collect(),
+            byte_rope: RopeTables::new(max_bytes, c.local_dim / c.local_heads, device),
+            patch_rope: RopeTables::new(max_bytes, c.global_dim / c.global_heads, device),
+            open: None, closed: None, count: 0, max_bytes, device: device.clone(),
+        }
+    }
+}
+
+impl<B: FlashAttention> ByteDecoder<B> for BltDecoder<'_, B> {
+    fn feed(&mut self, new: &[u32]) -> Tensor<B, 2> {
+        let (m, device) = (self.model, &self.device);
+        let c = &m.config;
+        let (start, t) = (self.bytes.len(), new.len());
+        assert!(t > 0 && start + t <= self.max_bytes, "BLT decoding past max_bytes");
+        self.bytes.extend_from_slice(new);
+        if let (Some(lm), Some(cache)) = (&self.patcher.entropy, self.entropy.as_mut()) {
+            let lp = log_softmax(lm.forward_cached(ids_row(new, device), cache), 2);
+            let h: Vec<f32> = (lp.clone().exp() * lp).sum_dim(2).neg().into_data().convert::<f32>().to_vec().unwrap();
+            self.entropies.extend(h);
+        }
+        let entropies = self.patcher.entropy.as_ref().map(|_| self.entropies.as_slice());
+        // Through position start + t: whether each new byte closes its patch.
+        let starts = self.patcher.patching.starts(&self.bytes, entropies);
+
+        let (grams, buckets) = (&c.hash_ngrams, c.hash_buckets);
+        let mut hashes = Vec::with_capacity(t * grams.len());
+        for p in start..start + t {
+            for (k, &g) in grams.iter().enumerate() {
+                hashes.push((k * buckets + (ngram_hash(&self.bytes, p, g) % buckets as u64) as usize) as i32);
+            }
+        }
+        let n = grams.len();
+        let hashed = m.hashes.forward(Tensor::from_ints(TensorData::new(hashes, [1, t * n]), device))
+            .reshape([1, t, n, c.local_dim]).sum_dim(2).reshape([1, t, c.local_dim]);
+        let mut h = (m.bytes.forward(ids_row(new, device)) + hashed) / ((n + 1) as f64).sqrt();
+        let rope = self.byte_rope.slice(start, t);
+        for (block, slot) in m.encoder.iter().zip(&mut self.encoder) {
+            h = block.forward_cached_plain(h, &rope, slot);
+        }
+
+        // Close the patches that end inside this chunk.
+        let states = match self.open.take() {
+            Some(open) => Tensor::cat(vec![open, h.clone()], 1),
+            None => h.clone(),
+        };
+        let first = start + t - states.dims()[1];
+        let (mut from, mut patches, mut reads) = (first, Vec::new(), Vec::with_capacity(t));
+        for p in start..start + t {
+            if starts[p + 1] {
+                patches.push(m.encoder_cross.patch(states.clone().narrow(1, from - first, p + 1 - from)));
+                from = p + 1;
+            }
+            reads.push((self.count + patches.len()) as i32 - 1);
+        }
+        if from < start + t { self.open = Some(states.narrow(1, from - first, start + t - from)); }
+        if !patches.is_empty() {
+            let new_patches = patches.len();
+            let mut g = Tensor::cat(patches, 1);
+            let rope = self.patch_rope.slice(self.count, new_patches);
+            for (block, slot) in m.global.iter().zip(&mut self.global) {
+                g = block.forward_cached_plain(g, &rope, slot);
+            }
+            let g = m.global_norm.forward(g).reshape([new_patches, c.global_dim]);
+            self.closed = Some(match self.closed.take() {
+                Some(closed) => Tensor::cat(vec![closed, g], 0),
+                None => g,
+            });
+            self.count += new_patches;
+        }
+
+        let global = self.closed.clone().expect("position 0 closes the BOS patch").reshape([1, self.count, c.global_dim]);
+        let read = Tensor::<B, 1, Int>::from_ints(TensorData::new(reads, [t]), device);
+        for ((cross, block), slot) in m.decoder_cross.iter().zip(&m.decoder).zip(&mut self.decoder) {
+            h = cross.forward(h, global.clone(), &read);
+            h = block.forward_cached_plain(h, &rope, slot);
+        }
+        m.head.forward(m.norm.forward(h)).reshape([t, BYTE_VOCAB])
+    }
 }
 
 // ─── Training ────────────────────────────────────────────────────────────────
@@ -733,10 +895,10 @@ fn validate<B: FlashAttention, M: ByteModel<B>>(model: &M, source: &Source, samp
     held
 }
 
-/// Samples `max_new` bytes after `prompt` (lowercased like the yumon_bpe normalizer),
-/// rerunning the whole row each step.
+/// Samples `max_new` bytes after `prompt` (lowercased like the yumon_bpe normalizer)
+/// with the model's KV-cached decoder.
 fn generate<B: FlashAttention, M: ByteModel<B>>(model: &M, patcher: Option<&Patcher<B>>,
-    config: Option<&BltModelConfig>, prompt: &str, max_new: usize, max_bytes: usize, seed: u64, device: &B::Device) -> String {
+    prompt: &str, max_new: usize, max_bytes: usize, seed: u64, device: &B::Device) -> String {
     let mut input = vec![BOS];
     input.extend(prompt.to_lowercase().bytes().map(byte_id));
     input.truncate(max_bytes);
@@ -746,13 +908,13 @@ fn generate<B: FlashAttention, M: ByteModel<B>>(model: &M, patcher: Option<&Patc
         state ^= state << 13; state ^= state >> 7; state ^= state << 17;
         (state >> 11) as f64 / (1u64 << 53) as f64
     };
+    let mut decoder = model.decoder(patcher, max_bytes, device);
+    let mut fed = 0;
     while input.len() < max_bytes && input.len() - start < max_new {
-        let row = ByteRow { input: input.clone(), targets: vec![PAD; input.len()], tokens: 0, dropped: 0 };
-        let rows = std::slice::from_ref(&row);
-        let starts = patcher.map(|p| p.starts(rows, device));
-        let batch = make_batch::<B>(rows, starts.as_deref().zip(config), device);
-        let len = input.len();
-        let logits: Vec<f32> = model.byte_logits(&batch).narrow(1, len - 1, 1).into_data().convert::<f32>().to_vec().unwrap();
+        let logits = decoder.feed(&input[fed..]);
+        fed = input.len();
+        let rows = logits.dims()[0];
+        let logits: Vec<f32> = logits.narrow(0, rows - 1, 1).into_data().convert::<f32>().to_vec().unwrap();
         let mut order: Vec<usize> = (0..logits.len()).filter(|&i| i != PAD as usize && i != BOS as usize).collect();
         order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
         order.truncate(TOP_K.max(1));
@@ -944,7 +1106,7 @@ where
         let mut lines = vec![format!("--- step {steps} (epoch {epoch}) val bpb {:.4}, nats/token {:.4}",
             report["bpb"].as_f64().unwrap_or(f64::NAN), report["nats_per_token"].as_f64().unwrap_or(f64::NAN))];
         for (i, prompt) in prompts.iter().enumerate() {
-            let text = generate(model, patcher, model_config, prompt, blt.eval_bytes, blt.max_bytes, steps as u64 + i as u64, device);
+            let text = generate(model, patcher, prompt, blt.eval_bytes, blt.max_bytes, steps as u64 + i as u64, device);
             lines.push(format!("{prompt:?} -> {text:?}"));
         }
         if !quiet { for line in &lines { println!("{line}"); } }

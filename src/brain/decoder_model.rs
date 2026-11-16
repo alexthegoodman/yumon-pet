@@ -314,6 +314,10 @@ impl<B: FlashAttention> DecBlock<B> {
     pub(crate) fn forward_plain(&self, x: Tensor<B, 3>, rope: &RopeTables<B>) -> Tensor<B, 3> {
         self.forward(x, rope, BlockJl { attention: None, ffn: None })
     }
+    /// `forward_plain` for new positions after those cached in `slot` (used by blt.rs).
+    pub(crate) fn forward_cached_plain(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, slot: &mut KvSlot<B>) -> Tensor<B, 3> {
+        self.forward_cached(x, rope, BlockJl { attention: None, ffn: None }, slot)
+    }
 }
 
 impl<B: Backend> DecBlock<B> {
