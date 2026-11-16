@@ -9,6 +9,7 @@ use wir::fluid::{self, FluidRule};
 use wir::swarm::{self, Species};
 use wir::ant;
 use wir::park;
+use wir::daw;
 use wir::superpose::{self, ChoiceLayerSpec, Preserve};
 use wir::tactics::{self, Archetype};
 use wir::games::{self, PathRule, Pong};
@@ -73,6 +74,12 @@ usage:
                                         generate the Yumon Park brain (one utility
                                         program for every species, 8 option keys),
                                         checked on random inputs against the rule
+  wir daw [--out DIR] [--cases 200000] [--seed 1] [--export brain.json] [--vectors 256]
+          [--sessions sessions.json] [--temperature 2]
+                                        generate the Entropy DAW next-step brain (56
+                                        action keys and note/clip/mixer parameters),
+                                        checked on random inputs against the rule;
+                                        --sessions scores it on recorded sessions
   wir superpose-choice-layer <file.wir> --features a,b,.. --keys k0..k6 [--keys ..]
            --neurons N (--states probe.json | --sample N) [--seed 1]
            [--preserve winner|values] [--margin 1] [--fidelity 0.0001] [--digits 4]
@@ -191,6 +198,7 @@ fn main() -> ExitCode {
         "tactics" => cmd_tactics(rest),
         "ant" => cmd_ant(rest),
         "park" => cmd_park(rest),
+        "daw" => cmd_daw(rest),
         "superpose-choice-layer" => cmd_superpose_choice_layer(rest),
         "seq" => cmd_seq(rest),
         "chess" => cmd_chess(rest),
@@ -609,6 +617,54 @@ fn cmd_park(raw: &[String]) -> Result<(), String> {
     }
     if let Some(out) = args.get("--export") {
         let json = park::export_json(int("--vectors", 256)? as u64, int("--seed", 1)? as u64 + 7, &variants(&args)?).map_err(|e| e.to_string())?;
+        std::fs::write(out, json).map_err(|e| format!("{out}: {e}"))?;
+        eprintln!("wrote {out}");
+    }
+    Ok(())
+}
+
+fn cmd_daw(raw: &[String]) -> Result<(), String> {
+    let valued = ["--out", "--cases", "--seed", "--export", "--vectors", "--sessions", "--temperature"];
+    let args = Args::parse(raw, &valued)?;
+    args.check(&valued)?;
+    let int = |k: &str, d: i64| -> Result<i64, String> { args.get(k).map_or(Ok(d), |v| v.parse().map_err(|_| format!("bad {k} `{v}`"))) };
+    let t = std::time::Instant::now();
+    let c = daw::daw_check(int("--cases", 200_000)? as u64, int("--seed", 1)? as u64).map_err(|e| e.to_string())?;
+    eprintln!("brain: hidden {:?}, {} parameters ({} non-zero)", c.shape.0, c.shape.1, c.shape.2);
+    eprintln!("{} inputs: {} output mismatches, worst |diff| {:.1e} ({:.1} s)", c.cases, c.mismatches, c.worst, t.elapsed().as_secs_f64());
+    if c.mismatches > 0 {
+        return Err("the network disagrees with the rule".into());
+    }
+    if let Some(path) = args.get("--sessions") {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        let sessions = daw::read_sessions(&text).map_err(|e| e.to_string())?;
+        let temperature = args.get("--temperature").map_or(Ok(daw::TEMPERATURE), |v| v.parse().map_err(|_| format!("bad --temperature `{v}`")))?;
+        let e = daw::evaluate(&sessions, temperature).map_err(|e| e.to_string())?;
+        let pct = |n: u64| n as f64 / e.queries.max(1) as f64 * 100.0;
+        eprintln!(
+            "{} sessions, {} next steps: top-1 {:.1}%, top-3 {:.1}%, mean ln p {:.3}",
+            sessions.len(), e.queries, pct(e.top1), pct(e.top3), e.log_lik / e.queries.max(1) as f64
+        );
+        let mut rows: Vec<(usize, (u64, u64))> = e.per_action.iter().copied().enumerate().filter(|r| r.1 .0 > 0).collect();
+        rows.sort_by_key(|r| std::cmp::Reverse(r.1 .0));
+        for (a, (n, hit)) in rows {
+            eprintln!("  {:24} {:7}  top-1 {:5.1}%", daw::ACTIONS[a], n, hit as f64 / n as f64 * 100.0);
+        }
+        let mut misses: Vec<_> = e.misses.iter().collect();
+        misses.sort_by_key(|m| std::cmp::Reverse(*m.1));
+        eprintln!("most common misses (after, predicted, actual):");
+        for ((last, p, a), n) in misses.into_iter().take(25) {
+            eprintln!("  {:7}  {:22} {:22} {}", n, last.map_or("(start)", |l| daw::ACTIONS[l]), daw::ACTIONS[*p], daw::ACTIONS[*a]);
+        }
+    }
+    if let Some(dir) = args.get("--out") {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
+        let path = std::path::Path::new(dir).join("daw_brain.wir");
+        std::fs::write(&path, daw::brain_program()).map_err(|e| format!("{}: {e}", path.display()))?;
+        eprintln!("wrote {}", path.display());
+    }
+    if let Some(out) = args.get("--export") {
+        let json = daw::export_json(int("--vectors", 256)? as u64, int("--seed", 1)? as u64 + 7).map_err(|e| e.to_string())?;
         std::fs::write(out, json).map_err(|e| format!("{out}: {e}"))?;
         eprintln!("wrote {out}");
     }

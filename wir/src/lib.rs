@@ -17,6 +17,7 @@
 pub mod ant;
 pub mod beam;
 pub mod chess;
+pub mod daw;
 pub mod park;
 pub mod ast;
 pub mod canon;

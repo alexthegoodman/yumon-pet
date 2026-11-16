@@ -237,6 +237,19 @@ python demos/park/build.py park_demo.json yumon-park.html   # built copy: demos/
 node demos/park/harness.js 10000 learn|nolearn|mixed 1 park_demo.json
 ```
 
+### Entropy DAW next steps
+
+`wir daw` writes the brain behind the Entropy DAW's Suggested Next Steps
+(`examples/daw_brain.wir`, rule and host reading in `src/daw.rs`): one-hot last substantive
+action plus 19 song facts in, one key per action (56) and the next note / clip / mixer track /
+solo / pattern length out. Entropy embeds the exported JSON (`src/prediction/daw_brain.json`)
+and runs it in Rust. `--sessions` scores it on sessions from entropy-engine's `gen_daw_data`.
+
+```
+cargo run --release -- daw --sessions ../../entropy-engine/data/daw_sessions.json   # top-1/top-3, top misses
+cargo run --release -- daw --out examples --export ../../entropy-engine/src/prediction/daw_brain.json --vectors 64
+```
+
 ### Superposition: `wir superpose-choice-layer`
 
 For **choice programs** (features, then key groups affine in them, then the largest key of
