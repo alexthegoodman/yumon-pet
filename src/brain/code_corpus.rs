@@ -138,6 +138,11 @@ pub struct CodeConfig {
     pub jl: Option<super::jl::JlSet>,
     /// N-Grammer layers (docs/NGRAMMER.md); architecture "decoder-only" only.
     pub ngram: Option<super::ngrammer::NgramConfig>,
+    /// Gated attention (docs/GATED_ATTENTION.md): "none" (default), "headwise" or
+    /// "elementwise"; architecture "decoder-only" only.
+    pub gated_attention: super::decoder_model::AttnGate,
+    /// Decoder-only block MLP: swiglu (default) or relu2 (decoder_model::MlpKind).
+    pub mlp_kind: super::decoder_model::MlpKind,
     /// Byte Latent Transformer / byte LM run (docs/BLT.md); `train_code` hands the
     /// prepared cache to `blt::run`.
     pub blt: Option<super::blt::BltConfig>,
@@ -169,7 +174,7 @@ impl Default for CodeConfig {
             token_embed_dim: None,
             router: None,
             experts: None,
-            mamba: None, shuffle: None, jl: None, ngram: None, blt: None, drop_hardest_deciles: 0,
+            mamba: None, shuffle: None, jl: None, ngram: None, gated_attention: Default::default(), mlp_kind: Default::default(), blt: None, drop_hardest_deciles: 0,
         }
     }
 }
@@ -259,10 +264,15 @@ impl CodeConfig {
             let jl = self.jl.as_ref().filter(|j| j.active());
             ng.validate(self.n_layers, |l| jl.map_or(self.embed_dim, |j| j.width_at(self.embed_dim, l)))?;
         }
+        ensure!(self.gated_attention.is_none() || self.architecture == CodeArchitecture::DecoderOnly,
+            "gated_attention requires architecture \"decoder-only\"");
+        ensure!(self.mlp_kind.is_swiglu() || self.architecture == CodeArchitecture::DecoderOnly,
+            "mlp_kind requires architecture \"decoder-only\"");
         if let Some(blt) = &self.blt {
             ensure!(self.architecture == CodeArchitecture::DecoderOnly, "blt requires architecture \"decoder-only\"");
-            ensure!(self.jl.is_none() && self.ngram.is_none() && self.adaptive_loss.is_none() && self.optimizer.is_none(),
-                "blt runs take no jl, ngram, adaptive_loss or optimizer section");
+            ensure!(self.jl.is_none() && self.ngram.is_none() && self.adaptive_loss.is_none() && self.optimizer.is_none()
+                && self.gated_attention.is_none() && self.mlp_kind.is_swiglu(),
+                "blt runs take no jl, ngram, gated_attention, mlp_kind, adaptive_loss or optimizer section");
             blt.validate(self)?;
         }
         Ok(())

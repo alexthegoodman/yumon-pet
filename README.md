@@ -261,6 +261,27 @@ checkpoints still load.
 cargo run --release --bin train_code -- --config configs/yumon-dec-base-pretrain-jl-ffn64-ngram.json --ngram 128x8@0,3
 ```
 
+### Gated attention (experimental, decoder-only)
+
+`"gated_attention": "headwise" | "elementwise"` ([design](docs/GATED_ATTENTION.md), after Qiu
+et al. 2025) multiplies each head's attention output by sigmoid(W_g norm(x)) before the output
+projection. `--gate none|headwise|elementwise` picks the arm. Run names gain `_gateh` / `_gatee`;
+older checkpoints still load.
+
+```sh
+cargo run --release --bin train_code -- --config configs/yumon-dec-base-pretrain-jl-ffn64-ngram-gated.json --gate headwise
+```
+
+### Squared-ReLU MLP (experimental, decoder-only)
+
+`"mlp_kind": "relu2"` ([design](docs/RELU2_MLP.md), Primer, So et al. 2021) replaces each block's
+SwiGLU with w2(relu(w1 x)^2): two projections instead of three. `--mlp swiglu|relu2` picks the
+arm; run names gain `_relu2`; older checkpoints still load. WIR tooling (`mlp_weights`) is SwiGLU-only.
+
+```sh
+cargo run --release --bin train_code -- --config configs/yumon-dec-base-pretrain-jl-ffn64-ngram-relu2.json
+```
+
 ### Byte Latent Transformer (experimental)
 
 An optional `blt` section ([design](docs/BLT.md), `src/brain/blt.rs`) trains a byte-level

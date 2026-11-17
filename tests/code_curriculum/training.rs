@@ -91,6 +91,8 @@ fn code_curriculum_gpu_all_architectures_resume_and_causal_targets() -> Result<(
             }),
             jl: (index == 7).then(|| crate::brain::jl::JlSet::parse("residual:8@1").unwrap()),
             ngram: None,
+            gated_attention: Default::default(),
+            mlp_kind: Default::default(),
         };
         let path = directory.join(&run.name);
         std::fs::create_dir_all(&path)?;

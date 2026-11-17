@@ -312,6 +312,9 @@ pub fn save_role(model: &YumonDecBrain<Infer>, dir: &Path, tokenizer_json: &Path
         jl: c.jl.clone(),
         tie_embeddings: c.tie_embeddings,
         token_embed_dim: c.token_embed_dim,
+        ngram: c.ngram.clone(),
+        gated_attention: c.gated_attention,
+        mlp_kind: c.mlp_kind,
     };
     let tok = TokenizerKind::Bpe(BpeTokenizer::load(dir.to_str().context("path")?)?);
     model.save(dir.to_str().context("path")?, &tok, &md)?;

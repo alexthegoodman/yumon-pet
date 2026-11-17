@@ -338,6 +338,28 @@ impl<B: Backend> MLP<B> {
     }
 }
 
+/// Squared-ReLU MLP (So et al. 2021, "Primer"): w2(relu(w1 x)^2). Two bias-free
+/// projections instead of SwiGLU's three, with the same N(0, std) init.
+#[derive(Module, Debug)]
+pub struct Relu2Mlp<B: Backend> {
+    pub(crate) w1: Linear<B>,
+    pub(crate) w2: Linear<B>,
+}
+
+impl<B: Backend> Relu2Mlp<B> {
+    pub fn new(d_input: usize, d_hidden: usize, d_model: usize, init_std: f64, device: &B::Device) -> Self {
+        let linear = |from, to| LinearConfig::new(from, to)
+            .with_initializer(Initializer::Normal { mean: 0.0, std: init_std })
+            .with_bias(false)
+            .init(device);
+        Relu2Mlp { w1: linear(d_input, d_hidden), w2: linear(d_hidden, d_model) }
+    }
+    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        let h = burn::tensor::activation::relu(self.w1.forward(x));
+        self.w2.forward(h.clone() * h)
+    }
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // YumonBrain
 // ═════════════════════════════════════════════════════════════════════════════

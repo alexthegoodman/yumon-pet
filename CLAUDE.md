@@ -451,3 +451,20 @@ KV-cached (`BltDecoder`: patches run encoder cross + global once on close; `DecB
 exact vs full forward, 11-15 ms/byte vs 61-267. Configs `yumon-blt-{space,static4,entropy}.json`,
 `yumon-bytelm-entropy.json`. 9 tests in tests/blt plus ignored `kv_cache_speed` and the WGPU small-row matmul dX
 bug repro. Smoke-tested only; full runs not done.
+
+Gated attention (2026-11-16): see docs/GATED_ATTENTION.md. Decoder-only config key `gated_attention`
+(none | headwise | elementwise, `AttnGate` in decoder_model.rs; `train_code --gate`) multiplies each
+head's attention output by sigmoid(W_g norm(x)) before `o` (Qiu et al. 2025). Gates are
+`YumonDecBrain.attn_gates` (last record field; `NgramDecBrain` is the pre-gate layout) and are created
+last in init, so other weights match the ungated seed. `BlockJl` is now `BlockMaps` (+ `gate`). Run
+names `_gateh` / `_gatee`; config `yumon-dec-base-pretrain-jl-ffn64-ngram-gated.json`. Tests, the Portal
+checkpoint load and a smoke run with resume passed; A/B runs not done (val split is 299 samples).
+
+Squared-ReLU MLP (2026-11-16): see docs/RELU2_MLP.md. Decoder-only config key `mlp_kind` (swiglu |
+relu2, `MlpKind` in decoder_model.rs, `Relu2Mlp` in model.rs; `train_code --mlp`) swaps each block's
+SwiGLU for w2(relu(w1 x)^2) (Primer). The MLPs are `YumonDecBrain.relu2_mlps` (last record field;
+`GatedDecBrain` is the previous layout) and each block's `mlp` becomes a width-1 placeholder.
+`mlp_weights`/wir_decoder are SwiGLU-only. Run name `_relu2`; config
+`yumon-dec-base-pretrain-jl-ffn64-ngram-relu2.json` (5.79M vs 5.89M params; ff_dim 614 = same
+weights). Tests and a smoke run with resume passed; A/B runs not done.
+`src/bin/build_yumon_talk_vocab.rs` is fully commented out (committed), so `cargo check --bins` fails on it.

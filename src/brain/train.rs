@@ -17,7 +17,7 @@ use rand::SeedableRng;
 use crate::{brain::{PAD_TOKEN, bpe::{BpeTokenizer, CL_ID, CR_ID, TokenizerKind}, chart::{TrainingState}, loader::{DataLoader, FileKind}, samples::{TrainingStage, WorldContext, prepare_paired_samples_split, prepare_paired_samples_split_sep}}, vision::{CIFAR_CLASSES, EMOTE_CLASSES, EMOTE_NAMES}};
 
 use crate::brain::{
-    decoder_model::{DecMetadata, YumonDecBrain, YumonDecBrainConfig},
+    decoder_model::{AttnGate, DecMetadata, MlpKind, YumonDecBrain, YumonDecBrainConfig},
     flash_attn::backend::FlashAttention,
 };
 
@@ -270,6 +270,10 @@ pub struct RunConfig {
     pub jl: Option<crate::brain::jl::JlSet>,
     /// Decoder-only N-Grammer layers (brain::ngrammer).
     pub ngram: Option<crate::brain::ngrammer::NgramConfig>,
+    /// Decoder-only attention output gate.
+    pub gated_attention: AttnGate,
+    /// Decoder-only block MLP.
+    pub mlp_kind: MlpKind,
 }
 
 /// Number of held-out prompts run through the model every time we do a
@@ -588,6 +592,8 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
                 + &config.experts.as_ref().map_or(String::new(), |g| g.tag(crate::brain::optimizers::ParamGroup::Experts))
                 + &config.jl.as_ref().map_or(String::new(), |j| j.tag())
                 + &config.ngram.as_ref().map_or(String::new(), |n| n.tag())
+                + config.gated_attention.tag()
+                + config.mlp_kind.tag()
                 + if config.tie_embeddings { "_tied" } else { "" },
             embed_dim: config.embed_dim, hidden_units: config.embed_dim,
             n_layers: config.n_layers, attn_heads: config.attn_heads, ff_dim: config.ff_dim,
@@ -614,6 +620,8 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
             mamba: config.mamba.clone(),
             jl: config.jl.clone(),
             ngram: config.ngram.clone(),
+            gated_attention: config.gated_attention,
+            mlp_kind: config.mlp_kind,
         };
         let run_dir = config.out_dir.join(&run.name);
         std::fs::create_dir_all(&run_dir)?;
@@ -626,7 +634,8 @@ pub fn run_code(config: &crate::brain::code_corpus::CodeConfig, check_only: bool
         }
         std::fs::write(identity_path, serde_json::to_vec_pretty(&identity)?)?;
         let device = <TrainBackend as Backend>::Device::default();
-        if config.adaptive_loss.is_some() || config.jl.is_some() || config.ngram.is_some() {
+        if config.adaptive_loss.is_some() || config.jl.is_some() || config.ngram.is_some() || !config.gated_attention.is_none()
+            || !config.mlp_kind.is_swiglu() {
             // Adaptive-loss and JL experiment arms must share initialization and dropout streams.
             <TrainBackend as Backend>::seed(&device, config.seed);
         }
@@ -1507,6 +1516,8 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
             .with_dropout_rate(run_cfg.dropout_rate)
             .with_jl(run_cfg.jl.clone())
             .with_ngram(run_cfg.ngram.clone())
+            .with_gated_attention(run_cfg.gated_attention)
+            .with_mlp_kind(run_cfg.mlp_kind)
             .with_tie_embeddings(run_cfg.tie_embeddings)
             .with_token_embed_dim(run_cfg.token_embed_dim);
         println!("Decoder-only: {:.2}M parameters, flash attention, BalancedCheckpointing{}.",
@@ -1520,7 +1531,8 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
         let same = |saved: &YumonDecBrainConfig| saved.vocab_size == config.vocab_size && saved.embed_dim == config.embed_dim
             && saved.ff_dim == config.ff_dim && saved.n_layers == config.n_layers
             && saved.attn_heads == config.attn_heads && saved.max_seq_len == config.max_seq_len
-            && saved.jl == config.jl && saved.ngram == config.ngram && saved.token_embed_dim == config.token_embed_dim;
+            && saved.jl == config.jl && saved.ngram == config.ngram && saved.token_embed_dim == config.token_embed_dim
+            && saved.gated_attention == config.gated_attention && saved.mlp_kind == config.mlp_kind;
         // Decoder runs named `_tied` before tying existed hold untied weights.
         let same_tie = |saved: &YumonDecBrainConfig| -> Result<()> {
             anyhow::ensure!(saved.tie_embeddings == config.tie_embeddings,
@@ -1541,6 +1553,12 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
         if let Some(ng) = &config.ngram {
             println!("N-Grammer: {} clusters x {} heads before blocks {:?}, {} weights, centroid loss weight {}.",
                 ng.num_clusters, ng.heads, ng.layers, config.ngram_param_count(), ng.loss_weight);
+        }
+        if !config.gated_attention.is_none() {
+            println!("Gated attention ({:?}): {} gate weights.", config.gated_attention, config.gate_param_count());
+        }
+        if !config.mlp_kind.is_swiglu() {
+            println!("Squared-ReLU MLPs: {} hidden units per block.", config.ff_dim);
         }
         if !run_dir.join("model.bin").exists() {
             if let Some(init_path) = &run_cfg.init_checkpoint {
@@ -1581,6 +1599,8 @@ impl CausalLmTrain for YumonDecBrain<TrainBackend> {
             max_seq_len:    p.run_cfg.max_seq_len,
             jl:             self.config.jl.clone(),
             ngram:          self.config.ngram.clone(),
+            gated_attention: self.config.gated_attention,
+            mlp_kind:       self.config.mlp_kind,
             tie_embeddings: self.config.tie_embeddings,
             token_embed_dim: self.config.token_embed_dim,
         };
@@ -2573,6 +2593,8 @@ fn generate_run_configs(batch_size_option: usize, architecture: Architecture) ->
                                     mamba: None,
                                     jl: None,
                                     ngram: None,
+                                    gated_attention: AttnGate::None,
+                                    mlp_kind: MlpKind::Swiglu,
                                 });
                             }
                         }

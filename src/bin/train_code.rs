@@ -41,6 +41,12 @@ fn main() -> anyhow::Result<()> {
         /// each layer sits before), e.g. `64x4@0`. Keeps the config's loss_weight and seed.
         #[arg(long)]
         ngram: Option<String>,
+        /// Gated attention arm (docs/GATED_ATTENTION.md): none | headwise | elementwise.
+        #[arg(long)]
+        gate: Option<String>,
+        /// Block MLP arm (docs/RELU2_MLP.md): swiglu | relu2.
+        #[arg(long)]
+        mlp: Option<String>,
     }
     let args = Args::parse();
     if args.smoke_test {
@@ -87,6 +93,14 @@ fn main() -> anyhow::Result<()> {
             arm.seed = base.seed;
         }
         config.ngram = arm;
+        config.validate()?;
+    }
+    if let Some(spec) = &args.gate {
+        config.gated_attention = yumon_pet::brain::decoder_model::AttnGate::parse(spec)?;
+        config.validate()?;
+    }
+    if let Some(spec) = &args.mlp {
+        config.mlp_kind = yumon_pet::brain::decoder_model::MlpKind::parse(spec)?;
         config.validate()?;
     }
     anyhow::ensure!(

@@ -22,7 +22,7 @@ use super::{
     flash_attn::backend::{FlashAttention, causal_flash_attention},
     jl::{JlProjection, JlSet, JlSite},
     ngrammer::{NgramConfig, NgramLayer},
-    model::{GenerationResult, MLP, MLPConfig, RMSNorm, RMSNormConfig, TEMPERATURE, TOP_K},
+    model::{GenerationResult, MLP, MLPConfig, RMSNorm, RMSNormConfig, Relu2Mlp, TEMPERATURE, TOP_K},
     samples::{Action, CardinalDir, TrainingStage},
     tokenizer::{BOS_TOKEN, EOS_TOKEN, PAD_TOKEN},
 };
@@ -48,19 +48,73 @@ pub(crate) struct DecBlock<B: Backend> {
     heads: usize,
 }
 
-/// The JL maps a block applies (see jl.rs). Residual maps sit between blocks
-/// and are applied by the brain.
-struct BlockJl<'a, B: Backend> {
+/// The brain-owned maps a block applies: JL maps (see jl.rs) and the attention
+/// gate. Residual maps sit between blocks and are applied by the brain.
+struct BlockMaps<'a, B: Backend> {
     /// head_dim -> dim for q, k (after RoPE) and v.
     attention: Option<&'a JlProjection<B>>,
     /// Normed MLP input, width -> dim.
     ffn: Option<&'a JlProjection<B>>,
+    /// Normed attention input -> gate logits (config.gated_attention).
+    gate: Option<&'a Linear<B>>,
+    /// Runs in place of the block's SwiGLU `mlp` (config.mlp_kind = relu2).
+    relu2: Option<&'a Relu2Mlp<B>>,
+}
+
+/// Gated attention (Qiu et al. 2025, "Gated Attention for Large Language Models"):
+/// each head's attention output is multiplied by sigmoid(W_g norm(x)) before the
+/// output projection, with W_g reading the same normed input as q/k/v. The gate
+/// depends only on the query row, so the KV cache is unchanged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttnGate {
+    #[default]
+    None,
+    /// One scalar per head: width -> heads.
+    Headwise,
+    /// One value per head channel: width -> heads * head_dim.
+    Elementwise,
+}
+impl AttnGate {
+    pub fn is_none(&self) -> bool { *self == AttnGate::None }
+    /// Run-name suffix.
+    pub fn tag(self) -> &'static str {
+        match self { AttnGate::None => "", AttnGate::Headwise => "_gateh", AttnGate::Elementwise => "_gatee" }
+    }
+    pub fn parse(spec: &str) -> Result<Self> {
+        serde_json::from_value(serde_json::Value::String(spec.to_ascii_lowercase()))
+            .map_err(|_| anyhow::anyhow!("gate must be none, headwise or elementwise, got {spec:?}"))
+    }
+    /// Gate outputs for a block with `heads` heads of attention width `head`.
+    fn width(self, heads: usize, head: usize) -> usize {
+        match self { AttnGate::None => 0, AttnGate::Headwise => heads, AttnGate::Elementwise => heads * head }
+    }
+}
+/// The block MLP. `relu2` (Primer's squared ReLU) drops SwiGLU's third projection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MlpKind {
+    #[default]
+    Swiglu,
+    /// w2(relu(w1 x)^2).
+    Relu2,
+}
+impl MlpKind {
+    pub fn is_swiglu(&self) -> bool { *self == MlpKind::Swiglu }
+    /// Run-name suffix.
+    pub fn tag(self) -> &'static str {
+        match self { MlpKind::Swiglu => "", MlpKind::Relu2 => "_relu2" }
+    }
+    pub fn parse(spec: &str) -> Result<Self> {
+        serde_json::from_value(serde_json::Value::String(spec.to_ascii_lowercase()))
+            .map_err(|_| anyhow::anyhow!("mlp must be swiglu or relu2, got {spec:?}"))
+    }
 }
 // Manual impls: a derive would require B: Copy.
-impl<B: Backend> Clone for BlockJl<'_, B> {
+impl<B: Backend> Clone for BlockMaps<'_, B> {
     fn clone(&self) -> Self { *self }
 }
-impl<B: Backend> Copy for BlockJl<'_, B> {}
+impl<B: Backend> Copy for BlockMaps<'_, B> {}
 /// RoPE base, as in burn::nn::RotaryEncodingConfig's default.
 const ROPE_THETA: f64 = 10_000.0;
 
@@ -265,18 +319,32 @@ pub(super) fn cached_attention<B: FlashAttention>(
     softmax(scores, 3).matmul(v.cast(FloatDType::F32)).cast(dtype).reshape([1, heads, t, dim])
 }
 
+/// A block's attention inputs: q, k, v and the optional gate.
+struct Qkv<B: Backend> {
+    q: Tensor<B, 4>,
+    k: Tensor<B, 4>,
+    v: Tensor<B, 4>,
+    gate: Option<Tensor<B, 4>>,
+}
+
 impl<B: FlashAttention> DecBlock<B> {
     /// Per-head q, k (RoPE applied) and v, [batch, heads, seq, dim], through the
-    /// block's attention JL map if it has one.
-    fn qkv(&self, x: &Tensor<B, 3>, rope: &RopeTables<B>, jl: BlockJl<B>) -> (Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 4>) {
+    /// block's attention JL map if it has one, plus the attention gate
+    /// [batch, heads, seq, 1 or dim] when the block has one.
+    fn qkv(&self, x: &Tensor<B, 3>, rope: &RopeTables<B>, maps: BlockMaps<B>) -> Qkv<B> {
         let [batch, seq, width] = x.dims();
         let hd = width / self.heads;
         let norm = self.attn_norm.forward(x.clone());
         let split = |t: Tensor<B, 3>| t.reshape([batch, seq, self.heads, hd]).swap_dims(1, 2);
+        let gate = maps.gate.map(|g| {
+            let logits = g.forward(norm.clone());
+            let per_head = logits.dims()[2] / self.heads;
+            burn::tensor::activation::sigmoid(logits.reshape([batch, seq, self.heads, per_head]).swap_dims(1, 2))
+        });
         let q = apply_rope(split(self.q.forward(norm.clone())), rope);
         let k = apply_rope(split(self.k.forward(norm.clone())), rope);
         let v = split(self.v.forward(norm));
-        match jl.attention {
+        let (q, k, v) = match maps.attention {
             Some(p) => {
                 // Attention scales scores by 1/sqrt(dim); this restores 1/sqrt(head_dim),
                 // so (qR).(kR) is scored like the unprojected q.k it estimates.
@@ -284,39 +352,45 @@ impl<B: FlashAttention> DecBlock<B> {
                 (p.forward(q) * rescale, p.forward(k), p.forward(v))
             }
             None => (q, k, v),
-        }
+        };
+        Qkv { q, k, v, gate }
     }
-    /// Residual add of the attention output [batch, heads, seq, dim], then the MLP
-    /// (or `mlp` in its place). Returns the block output, MLP input and MLP output.
-    fn finish(&self, x: Tensor<B, 3>, attn: Tensor<B, 4>, jl: BlockJl<B>, mlp: Option<&WirMlp<B>>)
-        -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>) {
+    /// Residual add of the (gated) attention output [batch, heads, seq, dim], then the
+    /// MLP (or `mlp` in its place). Returns the block output, MLP input and MLP output.
+    fn finish(&self, x: Tensor<B, 3>, attn: Tensor<B, 4>, gate: Option<Tensor<B, 4>>, maps: BlockMaps<B>,
+        mlp: Option<&WirMlp<B>>) -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>) {
         let [batch, heads, seq, dim] = attn.dims();
+        let attn = match gate {
+            Some(g) => attn * g,
+            None => attn,
+        };
         let x = x + self.o.forward(attn.swap_dims(1, 2).reshape([batch, seq, heads * dim]));
         let mut mlp_in = self.ffn_norm.forward(x.clone());
-        if let Some(p) = jl.ffn {
+        if let Some(p) = maps.ffn {
             mlp_in = p.forward(mlp_in);
         }
-        let mlp_out = match mlp {
-            Some(m) => m.forward(mlp_in.clone()),
-            None => self.mlp.forward(mlp_in.clone()),
+        let mlp_out = match (mlp, maps.relu2) {
+            (Some(m), _) => m.forward(mlp_in.clone()),
+            (None, Some(m)) => m.forward(mlp_in.clone()),
+            (None, None) => self.mlp.forward(mlp_in.clone()),
         };
         (x + mlp_out.clone(), mlp_in, mlp_out)
     }
-    fn forward_cached(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, jl: BlockJl<B>, slot: &mut KvSlot<B>) -> Tensor<B, 3> {
-        let (q, k, v) = self.qkv(&x, rope, jl);
-        self.finish(x, cached_attention(q, k, v, slot), jl, None).0
+    fn forward_cached(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, maps: BlockMaps<B>, slot: &mut KvSlot<B>) -> Tensor<B, 3> {
+        let Qkv { q, k, v, gate } = self.qkv(&x, rope, maps);
+        self.finish(x, cached_attention(q, k, v, slot), gate, maps, None).0
     }
-    fn forward(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, jl: BlockJl<B>) -> Tensor<B, 3> {
-        let (q, k, v) = self.qkv(&x, rope, jl);
-        self.finish(x, causal_flash_attention(q, k, v), jl, None).0
+    fn forward(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, maps: BlockMaps<B>) -> Tensor<B, 3> {
+        let Qkv { q, k, v, gate } = self.qkv(&x, rope, maps);
+        self.finish(x, causal_flash_attention(q, k, v), gate, maps, None).0
     }
     /// Causal block with no JL maps (used by blt.rs).
     pub(crate) fn forward_plain(&self, x: Tensor<B, 3>, rope: &RopeTables<B>) -> Tensor<B, 3> {
-        self.forward(x, rope, BlockJl { attention: None, ffn: None })
+        self.forward(x, rope, BlockMaps { attention: None, ffn: None, gate: None, relu2: None })
     }
     /// `forward_plain` for new positions after those cached in `slot` (used by blt.rs).
     pub(crate) fn forward_cached_plain(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, slot: &mut KvSlot<B>) -> Tensor<B, 3> {
-        self.forward_cached(x, rope, BlockJl { attention: None, ffn: None }, slot)
+        self.forward_cached(x, rope, BlockMaps { attention: None, ffn: None, gate: None, relu2: None }, slot)
     }
 }
 
@@ -368,10 +442,10 @@ impl<B: Backend> WirMlp<B> {
 impl<B: FlashAttention> DecBlock<B> {
     /// `forward` with the MLP optionally replaced; also returns the MLP's input and output.
     /// With an FFN JL map, the MLP input is the projected one.
-    fn forward_probe(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, jl: BlockJl<B>, mlp: Option<&WirMlp<B>>)
+    fn forward_probe(&self, x: Tensor<B, 3>, rope: &RopeTables<B>, maps: BlockMaps<B>, mlp: Option<&WirMlp<B>>)
         -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>) {
-        let (q, k, v) = self.qkv(&x, rope, jl);
-        self.finish(x, causal_flash_attention(q, k, v), jl, mlp)
+        let Qkv { q, k, v, gate } = self.qkv(&x, rope, maps);
+        self.finish(x, causal_flash_attention(q, k, v), gate, maps, mlp)
     }
 }
 
@@ -392,9 +466,14 @@ pub struct YumonDecBrain<B: Backend> {
     /// Tied head when the head width differs from the table width: head -> table.
     /// The projections are the last fields so older records load as `JlDecBrain`.
     head_down: Option<Linear<B>>,
-    /// N-Grammer layers (config.ngram), in layer order. Last field, so older records
-    /// load through the shorter layouts below.
+    /// N-Grammer layers (config.ngram), in layer order.
     ngram: Vec<NgramLayer<B>>,
+    /// Attention gates (config.gated_attention), one per block.
+    attn_gates: Vec<Linear<B>>,
+    /// Squared-ReLU MLPs (config.mlp_kind = relu2), one per block; each block's own
+    /// `mlp` is then an unused width-1 placeholder. Last field, so older records load
+    /// through the shorter layouts below.
+    relu2_mlps: Vec<Relu2Mlp<B>>,
 }
 
 /// Tied-head logits `x E^T`: x [batch, seq, d], table E [vocab, d].
@@ -406,6 +485,37 @@ pub(crate) fn tied_logits<B: Backend>(x: Tensor<B, 3>, table: Tensor<B, 2>) -> T
     let [vocab, _] = table.dims();
     let table_t = table.transpose().reshape([d * vocab]).reshape([d, vocab]);
     x.reshape([batch * seq, d]).matmul(table_t).reshape([batch, seq, vocab])
+}
+
+/// Record layout before squared-ReLU MLPs (with attention gates).
+#[derive(Module, Debug)]
+struct GatedDecBrain<B: Backend> {
+    config: Ignored<YumonDecBrainConfig>,
+    embedding: Embedding<B>,
+    blocks: Vec<DecBlock<B>>,
+    norm: RMSNorm<B>,
+    dropout: Dropout,
+    token_head: Linear<B>,
+    jl: Vec<JlProjection<B>>,
+    embed_in: Option<Linear<B>>,
+    head_down: Option<Linear<B>>,
+    ngram: Vec<NgramLayer<B>>,
+    attn_gates: Vec<Linear<B>>,
+}
+
+/// Record layout before attention gates (with N-Grammer layers).
+#[derive(Module, Debug)]
+struct NgramDecBrain<B: Backend> {
+    config: Ignored<YumonDecBrainConfig>,
+    embedding: Embedding<B>,
+    blocks: Vec<DecBlock<B>>,
+    norm: RMSNorm<B>,
+    dropout: Dropout,
+    token_head: Linear<B>,
+    jl: Vec<JlProjection<B>>,
+    embed_in: Option<Linear<B>>,
+    head_down: Option<Linear<B>>,
+    ngram: Vec<NgramLayer<B>>,
 }
 
 /// Record layout before N-Grammer layers (with the embedding projections).
@@ -447,34 +557,52 @@ struct LegacyDecBrain<B: Backend> {
 
 /// Loads a record; the config picks the layout. A shorter layout also reads newer
 /// records whose trailing fields are empty (bincode ignores the trailing bytes), so
-/// the full layout is only needed with embedding projections, `JlDecBrain` with JL
+/// the full layout is only needed with squared-ReLU MLPs, `GatedDecBrain` with
+/// attention gates, `NgramDecBrain` with
+/// N-Grammer layers, `ProjDecBrain` with embedding projections, `JlDecBrain` with JL
 /// maps, and `LegacyDecBrain` otherwise. (Try-then-fall-back is not an option:
 /// BinBytesRecorder panics on a short record instead of returning an error.)
 fn load_dec_record<B: Backend, R: Recorder<B>>(recorder: &R, args: R::LoadArgs,
     config: &YumonDecBrainConfig, device: &B::Device) -> Result<YumonDecBrainRecord<B>> {
     let err = |e| anyhow::anyhow!("load: {e:?}");
-    if config.active_ngram().is_some() {
+    if !config.mlp_kind.is_swiglu() {
         return recorder.load(args, device).map_err(err);
+    }
+    if !config.gated_attention.is_none() {
+        let old = recorder.load::<GatedDecBrainRecord<B>>(args, device).map_err(err)?;
+        return Ok(YumonDecBrainRecord {
+            config: old.config, embedding: old.embedding, blocks: old.blocks, norm: old.norm,
+            dropout: old.dropout, token_head: old.token_head, jl: old.jl, embed_in: old.embed_in,
+            head_down: old.head_down, ngram: old.ngram, attn_gates: old.attn_gates, relu2_mlps: Vec::new(),
+        });
+    }
+    if config.active_ngram().is_some() {
+        let old = recorder.load::<NgramDecBrainRecord<B>>(args, device).map_err(err)?;
+        return Ok(YumonDecBrainRecord {
+            config: old.config, embedding: old.embedding, blocks: old.blocks, norm: old.norm,
+            dropout: old.dropout, token_head: old.token_head, jl: old.jl, embed_in: old.embed_in,
+            head_down: old.head_down, ngram: old.ngram, attn_gates: Vec::new(), relu2_mlps: Vec::new(),
+        });
     }
     if config.embed_in_dims().is_some() || config.head_down_dims().is_some() {
         let old = recorder.load::<ProjDecBrainRecord<B>>(args, device).map_err(err)?;
         return Ok(YumonDecBrainRecord {
             config: old.config, embedding: old.embedding, blocks: old.blocks, norm: old.norm,
             dropout: old.dropout, token_head: old.token_head, jl: old.jl, embed_in: old.embed_in,
-            head_down: old.head_down, ngram: Vec::new(),
+            head_down: old.head_down, ngram: Vec::new(), attn_gates: Vec::new(), relu2_mlps: Vec::new(),
         });
     }
     if config.active_jl().is_some() {
         let old = recorder.load::<JlDecBrainRecord<B>>(args, device).map_err(err)?;
         return Ok(YumonDecBrainRecord {
             config: old.config, embedding: old.embedding, blocks: old.blocks, norm: old.norm,
-            dropout: old.dropout, token_head: old.token_head, jl: old.jl, embed_in: None, head_down: None, ngram: Vec::new(),
+            dropout: old.dropout, token_head: old.token_head, jl: old.jl, embed_in: None, head_down: None, ngram: Vec::new(), attn_gates: Vec::new(), relu2_mlps: Vec::new(),
         });
     }
     let old = recorder.load::<LegacyDecBrainRecord<B>>(args, device).map_err(err)?;
     Ok(YumonDecBrainRecord {
         config: old.config, embedding: old.embedding, blocks: old.blocks, norm: old.norm,
-        dropout: old.dropout, token_head: old.token_head, jl: Vec::new(), embed_in: None, head_down: None, ngram: Vec::new(),
+        dropout: old.dropout, token_head: old.token_head, jl: Vec::new(), embed_in: None, head_down: None, ngram: Vec::new(), attn_gates: Vec::new(), relu2_mlps: Vec::new(),
     })
 }
 #[derive(Config, Debug)]
@@ -508,6 +636,12 @@ pub struct YumonDecBrainConfig {
     /// N-Grammer layers (ngrammer.rs).
     #[config(default = "None")]
     pub ngram: Option<NgramConfig>,
+    /// Sigmoid gate on each head's attention output (`AttnGate`).
+    #[config(default = "AttnGate::None")]
+    pub gated_attention: AttnGate,
+    /// Block MLP (`MlpKind`).
+    #[config(default = "MlpKind::Swiglu")]
+    pub mlp_kind: MlpKind,
 }
 
 /// Widths of one block: residual, MLP hidden, per-head attention, MLP input.
@@ -619,7 +753,9 @@ impl YumonDecBrainConfig {
                         v: linear(w.width, w.width),
                         o: linear(self.attn_heads * w.head, w.width),
                         ffn_norm: RMSNormConfig::new(w.width).init(device),
-                        mlp: MLPConfig::new(w.width, w.ff).with_d_input(Some(w.mlp_in)).init(device),
+                        // Width 1 placeholder when relu2_mlps holds the real MLPs.
+                        mlp: MLPConfig::new(w.width, if self.mlp_kind.is_swiglu() { w.ff } else { 1 })
+                            .with_d_input(Some(w.mlp_in)).init(device),
                         heads: self.attn_heads,
                     }
                 })
@@ -638,14 +774,40 @@ impl YumonDecBrainConfig {
             ngram: self.active_ngram().map_or_else(Vec::new, |n| {
                 n.layers.iter().map(|&l| NgramLayer::new(n, self.width_at(l), l, device)).collect()
             }),
+            attn_gates: self.gate_dims().into_iter().map(|(from, to)| linear(from, to)).collect(),
+            relu2_mlps: if self.mlp_kind.is_swiglu() { Vec::new() } else {
+                (0..self.n_layers).map(|layer| {
+                    let w = self.block_widths(layer);
+                    Relu2Mlp::new(w.mlp_in, w.ff, w.width, 0.02, device)
+                }).collect()
+            },
         }
+    }
+    /// Weights in block `w`'s MLP (with the width-1 placeholder for relu2).
+    fn mlp_param_count(&self, w: &BlockWidths) -> usize {
+        match self.mlp_kind {
+            MlpKind::Swiglu => 2 * w.mlp_in * w.ff + w.ff * w.width,
+            MlpKind::Relu2 => (w.mlp_in + w.width) * w.ff + 2 * w.mlp_in + w.width,
+        }
+    }
+    /// (from, to) of each block's attention gate; empty without gating.
+    fn gate_dims(&self) -> Vec<(usize, usize)> {
+        if self.gated_attention.is_none() { return Vec::new(); }
+        (0..self.n_layers).map(|l| {
+            let w = self.block_widths(l);
+            (w.width, self.gated_attention.width(self.attn_heads, w.head))
+        }).collect()
+    }
+    /// Weights in the attention gates.
+    pub fn gate_param_count(&self) -> usize {
+        self.gate_dims().iter().map(|(from, to)| from * to).sum()
     }
     /// Weights in the model, embeddings, head and JL maps included.
     pub fn param_count(&self) -> usize {
         let (v, h) = (self.vocab_size, self.attn_heads);
         let blocks: usize = (0..self.n_layers).map(|layer| {
             let w = self.block_widths(layer);
-            3 * w.width * w.width + h * w.head * w.width + 2 * w.width + 2 * w.mlp_in * w.ff + w.ff * w.width
+            3 * w.width * w.width + h * w.head * w.width + 2 * w.width + self.mlp_param_count(&w)
         }).sum();
         let out = self.width_at(self.n_layers);
         // Tied: only the 1 x 1 placeholder (weight and bias).
@@ -653,6 +815,7 @@ impl YumonDecBrainConfig {
         let projections: usize = [self.embed_in_dims(), self.head_down_dims()].into_iter().flatten()
             .map(|(from, to)| from * to).sum();
         v * self.effective_token_embed_dim() + projections + blocks + out + head + self.jl_param_count() + self.ngram_param_count()
+            + self.gate_param_count()
     }
     /// Weights in the JL maps (frozen unless jl.trainable).
     pub fn jl_param_count(&self) -> usize {
@@ -685,7 +848,7 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         for (layer, block) in self.blocks.iter().enumerate() {
             x = self.residual_jl(layer, x);
             x = self.ngram_train(layer, x, &mut None);
-            let (next, mlp_in, mlp_out) = block.forward_probe(x, ropes.at(layer), self.block_jl(layer),
+            let (next, mlp_in, mlp_out) = block.forward_probe(x, ropes.at(layer), self.block_maps(layer),
                 mlps.get(layer).and_then(Option::as_ref));
             trace.push((mlp_in, mlp_out));
             x = next;
@@ -759,7 +922,7 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         for (layer, block) in self.blocks.iter().enumerate() {
             x = self.residual_jl(layer, x);
             x = self.ngram_train(layer, x, &mut None);
-            x = block.forward(x, ropes.at(layer), self.block_jl(layer));
+            x = block.forward(x, ropes.at(layer), self.block_maps(layer));
         }
         x = self.residual_jl(self.blocks.len(), x);
         self.rows_head(x, rows)
@@ -848,7 +1011,7 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         for (layer, block) in self.blocks.iter().enumerate() {
             x = self.residual_jl(layer, x);
             x = self.ngram_cached(layer, x, cache);
-            x = block.forward_cached(x, ropes.at(layer), self.block_jl(layer), cache.layer(layer));
+            x = block.forward_cached(x, ropes.at(layer), self.block_maps(layer), cache.layer(layer));
         }
         x = self.residual_jl(self.blocks.len(), x);
         cache.advance(t);
@@ -875,11 +1038,16 @@ impl<B: FlashAttention> YumonDecBrain<B> {
     }
 
     /// The JL map block `layer` applies itself.
-    fn block_jl(&self, layer: usize) -> BlockJl<'_, B> {
+    fn block_maps(&self, layer: usize) -> BlockMaps<'_, B> {
         let [residual, attention, _] = self.config.jl_counts();
         let map = |site, offset| self.config.jl_from(site).filter(|&from| layer >= from)
             .map(|from| &self.jl[offset + layer - from]);
-        BlockJl { attention: map(JlSite::Attention, residual), ffn: map(JlSite::Ffn, residual + attention) }
+        BlockMaps {
+            attention: map(JlSite::Attention, residual),
+            ffn: map(JlSite::Ffn, residual + attention),
+            gate: self.attn_gates.get(layer),
+            relu2: self.relu2_mlps.get(layer),
+        }
     }
     /// Applies the residual JL map when it sits before block `layer`
     /// (`n_layers` = before the final norm).
@@ -899,6 +1067,7 @@ impl<B: FlashAttention> YumonDecBrain<B> {
 
     /// Block `layer`'s SwiGLU weights (w1, w3, w2), Burn `[in, out]` layout.
     pub fn mlp_weights(&self, layer: usize) -> (Tensor<B, 2>, Tensor<B, 2>, Tensor<B, 2>) {
+        assert!(self.config.mlp_kind.is_swiglu(), "mlp_weights reads SwiGLU MLPs; this model uses {:?}", self.config.mlp_kind);
         self.blocks[layer].mlp.swiglu_weights()
     }
 
@@ -916,7 +1085,7 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         for (layer, block) in self.blocks.iter().enumerate() {
             x = self.residual_jl(layer, x);
             x = self.ngram_train(layer, x, &mut aux);
-            x = block.forward(x, ropes.at(layer), self.block_jl(layer));
+            x = block.forward(x, ropes.at(layer), self.block_maps(layer));
         }
         x = self.residual_jl(self.blocks.len(), x);
         (self.head(x), aux.unwrap_or_else(|| Tensor::zeros([1], &device)))
@@ -935,7 +1104,7 @@ impl<B: FlashAttention> YumonDecBrain<B> {
         for (layer, block) in self.blocks.iter().enumerate() {
             x = self.residual_jl(layer, x);
             x = self.ngram_cached(layer, x, cache);
-            x = block.forward_cached(x, ropes.at(layer), self.block_jl(layer), cache.layer(layer));
+            x = block.forward_cached(x, ropes.at(layer), self.block_maps(layer), cache.layer(layer));
         }
         x = self.residual_jl(self.blocks.len(), x);
         cache.advance(t);
@@ -1053,6 +1222,10 @@ pub struct DecMetadata {
     pub token_embed_dim: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ngram: Option<NgramConfig>,
+    #[serde(default, skip_serializing_if = "AttnGate::is_none")]
+    pub gated_attention: AttnGate,
+    #[serde(default, skip_serializing_if = "MlpKind::is_swiglu")]
+    pub mlp_kind: MlpKind,
 }
 impl DecMetadata {
     pub fn config(&self) -> YumonDecBrainConfig {
@@ -1070,6 +1243,8 @@ impl DecMetadata {
             tie_embeddings: self.tie_embeddings,
             token_embed_dim: self.token_embed_dim,
             ngram: self.ngram.clone(),
+            gated_attention: self.gated_attention,
+            mlp_kind: self.mlp_kind,
         }
     }
 }
@@ -1517,14 +1692,21 @@ mod tests {
         struct Collect<'a, C: CheckpointStrategy> {
             grads: &'a <Autodiff<Inner, C> as AutodiffBackend>::Gradients,
             out: Vec<Vec<f32>>,
+            missing: usize,
         }
         impl<C: CheckpointStrategy> burn::module::ModuleVisitor<Autodiff<Inner, C>> for Collect<'_, C> {
             fn visit_float<const D: usize>(&mut self, param: &burn::module::Param<Tensor<Autodiff<Inner, C>, D>>) {
-                self.out.push(values(param.val().grad(self.grads).expect("every weight trains")));
+                match param.val().grad(self.grads) {
+                    Some(g) => self.out.push(values(g)),
+                    None => self.missing += 1,
+                }
             }
         }
-        let mut collect = Collect { grads: &grads, out: vec![] };
+        let mut collect = Collect { grads: &grads, out: vec![], missing: 0 };
         model.visit(&mut collect);
+        // Every weight trains except relu2's placeholder SwiGLU (w1, w2, w3 per block).
+        let placeholders = if config.mlp_kind.is_swiglu() { 0 } else { 3 * config.n_layers };
+        assert_eq!(collect.missing, placeholders, "weights without a gradient");
         (values(loss.inner())[0], collect.out)
     }
 
@@ -1574,6 +1756,8 @@ mod tests {
             tie_embeddings: false,
             token_embed_dim: None,
             ngram: None,
+            gated_attention: AttnGate::None,
+            mlp_kind: MlpKind::Swiglu,
         };
         model.save(path.to_str().unwrap(), &tokenizer, &meta).unwrap();
         let (restored, tok, restored_config) =
@@ -1749,6 +1933,198 @@ mod tests {
         let record = load_dec_record(&recorder, bytes, &config, &device).unwrap();
         let restored: YumonDecBrain<Inner> = config.init(&device).load_record(record);
         assert_close(values(model.forward(input())), values(restored.forward(input())), 1e-6, "pre-ngram load");
+    }
+
+    fn gate_configs() -> Vec<YumonDecBrainConfig> {
+        let base = || tiny_config().with_max_seq_len(16);
+        vec![
+            base().with_gated_attention(AttnGate::Headwise),
+            base().with_gated_attention(AttnGate::Elementwise),
+            // Elementwise gates match the attention JL width (heads x 4).
+            base().with_gated_attention(AttnGate::Elementwise).with_jl(JlSet::parse("attention:4").ok()),
+            // Narrow blocks after a residual map, with an N-Grammer layer and a tied, factorized table.
+            base().with_gated_attention(AttnGate::Elementwise).with_jl(JlSet::parse("residual:8@1,ffn:4").ok())
+                .with_ngram(NgramConfig::parse("8x2@0").unwrap()).with_tie_embeddings(true).with_token_embed_dim(Some(24)),
+        ]
+    }
+
+    #[test]
+    fn gated_attention_param_count_and_cache() {
+        let device = Default::default();
+        let ids: Vec<i32> = (0..12).map(|i| 4 + (i * 5) % 28).collect();
+        let tensor = |ids: &[i32]| Tensor::<Inner, 2, Int>::from_ints(TensorData::new(ids.to_vec(), [1, ids.len()]), &device);
+        for config in gate_configs() {
+            let what = format!("{:?} {:?}", config.gated_attention, config.jl.as_ref().map(|j| j.tag()));
+            let model: YumonDecBrain<Inner> = config.init(&device);
+            assert_eq!(model.attn_gates.len(), config.n_layers, "{what}");
+            assert_eq!(model.num_params(), config.param_count(), "{what}");
+            let full = values(model.forward(tensor(&ids)));
+            let mut cache = model.new_kv_cache(&device);
+            let mut cached = Vec::new();
+            let mut start = 0;
+            for n in [4, 1, 1, 3, 1, 2] {
+                cached.extend(values(model.forward_cached(tensor(&ids[start..start + n]), &mut cache)));
+                start += n;
+            }
+            assert_close(cached, full, 1e-4, &format!("cached logits {what}"));
+        }
+    }
+
+    /// Zero gate weights give sigmoid(0) = 1/2 everywhere: the same logits as an
+    /// ungated model whose output projections are halved.
+    #[test]
+    fn gated_attention_zero_gate_halves_attention() {
+        let device = Default::default();
+        for gate in [AttnGate::Headwise, AttnGate::Elementwise] {
+            let mut model: YumonDecBrain<Inner> = tiny_config().with_gated_attention(gate).init(&device);
+            for g in &mut model.attn_gates {
+                g.weight = burn::module::Param::from_tensor(g.weight.val().zeros_like());
+            }
+            let mut bare = model.clone();
+            bare.config.0.gated_attention = AttnGate::None;
+            bare.attn_gates.clear();
+            for block in &mut bare.blocks {
+                block.o.weight = burn::module::Param::from_tensor(block.o.weight.val() * 0.5);
+            }
+            let input = || Tensor::<Inner, 2, Int>::from_ints([[1, 4, 5, 6, 7]], &device);
+            assert_close(values(model.forward(input())), values(bare.forward(input())), 1e-5, &format!("{gate:?}"));
+        }
+    }
+
+    /// Gates train, BalancedCheckpointing matches plain gradients with gates on, a
+    /// gated checkpoint round-trips, and an N-Grammer record from before gates loads.
+    #[test]
+    fn gated_attention_gradients_and_roundtrip() {
+        let device = Default::default();
+        let config = tiny_config().with_max_seq_len(40).with_embed_dim(64).with_gated_attention(AttnGate::Elementwise);
+        let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+        let bytes = recorder.record(config.init::<Inner>(&device).into_record(), ()).unwrap();
+        let tokens: Vec<i32> = (0..2 * 40).map(|i| 1 + (i * 7 % 31)).collect();
+        // grads_of asserts every weight, gates included, gets a gradient.
+        let (loss_b, grads_b) = grads_of::<BalancedCheckpointing>(&config, &bytes, &tokens);
+        let (loss_p, grads_p) = grads_of::<NoCheckpointing>(&config, &bytes, &tokens);
+        assert!((loss_b - loss_p).abs() <= 1e-5 * loss_p.abs().max(1.0), "{loss_b} vs {loss_p}");
+        for (i, (b, p)) in grads_b.into_iter().zip(grads_p).enumerate() {
+            assert_close(b, p, 1e-4, &format!("param {i}"));
+        }
+
+        let input = || Tensor::<Inner, 2, Int>::from_ints([[1, 4, 5]], &device);
+        for config in gate_configs() {
+            let model: YumonDecBrain<Inner> = config.init(&device);
+            let bytes = recorder.record(model.clone().into_record(), ()).unwrap();
+            let record = load_dec_record(&recorder, bytes, &config, &device).unwrap();
+            let restored: YumonDecBrain<Inner> = config.init(&device).load_record(record);
+            assert_close(values(model.forward(input())), values(restored.forward(input())), 1e-6, "gated roundtrip");
+        }
+
+        let config = tiny_config().with_max_seq_len(16).with_ngram(NgramConfig::parse("8x2@0").unwrap());
+        let mut model: YumonDecBrain<Inner> = config.init(&device);
+        for layer in &mut model.ngram { layer.randomize_out(7); }
+        let old = NgramDecBrain {
+            config: model.config.clone(), embedding: model.embedding.clone(), blocks: model.blocks.clone(),
+            norm: model.norm.clone(), dropout: model.dropout.clone(), token_head: model.token_head.clone(),
+            jl: Vec::new(), embed_in: None, head_down: None, ngram: model.ngram.clone(),
+        };
+        let bytes = recorder.record(old.into_record(), ()).unwrap();
+        let record = load_dec_record(&recorder, bytes, &config, &device).unwrap();
+        let restored: YumonDecBrain<Inner> = config.init(&device).load_record(record);
+        assert_close(values(model.forward(input())), values(restored.forward(input())), 1e-6, "pre-gate ngram load");
+    }
+
+    fn relu2_configs() -> Vec<YumonDecBrainConfig> {
+        let base = || tiny_config().with_max_seq_len(16).with_mlp_kind(MlpKind::Relu2);
+        vec![
+            base(),
+            // FFN JL input after a residual map, gates, an N-Grammer layer and a tied, factorized table.
+            base().with_gated_attention(AttnGate::Elementwise).with_jl(JlSet::parse("residual:8@1,ffn:4").ok())
+                .with_ngram(NgramConfig::parse("8x2@0").unwrap()).with_tie_embeddings(true).with_token_embed_dim(Some(24)),
+        ]
+    }
+
+    #[test]
+    fn relu2_mlp_param_count_cache_and_roundtrip() {
+        let device = Default::default();
+        let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+        let ids: Vec<i32> = (0..12).map(|i| 4 + (i * 5) % 28).collect();
+        let tensor = |ids: &[i32]| Tensor::<Inner, 2, Int>::from_ints(TensorData::new(ids.to_vec(), [1, ids.len()]), &device);
+        for config in relu2_configs() {
+            let what = format!("{:?}", config.jl.as_ref().map(|j| j.tag()));
+            let model: YumonDecBrain<Inner> = config.init(&device);
+            assert_eq!(model.relu2_mlps.len(), config.n_layers, "{what}");
+            assert_eq!(model.num_params(), config.param_count(), "{what}");
+            let full = values(model.forward(tensor(&ids)));
+            let mut cache = model.new_kv_cache(&device);
+            let mut cached = Vec::new();
+            let mut start = 0;
+            for n in [4, 1, 1, 3, 1, 2] {
+                cached.extend(values(model.forward_cached(tensor(&ids[start..start + n]), &mut cache)));
+                start += n;
+            }
+            assert_close(cached, full.clone(), 1e-4, &format!("cached logits {what}"));
+            let bytes = recorder.record(model.clone().into_record(), ()).unwrap();
+            let record = load_dec_record(&recorder, bytes, &config, &device).unwrap();
+            let restored: YumonDecBrain<Inner> = config.init(&device).load_record(record);
+            assert_close(values(restored.forward(tensor(&ids))), full, 1e-6, &format!("relu2 roundtrip {what}"));
+        }
+        // Same widths: relu2 drops one mlp_in x ff projection per block (plus the placeholder).
+        let swiglu = tiny_config();
+        let relu2 = tiny_config().with_mlp_kind(MlpKind::Relu2);
+        let w = swiglu.block_widths(0);
+        assert_eq!(swiglu.param_count() - relu2.param_count(),
+            swiglu.n_layers * (w.mlp_in * w.ff - 2 * w.mlp_in - w.width));
+    }
+
+    /// The relu2 MLP is w2(relu(w1 x)^2), BalancedCheckpointing matches plain
+    /// gradients, and a gated record from before relu2 loads.
+    #[test]
+    fn relu2_mlp_forward_gradients_and_pre_relu2_load() {
+        let device = Default::default();
+        let mlp = Relu2Mlp::<Inner>::new(3, 5, 4, 0.5, &device);
+        let x = Tensor::<Inner, 3>::from_floats([[[0.3, -1.2, 0.8], [1.0, 0.5, -0.4]]], &device);
+        let z = x.clone().reshape([2, 3]).matmul(mlp.w1.weight.val());
+        let h = z.clone().clamp_min(0.0) * z.clamp_min(0.0);
+        let expected = values(h.matmul(mlp.w2.weight.val()));
+        assert_close(values(mlp.forward(x)), expected, 1e-6, "relu2 forward");
+
+        let config = tiny_config().with_max_seq_len(40).with_embed_dim(64).with_mlp_kind(MlpKind::Relu2);
+        let recorder = BinBytesRecorder::<FullPrecisionSettings>::default();
+        let bytes = recorder.record(config.init::<Inner>(&device).into_record(), ()).unwrap();
+        let tokens: Vec<i32> = (0..2 * 40).map(|i| 1 + (i * 7 % 31)).collect();
+        let (loss_b, grads_b) = grads_of::<BalancedCheckpointing>(&config, &bytes, &tokens);
+        let (loss_p, grads_p) = grads_of::<NoCheckpointing>(&config, &bytes, &tokens);
+        assert!((loss_b - loss_p).abs() <= 1e-5 * loss_p.abs().max(1.0), "{loss_b} vs {loss_p}");
+        for (i, (b, p)) in grads_b.into_iter().zip(grads_p).enumerate() {
+            assert_close(b, p, 1e-4, &format!("param {i}"));
+        }
+
+        let config = tiny_config().with_max_seq_len(16).with_gated_attention(AttnGate::Elementwise);
+        let model: YumonDecBrain<Inner> = config.init(&device);
+        let old = GatedDecBrain {
+            config: model.config.clone(), embedding: model.embedding.clone(), blocks: model.blocks.clone(),
+            norm: model.norm.clone(), dropout: model.dropout.clone(), token_head: model.token_head.clone(),
+            jl: Vec::new(), embed_in: None, head_down: None, ngram: Vec::new(), attn_gates: model.attn_gates.clone(),
+        };
+        let bytes = recorder.record(old.into_record(), ()).unwrap();
+        let record = load_dec_record(&recorder, bytes, &config, &device).unwrap();
+        let restored: YumonDecBrain<Inner> = config.init(&device).load_record(record);
+        let input = || Tensor::<Inner, 2, Int>::from_ints([[1, 4, 5]], &device);
+        assert_close(values(model.forward(input())), values(restored.forward(input())), 1e-6, "pre-relu2 gated load");
+    }
+
+    /// The Portal's embedded white-dwarf checkpoint (N-Grammer, before gates) still
+    /// loads and decodes. Skipped when assets/portal_model is not present.
+    #[test]
+    fn portal_model_loads() {
+        let dir = "assets/portal_model";
+        if !std::path::Path::new(dir).join("model.bin").exists() { return; }
+        let device = Default::default();
+        let (model, tokenizer, config) = YumonDecBrain::<Inner>::load(dir, &device).unwrap();
+        assert!(config.ngram.is_some() && config.gated_attention.is_none());
+        let ids: Vec<i32> = tokenizer.encode("fn main() {\n    let x = 1;").into_iter().map(|t| t as i32).collect();
+        let logits = values(model.forward(Tensor::<Inner, 2, Int>::from_ints(TensorData::new(ids.clone(), [1, ids.len()]), &device)));
+        assert!(logits.iter().all(|x| x.is_finite()));
+        let out = model.generate_unmasked_parsed(&tokenizer, "Human: hello\nYumon:", 24, &device);
+        println!("portal model: {:?}", out);
     }
 
     /// Records saved before the JL field existed still load (no maps).
