@@ -468,3 +468,11 @@ SwiGLU for w2(relu(w1 x)^2) (Primer). The MLPs are `YumonDecBrain.relu2_mlps` (l
 `yumon-dec-base-pretrain-jl-ffn64-ngram-relu2.json` (5.79M vs 5.89M params; ff_dim 614 = same
 weights). Tests and a smoke run with resume passed; A/B runs not done.
 `src/bin/build_yumon_talk_vocab.rs` is fully commented out (committed), so `cargo check --bins` fails on it.
+WIR Armageddon (2026-11-17): see docs/WIR.md "Armageddon 2070". `wir armageddon` (wir/src/armageddon.rs)
+writes 23 0.2 programs into `examples/armageddon/` for the Entropy Engine game Armageddon 2070: the shared
+`ar_sense` 5 x 5 grid program, infantry role brains (rifle/support/marksman/antiarmor) with squad modes,
+suppression, cohesion and the player's call, the squad and strategic (12-slot) brains, and tank, transport,
+helicopter, jet and mecha variants. Each is compiled and checked against `DeepProgram::eval` on random
+in-domain inputs (`--cases`); `--export` writes the weights JSON the game imports with
+`tools/ar_import_wir.mjs`. Argmax keys use `unit(n*score + tiebreak)`. `tests/armageddon.rs`: 2 tests.
+
