@@ -432,3 +432,12 @@ plain `Human:`/`Yumon:` prompts; no Yumon Talk, no n-gram decompressor); the old
 three.js universe (`universe_view.js`, `vendor/`). BDD: `node tests/portal/portal_ui.mjs <shots>` (Playwright from
 ../allegiance). Re-copy the sim pages after rebuilding the WIR demos. `scripts/package_release.ps1` now defaults to v0.2.0
 and ships only the exe.
+
+WIR Armageddon (2026-11-17): see docs/WIR.md "Armageddon 2070". `wir armageddon` (wir/src/armageddon.rs)
+writes 23 0.2 programs into `examples/armageddon/` for the Entropy Engine game Armageddon 2070: the shared
+`ar_sense` 5 x 5 grid program, infantry role brains (rifle/support/marksman/antiarmor) with squad modes,
+suppression, cohesion and the player's call, the squad and strategic (12-slot) brains, and tank, transport,
+helicopter, jet and mecha variants. Each is compiled and checked against `DeepProgram::eval` on random
+in-domain inputs (`--cases`); `--export` writes the weights JSON the game imports with
+`tools/ar_import_wir.mjs`. Argmax keys use `unit(n*score + tiebreak)`. `tests/armageddon.rs`: 2 tests.
+

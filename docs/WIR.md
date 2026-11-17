@@ -1011,3 +1011,58 @@ Not done: length normalization, top-p/nucleus (needs a cumulative sum), a real l
 behind the costs, a bound that includes float rounding, batching several searches per
 sequence.
 
+
+## Armageddon 2070: a chain of command of networks (Nov 17, 2026)
+
+The tactical enemies fought one player in a small arena. Armageddon 2070 (an Entropy Engine game,
+`entropy-engine/docs/ARMAGEDDON_2070.md`) puts 256 bots, about 45 vehicles and two mecha on 1 km
+maps, so `wir armageddon` (`src/armageddon.rs`) writes a family of 23 programs, one network each,
+along the game's `WIR_Behaviors.csv`: a shared senses grid program, four infantry role brains, a
+squad brain, a strategic brain, and tank (MBT, destroyer, anti-air, artillery), transport (APC, IFV,
+light), helicopter (attack, transport, drone), fixed-wing (fighter, attack, transport) and mecha
+(Titan, Wraith, Bastion) brains. Nothing is trained.
+
+- **Senses** (`ar_sense`, 74 taps, 2,216 weights) read a 5 x 5 window the host fills at any scale (2 m
+  cells for infantry, 4 m for vehicles, 16 m in the air): grades of four distance fields per heading
+  (objective, threat, cover, squad anchor; fields arrive relative to the agent's cell and clipped to
+  [0, 48], since only differences matter), exposure, friends per pinwheel sector, blocked headings.
+- **Infantry** is the grunt with orders: the squad's mode (7 one-hot inputs) shifts the approach
+  range and the objective pull, suppression feeds fear, a cohesion drive with a leash pulls along the
+  anchor field (`6*call` when the player calls), and the outputs add crouch, grenade and launcher.
+- **Squad** (22 inputs) and **strategic** (12 slots x 9 inputs) are pure utility programs with a
+  one-hot argmax; the strategic brain's `2*th*ours` term is a product of a 0..3 value and the 3-valued
+  ownership, which `mul_small` takes.
+- **Vehicles** separate decisions the host executes differently: the tank network picks the hull's
+  heading and a target class (tank, AT infantry, infantry, aircraft, none) and the host turns the
+  turret; transports trade `deliver` against `pickup` by passengers aboard; helicopters pick an
+  altitude band and take 8 random bits that add 1 to headings so approaches vary; jets choose attack
+  phases; mecha read component health (lame legs make holding better, a lost arm drops its weapon).
+
+Every argmax key is `unit(n * score + tie-break)` (no hand-computed bounds: `unit` takes the floor
+from the interval), so a brain is about 1,150-1,300 non-zero weights in 6-7 hidden layers. The check
+compares each network with `DeepProgram::eval` (the program's own semantics) on random in-domain
+integer inputs; the game checks the exported weights against the rules written again as plain
+TypeScript (`ar_wir.ts`), on random inputs and on every live decision of a 128 vs 128 battle
+(355k decisions in a 7-minute run, 0 mismatches).
+
+| network | inputs | hidden | weights |
+|---|---|---|---|
+| senses | 74 taps | [86, 90, 94, 98, 102, 106, 110, 181] | 2,216 |
+| rifle / support / marksman / antiarmor | 84 | [83, 114, 171, 19, 82, 19] | 1,279-1,284 |
+| squad | 22 | [39, 20, 14, 19, 42, 7] | 325 |
+| strategic | 108 | [120, 168, 12, 132, 12] | 1,212 |
+| tank x4 | 80 | [73-76, 70-73, 170-188, 17, 80, 17] | 1,158-1,295 |
+| transport x3 | 79 | [79-80, 78-79, 150, 157, 13, 76, 13] | 1,369-1,375 |
+| helicopter x3 | 91 | [75, 77, 116, 135, 15, 78, 15] | 1,206 |
+| jet x3 | 16 | 6 layers | 185-238 |
+| mecha x3 | 77 | [80-81, 64-66, 134, 23, 78, 15] | 1,142-1,163 |
+
+What changed after watching battles: squads stalled because bots planned on the 2 m nav grid but
+collided with the 1 m cover grid (pinned on wall corners); they now collide with the grid they plan
+on. A player's squad call (`8*call`) lost to a far objective's advance score; it is `14*call` now.
+
+```
+cd wir
+cargo run --release -- armageddon --out examples/armageddon --export ../tmp/wir-armageddon/armageddon.json
+cargo test --release --test armageddon
+```

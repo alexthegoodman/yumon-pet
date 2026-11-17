@@ -62,6 +62,12 @@ usage:
                                         checked on random inputs and enemy for enemy in
                                         arenas; reports behaviour (the --no-* controls
                                         zero one part of every archetype)
+  wir armageddon [--out DIR] [--cases 50000] [--seed 1] [--export demo.json]
+                                        generate the Armageddon 2070 networks (shared
+                                        senses grid program; infantry roles, squad,
+                                        strategic, tank, transport, helicopter, jet and
+                                        mecha brains), compile each and check it on
+                                        random in-domain inputs against the program
   wir ant [--out DIR] [--cases 200000] [--seed 1] [--export demo.json] [--vectors 256]
           [--variant label=brain.wir ..]
                                         generate the Yumon Ant programs (a sense grid
@@ -189,6 +195,7 @@ fn main() -> ExitCode {
         "fluid" => cmd_fluid(rest),
         "swarm" => cmd_swarm(rest),
         "tactics" => cmd_tactics(rest),
+        "armageddon" => cmd_armageddon(rest),
         "ant" => cmd_ant(rest),
         "park" => cmd_park(rest),
         "superpose-choice-layer" => cmd_superpose_choice_layer(rest),
@@ -612,6 +619,32 @@ fn cmd_park(raw: &[String]) -> Result<(), String> {
         std::fs::write(out, json).map_err(|e| format!("{out}: {e}"))?;
         eprintln!("wrote {out}");
     }
+    Ok(())
+}
+
+fn cmd_armageddon(raw: &[String]) -> Result<(), String> {
+    let valued = ["--out", "--cases", "--seed", "--export"];
+    let args = Args::parse(raw, &valued)?;
+    args.check(&valued)?;
+    let int = |k: &str, d: i64| -> Result<i64, String> { args.get(k).map_or(Ok(d), |v| v.parse().map_err(|_| format!("bad {k} `{v}`"))) };
+    let t = std::time::Instant::now();
+    if let Some(dir) = args.get("--out") {
+        for f in wir::armageddon::write_sources(std::path::Path::new(dir)).map_err(|e| e.to_string())? {
+            eprintln!("wrote {dir}/{f}");
+        }
+    }
+    let (json, reports) = wir::armageddon::export_json(int("--cases", 50_000)? as u64, int("--seed", 1)? as u64).map_err(|e| e.to_string())?;
+    let mut bad = 0;
+    for r in &reports {
+        eprintln!("{:<26} hidden {:?}, {} parameters; {} cases, {} mismatches (worst {:.1e})", r.name, r.hidden, r.params, r.cases, r.mismatches, r.worst);
+        bad += r.mismatches;
+    }
+    eprintln!("{} networks checked in {:.1} s", reports.len(), t.elapsed().as_secs_f64());
+    if let Some(out) = args.get("--export") {
+        std::fs::write(out, &json).map_err(|e| format!("{out}: {e}"))?;
+        eprintln!("wrote {out} ({} bytes)", json.len());
+    }
+    if bad > 0 { return Err(format!("{bad} cases disagree with their programs")); }
     Ok(())
 }
 
